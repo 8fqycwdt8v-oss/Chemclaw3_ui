@@ -14,7 +14,29 @@
  */
 
 const SID = '([0-9a-f]{32})';
-const APPROVAL = '([A-Za-z0-9._:-]{1,128})';
+
+/**
+ * Approval hold ids.
+ *
+ * Wider than `SID` on purpose, and the reason is worth stating: a hold's id is
+ * `approval-{interaction_id}`, and `interaction_id` is an argument the *model* supplies to
+ * `record_confirmed_answer`. So unlike a session id — which the service mints as uuid4 hex — its
+ * characters are not guaranteed. A pattern that only accepted `[A-Za-z0-9._:-]` refused any id
+ * the model happened to write with a space, a slash, or a bracket: the trace panel would render
+ * the approval and its Approve button would 404 here, never reaching the service.
+ *
+ * The set is therefore exactly what `encodeURIComponent` can emit: its unreserved characters
+ * `A-Za-z0-9-_.!~*'()` plus `%` for the escapes it produces. Note it does NOT escape `!~*'()`,
+ * so `approval-Suzuki(A)` arrives literally — a pattern that merely added `%` would still have
+ * refused that one. A test pins each case.
+ *
+ * Widening here is safe in a way it would not be for `SID`: this segment is forwarded
+ * still-encoded, and the service uses the decoded value purely as a Temporal workflow-id lookup,
+ * never as a filesystem or URL path, so an encoded `/` cannot traverse anything. A *raw* `/`
+ * still fails to match, because that would change the route's shape rather than its parameter.
+ * The length cap and the closed character set still hold.
+ */
+const APPROVAL = "([A-Za-z0-9._:~!*'()%-]{1,128})";
 
 export interface Route {
   method: string;

@@ -60,9 +60,8 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     setUploading(`Uploading ${file.name}…`);
     try {
       const summary = await api.uploadAttachment(sessionId, file, () => auth.getAccessToken());
-      setUploading(
-        `Attached ${summary.name}${summary.rows !== null ? ` (${summary.rows} rows)` : ''}.`,
-      );
+      // rows is 0 for a non-tabular format, so only mention it when there is a table.
+      setUploading(`Attached ${summary.name}${summary.rows > 0 ? ` (${summary.rows} rows)` : ''}.`);
     } catch (err) {
       setUploading(err instanceof Error ? err.message : 'Upload failed.');
     }

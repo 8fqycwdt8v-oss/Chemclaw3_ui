@@ -56,7 +56,9 @@ export interface TranscriptMessage {
 export interface AttachmentSummary {
   name: string;
   content_type: string;
-  rows: number | null;
+  /** Parsed row count. `0` for a non-tabular format (PDF, DOCX, PPTX) — the service defaults it
+   *  rather than omitting it, so treat 0 as "not a table", not as "an empty table". */
+  rows: number;
   excerpt: string;
 }
 

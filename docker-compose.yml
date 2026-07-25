@@ -1,0 +1,134 @@
+# Co-deployment: one backend server (Chemclaw3, FastAPI) and one frontend server
+# (this repo's BFF + SPA), talking to each other over the compose network.
+#
+#   docker compose up --build
+#   open http://localhost:3000
+#
+# Expects the Chemclaw3 checkout as a sibling directory:
+#
+#   parent/
+#     Chemclaw3/       <- the FastAPI service
+#     Chemclaw3_ui/    <- this repo
+#
+# Override with CHEMCLAW_REPO=/path/to/Chemclaw3 if it lives elsewhere.
+#
+# Only the UI publishes a port. The backend stays on the internal network, which is what
+# makes the dev auth posture below acceptable — see the comment on CHEMCLAW_SERVICE_ALLOW_INSECURE.
+
+name: chemclaw
+
+services:
+  postgres:
+    # pgvector, because the backend's fingerprint store and QM cache share this database.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: chemclaw
+      POSTGRES_PASSWORD: chemclaw
+      POSTGRES_DB: chemclaw
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U chemclaw']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: chemclaw
+      POSTGRES_PWD: chemclaw
+      POSTGRES_SEEDS: postgres
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      # 8233, not the image's usual 8080 — that would collide with the backend service port.
+      - '8233:8080'
+
+  # ---------------------------------------------------------------------------
+  # Backend server — the Chemclaw3 FastAPI service.
+  # ---------------------------------------------------------------------------
+  chemclaw:
+    build:
+      context: ${CHEMCLAW_REPO:-../Chemclaw3}
+      dockerfile: deploy/Containerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    environment:
+      CHEMCLAW_COMPONENT: service
+      CHEMCLAW_SERVICE_HOST: 0.0.0.0
+      CHEMCLAW_SERVICE_PORT: '8080'
+
+      # Authentication is off for development. Every request is then attributed to a shared
+      # `dev-user` principal with all authorization gates open.
+      CHEMCLAW_ENTRA_REQUIRED: 'false'
+      # The service fails closed on a non-loopback bind while auth is off — deliberately, because
+      # that combination is an open door to the agent and its tools. Inside compose the bind MUST
+      # be 0.0.0.0 for the UI container to reach it, so we take the explicit opt-out. This is only
+      # safe because no port for this service is published to the host.
+      CHEMCLAW_SERVICE_ALLOW_INSECURE: 'true'
+
+      # No CORS needed: the browser never calls this service directly. The UI server proxies to
+      # it server-to-server, so this stays empty (the safe default).
+      CHEMCLAW_SERVICE_CORS_ORIGINS: ''
+
+      # Durable sessions. Required for conversation history to survive a restart, for the
+      # front door to reattach a client after one, and for the transcript read-back endpoint.
+      CHEMCLAW_SESSION_STORE: postgres
+      CHEMCLAW_POSTGRES_DSN: postgresql://chemclaw:chemclaw@postgres:5432/chemclaw
+      CHEMCLAW_SESSION_STORE_DSN: postgresql://chemclaw:chemclaw@postgres:5432/chemclaw
+      CHEMCLAW_TEMPORAL_ADDRESS: temporal:7233
+
+      # Surfaces the agent's plan as `plan` events; without it the UI's plan panel stays empty.
+      CHEMCLAW_HARNESS_ENABLED: ${CHEMCLAW_HARNESS_ENABLED:-true}
+      # Populates confidence / unsupported_claims / review_required on answers.
+      CHEMCLAW_VERIFIER_ENABLED: ${CHEMCLAW_VERIFIER_ENABLED:-false}
+
+      CHEMCLAW_LLM_PROVIDER: ${CHEMCLAW_LLM_PROVIDER:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Frontend server — SPA + streaming proxy to the backend.
+  # ---------------------------------------------------------------------------
+  ui:
+    build:
+      context: .
+    depends_on:
+      chemclaw:
+        condition: service_healthy
+    environment:
+      PORT: '8080'
+      BIND_HOST: 0.0.0.0
+      # Service-to-service. This is the only thing that talks to the backend.
+      CHEMCLAW_API_URL: http://chemclaw:8080
+      AUTH_MODE: ${AUTH_MODE:-dev}
+      ENTRA_TENANT_ID: ${ENTRA_TENANT_ID:-}
+      ENTRA_CLIENT_ID: ${ENTRA_CLIENT_ID:-}
+      API_SCOPE: ${API_SCOPE:-}
+      APP_VERSION: ${APP_VERSION:-compose}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - '${UI_PORT:-3000}:8080'
+
+volumes:
+  postgres-data:

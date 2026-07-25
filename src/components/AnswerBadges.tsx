@@ -1,0 +1,76 @@
+/**
+ * Verifier signals on an answer.
+ *
+ * These are populated only when the backend's answer verifier is enabled; otherwise confidence
+ * is null and the flags are false, and this renders nothing.
+ *
+ * `review_required` deliberately renders at the TOP of the answer card, not the bottom: a warning
+ * placed after the text is read only once the reader has already believed it.
+ */
+
+import type { AssistantMessage } from '../state/types.ts';
+
+export function ReviewRequiredPill({
+  message,
+}: {
+  message: AssistantMessage;
+}): React.JSX.Element | null {
+  if (!message.reviewRequired) return null;
+  return (
+    <div className="mb-2 flex items-start gap-2 rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
+      <span aria-hidden>⚠️</span>
+      <p className="text-sm text-warn">
+        <span className="font-semibold">Needs expert review.</span> The verifier could not fully
+        support this answer from the cited evidence.
+      </p>
+    </div>
+  );
+}
+
+function confidenceTone(value: number): { cls: string; label: string } {
+  if (value >= 0.8) return { cls: 'border-ok/40 bg-ok-soft text-ok', label: 'high' };
+  if (value >= 0.5) return { cls: 'border-warn/40 bg-warn-soft text-warn', label: 'moderate' };
+  return { cls: 'border-danger/40 bg-danger-soft text-danger', label: 'low' };
+}
+
+export function AnswerFooter({
+  message,
+}: {
+  message: AssistantMessage;
+}): React.JSX.Element | null {
+  const hasConfidence = message.confidence !== null;
+  const hasClaims = message.unsupportedClaims.length > 0;
+  if (!hasConfidence && !hasClaims) return null;
+
+  const tone = hasConfidence ? confidenceTone(message.confidence as number) : null;
+
+  return (
+    <div className="mt-3 space-y-2 border-t border-border-subtle pt-2">
+      {tone && (
+        <span
+          className={`inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-xs ${tone.cls}`}
+          title="Citation-faithfulness score from the answer verifier"
+        >
+          <span className="font-medium">{tone.label} confidence</span>
+          <span className="font-mono">{(message.confidence as number).toFixed(2)}</span>
+        </span>
+      )}
+
+      {hasClaims && (
+        <details className="rounded border border-danger/40 bg-danger-soft px-2 py-1.5">
+          <summary className="cursor-pointer text-xs font-medium text-danger">
+            {message.unsupportedClaims.length} unsupported claim
+            {message.unsupportedClaims.length === 1 ? '' : 's'}
+          </summary>
+          <ul className="mt-1.5 space-y-1">
+            {message.unsupportedClaims.map((claim, i) => (
+              <li key={i} className="text-xs text-ink">
+                {claim}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}

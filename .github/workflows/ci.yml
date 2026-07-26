@@ -9,9 +9,21 @@
 name: ci
 
 on:
+  # Deliberately NOT `branches: ["**"]` (which is what the Chemclaw3 service uses).
+  # With a pull_request trigger as well, every push to a PR branch fires twice for
+  # the same commit — and here one of those jobs builds a Docker image, so the
+  # duplication is not free. Observed on this workflow's own first run: four check
+  # runs, two image builds, one commit. Branch coverage is unaffected in practice
+  # because work on this repo reaches main through a PR.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
+
+# A second push to a PR supersedes the first; there is no value in finishing a run
+# for a commit nobody will merge.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:

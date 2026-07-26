@@ -19,6 +19,11 @@ const prefill = (text: string): void => {
   window.dispatchEvent(new CustomEvent('chemclaw:prefill', { detail: text }));
 };
 
+/** Prefill the composer AND immediately submit — used for one-tap approval. */
+const prefillAndSend = (text: string): void => {
+  window.dispatchEvent(new CustomEvent('chemclaw:prefill', { detail: { text, autoSend: true } }));
+};
+
 export function QuestionPrompt({
   question,
   options,
@@ -112,22 +117,21 @@ export function ApprovalPrompt({
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={() => prefill('Approved — go ahead.')}
+              onClick={() => prefillAndSend('Approved — go ahead.')}
               className="rounded border border-border-subtle bg-surface-raised px-3 py-1 text-sm"
             >
               Approve
             </button>
             <button
               type="button"
-              onClick={() => prefill('Do not proceed. ')}
+              onClick={() => prefillAndSend('Do not proceed.')}
               className="rounded border border-border-subtle bg-surface-raised px-3 py-1 text-sm"
             >
               Decline
             </button>
           </div>
           <p className="mt-1.5 text-xs text-ink-muted">
-            This is a plan approval — it is answered by your next message, not by a separate
-            action. These buttons fill in the box below.
+            This is a plan approval. Approve or Decline to continue immediately.
           </p>
         </>
       )}

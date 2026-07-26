@@ -31,11 +31,31 @@ export function Composer({ conversationId }: { conversationId: string }): React.
 
   // Citation chips and prompt buttons hand text back through a window event rather than being
   // wired through the tree — they are rendered deep inside markdown output.
+  //
+  // The detail may be a plain string (prefill only) or { text, autoSend: true } (approval
+  // buttons — skips the "type and press Send" step so the user gets one-tap approve/decline).
+  // We use a ref so the handler always sees the current blocked/dryRun/conversationId values
+  // without being recreated on every render.
+  const autoSendRef = useRef<((message: string) => void) | null>(null);
+  autoSendRef.current = (message: string) => {
+    const isBlocked = useChatStore.getState().composerLock !== false ||
+      useChatStore.getState().streaming !== null;
+    if (isBlocked || message.length > MAX_MESSAGE_CHARS || !message.trim()) return;
+    setText('');
+    void sendMessage({ conversationId, text: message, dryRun, auth });
+  };
+
   useEffect(() => {
     const onPrefill = (event: Event): void => {
-      const detail = (event as CustomEvent<string>).detail;
-      setText(detail);
-      textareaRef.current?.focus();
+      const raw = (event as CustomEvent<string | { text: string; autoSend?: boolean }>).detail;
+      const message = typeof raw === 'string' ? raw : raw.text;
+      const autoSend = typeof raw === 'object' && raw.autoSend === true;
+      setText(message);
+      if (autoSend) {
+        autoSendRef.current?.(message);
+      } else {
+        textareaRef.current?.focus();
+      }
     };
     window.addEventListener('chemclaw:prefill', onPrefill);
     return () => window.removeEventListener('chemclaw:prefill', onPrefill);

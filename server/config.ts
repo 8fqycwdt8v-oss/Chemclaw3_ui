@@ -48,7 +48,9 @@ function buildCsp(mode: AuthMode): string {
     'frame-src': ["'none'"],
     'form-action': ["'self'"],
     'base-uri': ["'none'"],
-    'frame-ancestors': ["'none'"],
+    // Allow framing from any origin in dev mode so the Replit preview iframe works.
+    // Production deployments behind Entra auth should tighten this back to "'none'".
+    'frame-ancestors': mode === 'dev' ? ['*'] : ["'none'"],
     'object-src': ["'none'"],
   };
 

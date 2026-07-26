@@ -123,6 +123,7 @@ export interface ChatState {
   createConversation: () => string;
   selectConversation: (id: string) => void;
   deleteConversation: (id: string) => void;
+  clearAll: () => void;
   setSessionId: (conversationId: string, sessionId: string, contextLost?: boolean) => void;
   hydrateTranscript: (conversationId: string, messages: ChatMessage[]) => void;
 
@@ -202,6 +203,21 @@ export const useChatStore = create<ChatState>()(
             conversations: rest,
             order,
             activeId: s.activeId === id ? (order[0] ?? null) : s.activeId,
+          };
+        });
+      },
+
+      clearAll() {
+        set(() => {
+          const fresh = newConversation();
+          return {
+            conversations: { [fresh.id]: fresh },
+            order: [fresh.id],
+            activeId: fresh.id,
+            composerLock: false,
+            banner: null,
+            jobFeed: [],
+            streaming: null,
           };
         });
       },
@@ -348,7 +364,9 @@ export const useChatStore = create<ChatState>()(
       },
     }),
     {
-      name: 'chemclaw3.chat.v1',
+      // Bumped to v2 to force a clean slate on iPhone/mobile browsers that kept serving the old
+      // v1 persisted state (poisoned sessions) after the recent fixes.
+      name: 'chemclaw3.chat.v2',
       version: 1,
       storage: createJSONStorage(() => localStorage),
 

@@ -102,6 +102,20 @@ export function Sidebar(): React.JSX.Element {
           );
         })}
       </nav>
+
+      <div className="border-t border-border-subtle p-3">
+        <button
+          type="button"
+          onClick={() => {
+            if (window.confirm('Reset the app? This clears all conversations and starts fresh.')) {
+              useChatStore.getState().clearAll();
+            }
+          }}
+          className="w-full rounded-lg border border-danger/30 px-3 py-2 text-xs text-danger hover:bg-danger/10"
+        >
+          Reset app
+        </button>
+      </div>
     </aside>
   );
 }

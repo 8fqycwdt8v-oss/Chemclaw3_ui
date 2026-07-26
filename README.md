@@ -135,6 +135,11 @@ malformed frames, unknown event types, a stream that ends without an answer, and
 
 Everything else is verified against the real service.
 
+`happy-dom` is held at 15.x on purpose — 16.x is blocked by the Replit security policy, so a bump
+to it makes the suite unrunnable there rather than failing a test. 15.11.7 is the last 15.x release
+and is past CVE-2024-51757 (fixed in 15.10.2), so the pin is not trading a policy problem for a
+known vulnerability. Move to jsdom rather than to 16.x if this needs to change.
+
 ## Backend requirements
 
 `GET /sessions` and `GET /sessions/{id}/messages` (the conversation list and transcript read-back)

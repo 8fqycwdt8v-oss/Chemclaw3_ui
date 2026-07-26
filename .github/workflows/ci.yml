@@ -1,0 +1,148 @@
+# CI gate: typecheck + test + build on every push and PR, mirroring the Chemclaw3
+# service's "green before done" rule so both halves of the deployment are held to
+# the same bar.
+#
+# There is deliberately no end-to-end job here. This UI talks to a live Chemclaw3,
+# which needs Postgres, Temporal and an LLM key — standing that up per push would
+# buy a slow, flaky signal. `npm run smoke` covers the real chain and is run
+# against a deployed environment instead.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the `engines` floor in package.json: the BFF runs from
+          # TypeScript source in dev via Node's native type stripping, which is
+          # only unflagged from 22.6.
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # The three checks below guard properties the unit tests cannot see, because
+      # they are facts about the *bundle* rather than about any module.
+      - name: The runtime config script survives bundling
+        run: |
+          # Vite warns rather than fails when it cannot bundle a non-module script,
+          # so a refactor could silently drop this tag — and the app would then read
+          # its MSAL settings from nothing, in production only.
+          grep -q 'src="/config.js"' dist/client/index.html \
+            || { echo "::error::index.html no longer loads /config.js"; exit 1; }
+          echo "ok: /config.js is still referenced"
+
+      - name: MSAL stays out of the entry chunk
+        run: |
+          # Auth is a seam with two implementations, and the dev path must not pay for
+          # the one it never uses. A static import would quietly pull ~230 kB of MSAL
+          # into every first load — no unit test can see that, only the bundle can.
+          #
+          # The probe is `PublicClientApplication`, a class from @azure/msal-browser.
+          # Grepping for "msal" would false-positive on this app's own
+          # `authMode === 'msal'` comparisons and on the lazy chunk's filename, both
+          # of which legitimately appear in the entry.
+          entry=$(node -e "
+            const fs=require('fs');
+            const html=fs.readFileSync('dist/client/index.html','utf8');
+            const m=html.match(/src=\"(\/assets\/index-[^\"]+\.js)\"/);
+            if(!m){console.error('could not find the entry chunk in index.html');process.exit(1)}
+            process.stdout.write('dist/client'+m[1]);
+          ")
+          echo "entry chunk: $entry"
+
+          if grep -q 'PublicClientApplication' "$entry"; then
+            echo "::error::MSAL is inlined into the entry chunk — it must stay dynamically imported"
+            exit 1
+          fi
+
+          # Positive control: if MSAL is not in SOME chunk, the probe string has gone
+          # stale and the check above would pass for the wrong reason.
+          if ! grep -lq 'PublicClientApplication' dist/client/assets/*.js 2>/dev/null; then
+            echo "::error::MSAL was not found in any chunk — this check has stopped testing anything"
+            exit 1
+          fi
+          echo "ok: MSAL is present, and only in a lazily-loaded chunk"
+
+      - name: The server bundle runs with no node_modules
+        run: |
+          # The container's runtime stage copies dist/ and nothing else — esbuild is
+          # expected to have inlined sirv. Anything it failed to inline would surface
+          # only as a crash on deploy, so prove it here by running the bundle from a
+          # temp directory with no node_modules anywhere above it. (A temp copy rather
+          # than deleting node_modules in place, so this step stays order-independent.)
+          workdir=$(mktemp -d)
+          cp -r dist "$workdir/dist"
+          cd "$workdir"
+
+          PORT=8788 BIND_HOST=127.0.0.1 CLIENT_DIR=dist/client \
+            CHEMCLAW_API_URL=http://127.0.0.1:9 LOG_LEVEL=error \
+            node dist/server.js &
+          server=$!
+          trap 'kill $server 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8788/healthz >/dev/null && break || sleep 0.5
+          done
+
+          curl -sf http://127.0.0.1:8788/healthz | grep -q '"ok"' \
+            || { echo "::error::the standalone server bundle did not answer /healthz"; exit 1; }
+          echo "ok: server bundle runs with no node_modules"
+
+  container:
+    # The whole point of this repo is co-deployment, so a Dockerfile that no longer
+    # builds is a real break even when every test passes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: chemclaw3-ui:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: The container serves the SPA and its runtime config
+        run: |
+          docker run -d --name ui -p 8080:8080 \
+            -e AUTH_MODE=dev -e CHEMCLAW_API_URL=http://127.0.0.1:9 chemclaw3-ui:ci
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8080/healthz >/dev/null && break || sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/healthz | grep -q '"ok"' \
+            || { echo "::error::/healthz did not answer"; docker logs ui; exit 1; }
+          # One image, any tenant: config comes from the environment at request time.
+          curl -sf http://127.0.0.1:8080/config.js | grep -q '__CHEMCLAW_CONFIG__' \
+            || { echo "::error::/config.js did not render"; docker logs ui; exit 1; }
+          # SPA fallback, so a deep link or the MSAL redirect URI resolves.
+          curl -sf -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/auth/callback | grep -q 200 \
+            || { echo "::error::SPA fallback is broken"; docker logs ui; exit 1; }
+          # The proxy whitelist must refuse a service route the UI never calls.
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/metrics)
+          [ "$code" = "404" ] || { echo "::error::/api/metrics was not blocked (got $code)"; exit 1; }
+          docker rm -f ui
+          echo "ok: container serves the app, its config, the SPA fallback, and blocks un-whitelisted routes"

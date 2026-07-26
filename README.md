@@ -135,10 +135,16 @@ malformed frames, unknown event types, a stream that ends without an answer, and
 
 Everything else is verified against the real service.
 
-`happy-dom` is held at 15.x on purpose — 16.x is blocked by the Replit security policy, so a bump
-to it makes the suite unrunnable there rather than failing a test. 15.11.7 is the last 15.x release
-and is past CVE-2024-51757 (fixed in 15.10.2), so the pin is not trading a policy problem for a
-known vulnerability. Move to jsdom rather than to 16.x if this needs to change.
+`happy-dom` is held at 15.x on purpose — 16.x is blocked by the Replit package firewall, which
+fails the *whole* devDependency install rather than one package, so a bump to 16.x takes `vite` and
+everything else down with it. 15.11.7 is the last 15.x release and is past CVE-2024-51757 (fixed in
+15.10.2), so the pin is not trading a policy problem for a known vulnerability. Move to jsdom rather
+than to 16.x if this needs to change.
+
+Keep `vitest` and `happy-dom` in `devDependencies` together. Dropping `happy-dom` alone leaves
+`vitest.config.ts` naming an environment that is not installed, and dropping both leaves the `test`
+scripts pointing at a binary that is not there — in either case `npm test` fails on a missing tool
+rather than a real assertion.
 
 ## Backend requirements
 

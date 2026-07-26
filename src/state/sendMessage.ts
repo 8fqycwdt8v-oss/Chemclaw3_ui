@@ -168,7 +168,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       action:
         apiError.kind === 'unauthorized'
           ? 'reauth'
-          : apiError.kind === 'turn_in_flight'
+          : apiError.kind === 'turn_in_flight' || apiError.kind === 'session_not_found'
             ? 'reset'
             : apiError.retryable
               ? 'retry'

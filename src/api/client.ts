@@ -67,6 +67,17 @@ export interface PendingApproval {
   [key: string]: unknown;
 }
 
+/** The plan a session is proposing, and the hash a decision on it must be bound to. */
+export interface PlanStatus {
+  session_id: string;
+  plan_hash: string;
+  plan: string[];
+  /** `plan_only` until a human approves; `execute` afterwards. */
+  mode: string;
+  approved: boolean;
+  decided_by: string | null;
+}
+
 export const api = {
   async health(): Promise<boolean> {
     try {
@@ -127,5 +138,38 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ approved }),
     });
+  },
+
+  /** The plan a session is proposing, read for the hash that binds a decision to it. */
+  getPlan(sessionId: string, getToken: TokenGetter): Promise<PlanStatus> {
+    return request<PlanStatus>(`/sessions/${sessionId}/plan`, getToken);
+  },
+
+  /**
+   * Approve or reject a harness plan, bound to the exact plan the human was shown.
+   *
+   * `planHash` is required by the service and is deliberately not defaulted to "whatever the plan
+   * is now": a plan that changed after being displayed is a different plan. A mismatch comes back
+   * as 409 and is re-kinded here, because on this route that status means the plan moved, while
+   * on the message route it means a turn is already running — one number, two meanings, and only
+   * the caller knows which route it asked.
+   */
+  async decidePlan(
+    sessionId: string,
+    approved: boolean,
+    planHash: string,
+    getToken: TokenGetter,
+  ): Promise<void> {
+    try {
+      await request<void>(`/sessions/${sessionId}/plan/decision`, getToken, {
+        method: 'POST',
+        body: JSON.stringify({ approved, plan_hash: planHash }),
+      });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        throw new ApiError('plan_changed', err.message, 409);
+      }
+      throw err;
+    }
   },
 };

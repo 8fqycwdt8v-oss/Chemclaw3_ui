@@ -32,7 +32,14 @@ function PlanChecklist({ todos }: { todos: string[] }): React.JSX.Element | null
   );
 }
 
-function AssistantBubble({ message }: { message: AssistantMessage }): React.JSX.Element {
+function AssistantBubble({
+  message,
+  sessionId,
+}: {
+  message: AssistantMessage;
+  /** Threaded down for the plan gate, which is answered per session rather than per message. */
+  sessionId: string | null;
+}): React.JSX.Element {
   // finalText wins outright. answer.text is the full concatenation of every token, so anything
   // that combined the two would render the entire answer twice.
   const body = message.finalText ?? message.streamedText;
@@ -72,7 +79,11 @@ function AssistantBubble({ message }: { message: AssistantMessage }): React.JSX.
 
       {question && <QuestionPrompt question={question.question} options={question.options} />}
       {approval && (
-        <ApprovalPrompt prompt={approval.prompt} approvalId={approval.approvalId} />
+        <ApprovalPrompt
+          prompt={approval.prompt}
+          approvalId={approval.approvalId}
+          sessionId={sessionId}
+        />
       )}
 
       <AnswerFooter message={message} />
@@ -81,7 +92,13 @@ function AssistantBubble({ message }: { message: AssistantMessage }): React.JSX.
   );
 }
 
-function Bubble({ message }: { message: ChatMessage }): React.JSX.Element {
+function Bubble({
+  message,
+  sessionId,
+}: {
+  message: ChatMessage;
+  sessionId: string | null;
+}): React.JSX.Element {
   if (message.role === 'user') {
     return (
       <div className="flex justify-end">
@@ -93,7 +110,7 @@ function Bubble({ message }: { message: ChatMessage }): React.JSX.Element {
   }
   return (
     <div className="rounded-2xl rounded-bl-sm border border-border-subtle bg-surface-raised px-4 py-3">
-      <AssistantBubble message={message} />
+      <AssistantBubble message={message} sessionId={sessionId} />
     </div>
   );
 }
@@ -152,7 +169,7 @@ export function MessageList({
         )}
 
         {conversation.messages.map((message) => (
-          <Bubble key={message.id} message={message} />
+          <Bubble key={message.id} message={message} sessionId={conversation.sessionId} />
         ))}
         <div ref={endRef} />
       </div>

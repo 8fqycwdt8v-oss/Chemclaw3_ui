@@ -2,7 +2,7 @@
  * A turn parked on admission control says so, instead of claiming to be thinking.
  *
  * The backend used to take its admission permit before the response existed, so a turn waiting
- * for capacity produced no bytes at all and then a bare HTTP 503 (backend D-164). It now opens the
+ * for capacity produced no bytes at all and then a bare HTTP 503 (backend D-166). It now opens the
  * stream first and sends `queued`. That event only ever arrives for a turn that genuinely had to
  * wait, which is why the interesting assertions here are as much about its *absence*: an ordinary
  * turn must not render a queue state, and this must not become a trace row for a turn that has not

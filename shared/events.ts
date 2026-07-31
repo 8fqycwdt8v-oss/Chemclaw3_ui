@@ -5,7 +5,7 @@
  * and setting BOTH the SSE `event:` name and the JSON `type` field to the same discriminator.
  * We prefer the JSON field and fall back to the SSE name.
  *
- * Verified against 8fqycwdt8v-oss/Chemclaw3 @ 3f51ef9 (src/chemclaw/api/events.py). Fourteen
+ * Verified against 8fqycwdt8v-oss/Chemclaw3 @ a1bc379 (src/chemclaw/api/events.py). Fourteen
  * members — `question` and `note_proposed` are easy to miss, and `job_started` carries `kind`.
  *
  * It said ten for a while, and the two it was missing were the two that report trouble:

@@ -61,6 +61,7 @@ function newAssistantMessage(): AssistantMessage {
     confidence: null,
     unsupportedClaims: [],
     reviewRequired: false,
+    degradedConnectors: [],
     trace: [],
     latestPlan: null,
     error: null,
@@ -78,6 +79,12 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
         ...base,
         kind: 'tool_call',
         toolCall: { tool: event.tool, arguments: event.arguments },
+      };
+    case 'tool_failed':
+      return {
+        ...base,
+        kind: 'tool_failed',
+        toolFailure: { tool: event.tool, message: event.message },
       };
     case 'job_started':
       return { ...base, kind: 'job_started', job: { jobId: event.job_id, kind: event.kind } };
@@ -320,6 +327,18 @@ export const useChatStore = create<ChatState>()(
               confidence: event.confidence,
               unsupportedClaims: event.unsupported_claims,
               reviewRequired: event.review_required,
+            })),
+          );
+          return;
+        }
+
+        if (event.type === 'capability_degraded') {
+          // Not a trace row: it qualifies the whole answer, not one step of it, and it arrives
+          // before the first token precisely so the reader sees it above the text.
+          set((s) =>
+            updateAssistant(s, conversationId, messageId, (m) => ({
+              ...m,
+              degradedConnectors: event.connectors,
             })),
           );
           return;

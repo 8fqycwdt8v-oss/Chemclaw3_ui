@@ -3,7 +3,8 @@
  *
  * An honesty constraint drives the wording here: the backend emits tool *invocations* only —
  * there is no tool-result event in the contract. So this panel says what the agent called, and
- * never implies it is showing what came back. `arguments` is a raw string the backend truncates
+ * never implies it is showing what came back. A call that *failed* is the one exception, because
+ * `tool_failed` carries a reason and a step that did not work is not the same as one that did. `arguments` is a raw string the backend truncates
  * to 200 characters, so it is displayed as-is rather than parsed as JSON.
  */
 
@@ -72,6 +73,21 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
                 {entry.toolCall.arguments}
               </pre>
             </details>
+          )}
+        </div>
+      );
+
+    case 'tool_failed':
+      return (
+        <div className="rounded-md border border-danger/40 bg-danger-soft px-3 py-2">
+          <p className="flex items-center gap-1.5 text-sm text-danger">
+            <span aria-hidden>✖</span>
+            <span className="font-medium">{toolLabel(entry.toolFailure?.tool ?? 'tool')}</span>
+            <span className="font-mono text-xs">{entry.toolFailure?.tool}</span>
+            <span className="text-xs">failed</span>
+          </p>
+          {entry.toolFailure?.message && (
+            <p className="mt-1 text-xs text-danger">{entry.toolFailure.message}</p>
           )}
         </div>
       );

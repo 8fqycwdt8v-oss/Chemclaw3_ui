@@ -11,7 +11,7 @@ import { useEffect, useRef } from 'react';
 import type { AssistantMessage, ChatMessage, Conversation } from '../state/types.ts';
 import { Markdown } from './Markdown.tsx';
 import { TracePanel } from './TracePanel.tsx';
-import { AnswerFooter, ReviewRequiredPill } from './AnswerBadges.tsx';
+import { AnswerFooter, CapabilityDegradedPill, ReviewRequiredPill } from './AnswerBadges.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
 import { cn } from '../lib/cn.ts';
 
@@ -43,6 +43,7 @@ function AssistantBubble({ message }: { message: AssistantMessage }): React.JSX.
 
   return (
     <div className="max-w-none">
+      <CapabilityDegradedPill message={message} />
       <ReviewRequiredPill message={message} />
       {message.latestPlan && <PlanChecklist todos={message.latestPlan} />}
 

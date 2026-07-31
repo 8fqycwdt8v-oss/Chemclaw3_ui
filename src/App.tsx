@@ -69,6 +69,9 @@ export function App(): React.JSX.Element {
                 confidence: null,
                 unsupportedClaims: [],
                 reviewRequired: false,
+                // Empty on a rehydrated transcript, and honestly so: the backend persists the
+                // messages, not which connectors happened to be down when each was produced.
+                degradedConnectors: [],
                 trace: [],
                 latestPlan: null,
                 error: null,

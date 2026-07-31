@@ -16,6 +16,7 @@ export type TurnStatus = 'streaming' | 'done' | 'error' | 'aborted';
 export type TraceKind =
   | 'plan'
   | 'tool_call'
+  | 'tool_failed'
   | 'job_started'
   | 'job_completed'
   | 'question'
@@ -34,6 +35,7 @@ export interface TraceEntry {
   kind: TraceKind;
   plan?: { todos: string[] };
   toolCall?: { tool: string; arguments: string };
+  toolFailure?: { tool: string; message: string };
   job?: { jobId: string; kind?: string; summary?: JobSummary };
   question?: { question: string; options: string[] };
   note?: { noteId: string; reference: string };
@@ -65,6 +67,15 @@ export interface AssistantMessage {
   confidence: number | null;
   unsupportedClaims: string[];
   reviewRequired: boolean;
+  /**
+   * Connectors that were unreachable for this turn, so their tools were absent from it.
+   *
+   * On the message rather than in `trace`, because it qualifies the whole answer rather than
+   * describing one step of it. The model is never told a tool is missing — it reasons from the
+   * surface it was given — so without surfacing this, an answer assembled without the ELN reads
+   * exactly like one assembled with it.
+   */
+  degradedConnectors: string[];
   trace: TraceEntry[];
   /** Newest `plan` snapshot, for the header checklist. Full history stays in `trace`. */
   latestPlan: string[] | null;

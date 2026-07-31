@@ -5,8 +5,14 @@
  * and setting BOTH the SSE `event:` name and the JSON `type` field to the same discriminator.
  * We prefer the JSON field and fall back to the SSE name.
  *
- * Verified against 8fqycwdt8v-oss/Chemclaw3 @ d5ed9e3 (service/events.py). Ten members —
- * `question` and `note_proposed` are easy to miss, and `job_started` carries `kind`.
+ * Verified against 8fqycwdt8v-oss/Chemclaw3 @ 25691b5 (src/chemclaw/api/events.py). Twelve
+ * members — `question` and `note_proposed` are easy to miss, and `job_started` carries `kind`.
+ *
+ * It said ten for a while, and the two it was missing were the two that report trouble:
+ * `capability_degraded` and `tool_failed`. Because `normalizeEvent` drops anything outside
+ * `EVENT_TYPES`, an answer assembled without the ELN connector rendered as a confident, ordinary
+ * answer. Forward-compatibility is the right default for an unknown event; it is the wrong
+ * outcome for one that exists to qualify what the agent just said.
  *
  * This file is imported by both the SPA (bundled by Vite) and the mock backend (bundled by
  * esbuild). Keep it dependency-free.
@@ -103,12 +109,30 @@ export interface ErrorEvent {
   message: string;
 }
 
+export interface CapabilityDegradedEvent {
+  type: 'capability_degraded';
+  /** Connectors that did not come up for this turn, so their tools were absent from it. Emitted
+   *  before the first token, so a surface can mark the answer as partial while it streams rather
+   *  than retroactively. The turn is NOT failed by this — it costs tools, not the conversation. */
+  connectors: string[];
+}
+
+export interface ToolFailedEvent {
+  type: 'tool_failed';
+  /** One tool call raised; the turn continues. Distinct from `error`, which ends it: the model
+   *  can route around a failed call, and when it cannot, this is the only event that says why. */
+  tool: string;
+  message: string;
+}
+
 export type ChemclawEvent =
   | PlanEvent
   | ToolCallEvent
   | TokenEvent
   | JobStartedEvent
   | JobCompletedEvent
+  | CapabilityDegradedEvent
+  | ToolFailedEvent
   | QuestionEvent
   | NoteProposedEvent
   | ApprovalRequestEvent
@@ -123,6 +147,8 @@ const EVENT_TYPES = new Set<string>([
   'token',
   'job_started',
   'job_completed',
+  'capability_degraded',
+  'tool_failed',
   'question',
   'note_proposed',
   'approval_request',
@@ -190,6 +216,14 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         job_id: asString(o.job_id),
         summary:
           typeof o.summary === 'object' && o.summary !== null ? (o.summary as JobSummary) : {},
+      };
+    case 'capability_degraded':
+      return { type: 'capability_degraded', connectors: asStringArray(o.connectors) };
+    case 'tool_failed':
+      return {
+        type: 'tool_failed',
+        tool: asString(o.tool, 'unknown'),
+        message: asString(o.message, 'The tool call failed.'),
       };
     case 'question':
       return {

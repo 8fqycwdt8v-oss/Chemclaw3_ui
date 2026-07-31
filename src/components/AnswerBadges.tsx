@@ -6,6 +6,11 @@
  *
  * `review_required` deliberately renders at the TOP of the answer card, not the bottom: a warning
  * placed after the text is read only once the reader has already believed it.
+ *
+ * `CapabilityDegradedPill` is placed by the same rule, and matters more: the backend emits it
+ * before the first token precisely so a surface can qualify the answer *while* it streams. It also
+ * says the one thing the reader cannot otherwise know — that "the ELN says nothing about that
+ * batch" and "the ELN was unreachable" would have arrived as the same sentence.
  */
 
 import type { AssistantMessage } from '../state/types.ts';
@@ -22,6 +27,25 @@ export function ReviewRequiredPill({
       <p className="text-sm text-warn">
         <span className="font-semibold">Needs expert review.</span> The verifier could not fully
         support this answer from the cited evidence.
+      </p>
+    </div>
+  );
+}
+
+export function CapabilityDegradedPill({
+  message,
+}: {
+  message: AssistantMessage;
+}): React.JSX.Element | null {
+  const down = message.degradedConnectors;
+  if (down.length === 0) return null;
+  return (
+    <div className="mb-2 flex items-start gap-2 rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
+      <span aria-hidden>🔌</span>
+      <p className="text-sm text-warn">
+        <span className="font-semibold">Answered with fewer tools.</span> {down.join(', ')}{' '}
+        {down.length === 1 ? 'was' : 'were'} unreachable for this turn, so anything only{' '}
+        {down.length === 1 ? 'it' : 'they'} can reach is missing — not absent from the record.
       </p>
     </div>
   );

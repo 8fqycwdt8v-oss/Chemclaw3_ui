@@ -7,6 +7,7 @@ import { useJobFeed } from './hooks/useJobFeed.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { TopBar } from './components/TopBar.tsx';
 import { MessageList } from './components/MessageList.tsx';
+import { JobFeed } from './components/JobFeed.tsx';
 import { Composer } from './components/Composer.tsx';
 import type { ChatMessage } from './state/types.ts';
 
@@ -93,6 +94,7 @@ export function App(): React.JSX.Element {
         {conversation ? (
           <>
             <MessageList conversation={conversation} />
+            <JobFeed />
             <Composer conversationId={conversation.id} />
           </>
         ) : (

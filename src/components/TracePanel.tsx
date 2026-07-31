@@ -10,8 +10,8 @@
 import { useState } from 'react';
 import type { TraceEntry } from '../state/types.ts';
 import { cn } from '../lib/cn.ts';
-import { formatEnergy, toolLabel } from '../lib/format.ts';
-import { Molecule } from './Molecule.tsx';
+import { toolLabel } from '../lib/format.ts';
+import { JobResultCard } from './JobResultCard.tsx';
 
 const TOOL_ICON: Record<string, string> = {
   gather_evidence: '🔍',
@@ -32,29 +32,9 @@ const TOOL_ICON: Record<string, string> = {
 };
 
 function JobCard({ entry }: { entry: TraceEntry }): React.JSX.Element {
-  const summary = entry.job?.summary ?? {};
-  const smiles = typeof summary.molecule_smiles === 'string' ? summary.molecule_smiles : null;
-  const energy =
-    typeof summary.total_energy_hartree === 'number' ? summary.total_energy_hartree : null;
-  const converged = summary.converged;
-
   return (
     <div className="rounded-md border border-border-subtle bg-surface-raised p-3">
-      <div className="mb-2 flex items-center gap-2">
-        <span className="font-mono text-xs text-ink-muted">{entry.job?.jobId}</span>
-        {converged === true && (
-          <span className="rounded bg-ok-soft px-1.5 py-0.5 text-xs text-ok">converged</span>
-        )}
-        {converged === false && (
-          <span className="rounded bg-warn-soft px-1.5 py-0.5 text-xs text-warn">
-            not converged
-          </span>
-        )}
-      </div>
-      {smiles && <Molecule smiles={smiles} width={280} height={190} />}
-      {energy !== null && (
-        <p className="mt-2 font-mono text-xs text-ink-muted">{formatEnergy(energy)}</p>
-      )}
+      <JobResultCard jobId={entry.job?.jobId ?? ''} summary={entry.job?.summary} />
     </div>
   );
 }

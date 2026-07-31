@@ -142,6 +142,7 @@ export interface ChatState {
   setBanner: (banner: Banner | null) => void;
   setStreaming: (s: ChatState['streaming']) => void;
   pushJobCompleted: (event: JobCompletedEvent) => void;
+  dismissJobCompleted: (jobId: string) => void;
 }
 
 /** Apply `fn` to the assistant message with `messageId`, leaving all other state untouched. */
@@ -360,7 +361,15 @@ export const useChatStore = create<ChatState>()(
         set({ streaming });
       },
       pushJobCompleted(event) {
-        set((s) => ({ jobFeed: [event, ...s.jobFeed].slice(0, 50) }));
+        // Newest first, and deduplicated by job id: the push-back stream reconnects with backoff
+        // and an at-least-once delivery can repeat a completion, which would otherwise stack up as
+        // two identical cards.
+        set((s) => ({
+          jobFeed: [event, ...s.jobFeed.filter((j) => j.job_id !== event.job_id)].slice(0, 50),
+        }));
+      },
+      dismissJobCompleted(jobId) {
+        set((s) => ({ jobFeed: s.jobFeed.filter((j) => j.job_id !== jobId) }));
       },
     }),
     {

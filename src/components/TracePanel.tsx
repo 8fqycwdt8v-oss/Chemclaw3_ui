@@ -1,11 +1,17 @@
 /**
  * The "show your work" panel.
  *
- * An honesty constraint drives the wording here: the backend emits tool *invocations* only —
- * there is no tool-result event in the contract. So this panel says what the agent called, and
- * never implies it is showing what came back. A call that *failed* is the one exception, because
- * `tool_failed` carries a reason and a step that did not work is not the same as one that did. `arguments` is a raw string the backend truncates
- * to 200 characters, so it is displayed as-is rather than parsed as JSON.
+ * An honesty constraint used to drive the wording here: the backend emitted tool *invocations*
+ * only, so the panel said what the agent called and never implied it was showing what came back.
+ * `tool_result` (backend D-159) is what lifts that, and the caveat goes with it — a panel that
+ * disclaims showing results while showing them is worse than either version.
+ *
+ * A call is also announced when it is *issued* now, so an entry with no result yet is a call still
+ * running rather than one whose result was withheld. Three states per row: running, returned,
+ * failed.
+ *
+ * `arguments` and `result` are raw strings the backend truncates to 200 characters, so both are
+ * displayed as-is rather than parsed as JSON.
  */
 
 import { useState } from 'react';
@@ -73,6 +79,20 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
                 {entry.toolCall.arguments}
               </pre>
             </details>
+          )}
+          {entry.toolCall?.result !== undefined && (
+            <div className="mt-1">
+              <p className="text-xs text-ink-muted">returned</p>
+              {/* Same truncation discipline as the arguments above; also never parsed. */}
+              <pre className="mt-1 overflow-x-auto rounded bg-surface-sunken p-2 font-mono text-xs">
+                {entry.toolCall.result}
+              </pre>
+            </div>
+          )}
+          {/* Still open: not "we are hiding the result" but "the call has not come back". The
+              row that follows says which of the two endings arrived. */}
+          {entry.toolCall?.result === undefined && !entry.toolCall?.failed && (
+            <p className="mt-1 text-xs text-ink-muted">running…</p>
           )}
         </div>
       );
@@ -149,8 +169,8 @@ export function TracePanel({ trace }: { trace: TraceEntry[] }): React.JSX.Elemen
           )}
         >
           <p className="text-xs text-ink-muted">
-            Tool calls the agent made. The service streams invocations only, so this shows what was
-            called — not what each call returned.
+            Tool calls the agent made, each with what it returned. Previews are truncated by the
+            service, so a long result is shown in part.
           </p>
           {shown.map((entry) => (
             <Row key={entry.id} entry={entry} />

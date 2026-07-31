@@ -5,7 +5,7 @@
  * and setting BOTH the SSE `event:` name and the JSON `type` field to the same discriminator.
  * We prefer the JSON field and fall back to the SSE name.
  *
- * Verified against 8fqycwdt8v-oss/Chemclaw3 @ 25691b5 (src/chemclaw/api/events.py). Twelve
+ * Verified against 8fqycwdt8v-oss/Chemclaw3 @ bbbb62b (src/chemclaw/api/events.py). Thirteen
  * members — `question` and `note_proposed` are easy to miss, and `job_started` carries `kind`.
  *
  * It said ten for a while, and the two it was missing were the two that report trouble:
@@ -125,6 +125,17 @@ export interface ToolFailedEvent {
   message: string;
 }
 
+export interface ToolResultEvent {
+  type: 'tool_result';
+  /** What a call returned, as data rather than as the model's paraphrase of it. Success only:
+   *  a call that raised arrives as `tool_failed` instead, and the two are exhaustive — which is
+   *  why there is no `ok` flag to check. */
+  tool: string;
+  /** Truncated by the backend exactly as `tool_call.arguments` is — a preview of the value, not
+   *  the whole return. Raw; never `JSON.parse` it unguarded. */
+  preview: string;
+}
+
 export type ChemclawEvent =
   | PlanEvent
   | ToolCallEvent
@@ -133,6 +144,7 @@ export type ChemclawEvent =
   | JobCompletedEvent
   | CapabilityDegradedEvent
   | ToolFailedEvent
+  | ToolResultEvent
   | QuestionEvent
   | NoteProposedEvent
   | ApprovalRequestEvent
@@ -149,6 +161,7 @@ const EVENT_TYPES = new Set<string>([
   'job_completed',
   'capability_degraded',
   'tool_failed',
+  'tool_result',
   'question',
   'note_proposed',
   'approval_request',
@@ -224,6 +237,12 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         type: 'tool_failed',
         tool: asString(o.tool, 'unknown'),
         message: asString(o.message, 'The tool call failed.'),
+      };
+    case 'tool_result':
+      return {
+        type: 'tool_result',
+        tool: asString(o.tool, 'unknown'),
+        preview: asString(o.preview),
       };
     case 'question':
       return {

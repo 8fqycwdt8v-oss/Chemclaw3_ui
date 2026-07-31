@@ -34,7 +34,21 @@ export interface TraceEntry {
   at: number;
   kind: TraceKind;
   plan?: { todos: string[] };
-  toolCall?: { tool: string; arguments: string };
+  /**
+   * A tool invocation and, once it comes back, what it returned.
+   *
+   * One entry rather than two, because a call and its result are one step of the agent's work
+   * and reading them as separate rows means scanning for the pair. Neither field set means the
+   * call is still running — a real state now that a call is announced at issue rather than on
+   * return (backend D-159).
+   *
+   * `failed` exists so that state cannot be claimed falsely. A raised call never gets a
+   * `tool_result` (the backend emits `tool_failed` instead, and the two are exhaustive), so
+   * without it a failed call would read "running…" for the rest of the conversation. It carries
+   * no message: the `tool_failed` row that follows is where the reason belongs, and saying it
+   * twice in adjacent rows is not saying it better.
+   */
+  toolCall?: { tool: string; arguments: string; result?: string; failed?: boolean };
   toolFailure?: { tool: string; message: string };
   job?: { jobId: string; kind?: string; summary?: JobSummary };
   question?: { question: string; options: string[] };

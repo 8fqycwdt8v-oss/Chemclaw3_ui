@@ -68,6 +68,37 @@ function newAssistantMessage(): AssistantMessage {
   };
 }
 
+/**
+ * Close the open `tool_call` row for `tool` with how it ended, returning the updated trace.
+ *
+ * Both endings come through here, because a call is announced at issue now (backend D-159) and an
+ * open row means "still running" — so a `tool_failed` that left its row open would read as running
+ * forever. `tool_failed` still appends its own row afterwards; this only stops the claim.
+ *
+ * Neither event carries a call id, so the match is "the oldest still-open row for this tool" —
+ * first issued, first answered. Two concurrent calls to the *same* tool returning out of order
+ * would pair the previews the wrong way round; nothing on the wire can say otherwise, and the
+ * alternative (a row per result) makes every reader do the same pairing by eye. An ending whose
+ * call has already been dropped by `MAX_TRACE_ENTRIES` is discarded with it.
+ */
+function closeToolCall(
+  trace: TraceEntry[],
+  tool: string,
+  ending: { result: string } | { failed: true },
+): TraceEntry[] {
+  const index = trace.findIndex(
+    (entry) =>
+      entry.kind === 'tool_call' &&
+      entry.toolCall?.tool === tool &&
+      entry.toolCall.result === undefined &&
+      !entry.toolCall.failed,
+  );
+  const target = trace[index];
+  if (index === -1 || !target?.toolCall) return trace;
+  const updated: TraceEntry = { ...target, toolCall: { ...target.toolCall, ...ending } };
+  return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
+}
+
 /** Map one stream event onto a trace entry, or null for `token` (which is not trace). */
 function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
   const base = { id: uid(), at: Date.now() };
@@ -344,15 +375,34 @@ export const useChatStore = create<ChatState>()(
           return;
         }
 
+        if (event.type === 'tool_result') {
+          // Not its own row: it closes the `tool_call` row already in the trace.
+          set((s) =>
+            updateAssistant(s, conversationId, messageId, (m) => ({
+              ...m,
+              trace: closeToolCall(m.trace, event.tool, { result: event.preview }),
+            })),
+          );
+          return;
+        }
+
         const entry = traceEntryFor(event);
         if (!entry) return;
 
         set((s) =>
-          updateAssistant(s, conversationId, messageId, (m) => ({
-            ...m,
-            trace: [...m.trace, entry].slice(-MAX_TRACE_ENTRIES),
-            latestPlan: event.type === 'plan' ? event.todos : m.latestPlan,
-          })),
+          updateAssistant(s, conversationId, messageId, (m) => {
+            // A failure closes its call's row *and* adds its own: the row stops claiming the
+            // call is running, the new row carries the reason.
+            const base =
+              event.type === 'tool_failed'
+                ? closeToolCall(m.trace, event.tool, { failed: true })
+                : m.trace;
+            return {
+              ...m,
+              trace: [...base, entry].slice(-MAX_TRACE_ENTRIES),
+              latestPlan: event.type === 'plan' ? event.todos : m.latestPlan,
+            };
+          }),
         );
       },
 

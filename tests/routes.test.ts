@@ -14,6 +14,8 @@ describe('proxy route whitelist', () => {
       ['POST', `/api/sessions/${SID}/messages`, `/sessions/${SID}/messages`],
       ['GET', `/api/sessions/${SID}/events`, `/sessions/${SID}/events`],
       ['POST', `/api/sessions/${SID}/attachments`, `/sessions/${SID}/attachments`],
+      ['GET', `/api/sessions/${SID}/plan`, `/sessions/${SID}/plan`],
+      ['POST', `/api/sessions/${SID}/plan/decision`, `/sessions/${SID}/plan/decision`],
       ['GET', '/api/approvals', '/approvals'],
       ['GET', '/api/approvals/approval-q-42', '/approvals/approval-q-42'],
       ['POST', '/api/approvals/approval-q-42/decision', '/approvals/approval-q-42/decision'],
@@ -55,6 +57,9 @@ describe('proxy route whitelist', () => {
   it('matches on method, so a route is not reachable by the wrong verb', () => {
     expect(resolveRoute('DELETE', `/api/sessions/${SID}/messages`)).toBeNull();
     expect(resolveRoute('POST', `/api/sessions/${SID}/events`)).toBeNull();
+    // Reading the plan and deciding on it are separate routes, not one path with two verbs.
+    expect(resolveRoute('POST', `/api/sessions/${SID}/plan`)).toBeNull();
+    expect(resolveRoute('GET', `/api/sessions/${SID}/plan/decision`)).toBeNull();
   });
 
   describe('approval ids', () => {

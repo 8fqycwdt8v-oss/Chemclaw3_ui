@@ -83,6 +83,23 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
+  // The harness plan gate: read the plan awaiting a decision — with the hash that binds it — then
+  // answer it. Deliberately HTTP routes on the service and not agent tools: until they existed,
+  // the agent moved itself out of plan mode through MAF's own `mode_set` and the audit trail
+  // recorded that under the asking chemist's identity.
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/plan$`),
+    target: (m) => `/sessions/${m[1]}/plan`,
+    sse: false,
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/sessions/${SID}/plan/decision$`),
+    target: (m) => `/sessions/${m[1]}/plan/decision`,
+    sse: false,
+  },
+
   // Durable approval holds (the PR-gate's human sign-off).
   { method: 'GET', pattern: /^\/api\/approvals$/, target: () => '/approvals', sse: false },
   {

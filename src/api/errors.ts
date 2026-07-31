@@ -16,6 +16,12 @@ export type ApiErrorKind =
   /** 409 — a turn is already running for this session. The backend serialises turns per session
    *  and sheds rather than queues, so this is a hard error, not a wait. */
   | 'turn_in_flight'
+  /** 409 on the plan-decision route only — the plan changed between being shown and being
+   *  approved, so the human agreed to something else and the service refuses rather than
+   *  silently approving the current plan. The status alone cannot be told apart from
+   *  `turn_in_flight`, which is why `api.decidePlan` re-kinds it instead of `errorFromStatus`
+   *  guessing from a number that means two different things on two different routes. */
+  | 'plan_changed'
   /** 422 — message over the backend's character cap. */
   | 'message_too_long'
   /** 429 — turn/token budget exhausted, or too many concurrent event streams. Terminal. */

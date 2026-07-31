@@ -5,7 +5,7 @@
  * and setting BOTH the SSE `event:` name and the JSON `type` field to the same discriminator.
  * We prefer the JSON field and fall back to the SSE name.
  *
- * Verified against 8fqycwdt8v-oss/Chemclaw3 @ bbbb62b (src/chemclaw/api/events.py). Thirteen
+ * Verified against 8fqycwdt8v-oss/Chemclaw3 @ 3f51ef9 (src/chemclaw/api/events.py). Fourteen
  * members — `question` and `note_proposed` are easy to miss, and `job_started` carries `kind`.
  *
  * It said ten for a while, and the two it was missing were the two that report trouble:
@@ -17,6 +17,13 @@
  * This file is imported by both the SPA (bundled by Vite) and the mock backend (bundled by
  * esbuild). Keep it dependency-free.
  */
+
+export interface QueuedEvent {
+  type: 'queued';
+  /* No payload. The backend emits this only when the turn actually had to wait for an admission
+   * permit, and it is then the FIRST event of that turn. A turn that gets a permit immediately —
+   * the normal case — never sends one, so seeing it at all is the information. */
+}
 
 export interface PlanEvent {
   type: 'plan';
@@ -137,6 +144,7 @@ export interface ToolResultEvent {
 }
 
 export type ChemclawEvent =
+  | QueuedEvent
   | PlanEvent
   | ToolCallEvent
   | TokenEvent
@@ -154,6 +162,7 @@ export type ChemclawEvent =
 export type ChemclawEventType = ChemclawEvent['type'];
 
 const EVENT_TYPES = new Set<string>([
+  'queued',
   'plan',
   'tool_call',
   'token',
@@ -211,6 +220,8 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
   if (typeof type !== 'string' || !EVENT_TYPES.has(type)) return null;
 
   switch (type) {
+    case 'queued':
+      return { type: 'queued' };
     case 'plan':
       return { type: 'plan', todos: asStringArray(o.todos) };
     case 'tool_call':

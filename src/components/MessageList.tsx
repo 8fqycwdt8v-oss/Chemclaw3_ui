@@ -64,7 +64,14 @@ function AssistantBubble({
           <Markdown>{body}</Markdown>
         )
       ) : (
-        streaming && <p className="text-sm text-ink-muted">Thinking…</p>
+        streaming && (
+          <p className="text-sm text-ink-muted">
+            {/* "Thinking…" is untrue while the turn is parked on admission control: nothing is
+                running yet. The distinction is the point of the event — a queued turn and a hung
+                server used to look identical from here. */}
+            {message.queued ? 'Waiting for a free slot on the server…' : 'Thinking…'}
+          </p>
+        )
       )}
 
       {message.status === 'aborted' && (

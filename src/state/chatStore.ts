@@ -62,6 +62,7 @@ function newAssistantMessage(): AssistantMessage {
     unsupportedClaims: [],
     reviewRequired: false,
     degradedConnectors: [],
+    queued: false,
     trace: [],
     latestPlan: null,
     error: null,
@@ -359,6 +360,14 @@ export const useChatStore = create<ChatState>()(
               unsupportedClaims: event.unsupported_claims,
               reviewRequired: event.review_required,
             })),
+          );
+          return;
+        }
+
+        if (event.type === 'queued') {
+          // Not a trace row: the turn has not done anything yet — that is the whole message.
+          set((s) =>
+            updateAssistant(s, conversationId, messageId, (m) => ({ ...m, queued: true })),
           );
           return;
         }

@@ -90,6 +90,16 @@ export interface AssistantMessage {
    * exactly like one assembled with it.
    */
   degradedConnectors: string[];
+  /**
+   * The turn is parked waiting for a server admission permit, and has not started running.
+   *
+   * On the message rather than in `trace` for the same reason `degradedConnectors` is: it is a
+   * state of the whole turn, not a step of it. The backend sends `queued` only when a turn
+   * genuinely has to wait, so this stays false for a normal turn. It is never cleared — once the
+   * first token arrives there is a body to render and the waiting notice is not reached, which
+   * is also the truthful record: this turn *was* queued.
+   */
+  queued: boolean;
   trace: TraceEntry[];
   /** Newest `plan` snapshot, for the header checklist. Full history stays in `trace`. */
   latestPlan: string[] | null;

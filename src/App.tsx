@@ -72,6 +72,8 @@ export function App(): React.JSX.Element {
                 // Empty on a rehydrated transcript, and honestly so: the backend persists the
                 // messages, not which connectors happened to be down when each was produced.
                 degradedConnectors: [],
+                // Same reason: a rehydrated message is finished, so it is not waiting on anything.
+                queued: false,
                 trace: [],
                 latestPlan: null,
                 error: null,

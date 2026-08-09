@@ -7,6 +7,13 @@ cannot do, and a staged path through them.
 Backend facts are cited against `8fqycwdt8v-oss/Chemclaw3` @ `261b166`; frontend facts against this
 repo @ `b2fd195`.
 
+> **Status.** This document is the study that preceded the work, and it is kept as written — its
+> analysis of what was broken is the argument for what was built, and rewriting it in the past tense
+> would leave the decisions looking unmotivated. What has since landed on this branch: the contract
+> repair of §2, Concept A and B (RDKit, the recognisers, the entity rail), Concept E (the provenance
+> overlay), and Concept D (the workbench). Where a table below states a gap that is now closed, it
+> says so inline. Concept C remains gated on the backend change in §8 item 1.
+
 ---
 
 ## 0. The thesis
@@ -88,14 +95,21 @@ note content and its dependencies) and `POST /proposals/{id}/decision`.
 | `POST /sessions/{id}/attachments` | yes |
 | `GET /sessions/{id}/plan`, `POST /sessions/{id}/plan/decision` | yes |
 | `GET /approvals`, `GET /approvals/{id}`, `POST /approvals/{id}/decision` | yes |
-| **`GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}`** | **no** |
-| **`GET /proposals`, `GET /proposals/{id}`, `POST /proposals/{id}/decision`** | **no** |
-| **`GET /profiles`** | **no** |
+| `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` | *was no — added by Concept D* |
+| `GET /proposals`, `GET /proposals/{id}`, `POST /proposals/{id}/decision` | *was no — added by Concept D* |
+| `GET /profiles` | *was no — added by Concept D* |
 
-The three missing rows are not missing features — they are implemented, tested backend routes
-(`src/chemclaw/api/routes/jobs.py`, `proposals.py`, `sessions.py:171`) that this UI simply cannot
-reach. `ISSUES.md` records `/approvals` and `/sessions` as backend gaps; both have since been
-implemented upstream, so that file is stale.
+The three rows that read "no" when this was written were not missing features — they are
+implemented, tested backend routes (`src/chemclaw/api/routes/jobs.py`, `proposals.py`,
+`sessions.py:171`) that this UI simply could not reach. Whitelisting them was the whole of the
+workbench's data layer. `ISSUES.md` recorded `/approvals` and `/sessions` as backend gaps; both had
+already been implemented upstream, and that file has since been corrected.
+
+One correction to the reading above, found on contact with the code: **`GET /jobs` lists finished
+runs only.** It reads `job_records`, and a row is written when a run *completes* — so the listing
+answers "what has this system finished", not "what is running now". A running job is reachable only
+by its id. That is why the jobs view has an open-by-id box beside the list rather than a cancel
+button on every row, which would have been decorative.
 
 Two more capabilities the UI does not use:
 
@@ -106,8 +120,10 @@ Two more capabilities the UI does not use:
 
 ### 1.4 The event contract
 
-The backend union (`src/chemclaw/api/events.py`) has **15** members. `shared/events.ts` mirrors 14,
-and three of the mirrored ones have since grown fields:
+The backend union (`src/chemclaw/api/events.py`) has **15** members. `shared/events.ts` mirrored 14
+when this was written, and three of the mirrored ones had since grown fields. **Every row below is
+now closed** — the mirror is complete and each field has a consumer; they are kept because the
+pattern they form is the argument for the drift check in §8.
 
 | Backend | Frontend mirror | Consequence |
 | --- | --- | --- |
@@ -117,10 +133,12 @@ and three of the mirrored ones have since grown fields:
 | `answer.verified_by: "judge" \| "citation-gate" \| null` | **absent** | Whether the confidence score came from the LLM judge or the weaker fallback. Without it, "low confidence" and "the check that earns confidence never ran" render identically. |
 | `error.code` / `retryable` / `correlation_id` | **absent** | A closed 8-member taxonomy (`turn_timeout`, `budget_exhausted`, `loop_cap_reached`, `empty_answer`, …) that would let the UI offer the right next step instead of "try again". |
 
-Also unused: `TranscriptMessage.tool_calls` (`src/chemclaw/api/schemas.py:71`) carries `tool`,
-`arguments` **and `result`** per call, truncated to 400 chars. The UI's `TranscriptMessage`
-interface (`src/api/client.ts:50`) declares only `role`/`text`/`created_at`, so reloading a
-conversation loses its whole trace.
+Also unused at the time: `TranscriptMessage.tool_calls` (`src/chemclaw/api/schemas.py:71`) carries
+`tool`, `arguments` **and `result`** per call, truncated to 400 chars. The UI's `TranscriptMessage`
+declared only `role`/`text`/`created_at`, so reloading a conversation lost its whole trace. Now read
+(`src/state/transcript.ts`), including the third state the backend is careful to distinguish: a
+stored call whose `result` is `null` ran and its outcome was not recorded, which is neither a
+success nor a failure and must not render as "running".
 
 ---
 

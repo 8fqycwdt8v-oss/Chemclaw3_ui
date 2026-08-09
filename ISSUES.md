@@ -48,19 +48,23 @@ buttons reach a real endpoint.
 
 ---
 
-## Issue 4: backend routes the BFF does not forward
+## Issue 4: ~~backend routes the BFF does not forward~~ — RESOLVED
 
-These are implemented and tested upstream but absent from the BFF whitelist (`server/routes.ts`),
-so the UI cannot reach them:
+All seven are whitelisted and consumed by the workbench views (`src/views/`). Recorded here because
+the shape is worth remembering: none of these was a missing backend feature, and the gap was
+invisible from either side alone — the backend's tests passed, the UI's tests passed, and nothing
+compared the two.
+
+One thing the implementation corrected: `GET /jobs` lists *finished* runs only (it reads
+`job_records`, whose rows are written on completion), so a running job is reachable only by its id.
+
+These were the routes:
 
 | Route | What it carries |
 | --- | --- |
-| `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` | Every durable run — status, result, rationale — and an operator-gated cancel. A job outlives the conversation that started it, which is the whole reason the surface exists. |
-| `GET /proposals`, `GET /proposals/{id}`, `POST /proposals/{id}/decision` | The PR-gate's review queue: the proposed note's full content, its dependencies, and the human sign-off. The GxP spine of the architecture, with no UI at all today. |
+| `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` | Durable runs — status, result, rationale — and an operator-gated cancel. A job outlives the conversation that started it, which is the whole reason the surface exists. |
+| `GET /proposals`, `GET /proposals/{id}`, `POST /proposals/{id}/decision` | The PR-gate's review queue: the proposed note's full content, its dependencies, and the human sign-off. The GxP spine of the architecture, which had no UI at all. |
 | `GET /profiles` | The narrowed agents a session can be started as — `data/profiles/property-lookup.yaml` is a ready-made calculator mode. |
-
-**Fix:** whitelist entries plus the views that consume them. Tracked as workstream 4 of
-`docs/chemistry-aware-frontend.md`.
 
 ---
 

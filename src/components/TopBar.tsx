@@ -48,9 +48,9 @@ export function TopBar(): React.JSX.Element {
           <span
             className={
               health === 'ok'
-                ? 'text-ok'
+                ? 'text-ok-ink'
                 : health === 'down'
-                  ? 'text-danger'
+                  ? 'text-danger-ink'
                   : 'text-ink-muted'
             }
           >
@@ -61,7 +61,7 @@ export function TopBar(): React.JSX.Element {
 
         {auth.mode === 'dev' && (
           <span
-            className="rounded border border-warn/40 bg-warn-soft px-1.5 py-0.5 text-xs text-warn"
+            className="rounded border border-warn/40 bg-warn-soft px-1.5 py-0.5 text-xs text-warn-ink"
             title="CHEMCLAW_ENTRA_REQUIRED is off: requests are attributed to a shared dev principal"
           >
             dev auth — no sign-in
@@ -89,7 +89,7 @@ export function TopBar(): React.JSX.Element {
                   void auth.login();
                   refresh();
                 }}
-                className="rounded bg-accent px-2.5 py-1 text-white"
+                className="rounded bg-brand px-2.5 py-1 text-brand-fg"
               >
                 Sign in
               </button>
@@ -99,12 +99,12 @@ export function TopBar(): React.JSX.Element {
 
       {banner && (
         <div className="flex items-center gap-3 border-t border-border-subtle bg-danger-soft px-4 py-1.5">
-          <p className="text-sm text-danger">{banner.text}</p>
+          <p className="text-sm text-danger-ink">{banner.text}</p>
           {banner.action === 'reset' && activeId && (
             <button
               type="button"
               onClick={() => void resetSession(activeId, auth)}
-              className="rounded border border-danger/40 px-2 py-0.5 text-xs text-danger"
+              className="rounded border border-danger/40 px-2 py-0.5 text-xs text-danger-ink"
             >
               Start a fresh session
             </button>
@@ -113,7 +113,7 @@ export function TopBar(): React.JSX.Element {
             <button
               type="button"
               onClick={() => void auth.login()}
-              className="rounded border border-danger/40 px-2 py-0.5 text-xs text-danger"
+              className="rounded border border-danger/40 px-2 py-0.5 text-xs text-danger-ink"
             >
               Sign in again
             </button>

@@ -11,9 +11,9 @@
 import { cn } from '../lib/cn.ts';
 
 const PALETTE: Record<string, string> = {
-  reaction: 'border-accent/40 bg-accent-soft text-accent',
+  reaction: 'border-brand/40 bg-brand-soft text-brand-ink',
   note: 'border-border-subtle bg-surface-sunken text-ink-muted',
-  qm: 'border-ok/40 bg-ok-soft text-ok',
+  qm: 'border-ok/40 bg-ok-soft text-ok-ink',
 };
 
 export function CitationChip({ kind, id }: { kind: string; id: string }): React.JSX.Element {

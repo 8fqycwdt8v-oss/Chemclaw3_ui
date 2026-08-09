@@ -80,7 +80,7 @@ function AssistantBubble({
 
       {message.error && (
         <div className="mt-2 rounded-md border border-danger/40 bg-danger-soft px-3 py-2">
-          <p className="text-sm text-danger">{message.error.message}</p>
+          <p className="text-sm text-danger-ink">{message.error.message}</p>
         </div>
       )}
 
@@ -109,7 +109,7 @@ function Bubble({
   if (message.role === 'user') {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-accent px-4 py-2 text-white">
+        <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-brand px-4 py-2 text-brand-fg">
           <p className="whitespace-pre-wrap text-[0.95rem]">{message.text}</p>
         </div>
       </div>
@@ -158,7 +158,7 @@ export function MessageList({
       <div className={cn('mx-auto flex max-w-3xl flex-col gap-4')}>
         {conversation.contextLost && (
           <div className="rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
-            <p className="text-sm text-warn">
+            <p className="text-sm text-warn-ink">
               This conversation’s server session was replaced. The assistant no longer remembers
               the turns above — restate anything it needs.
             </p>

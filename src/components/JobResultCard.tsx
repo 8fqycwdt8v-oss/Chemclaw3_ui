@@ -33,10 +33,10 @@ export function JobResultCard({
       <div className="mb-2 flex items-center gap-2">
         <span className="font-mono text-xs text-ink-muted">{jobId}</span>
         {converged === true && (
-          <span className="rounded bg-ok-soft px-1.5 py-0.5 text-xs text-ok">converged</span>
+          <span className="rounded bg-ok-soft px-1.5 py-0.5 text-xs text-ok-ink">converged</span>
         )}
         {converged === false && (
-          <span className="rounded bg-warn-soft px-1.5 py-0.5 text-xs text-warn">
+          <span className="rounded bg-warn-soft px-1.5 py-0.5 text-xs text-warn-ink">
             not converged
           </span>
         )}

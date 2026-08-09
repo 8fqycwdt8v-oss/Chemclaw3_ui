@@ -91,13 +91,13 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     <div className="border-t border-border-subtle bg-surface-raised px-4 py-3">
       <div className="mx-auto max-w-3xl">
         {composerLock === 'turn_in_flight' && !isStreaming && (
-          <p className="mb-2 text-xs text-warn">
+          <p className="mb-2 text-xs text-warn-ink">
             A turn is already running for this conversation. Wait for it, or start a fresh session
             from the banner above.
           </p>
         )}
         {composerLock === 'budget_exhausted' && (
-          <p className="mb-2 text-xs text-danger">
+          <p className="mb-2 text-xs text-danger-ink">
             The usage budget for this service is exhausted. New turns are refused until it resets.
           </p>
         )}
@@ -153,7 +153,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
             <button
               type="button"
               onClick={stopStreaming}
-              className="rounded-lg bg-danger px-3 py-1.5 text-sm font-medium text-white"
+              className="rounded-lg bg-danger px-3 py-1.5 text-sm font-medium text-danger-fg"
             >
               Stop
             </button>
@@ -162,7 +162,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
               type="button"
               onClick={submit}
               disabled={blocked || tooLong || !text.trim()}
-              className="rounded-lg bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40"
+              className="rounded-lg bg-brand px-3 py-1.5 text-sm font-medium text-brand-fg disabled:opacity-40"
             >
               Send
             </button>
@@ -182,7 +182,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
             </span>
           </label>
           {text.length > MAX_MESSAGE_CHARS * 0.8 && (
-            <span className={tooLong ? 'text-danger' : undefined}>
+            <span className={tooLong ? 'text-danger-ink' : undefined}>
               {text.length.toLocaleString()} / {MAX_MESSAGE_CHARS.toLocaleString()}
             </span>
           )}

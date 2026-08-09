@@ -1,102 +1,434 @@
 @import 'tailwindcss';
+@import 'tw-animate-css';
 
-/* Tailwind v4 is CSS-first: design tokens live here, not in a tailwind.config.js (which this
-   project deliberately does not have). Anyone arriving with v3 muscle memory should start here. */
-@theme {
-  --color-surface: oklch(99% 0.003 250);
-  --color-surface-raised: oklch(100% 0 0);
-  --color-surface-sunken: oklch(96.5% 0.005 250);
-  --color-border-subtle: oklch(90% 0.006 250);
-  --color-ink: oklch(23% 0.015 250);
-  --color-ink-muted: oklch(52% 0.014 250);
-  --color-accent: oklch(52% 0.13 205);
-  --color-accent-soft: oklch(95% 0.03 205);
-  --color-warn: oklch(62% 0.15 65);
-  --color-warn-soft: oklch(96% 0.04 65);
-  --color-danger: oklch(55% 0.19 25);
-  --color-danger-soft: oklch(96% 0.03 25);
-  --color-ok: oklch(58% 0.13 150);
-  --color-ok-soft: oklch(95% 0.04 150);
+/* ---------------------------------------------------------------------------
+   Tailwind v4 is CSS-first: design tokens live here, not in a tailwind.config.js
+   (which this project deliberately does not have).
+
+   READ THIS BEFORE ADDING A THEME-DEPENDENT TOKEN.
+
+   `@theme` cannot be nested to express a theme. Tailwind walks the whole
+   stylesheet and merges EVERY `@theme` block into one map regardless of what
+   at-rule encloses it — unlike `@utility` and `@plugin`, `@theme` has no parent
+   check — then hoists the first into `:root, :host` and deletes the rest. Last
+   write wins, unconditionally.
+
+   This file used to carry a second `@theme` inside
+   `@media (prefers-color-scheme: dark)`. It compiled to a single `:root` block
+   holding the DARK values and no media query at all, so the app was dark in both
+   OS modes and the light palette was dead code. Verified against v4.3.3.
+
+   So: anything that varies by theme is a PLAIN custom property below, and
+   `@theme inline` maps the utility names onto it. `inline` is load-bearing —
+   without it the var is resolved once at `:root` and a `[data-theme]` override
+   further down the tree would not take.
+--------------------------------------------------------------------------- */
+
+/* `:where()` holds specificity at 0 so a `dark:` utility never outranks the base
+   utility it is overriding. Both selectors so `dark:` works on <html> itself. */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* ── Raw palette ─────────────────────────────────────────────────────────────
+   Warm neutrals (hue ~80) rather than cool: the surface is what the eye rests on
+   between answers, and a warm ground reads calmer over a long session. Semantics
+   keep their own hues — 215 brand, 150 ok, 68 warn, 27 danger.
+
+   Every fill has a paired `-fg`. Never `text-white` on a fill: in dark mode the
+   fills sit at 70-75% lightness and white-on-fill lands around 2:1. */
+:root {
+  color-scheme: light;
+
+  --surface: oklch(98.6% 0.004 85);
+  --surface-raised: oklch(100% 0 0);
+  --surface-sunken: oklch(96.4% 0.006 85);
+  --surface-overlay: oklch(100% 0 0);
+
+  --ink: oklch(24% 0.012 75);
+  --ink-muted: oklch(48% 0.012 75);
+  --ink-subtle: oklch(60% 0.010 75);
+
+  --line: oklch(90.5% 0.006 85);
+  --line-strong: oklch(84% 0.008 85);
+
+  --brand: oklch(52% 0.135 215);
+  --brand-fg: oklch(99% 0.005 215);
+  --brand-soft: oklch(95.5% 0.028 215);
+  --brand-ink: oklch(40% 0.120 215);
+
+  --ok: oklch(47% 0.115 150);
+  --ok-fg: oklch(99% 0 0);
+  --ok-soft: oklch(95.5% 0.038 150);
+  --ok-ink: oklch(38% 0.095 150);
+
+  --warn: oklch(55% 0.125 68);
+  --warn-fg: oklch(99% 0 0);
+  --warn-soft: oklch(96% 0.040 68);
+  --warn-ink: oklch(42% 0.105 60);
+
+  --danger: oklch(51% 0.19 27);
+  --danger-fg: oklch(99% 0 0);
+  --danger-soft: oklch(96% 0.030 27);
+  --danger-ink: oklch(42% 0.165 27);
+
+  --ring: oklch(52% 0.135 215);
+  --radius: 0.625rem;
 }
 
-@media (prefers-color-scheme: dark) {
-  @theme {
-    --color-surface: oklch(20% 0.012 250);
-    --color-surface-raised: oklch(24% 0.014 250);
-    --color-surface-sunken: oklch(17% 0.012 250);
-    --color-border-subtle: oklch(32% 0.014 250);
-    --color-ink: oklch(94% 0.006 250);
-    --color-ink-muted: oklch(70% 0.012 250);
-    --color-accent: oklch(72% 0.12 205);
-    --color-accent-soft: oklch(30% 0.05 205);
-    --color-warn: oklch(78% 0.13 65);
-    --color-warn-soft: oklch(32% 0.05 65);
-    --color-danger: oklch(70% 0.15 25);
-    --color-danger-soft: oklch(30% 0.06 25);
-    --color-ok: oklch(74% 0.12 150);
-    --color-ok-soft: oklch(28% 0.05 150);
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --surface: oklch(20.5% 0.008 80);
+  --surface-raised: oklch(24.5% 0.009 80);
+  --surface-sunken: oklch(17.5% 0.008 80);
+  --surface-overlay: oklch(26% 0.010 80);
+
+  --ink: oklch(95% 0.005 85);
+  --ink-muted: oklch(74% 0.010 85);
+  --ink-subtle: oklch(63% 0.010 85);
+
+  --line: oklch(31% 0.010 80);
+  --line-strong: oklch(41% 0.012 80);
+
+  --brand: oklch(74% 0.115 215);
+  --brand-fg: oklch(19% 0.030 215);
+  --brand-soft: oklch(30% 0.045 215);
+  --brand-ink: oklch(85% 0.090 215);
+
+  --ok: oklch(76% 0.125 150);
+  --ok-fg: oklch(18% 0.030 150);
+  --ok-soft: oklch(28% 0.045 150);
+  --ok-ink: oklch(86% 0.100 150);
+
+  --warn: oklch(80% 0.125 68);
+  --warn-fg: oklch(20% 0.040 60);
+  --warn-soft: oklch(31% 0.050 60);
+  --warn-ink: oklch(88% 0.100 68);
+
+  --danger: oklch(71% 0.155 27);
+  --danger-fg: oklch(18% 0.040 27);
+  --danger-soft: oklch(29% 0.055 27);
+  --danger-ink: oklch(86% 0.110 27);
+
+  --ring: oklch(74% 0.115 215);
+}
+
+/* ── Static scales ───────────────────────────────────────────────────────── */
+@theme {
+  /* Self-hosted via @fontsource-variable (imported in main.tsx): Vite bundles the woff2
+     same-origin, which is the only thing `font-src 'self' data:` permits. The packages ship
+     per-unicode-range faces, so the Greek subset — μ, α, β, Δ, and the rest of a chemistry
+     answer — downloads only when a glyph in it is actually used.
+
+     A single mono family across both `.prose-answer code` and the `font-mono` utility: those
+     used to resolve to two different stacks, so a SMILES string in an answer and the same
+     string in the trace panel rendered in different typefaces on one screen. Mono earns its
+     place here by keeping 0/O and 1/l/I apart in SMILES, job ids and hartree values. */
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  /* `initial` clears Tailwind's 13-step default ladder first, so an off-scale
+     size is a build-time miss rather than a silently-invented third type system.
+     Only font sizes are cleared: Tailwind protects --text-color-*, --text-shadow-*
+     and --text-underline-offset-* from this namespace wipe. */
+  --text-*: initial;
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1.45;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.5;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.54;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.65;
+  --text-lg: 1.0625rem;
+  --text-lg--line-height: 1.5;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.35;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 1.25;
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 10px);
+
+  --shadow-2xs: 0 1px 1px oklch(0% 0 0 / 0.04);
+  --shadow-xs: 0 1px 2px -1px oklch(0% 0 0 / 0.06), 0 1px 1px oklch(0% 0 0 / 0.04);
+  --shadow-sm: 0 1px 2px -1px oklch(0% 0 0 / 0.06), 0 2px 6px -2px oklch(0% 0 0 / 0.06);
+  --shadow-md: 0 2px 4px -2px oklch(0% 0 0 / 0.06), 0 6px 16px -4px oklch(0% 0 0 / 0.09);
+  --shadow-lg: 0 8px 28px -10px oklch(0% 0 0 / 0.16), 0 2px 8px -3px oklch(0% 0 0 / 0.08);
+
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+
+  --container-prose: 48rem;
+  --spacing-sidebar: 17rem;
+
+  --animate-caret: caret-blink 1.1s steps(1, end) infinite;
+
+  @keyframes caret-blink {
+    0%,
+    45% {
+      opacity: 1;
+    }
+    55%,
+    100% {
+      opacity: 0.18;
+    }
   }
 }
 
-html,
-body,
-#root {
-  height: 100%;
+/* ── Theme-swappable colours: one system, two vocabularies ───────────────────
+   The Chemclaw names are what this app's own components use. The shadcn names
+   are aliases onto the same raw properties, so vendored components inherit this
+   palette instead of introducing a second one.
+
+   Note `--color-accent`: in shadcn's vocabulary "accent" means the subtle hover
+   surface, not a brand colour. This project's brand token is `brand` precisely
+   so the two can coexist. */
+@theme inline {
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-surface-overlay: var(--surface-overlay);
+
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-subtle: var(--ink-subtle);
+
+  --color-border-subtle: var(--line);
+  --color-border-strong: var(--line-strong);
+
+  --color-brand: var(--brand);
+  --color-brand-fg: var(--brand-fg);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-ink: var(--brand-ink);
+
+  --color-ok: var(--ok);
+  --color-ok-fg: var(--ok-fg);
+  --color-ok-soft: var(--ok-soft);
+  --color-ok-ink: var(--ok-ink);
+
+  --color-warn: var(--warn);
+  --color-warn-fg: var(--warn-fg);
+  --color-warn-soft: var(--warn-soft);
+  --color-warn-ink: var(--warn-ink);
+
+  --color-danger: var(--danger);
+  --color-danger-fg: var(--danger-fg);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-ink: var(--danger-ink);
+
+  /* shadcn vocabulary — aliases, not a second palette. */
+  --color-background: var(--surface);
+  --color-foreground: var(--ink);
+  --color-card: var(--surface-raised);
+  --color-card-foreground: var(--ink);
+  --color-popover: var(--surface-overlay);
+  --color-popover-foreground: var(--ink);
+  --color-primary: var(--brand);
+  --color-primary-foreground: var(--brand-fg);
+  --color-secondary: var(--surface-sunken);
+  --color-secondary-foreground: var(--ink);
+  --color-muted: var(--surface-sunken);
+  --color-muted-foreground: var(--ink-muted);
+  --color-accent: var(--surface-sunken);
+  --color-accent-foreground: var(--ink);
+  --color-destructive: var(--danger);
+  --color-destructive-foreground: var(--danger-fg);
+  --color-border: var(--line);
+  --color-input: var(--line);
+  --color-ring: var(--ring);
 }
 
-body {
-  background: var(--color-surface);
-  color: var(--color-ink);
-  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
-  -webkit-font-smoothing: antialiased;
+@layer base {
+  /* v4 defaults border-color to currentColor; this is what makes a bare `border`
+     look right, and what the vendored components assume. */
+  *,
+  ::after,
+  ::before {
+    border-color: var(--color-border);
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    /* dvh tracks the shrinking viewport on mobile; the percentage above stays as
+       the fallback for anything that does not support it. */
+    height: 100dvh;
+  }
+
+  body {
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--text-base--line-height);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Chemistry runs on numbers that need to line up: energies, pKa, confidence. */
+  :where(table, .tabular) {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* One global honouring of the preference, rather than per-animation opt-outs
+     that get forgotten the moment someone adds a transition. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }
 
-/* Answer prose. Kept minimal and hand-rolled rather than pulling in @tailwindcss/typography,
-   which is a large dependency for what amounts to a dozen rules. */
+/* ── Utilities ───────────────────────────────────────────────────────────── */
+
+/* One focus recipe for the whole app. Previously there was exactly one focus
+   style anywhere, and the composer textarea set `outline-none` with nothing in
+   its place — a keyboard user got no indication of where they were. */
+@utility focus-ring {
+  &:focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+}
+
+/* Grows the hit area without growing the visual. WCAG 2.2 AA (SC 2.5.8) asks for
+   24x24; 44x44 is the coarse-pointer target we hold ourselves to, and several
+   controls here are 12px glyphs. */
+@utility tap-target {
+  position: relative;
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    translate: -50% -50%;
+    width: max(100%, 1.5rem);
+    height: max(100%, 1.5rem);
+  }
+
+  @media (pointer: coarse) {
+    &::after {
+      width: max(100%, 2.75rem);
+      height: max(100%, 2.75rem);
+    }
+  }
+}
+
+/* Visible only to assistive tech. Used for the live region and the headings that
+   give the transcript a navigable outline without adding visual noise. */
+@utility sr-only-live {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* ── Answer prose ────────────────────────────────────────────────────────────
+   Hand-rolled rather than @tailwindcss/typography, which is a large dependency
+   for what amounts to a dozen rules.
+
+   Sized in em against the base scale so the answer body matches surrounding UI
+   text instead of running its own ladder. Heading LEVELS are remapped in
+   Markdown.tsx (model-authored h1 becomes h3) to keep the document outline sane;
+   these rules style by class so the appearance is unaffected by that. */
 .prose-answer :where(p, ul, ol, pre, table, blockquote) {
-  margin-block: 0.7em;
+  margin-block: 0.75em;
 }
-.prose-answer :where(h1, h2, h3, h4) {
+.prose-answer :where(:first-child) {
+  margin-block-start: 0;
+}
+.prose-answer :where(:last-child) {
+  margin-block-end: 0;
+}
+.prose-answer :where(h1, h2, h3, h4, h5, h6) {
   font-weight: 600;
-  margin-block: 1.1em 0.5em;
+  letter-spacing: -0.01em;
+  margin-block: 1.4em 0.5em;
   line-height: 1.3;
 }
-.prose-answer :where(h1) { font-size: 1.35rem; }
-.prose-answer :where(h2) { font-size: 1.18rem; }
-.prose-answer :where(h3) { font-size: 1.05rem; }
-.prose-answer :where(ul) { list-style: disc; padding-inline-start: 1.4em; }
-.prose-answer :where(ol) { list-style: decimal; padding-inline-start: 1.4em; }
-.prose-answer :where(li) { margin-block: 0.25em; }
+.prose-answer :where(.md-h1) {
+  font-size: 1.3em;
+}
+.prose-answer :where(.md-h2) {
+  font-size: 1.15em;
+}
+.prose-answer :where(.md-h3) {
+  font-size: 1.05em;
+}
+.prose-answer :where(.md-h4, .md-h5, .md-h6) {
+  font-size: 1em;
+}
+.prose-answer :where(ul) {
+  list-style: disc;
+  padding-inline-start: 1.4em;
+}
+.prose-answer :where(ol) {
+  list-style: decimal;
+  padding-inline-start: 1.4em;
+}
+.prose-answer :where(li) {
+  margin-block: 0.3em;
+}
+.prose-answer :where(li)::marker {
+  color: var(--color-ink-subtle);
+}
 .prose-answer :where(code) {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 0.875em;
   background: var(--color-surface-sunken);
-  padding: 0.12em 0.35em;
-  border-radius: 0.25rem;
+  border: 1px solid var(--color-border-subtle);
+  padding: 0.1em 0.35em;
+  border-radius: var(--radius-sm);
 }
 .prose-answer :where(pre) {
   background: var(--color-surface-sunken);
   border: 1px solid var(--color-border-subtle);
-  border-radius: 0.5rem;
-  padding: 0.8rem 0.9rem;
+  border-radius: var(--radius-lg);
+  padding: 0.85rem 0.95rem;
   overflow-x: auto;
 }
 .prose-answer :where(pre code) {
   background: none;
+  border: 0;
   padding: 0;
   font-size: 0.85em;
 }
 .prose-answer :where(table) {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 0.9em;
   display: block;
   overflow-x: auto;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
 }
 .prose-answer :where(th, td) {
-  border: 1px solid var(--color-border-subtle);
-  padding: 0.35rem 0.6rem;
+  border-block-end: 1px solid var(--color-border-subtle);
+  padding: 0.45rem 0.7rem;
   text-align: left;
+}
+.prose-answer :where(thead th) {
+  background: var(--color-surface-sunken);
+  font-weight: 600;
+}
+.prose-answer :where(tr:last-child td) {
+  border-block-end: 0;
 }
 .prose-answer :where(blockquote) {
   border-inline-start: 3px solid var(--color-border-subtle);
@@ -104,22 +436,19 @@ body {
   color: var(--color-ink-muted);
 }
 .prose-answer :where(a) {
-  color: var(--color-accent);
+  color: var(--color-brand);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+.prose-answer :where(hr) {
+  border: 0;
+  border-block-start: 1px solid var(--color-border-subtle);
+  margin-block: 1.5em;
+}
 
 /* The streaming caret. */
-@keyframes caret-blink {
-  0%, 45% { opacity: 1; }
-  55%, 100% { opacity: 0.15; }
-}
 .caret {
   display: inline-block;
   width: 0.5ch;
-  animation: caret-blink 1.1s steps(1, end) infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .caret { animation: none; }
+  animation: var(--animate-caret);
 }

@@ -15,7 +15,7 @@ function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
   return (
     <div className="flex h-full items-center justify-center p-8">
       <div className="max-w-lg rounded-lg border border-danger/40 bg-danger-soft p-5">
-        <h1 className="mb-2 font-semibold text-danger">Configuration error</h1>
+        <h1 className="mb-2 font-semibold text-danger-ink">Configuration error</h1>
         <ul className="list-disc space-y-1 pl-5 text-sm">
           {problems.map((problem) => (
             <li key={problem}>{problem}</li>

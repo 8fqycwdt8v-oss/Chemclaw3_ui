@@ -3,6 +3,10 @@ import { createRoot } from 'react-dom/client';
 import { AuthGate } from './auth/AuthContext.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
 import { App } from './App.tsx';
+// Before index.css so the @font-face rules are registered by the time the token that names
+// them is used. Vite rewrites these to hashed same-origin assets.
+import '@fontsource-variable/inter';
+import '@fontsource-variable/jetbrains-mono';
 import './index.css';
 
 const container = document.getElementById('root');

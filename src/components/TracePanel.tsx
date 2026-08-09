@@ -100,14 +100,14 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
     case 'tool_failed':
       return (
         <div className="rounded-md border border-danger/40 bg-danger-soft px-3 py-2">
-          <p className="flex items-center gap-1.5 text-sm text-danger">
+          <p className="flex items-center gap-1.5 text-sm text-danger-ink">
             <span aria-hidden>✖</span>
             <span className="font-medium">{toolLabel(entry.toolFailure?.tool ?? 'tool')}</span>
             <span className="font-mono text-xs">{entry.toolFailure?.tool}</span>
             <span className="text-xs">failed</span>
           </p>
           {entry.toolFailure?.message && (
-            <p className="mt-1 text-xs text-danger">{entry.toolFailure.message}</p>
+            <p className="mt-1 text-xs text-danger-ink">{entry.toolFailure.message}</p>
           )}
         </div>
       );

@@ -42,7 +42,7 @@ export function QuestionPrompt({
   options: string[];
 }): React.JSX.Element {
   return (
-    <div className="mt-3 rounded-md border border-accent/40 bg-accent-soft p-3">
+    <div className="mt-3 rounded-md border border-brand/40 bg-brand-soft p-3">
       <p className="text-sm font-medium">{question}</p>
       {options.length > 0 ? (
         <div className="mt-2 flex flex-wrap gap-1.5">
@@ -51,7 +51,7 @@ export function QuestionPrompt({
               key={option}
               type="button"
               onClick={() => prefill(option)}
-              className="rounded border border-accent/50 bg-surface-raised px-2 py-1 text-sm hover:brightness-95"
+              className="rounded border border-brand/50 bg-surface-raised px-2 py-1 text-sm hover:brightness-95"
             >
               {option}
             </button>
@@ -89,7 +89,7 @@ function DecisionControls({
         type="button"
         disabled={state === 'sending'}
         onClick={() => onDecide(true)}
-        className="rounded bg-ok px-3 py-1 text-sm font-medium text-white disabled:opacity-50"
+        className="rounded bg-ok px-3 py-1 text-sm font-medium text-ok-fg disabled:opacity-50"
       >
         {labels[0]}
       </button>
@@ -101,7 +101,7 @@ function DecisionControls({
       >
         {labels[1]}
       </button>
-      {error && <span className="text-xs text-danger">{error}</span>}
+      {error && <span className="text-xs text-danger-ink">{error}</span>}
     </div>
   );
 }

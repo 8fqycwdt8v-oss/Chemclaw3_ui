@@ -41,7 +41,7 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
     return (
       <div className="flex h-full items-center justify-center p-8">
         <div className="max-w-md rounded-lg border border-danger/40 bg-danger-soft p-5">
-          <h1 className="mb-1 font-semibold text-danger">Sign-in failed</h1>
+          <h1 className="mb-1 font-semibold text-danger-ink">Sign-in failed</h1>
           <p className="text-sm text-ink-muted">{error}</p>
         </div>
       </div>

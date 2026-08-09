@@ -24,7 +24,7 @@ export function ReviewRequiredPill({
   return (
     <div className="mb-2 flex items-start gap-2 rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
       <span aria-hidden>⚠️</span>
-      <p className="text-sm text-warn">
+      <p className="text-sm text-warn-ink">
         <span className="font-semibold">Needs expert review.</span> The verifier could not fully
         support this answer from the cited evidence.
       </p>
@@ -42,7 +42,7 @@ export function CapabilityDegradedPill({
   return (
     <div className="mb-2 flex items-start gap-2 rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
       <span aria-hidden>🔌</span>
-      <p className="text-sm text-warn">
+      <p className="text-sm text-warn-ink">
         <span className="font-semibold">Answered with fewer tools.</span> {down.join(', ')}{' '}
         {down.length === 1 ? 'was' : 'were'} unreachable for this turn, so anything only{' '}
         {down.length === 1 ? 'it' : 'they'} can reach is missing — not absent from the record.
@@ -52,9 +52,9 @@ export function CapabilityDegradedPill({
 }
 
 function confidenceTone(value: number): { cls: string; label: string } {
-  if (value >= 0.8) return { cls: 'border-ok/40 bg-ok-soft text-ok', label: 'high' };
-  if (value >= 0.5) return { cls: 'border-warn/40 bg-warn-soft text-warn', label: 'moderate' };
-  return { cls: 'border-danger/40 bg-danger-soft text-danger', label: 'low' };
+  if (value >= 0.8) return { cls: 'border-ok/40 bg-ok-soft text-ok-ink', label: 'high' };
+  if (value >= 0.5) return { cls: 'border-warn/40 bg-warn-soft text-warn-ink', label: 'moderate' };
+  return { cls: 'border-danger/40 bg-danger-soft text-danger-ink', label: 'low' };
 }
 
 export function AnswerFooter({
@@ -82,7 +82,7 @@ export function AnswerFooter({
 
       {hasClaims && (
         <details className="rounded border border-danger/40 bg-danger-soft px-2 py-1.5">
-          <summary className="cursor-pointer text-xs font-medium text-danger">
+          <summary className="cursor-pointer text-xs font-medium text-danger-ink">
             {message.unsupportedClaims.length} unsupported claim
             {message.unsupportedClaims.length === 1 ? '' : 's'}
           </summary>

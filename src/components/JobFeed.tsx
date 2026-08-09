@@ -45,7 +45,7 @@ export function JobFeed(): React.JSX.Element | null {
               type="button"
               onClick={() => dismiss(job.job_id)}
               aria-label={`Dismiss job ${job.job_id}`}
-              className="absolute top-1 right-1 rounded px-1 text-xs text-ink-muted hover:text-ink focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
+              className="absolute top-1 right-1 rounded px-1 text-xs text-ink-muted hover:text-ink focus-visible:ring-2 focus-visible:ring-brand focus-visible:outline-none"
             >
               ×
             </button>

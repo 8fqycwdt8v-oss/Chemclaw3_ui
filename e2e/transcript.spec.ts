@@ -80,23 +80,43 @@ test('content-visibility does not hide text from find-in-page or the a11y tree',
   page,
 }) => {
   await page.goto(`/c/${CONVERSATION}`);
+  // Wait for the pin to have landed. Acting while the transcript is still settling detaches the
+  // node mid-scroll, which is a race in the test and not a property of the page.
+  await expect(page.getByText(`Answer number ${TOTAL - 1}`)).toBeVisible();
 
   // `content-visibility: auto` skips layout for off-screen subtrees. It must not skip them for
   // search or assistive technology — if it did, the optimisation would have cost the transcript
   // its readability, which is the whole point of it.
   const early = page.getByText('Answer number 141');
   await expect(early).toHaveCount(1);
-  await early.scrollIntoViewIfNeeded();
+  // textContent reaches a skipped subtree; a rendering-only optimisation is the only acceptable
+  // kind here.
+  expect(await early.textContent()).toContain('Answer number 141');
+
+  // Scroll the container, not the node. An answer body is rendered by a lazily-loaded markdown
+  // component, so the matched text node is replaced when that chunk lands — and an action bound
+  // to the old node fails with "not attached" whenever the swap wins the race.
+  await page.locator('#transcript').evaluate((el) => {
+    el.scrollTop = 0;
+  });
   await expect(early).toBeVisible();
 });
 
 test('Load earlier keeps the reader where they were', async ({ page }) => {
   await page.goto(`/c/${CONVERSATION}`);
 
+  await expect(page.getByText(`Answer number ${TOTAL - 1}`)).toBeVisible();
+
+  // Scroll to the top explicitly rather than letting an action decide how far to move. The reader
+  // this test is about has scrolled up to the start of the window and is looking at the message
+  // just below the button, so put the page in exactly that state before measuring anything.
   const scroller = page.locator('#transcript');
-  await page.getByRole('button', { name: /Load earlier/ }).scrollIntoViewIfNeeded();
+  await scroller.evaluate((el) => {
+    el.scrollTop = 0;
+  });
 
   const anchor = page.getByText('Answer number 141');
+  await expect(anchor).toBeVisible();
   const before = await anchor.boundingBox();
 
   await page.getByRole('button', { name: /Load earlier/ }).click();

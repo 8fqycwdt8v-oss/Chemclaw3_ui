@@ -166,9 +166,17 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       return;
     }
 
-    useChatStore
-      .getState()
-      .failTurn(conversationId, messageId, { kind: apiError.kind, message: apiError.message });
+    useChatStore.getState().failTurn(conversationId, messageId, {
+      kind: apiError.kind,
+      message: apiError.message,
+      // Carried through to the error card. The correlation id is the key the backend's audit
+      // trail is indexed on and the only place it reaches a client — so dropping it here, on
+      // the failure path, was the difference between a reportable failure and an unreportable
+      // one. It survived only on the non-terminal notice path, i.e. the cases that are not
+      // failures.
+      ...(apiError.code ? { code: apiError.code } : {}),
+      ...(apiError.correlationId ? { correlationId: apiError.correlationId } : {}),
+    });
 
     // 429 is terminal — the budget does not replenish on a retry, so leave the composer locked
     // and say so. Everything else releases the composer and surfaces a banner.

@@ -98,3 +98,30 @@ test('the durable-run and proposal surfaces load', async ({ page }) => {
   await page.getByRole('button', { name: 'Proposed notes' }).click();
   await expect(page.getByRole('heading', { name: 'Proposed notes' })).toBeVisible();
 });
+
+test('the conversation panel can be closed again on a narrow screen', async ({ page }) => {
+  // The panel is `absolute` and covers the ☰ toggle that opened it, so without its own dismissal
+  // path a phone user who opened it was stuck behind it for the rest of the session — on the
+  // platform whose poisoned-state problem is the reason "Reset app" lives in there.
+  await page.setViewportSize({ width: 375, height: 720 });
+  await page.goto('/');
+
+  const sidebar = page.locator('#conversation-sidebar');
+  await expect(sidebar).toBeHidden();
+
+  await page.getByRole('button', { name: 'Conversations' }).click();
+  await expect(sidebar).toBeVisible();
+  await expect(sidebar.getByRole('button', { name: 'Reset app' })).toBeVisible();
+
+  // Escape is one of the three ways out; the others are the backdrop and the ✕.
+  await page.keyboard.press('Escape');
+  await expect(sidebar).toBeHidden();
+});
+
+test('the composer stays visible and usable at a phone width', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 720 });
+  await page.goto('/');
+  await expect(page.locator(composer)).toBeVisible();
+  await send(page, 'hello from a phone');
+  await expect(page.getByText('Acetic acid has a pKa of 4.76.')).toBeVisible();
+});

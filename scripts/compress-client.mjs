@@ -52,6 +52,13 @@ function* walk(dir) {
  * compressed into `.map.gz`/`.map.br` siblings — and sirv serves a sibling for a request for the
  * map, so removing only the plain files would have left the maps public in compressed form.
  */
+// Fail before `walk()` rather than letting readdirSync throw an ENOENT stack: a missing directory
+// means the client build did not run, which is worth saying in words.
+if (!statSync(CLIENT_DIR, { throwIfNoEntry: false })) {
+  console.error(`compress-client: ${CLIENT_DIR} does not exist — run \`vite build\` first.`);
+  process.exit(1);
+}
+
 let strippedMaps = 0;
 if (process.env.KEEP_CLIENT_SOURCEMAPS !== 'true') {
   for (const file of walk(CLIENT_DIR)) {
@@ -98,8 +105,11 @@ console.log(
     `(${(originalBytes / 1024).toFixed(0)} kB -> ${(gzipBytes / 1024).toFixed(0)} kB gzip, ${pct}% smaller)`,
 );
 
-// Sanity: a build that produced nothing to compress is almost certainly a build that did not run.
+// A build that produced nothing to compress is a build that produced no JS or CSS, which is not a
+// build. The previous version of this check tested `!statSync(...)` — which is false whenever the
+// directory exists, i.e. in exactly the case it was written to catch — and was unreachable anyway
+// because `walk()` throws first when the directory is missing.
 if (compressed === 0) {
-  console.warn(`compress-client: nothing compressed under ${CLIENT_DIR} — did the client build?`);
-  if (!statSync(CLIENT_DIR, { throwIfNoEntry: false })) process.exit(1);
+  console.error(`compress-client: nothing compressed under ${CLIENT_DIR} — did the client build?`);
+  process.exit(1);
 }

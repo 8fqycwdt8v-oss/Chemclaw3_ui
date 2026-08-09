@@ -19,17 +19,19 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { api, TERMINAL_JOB_STATUSES, type JobRecord } from '../api/client.ts';
+import { api, TERMINAL_JOB_STATUSES, type JobRecord, type JobStatus } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { cn } from '../lib/cn.ts';
+import { relativeTime } from '../lib/format.ts';
 
 type Filter = 'mine' | 'all';
 
-function statusTone(status: string): string {
+function statusTone(status: string | undefined): string {
+  if (status === undefined) return 'text-ink-muted';
   if (status === 'completed') return 'text-ok';
   if (TERMINAL_JOB_STATUSES.has(status)) return 'text-danger';
-  return 'text-ink-muted';
+  return 'text-warn';
 }
 
 export function JobsPanel(): React.JSX.Element {
@@ -39,6 +41,14 @@ export function JobsPanel(): React.JSX.Element {
   const [filter, setFilter] = useState<Filter>('all');
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  /**
+   * Real per-job status, keyed by id, fetched on demand.
+   *
+   * `JobRecord` carries no status at all, so the list alone cannot say whether a run succeeded.
+   * `GET /jobs/{id}` is the same function the agent's own `get_durable_job_status` tool calls, so a
+   * chemist reading this panel and one asking in chat cannot get different answers.
+   */
+  const [statuses, setStatuses] = useState<Record<string, JobStatus>>({});
 
   // Through a ref-free stable callback: `useAuth()` returns a fresh object each render, so listing
   // it as a dependency would refetch the whole list on every state change.
@@ -70,6 +80,29 @@ export function JobsPanel(): React.JSX.Element {
     };
   }, [token, reloadToken]);
 
+  // Fetch the real status for whatever is on screen. Bounded to the loaded page, sequential
+  // rather than a burst, and failures are simply left unknown — a status we could not read must
+  // render as unknown, never as success.
+  useEffect(() => {
+    if (jobs === null || jobs.length === 0) return;
+    let live = true;
+    void (async () => {
+      for (const job of jobs) {
+        if (!live) return;
+        try {
+          const status = await api.getJob(job.job_id, token);
+          if (!live) return;
+          setStatuses((prev) => ({ ...prev, [job.job_id]: status }));
+        } catch {
+          // Leave it unknown.
+        }
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [jobs, token]);
+
   const cancel = async (jobId: string): Promise<void> => {
     setBusy(jobId);
     setNote(null);
@@ -95,8 +128,13 @@ export function JobsPanel(): React.JSX.Element {
   };
 
   const mine = auth.account?.id;
+  // Without an account there is nothing to filter by, so offering "Mine" would answer "you have
+  // started no runs" on evidence the app does not have. Dev auth has no real principal.
+  const canFilterMine = Boolean(mine) && auth.mode !== 'dev';
   const shown =
-    filter === 'mine' && mine ? (jobs ?? []).filter((j) => j.requested_by === mine) : (jobs ?? []);
+    filter === 'mine' && canFilterMine
+      ? (jobs ?? []).filter((j) => j.requested_by === mine)
+      : (jobs ?? []);
 
   return (
     <section aria-labelledby="jobs-heading" className="flex h-full flex-col">
@@ -110,6 +148,12 @@ export function JobsPanel(): React.JSX.Element {
               key={f}
               type="button"
               aria-pressed={filter === f}
+              disabled={f === 'mine' && !canFilterMine}
+              title={
+                f === 'mine' && !canFilterMine
+                  ? 'Needs a signed-in account to filter by requester'
+                  : undefined
+              }
               onClick={() => setFilter(f)}
               className={cn(
                 'rounded px-2 py-0.5 text-xs focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none',
@@ -157,7 +201,10 @@ export function JobsPanel(): React.JSX.Element {
                 </div>
                 <button
                   type="button"
-                  disabled={busy === job.job_id}
+                  disabled={
+                    busy === job.job_id ||
+                    TERMINAL_JOB_STATUSES.has(statuses[job.job_id]?.status ?? '')
+                  }
                   onClick={() => void cancel(job.job_id)}
                   className="shrink-0 rounded border border-border-subtle px-2 py-0.5 text-xs disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
                 >
@@ -167,9 +214,22 @@ export function JobsPanel(): React.JSX.Element {
               {job.summary && <p className="mt-1.5 text-sm break-words">{job.summary}</p>}
               {job.rationale && <p className="mt-1 text-xs text-ink-muted">{job.rationale}</p>}
               <p className="mt-1 text-xs">
-                <span className={statusTone(job.completed_at ? 'completed' : 'running')}>
-                  {job.completed_at ? `finished ${job.completed_at}` : 'no completion recorded'}
+                {/*
+                  `completed_at` is NOT a success signal — it means the record has an end
+                  timestamp, which is equally true of a run that failed, was cancelled, terminated
+                  or timed out. Reading it as "completed" painted failures green and told a
+                  chemist their campaign had run. The real status comes from `GET /jobs/{id}`,
+                  fetched on demand below; until then this says only what it knows.
+                */}
+                <span className={statusTone(statuses[job.job_id]?.status)}>
+                  {statuses[job.job_id]?.status ??
+                    (job.completed_at ? 'ended — status not loaded' : 'no end recorded')}
                 </span>
+                {job.completed_at && (
+                  <span className="ml-1.5 text-ink-muted">
+                    {relativeTime(Date.parse(job.completed_at))}
+                  </span>
+                )}
                 {job.requested_by && (
                   <span className="ml-1.5 text-ink-muted">· asked by {job.requested_by}</span>
                 )}

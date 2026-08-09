@@ -55,7 +55,11 @@ export default defineConfig({
   // agent's answer. The BFF in front of it is the real one.
   webServer: {
     command: `node e2e/mock-backend.mjs & CLIENT_DIR=dist/client PORT=${PORT} BIND_HOST=127.0.0.1 AUTH_MODE=dev CHEMCLAW_API_URL=http://127.0.0.1:8789 node dist/server.mjs`,
-    url: `${BASE_URL}/healthz`,
+    // `/api/readyz`, not `/healthz`. The latter is answered locally by the BFF without touching
+    // the backend, so it went green the moment the BFF bound its port — while the mock might not
+    // be listening yet, and the first spec (which asserts "connected") raced a 502. This probe
+    // traverses the proxy, so readiness means the whole chain is up.
+    url: `${BASE_URL}/api/readyz`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,
     stdout: 'pipe',

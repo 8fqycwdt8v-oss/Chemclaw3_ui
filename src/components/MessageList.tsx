@@ -90,6 +90,14 @@ function AssistantBubble({
       {message.error && (
         <div className="mt-2 rounded-md border border-danger/40 bg-danger-soft px-3 py-2">
           <p className="text-sm text-danger">{message.error.message}</p>
+          {message.error.correlationId && (
+            // The id the backend's audit trail is keyed on, and the only place it reaches a
+            // client. Quoting it is what lets an operator find the turn — without it a failure is
+            // something a chemist can experience but not report.
+            <p className="mt-1 font-mono text-[0.7rem] text-ink-muted">
+              Reference: {message.error.correlationId}
+            </p>
+          )}
         </div>
       )}
 
@@ -142,6 +150,17 @@ const Bubble = memo(function Bubble({
 
 export function MessageList({ conversation }: { conversation: Conversation }): React.JSX.Element {
   const endRef = useRef<HTMLDivElement | null>(null);
+
+  // Derived, not stored: the last message's settled state is the whole announcement.
+  const last = conversation.messages[conversation.messages.length - 1];
+  const announcement =
+    last?.role === 'assistant' && last.status !== 'streaming'
+      ? last.status === 'error'
+        ? 'The turn failed.'
+        : last.status === 'aborted'
+          ? 'The turn was stopped.'
+          : 'The assistant has answered.'
+      : '';
   const pinnedRef = useRef(true);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
@@ -168,15 +187,18 @@ export function MessageList({ conversation }: { conversation: Conversation }): R
   }, [conversation.messages.length, streamedLength]);
 
   return (
-    // `role="log"` with a polite live region: a screen reader is told when an answer arrives
-    // rather than being left to discover it. Deliberately NOT `aria-live` on the streaming text
-    // itself — that would re-announce the whole answer on every token.
+    // `role="log"` names the region so a screen-reader user can navigate to it. It carries NO
+    // `aria-live`: an implicit or explicit live region here covers every descendant, and
+    // `<Markdown>` re-parses the whole partial answer on each flush — so any token that completes
+    // a list item or closes a code fence is a node addition, and gets announced. The comment that
+    // used to sit here claimed the opposite of what the markup did.
+    //
+    // The announcement now comes from a single `sr-only` node below, written once per turn.
     <div
       ref={scrollerRef}
       role="log"
       aria-label="Conversation"
-      aria-live="polite"
-      aria-relevant="additions"
+      aria-live="off"
       className="flex-1 overflow-y-auto px-4 py-6"
     >
       <div className={cn('mx-auto flex max-w-3xl flex-col gap-4')}>
@@ -224,6 +246,18 @@ export function MessageList({ conversation }: { conversation: Conversation }): R
         ))}
         <div ref={endRef} />
       </div>
+
+      {/*
+        The one live region in the transcript.
+        
+        A single sentence, updated only when a turn settles, so a screen reader is told an answer
+        arrived without being read the answer token by token as its markdown restructures. The
+        text itself stays navigable in the `log` region above, which is where a reader goes to
+        actually read it.
+      */}
+      <p aria-live="polite" className="sr-only">
+        {announcement}
+      </p>
     </div>
   );
 }

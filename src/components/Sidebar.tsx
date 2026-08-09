@@ -29,9 +29,11 @@ import { cn } from '../lib/cn.ts';
 const SidebarRow = memo(function SidebarRow({
   id,
   active,
+  onSelect,
 }: {
   id: string;
   active: boolean;
+  onSelect: () => void;
 }): React.JSX.Element | null {
   const title = useChatStore((s) => s.conversations[id]?.title);
   const updatedAt = useChatStore((s) => s.conversations[id]?.updatedAt);
@@ -41,8 +43,12 @@ const SidebarRow = memo(function SidebarRow({
   return (
     <button
       type="button"
-      aria-current={active ? 'true' : undefined}
-      onClick={() => useChatStore.getState().selectConversation(id)}
+      aria-current={active ? 'page' : undefined}
+      onClick={() => {
+        useChatStore.getState().selectConversation(id);
+        // On a narrow screen the panel is covering the conversation the user just picked.
+        onSelect();
+      }}
       className={cn(
         'mb-1 w-full rounded-md px-2.5 py-2 text-left transition-colors focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none',
         active ? 'bg-surface-raised' : 'hover:bg-surface-raised/60',
@@ -61,7 +67,13 @@ const SidebarRow = memo(function SidebarRow({
   );
 });
 
-export function Sidebar({ open }: { open: boolean }): React.JSX.Element {
+export function Sidebar({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}): React.JSX.Element {
   const { auth } = useAuth();
   const order = useChatStore((s) => s.order);
   const activeId = useChatStore((s) => s.activeId);
@@ -108,6 +120,16 @@ export function Sidebar({ open }: { open: boolean }): React.JSX.Element {
     };
   }, [auth]);
 
+  // Escape closes it. Without this the panel could cover its own toggle with no way back.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
   return (
     /*
      * Off-canvas on small screens rather than absent.
@@ -116,45 +138,70 @@ export function Sidebar({ open }: { open: boolean }): React.JSX.Element {
      * switcher, no "New conversation", and — the one that matters — no "Reset app". The commit
      * that added that reset button was specifically about mobile browsers serving poisoned
      * persisted state, so hiding the only recovery control on the affected platform left exactly
-     * those users with no way out. `TopBar` owns the toggle.
+     * those users with no way out.
+     *
+     * Open, it is `absolute` and therefore out of flow — which means it sits ON TOP of `TopBar`'s
+     * ☰ toggle at roughly x=16px, so the control that opened it could not close it. It needs its
+     * own way out, and has three: a backdrop, a close button, and Escape. Selecting a conversation
+     * closes it too, since that is the thing the user opened it to do.
      */
-    <aside
-      id="conversation-sidebar"
-      className={cn(
-        'w-64 shrink-0 flex-col border-r border-border-subtle bg-surface-sunken md:flex',
-        'absolute inset-y-0 left-0 z-20 md:static',
-        open ? 'flex' : 'hidden',
+    <>
+      {open && (
+        <button
+          type="button"
+          aria-label="Close conversations"
+          onClick={onClose}
+          className="fixed inset-0 z-10 bg-ink/20 md:hidden"
+        />
       )}
-    >
-      <div className="p-3">
-        <button
-          type="button"
-          onClick={() => useChatStore.getState().createConversation()}
-          className="w-full rounded-lg border border-border-subtle bg-surface-raised px-3 py-2 text-sm font-medium hover:brightness-95"
-        >
-          + New conversation
-        </button>
-      </div>
+      <aside
+        id="conversation-sidebar"
+        className={cn(
+          'w-64 shrink-0 flex-col border-r border-border-subtle bg-surface-sunken md:flex',
+          'absolute inset-y-0 left-0 z-20 md:static',
+          open ? 'flex' : 'hidden',
+        )}
+      >
+        <div className="flex items-center gap-2 p-3">
+          <button
+            type="button"
+            onClick={() => useChatStore.getState().createConversation()}
+            className="w-full rounded-lg border border-border-subtle bg-surface-raised px-3 py-2 text-sm font-medium hover:brightness-95"
+          >
+            + New conversation
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close conversations"
+            className="rounded-lg border border-border-subtle px-2 py-2 text-sm text-ink-muted md:hidden"
+          >
+            ✕
+          </button>
+        </div>
 
-      <nav className="flex-1 overflow-y-auto px-2 pb-3">
-        {order.map((id) => (
-          <SidebarRow key={id} id={id} active={id === activeId} />
-        ))}
-      </nav>
+        <nav className="flex-1 overflow-y-auto px-2 pb-3">
+          {order.map((id) => (
+            <SidebarRow key={id} id={id} active={id === activeId} onSelect={onClose} />
+          ))}
+        </nav>
 
-      <div className="border-t border-border-subtle p-3">
-        <button
-          type="button"
-          onClick={() => {
-            if (window.confirm('Reset the app? This clears all conversations and starts fresh.')) {
-              useChatStore.getState().clearAll();
-            }
-          }}
-          className="w-full rounded-lg border border-danger/30 px-3 py-2 text-xs text-danger hover:bg-danger/10"
-        >
-          Reset app
-        </button>
-      </div>
-    </aside>
+        <div className="border-t border-border-subtle p-3">
+          <button
+            type="button"
+            onClick={() => {
+              if (
+                window.confirm('Reset the app? This clears all conversations and starts fresh.')
+              ) {
+                useChatStore.getState().clearAll();
+              }
+            }}
+            className="w-full rounded-lg border border-danger/30 px-3 py-2 text-xs text-danger hover:bg-danger/10"
+          >
+            Reset app
+          </button>
+        </div>
+      </aside>
+    </>
   );
 }

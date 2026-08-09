@@ -187,11 +187,7 @@ export interface ChatState {
   appendTokens: (conversationId: string, messageId: string, text: string) => void;
   applyEvent: (conversationId: string, messageId: string, event: ChemclawEvent) => void;
   finishTurn: (conversationId: string, messageId: string, status: 'done' | 'aborted') => void;
-  failTurn: (
-    conversationId: string,
-    messageId: string,
-    error: { kind: ApiErrorKind; message: string },
-  ) => void;
+  failTurn: (conversationId: string, messageId: string, error: AssistantMessage['error']) => void;
 
   setComposerLock: (lock: ComposerLock) => void;
   setBanner: (banner: Banner | null) => void;
@@ -695,6 +691,11 @@ export const useChatStore = create<ChatState>()(
             ...m,
             status: 'error',
             error,
+            // Cleared, not merely hidden. `TurnNoticePill` suppresses itself once the status is
+            // 'error', but that left `notice` in state for any other reader to find — and the
+            // suppression is not ordering-guaranteed either, so the pill could flash before the
+            // error card replaced it. A failed turn has one story.
+            notice: null,
           })),
         );
       },

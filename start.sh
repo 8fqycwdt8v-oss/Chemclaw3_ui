@@ -29,8 +29,19 @@ export PORT="${PORT:-8099}"
 # Tell the BFF where its built client assets are
 export CLIENT_DIR="$SCRIPT_DIR/dist/client"
 
-# Build client if not already built
-if [ ! -d "$CLIENT_DIR" ]; then
+# Build the client when there is nothing usable there.
+#
+# Testing only for the directory was not enough once the bundle became mode-dependent: a
+# `npm run build` without ALLOW_DEV_AUTH leaves a dist/client that exists and *throws in the
+# browser* under AUTH_MODE=dev, and this script would happily serve it. Checking for a built
+# index.html plus the dev-auth marker this deployment needs makes the staleness visible here
+# rather than as a blank page.
+needs_build=0
+[ -f "$CLIENT_DIR/index.html" ] || needs_build=1
+if [ "$needs_build" = "0" ] && [ "$AUTH_MODE" = "dev" ]; then
+  grep -rqls "dev@localhost" "$CLIENT_DIR" || needs_build=1
+fi
+if [ "$needs_build" = "1" ]; then
   echo "Building client assets..."
   npm run build:client
 fi

@@ -19,19 +19,31 @@ import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:
 import { cfg } from './config.ts';
 import { log } from './log.ts';
 
-const upstream = new URL(cfg.apiUrl);
-const transport = upstream.protocol === 'https:' ? https : http;
+/**
+ * Parsed lazily, not at module scope.
+ *
+ * `server/index.ts` imports this module before it calls `validateConfig()`, so a module-level
+ * `new URL(cfg.apiUrl)` ran first and a typo'd `CHEMCLAW_API_URL` produced a raw `TypeError:
+ * Invalid URL` naming this file — while the curated message in `validateConfig` could never
+ * print. The most likely configuration mistake had the least useful error.
+ */
+let upstreamUrl: URL | null = null;
+const upstream = (): URL => (upstreamUrl ??= new URL(cfg.apiUrl));
+const transport = (): typeof http | typeof https =>
+  upstream().protocol === 'https:' ? https : http;
 
 /**
  * keepAlive with NO socket timeout. A turn can legitimately run for the backend's full 600s
  * wall clock without producing a byte, and the job stream longer still.
  */
-const agent = new transport.Agent({
-  keepAlive: true,
-  keepAliveMsecs: 15_000,
-  maxSockets: 128,
-  timeout: 0,
-});
+let agentInstance: http.Agent | null = null;
+const agent = (): http.Agent =>
+  (agentInstance ??= new (transport().Agent)({
+    keepAlive: true,
+    keepAliveMsecs: 15_000,
+    maxSockets: 128,
+    timeout: 0,
+  }));
 
 /** Headers that describe a single hop and must never be copied across one. */
 const HOP_BY_HOP = new Set([
@@ -127,6 +139,14 @@ const FORWARDED_REQUEST_HEADERS = new Set([
   'if-none-match',
   'if-modified-since',
   'last-event-id',
+  // Conditional/partial reads. Without these on the request leg the corresponding response
+  // headers are unreachable, so 206 was broken end to end.
+  'range',
+  'if-range',
+  // Both `client.ts` and `useJobFeed.ts` set `cache: 'no-store'`, which the browser emits as a
+  // request header; dropping it silently discarded the caller's stated intent.
+  'cache-control',
+  'pragma',
 ]);
 
 /**
@@ -147,7 +167,47 @@ const FORWARDED_RESPONSE_HEADERS = new Set([
   'retry-after',
   'content-disposition',
   'vary',
+  // Restored after review found each of these breaks a path that used to work:
+  // `location` — without it a 3xx is a redirect with no target, so a browser renders blank and
+  //   `fetch` (which follows redirects by default) throws. Starlette's own `redirect_slashes`
+  //   produces these.
+  'location',
+  // `www-authenticate` — RFC 9110 makes this MUST-send on a 401, and its `error_description` is
+  //   the only machine-readable "expired" vs "invalid" signal a client gets.
+  'www-authenticate',
+  // `content-encoding` — `accept-encoding: identity` binds the backend, not a sidecar configured
+  //   to compress anyway. Dropping it hands the browser gzip bytes labelled JSON, which fails as
+  //   a `SyntaxError` in `res.json()` rather than as anything diagnosable.
+  'content-encoding',
+  // `allow` — a 405 that does not say which methods are permitted is not much of a 405.
+  'allow',
+  'accept-ranges',
+  'content-range',
 ]);
+
+/** The first value of a header that may arrive repeated. */
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+/** Strip the IPv4-mapped IPv6 prefix, which most log pipelines do not normalise. */
+function normaliseAddress(address: string | undefined): string | undefined {
+  if (!address) return undefined;
+  return address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
+}
+
+/**
+ * The scheme the client used to reach THIS proxy.
+ *
+ * Trusts an inbound `x-forwarded-proto` when present, because in the deployments that set it we
+ * are not the edge; falls back to whether our own socket is TLS.
+ */
+function clientProto(req: IncomingMessage): string {
+  const forwarded = firstHeader(req.headers['x-forwarded-proto']);
+  if (forwarded) return forwarded.split(',')[0]!.trim();
+  return 'encrypted' in req.socket && req.socket.encrypted ? 'https' : 'http';
+}
 
 /** Copy the allowed request headers to the upstream and set the ones we own authoritatively. */
 function buildUpstreamHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
@@ -161,12 +221,28 @@ function buildUpstreamHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
   // Never let the upstream compress an event stream: a compressor buffers until its window
   // fills, so tokens would arrive in clumps or, on a short answer, not until the very end.
   headers['accept-encoding'] = 'identity';
-  headers['host'] = upstream.host;
-  // Set by us, not copied: a client-supplied value here would be a forgery, and an absent value
-  // is worse than a wrong one for anything downstream that logs it.
-  const remote = req.socket.remoteAddress;
-  if (remote) headers['x-forwarded-for'] = remote;
-  headers['x-forwarded-proto'] = upstream.protocol === 'https:' ? 'https' : 'http';
+  headers['host'] = upstream().host;
+  // Appended, not overwritten — and this is the correction to a fix that made things worse.
+  //
+  // Overwriting with `req.socket.remoteAddress` sounded safe ("a client-supplied value would be a
+  // forgery") and was not: in every deployment this project has — Replit, compose behind a
+  // published port, any ingress — that address IS the proxy in front of us, and the inbound
+  // header was the only place the real client address existed. Stripping it and substituting our
+  // peer manufactured exactly the audit-trail lie the allow-list exists to prevent, with this
+  // process's authority behind it.
+  //
+  // The standard shape is a list, oldest first, each hop appending its peer. A downstream reader
+  // that trusts the first entry is making its own decision about how many proxies to trust; what
+  // this must not do is destroy the information.
+  const remote = normaliseAddress(req.socket.remoteAddress);
+  const inbound = firstHeader(req.headers['x-forwarded-for']);
+  const chain = [inbound, remote].filter((part): part is string => Boolean(part));
+  if (chain.length > 0) headers['x-forwarded-for'] = chain.join(', ');
+  // Describes the scheme the CLIENT used to reach this proxy, not the leg we are about to make.
+  // Deriving it from the upstream protocol reported `http` to a backend whose user was on HTTPS.
+  headers['x-forwarded-proto'] = clientProto(req);
+  const host = firstHeader(req.headers['x-forwarded-host']) ?? firstHeader(req.headers.host);
+  if (host) headers['x-forwarded-host'] = host;
   return headers;
 }
 
@@ -188,6 +264,10 @@ const REPLAYABLE_METHODS = new Set(['GET', 'HEAD', 'DELETE']);
 /** Connection-level failures, i.e. ones where the request provably never reached a handler. */
 const REPLAYABLE_ERRORS = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT']);
 
+/** How long, and how much more, an over-cap upload may keep sending before the socket is closed. */
+const LINGER_MS = 5_000;
+const LINGER_MAX_BYTES = 8 * 1024 * 1024;
+
 export function proxy(
   req: IncomingMessage,
   res: ServerResponse,
@@ -196,15 +276,15 @@ export function proxy(
   /** Internal: set when this call is already the one retry a request gets. */
   isRetry = false,
 ): void {
-  const upstreamReq = transport.request(
+  const upstreamReq = transport().request(
     {
-      protocol: upstream.protocol,
-      hostname: upstream.hostname,
-      port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
+      protocol: upstream().protocol,
+      hostname: upstream().hostname,
+      port: upstream().port || (upstream().protocol === 'https:' ? 443 : 80),
       method: req.method,
       path: upstreamPath,
       headers: buildUpstreamHeaders(req),
-      agent,
+      agent: agent(),
     },
     (upstreamRes) => {
       const out: http.OutgoingHttpHeaders = {};
@@ -280,7 +360,14 @@ export function proxy(
       !isRetry &&
       REPLAYABLE_METHODS.has(method) &&
       REPLAYABLE_ERRORS.has(err.code ?? '') &&
-      !req.readableDidRead;
+      !req.readableDidRead &&
+      // The client must still be there. `res.on('close')` fires exactly once, so if it has
+      // already fired, a retry creates an upstream request that nothing will ever cancel — and on
+      // the long-lived event stream that means a leaked connection per occurrence, against a
+      // per-user cap. The disconnect propagation this file calls its most important line is
+      // precisely what the retry path was bypassing.
+      !res.destroyed &&
+      !res.writableEnded;
     if (replayable) {
       log.debug(`retrying ${method} ${upstreamPath} once after ${err.code}`);
       proxy(req, res, upstreamPath, expectSse, true);
@@ -308,14 +395,50 @@ export function proxy(
     if (received <= cfg.maxBodyBytes) return;
     refused = true;
     log.warn(`request body over ${cfg.maxBodyBytes} bytes for ${req.method} ${upstreamPath}`);
+
+    // Stop feeding the upstream, then answer — WITHOUT resetting the client's connection.
+    //
+    // The first version called `req.destroy()` in the same tick as `res.end()`. That destroys the
+    // socket the client is still writing its body to, so the browser sees ERR_CONNECTION_RESET and
+    // discards the response it had already received: the user got "could not reach the service"
+    // for a file that was simply too large, which is the opposite diagnosis. (A Node client
+    // happened to surface the 413 first, which is why this looked fine when tested from a script.)
+    //
+    // Unpiping first also stops pipe's own `ondata` writing into a destroyed upstream request,
+    // which raced a second socket kill against the same response.
+    req.unpipe(upstreamReq);
     upstreamReq.destroy();
     if (!res.headersSent) {
-      res.writeHead(413, { 'content-type': 'application/json' });
+      res.writeHead(413, {
+        'content-type': 'application/json',
+        // The remaining body is not going to be read, so the connection cannot be reused. Saying
+        // so lets the client finish writing and close cleanly instead of being reset mid-upload.
+        connection: 'close',
+      });
       res.end(
         JSON.stringify({ detail: `request body exceeds the ${cfg.maxBodyBytes} byte limit` }),
       );
     }
-    req.destroy();
+    // Lingering close: drain and discard what is still arriving, bounded, then close.
+    //
+    // This is what nginx does for `client_max_body_size` and it exists for exactly this reason —
+    // a client that is mid-upload will not read a response off a socket that has been reset, so
+    // closing immediately means the 413 is never seen. Draining lets the client finish writing,
+    // notice the response, and close cleanly. Bounded in both time and bytes so an oversized
+    // upload still cannot be used to hold the connection open indefinitely, which is the point of
+    // having a cap at all.
+    req.resume();
+    let drained = 0;
+    const onDrainChunk = (chunk: Buffer): void => {
+      drained += chunk.length;
+      if (drained > LINGER_MAX_BYTES) req.destroy();
+    };
+    req.on('data', onDrainChunk);
+    const linger = setTimeout(() => req.destroy(), LINGER_MS);
+    // `unref` so a lingering drain never holds the process open during shutdown.
+    linger.unref();
+    req.once('end', () => clearTimeout(linger));
+    req.once('close', () => clearTimeout(linger));
   });
 
   req.pipe(upstreamReq);

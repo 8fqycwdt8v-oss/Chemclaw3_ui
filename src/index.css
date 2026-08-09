@@ -45,7 +45,12 @@
 
   --ink: oklch(24% 0.012 75);
   --ink-muted: oklch(48% 0.012 75);
-  --ink-subtle: oklch(60% 0.01 75);
+  /* Only five points below `ink-muted`, and deliberately so. This carries 11px metadata — trace
+     tool names, job ids, the sidebar hints — which is small text, so it owes 4.5:1 against the
+     sunken panel it most often sits on. There is no room left between that and white for a
+     visibly fainter third step; the hierarchy is carried by size and weight instead. It sat at
+     60% until an axe run measured those nodes at 3.57:1. */
+  --ink-subtle: oklch(53% 0.01 75);
 
   --line: oklch(90.5% 0.006 85);
   --line-strong: oklch(84% 0.008 85);

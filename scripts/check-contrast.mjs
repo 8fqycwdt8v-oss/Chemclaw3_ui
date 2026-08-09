@@ -70,7 +70,10 @@ function parseBlock(css, selector) {
 /* ── The pairs that actually occur ────────────────────────────────────────── */
 
 const AA_TEXT = 4.5;
-const AA_LARGE = 3; // >=18.66px or bold >=14px
+// There is deliberately no AA_LARGE (3:1, for >=18.66px or bold >=14px). Nothing in this app sits
+// on a colour pair that is only ever large text, and the one row that claimed to — ink-subtle —
+// turned out to carry 11px metadata. A threshold that has to be argued for per usage is one that
+// will be wrong the next time a component moves.
 const AA_UI = 3; // component boundaries and focus indicators (SC 1.4.11)
 
 const PAIRS = [
@@ -81,8 +84,14 @@ const PAIRS = [
   ['ink-muted', 'surface', AA_TEXT, 'muted text'],
   ['ink-muted', 'surface-raised', AA_TEXT, 'muted text on a card'],
   ['ink-muted', 'surface-sunken', AA_TEXT, 'muted text on a sunken panel'],
-  // ink-subtle is only ever used at >=14px semibold or as a decorative rail.
-  ['ink-subtle', 'surface-raised', AA_LARGE, 'subtle text'],
+  // ink-subtle was listed here once at AA_LARGE, on the claim that it was "only ever used at
+  // >=14px semibold or as a decorative rail". That was not true of the code: it carries `text-2xs`
+  // metadata in the trace panel, the job feed and both sidebar hints — 11px, which is squarely
+  // small text. An axe run found three such nodes at 3.57:1. The claim is gone and the token is
+  // now held to the threshold its actual usage requires, on every ground it appears on.
+  ['ink-subtle', 'surface', AA_TEXT, 'small metadata text'],
+  ['ink-subtle', 'surface-raised', AA_TEXT, 'small metadata text on a card'],
+  ['ink-subtle', 'surface-sunken', AA_TEXT, 'small metadata text on a sunken panel'],
 
   // Filled controls: this is where `text-white` used to sit at ~2:1 in dark mode.
   ['brand-fg', 'brand', AA_TEXT, 'label on a primary button / user bubble'],

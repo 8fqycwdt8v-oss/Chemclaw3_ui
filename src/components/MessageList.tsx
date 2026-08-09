@@ -7,8 +7,9 @@
  * between "code block" and "prose" as the closing backticks arrive.
  */
 
-import { useEffect, useRef } from 'react';
+import { memo, useEffect, useRef } from 'react';
 import type { AssistantMessage, ChatMessage, Conversation } from '../state/types.ts';
+import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { Markdown } from './Markdown.tsx';
 import { TracePanel } from './TracePanel.tsx';
 import {
@@ -105,7 +106,16 @@ function AssistantBubble({
   );
 }
 
-function Bubble({
+/**
+ * Memoised, and it matters more than it looks.
+ *
+ * `updateAssistant` rebuilds the conversations record and maps every message on each store write,
+ * and tokens flush once per animation frame — so without this, every *finished* answer in the
+ * transcript re-ran `<ReactMarkdown>`, a full remark/rehype parse, roughly sixty times a second
+ * while a new answer streamed. `.map()` preserves object identity for every message except the one
+ * actually being updated, so a shallow compare is exactly the right test.
+ */
+const Bubble = memo(function Bubble({
   message,
   sessionId,
 }: {
@@ -126,7 +136,7 @@ function Bubble({
       <AssistantBubble message={message} sessionId={sessionId} />
     </div>
   );
-}
+});
 
 export function MessageList({ conversation }: { conversation: Conversation }): React.JSX.Element {
   const endRef = useRef<HTMLDivElement | null>(null);
@@ -178,7 +188,27 @@ export function MessageList({ conversation }: { conversation: Conversation }): R
         )}
 
         {conversation.messages.map((message) => (
-          <Bubble key={message.id} message={message} sessionId={conversation.sessionId} />
+          // A per-message boundary, so one unrenderable answer costs that card and not the app.
+          // The reset key is the rendered body: a message that threw on partially-streamed
+          // markdown recovers by itself once `finalText` replaces it with well-formed text.
+          <ErrorBoundary
+            key={message.id}
+            resetKeys={[
+              message.role === 'assistant' ? (message.finalText ?? message.streamedText) : '',
+            ]}
+            fallback={() => (
+              <div className="rounded-md border border-danger/40 bg-danger-soft p-3">
+                <p className="text-sm text-danger">This message could not be displayed.</p>
+                {message.role === 'assistant' && (
+                  <pre className="mt-1.5 max-h-40 overflow-auto font-mono text-xs whitespace-pre-wrap">
+                    {message.finalText ?? message.streamedText}
+                  </pre>
+                )}
+              </div>
+            )}
+          >
+            <Bubble message={message} sessionId={conversation.sessionId} />
+          </ErrorBoundary>
         ))}
         <div ref={endRef} />
       </div>

@@ -17,12 +17,29 @@ import { paths } from './endpoints.ts';
 
 export type TokenGetter = () => Promise<string | null>;
 
+/**
+ * How long a non-streaming call may take before it is abandoned.
+ *
+ * There was no timeout anywhere in this client. A hung BFF left `getPlan` pending forever, so the
+ * plan card sat on "Reading the plan…" with no way out, and an upload could never be given up on.
+ * Generous, because these cross a proxy to a service that can be genuinely slow — but finite,
+ * because a promise that never settles is a UI state nobody can leave.
+ *
+ * The turn stream and the job-event stream are deliberately exempt: both are long-lived by design
+ * and have their own liveness signals.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 async function request<T>(path: string, getToken: TokenGetter, init: RequestInit = {}): Promise<T> {
   const token = await getToken();
   let res: Response;
+  // Compose with any caller-supplied signal rather than replacing it.
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
   try {
     res = await fetch(`${config.apiBase}${path}`, {
       ...init,
+      signal,
       cache: 'no-store',
       headers: {
         accept: 'application/json',
@@ -34,6 +51,9 @@ async function request<T>(path: string, getToken: TokenGetter, init: RequestInit
       },
     });
   } catch {
+    if (timeout.aborted) {
+      throw new ApiError('network', 'The Chemclaw service did not respond in time.');
+    }
     throw new ApiError('network', 'Could not reach the Chemclaw service.');
   }
 

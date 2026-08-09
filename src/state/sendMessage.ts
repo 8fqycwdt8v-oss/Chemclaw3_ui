@@ -48,8 +48,16 @@ function createTokenBatcher(conversationId: string, messageId: string) {
   const flush = (): void => {
     scheduled = false;
     if (!pending) return;
-    useChatStore.getState().appendTokens(conversationId, messageId, pending);
+    // Cleared BEFORE the store write, not after.
+    //
+    // zustand's persist middleware patches setState as "apply the update, then write to storage",
+    // so by the time `localStorage.setItem` can throw — a QuotaExceededError, which a long
+    // conversation makes entirely reachable — the tokens are already in the store. Clearing
+    // afterwards meant the throw skipped the reset and left `pending` intact, so every subsequent
+    // flush re-appended everything already flushed and the answer grew quadratically.
+    const text = pending;
     pending = '';
+    useChatStore.getState().appendTokens(conversationId, messageId, text);
   };
 
   return {

@@ -26,9 +26,23 @@ interface DrawerLike {
   draw: (tree: unknown, target: string | SVGElement, theme: string) => void;
 }
 
-let drawerPromise: Promise<{ parse: (s: string) => unknown; drawer: DrawerLike }> | null = null;
+/**
+ * One cached drawer per size, not one for the whole app.
+ *
+ * A single module-level promise captured `width`/`height` from whichever component happened to
+ * render first and reused that drawer for every structure afterwards — so a job card asking for
+ * 280x190, an inline toggle asking for 260x180, and the 320x220 default all rendered at whichever
+ * size won the race. Non-deterministic, and the effect below listed `width`/`height` as
+ * dependencies as though they mattered. Keying the cache by size makes them matter.
+ */
+const drawerCache = new Map<
+  string,
+  Promise<{ parse: (s: string) => unknown; drawer: DrawerLike }>
+>();
 
 async function loadDrawer(width: number, height: number) {
+  const key = `${width}x${height}`;
+  let drawerPromise = drawerCache.get(key);
   if (!drawerPromise) {
     drawerPromise = import('smiles-drawer').then((mod) => {
       const SD = (mod as { default?: unknown }).default ?? mod;
@@ -55,6 +69,7 @@ async function loadDrawer(width: number, height: number) {
       };
       return { parse, drawer };
     });
+    drawerCache.set(key, drawerPromise);
   }
   return drawerPromise;
 }
@@ -92,6 +107,9 @@ export function Molecule({
       .then(({ parse, drawer }) => {
         if (cancelled || !svgRef.current) return;
         const tree = parse(smiles);
+        // Clear first: `draw` appends into the element, and whether it removes a previous
+        // drawing is an internal detail of SvgWrapper that this repo neither controls nor tests.
+        svgRef.current.replaceChildren();
         drawer.draw(tree, svgRef.current, prefersDark());
       })
       .catch(() => {

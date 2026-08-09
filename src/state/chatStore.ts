@@ -19,6 +19,7 @@ import type {
   ComposerLock,
   Conversation,
   TraceEntry,
+  TurnStatus,
 } from './types.ts';
 
 /** Keep persisted state bounded — see `partialize` below. */
@@ -222,6 +223,105 @@ const updateAssistant = (
   };
 };
 
+/** The live storage key. Versioned by `version`, not by the key — see the store config below. */
+export const STORAGE_KEY = 'chemclaw3.chat';
+
+/**
+ * Keys this app has ever persisted under.
+ *
+ * Both legacy names are removed rather than migrated. The v1 blob was abandoned precisely because
+ * it was poisoned (`d7e85d8`), and v2 exists only because that abandonment was done by renaming
+ * the key; carrying either forward would reintroduce the state the rename was trying to escape.
+ * They are deleted rather than left, because a user who resets to clear their work should not
+ * still have it on disk.
+ */
+export const LEGACY_KEYS = ['chemclaw3.chat.v1', 'chemclaw3.chat.v2'] as const;
+
+interface PersistedChat {
+  conversations: Record<string, unknown>;
+  order: string[];
+  activeId: string | null;
+}
+
+/** Remove every key this app has ever written. Safe to call when storage is unavailable. */
+export function clearPersisted(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+    for (const key of LEGACY_KEYS) localStorage.removeItem(key);
+  } catch {
+    // A private-mode browser can refuse storage entirely; there is nothing to clean up there.
+  }
+}
+
+/**
+ * Coerce one stored conversation into the current shape, or `null` if it is unusable.
+ *
+ * Field-tolerant on purpose: a stored message missing a field added later gets that field's
+ * default rather than failing the load. Without this, every addition to `AssistantMessage` would
+ * need its own migration step, and the pressure would be to skip the bump and ship a store whose
+ * shape does not match its type.
+ */
+function coerceConversation(raw: unknown): Conversation | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.id !== 'string') return null;
+
+  const messages: ChatMessage[] = [];
+  for (const item of Array.isArray(o.messages) ? o.messages : []) {
+    if (typeof item !== 'object' || item === null) continue;
+    const m = item as Record<string, unknown>;
+    if (typeof m.id !== 'string') continue;
+    if (m.role === 'user') {
+      messages.push({
+        id: m.id,
+        role: 'user',
+        text: typeof m.text === 'string' ? m.text : '',
+        at: typeof m.at === 'number' ? m.at : Date.now(),
+      });
+      continue;
+    }
+    if (m.role !== 'assistant') continue;
+    // A message still marked 'streaming' cannot be resumed — there is no endpoint for it — so it
+    // is retired here, at load, rather than being written to disk as a lie about a live turn.
+    const status = m.status === 'streaming' ? 'aborted' : (m.status as TurnStatus) || 'done';
+    messages.push({
+      id: m.id,
+      role: 'assistant',
+      at: typeof m.at === 'number' ? m.at : Date.now(),
+      status,
+      streamedText: typeof m.streamedText === 'string' ? m.streamedText : '',
+      finalText: typeof m.finalText === 'string' ? m.finalText : null,
+      confidence: typeof m.confidence === 'number' ? m.confidence : null,
+      unsupportedClaims: Array.isArray(m.unsupportedClaims) ? m.unsupportedClaims.map(String) : [],
+      reviewRequired: m.reviewRequired === true,
+      verifiedBy:
+        m.verifiedBy === 'judge' || m.verifiedBy === 'citation-gate' ? m.verifiedBy : null,
+      degradedConnectors: Array.isArray(m.degradedConnectors)
+        ? m.degradedConnectors.map(String)
+        : [],
+      queued: m.queued === true,
+      trace: Array.isArray(m.trace) ? (m.trace as TraceEntry[]) : [],
+      latestPlan: Array.isArray(m.latestPlan) ? m.latestPlan.map(String) : null,
+      notice: null,
+      error:
+        m.status === 'streaming'
+          ? { kind: 'stream' as ApiErrorKind, message: 'Interrupted by a page reload.' }
+          : ((m.error as AssistantMessage['error']) ?? null),
+    });
+  }
+
+  return {
+    id: o.id,
+    sessionId: typeof o.sessionId === 'string' ? o.sessionId : null,
+    profile: typeof o.profile === 'string' ? o.profile : null,
+    title: typeof o.title === 'string' ? o.title : 'New conversation',
+    createdAt: typeof o.createdAt === 'number' ? o.createdAt : Date.now(),
+    updatedAt: typeof o.updatedAt === 'number' ? o.updatedAt : Date.now(),
+    messages,
+    contextLost: o.contextLost === true,
+  };
+}
+
 export const useChatStore = create<ChatState>()(
   persist(
     (set, get) => ({
@@ -237,10 +337,13 @@ export const useChatStore = create<ChatState>()(
         const conversation = { ...newConversation(), profile };
         set((s) => ({
           conversations: { ...s.conversations, [conversation.id]: conversation },
-          order: [conversation.id, ...s.order],
+          // Trimmed in memory too, not only when persisting. `MAX_CONVERSATIONS` was enforced
+          // solely in `partialize`, so conversation 31 was shown in the sidebar, worked in, and
+          // then silently gone on reload — with no warning at any point.
+          order: [conversation.id, ...s.order].slice(0, MAX_CONVERSATIONS),
           activeId: conversation.id,
-          composerLock: false,
-          banner: null,
+          composerLock: s.composerLock === 'budget_exhausted' ? s.composerLock : false,
+          banner: s.composerLock === 'budget_exhausted' ? s.banner : null,
         }));
         return conversation.id;
       },
@@ -261,10 +364,23 @@ export const useChatStore = create<ChatState>()(
 
       selectConversation(id) {
         if (!get().conversations[id]) return;
-        set({ activeId: id, composerLock: false, banner: null });
+        set((s) => ({
+          activeId: id,
+          // A `budget_exhausted` lock is a property of the deployment, not of one conversation —
+          // the budget is per-session AND per-user — so switching conversations must not clear it.
+          // `turn_in_flight` is cleared, because the turn it refers to belongs to the conversation
+          // being navigated away from; `Composer` still blocks on the global `streaming` while
+          // that turn runs.
+          composerLock: s.composerLock === 'budget_exhausted' ? s.composerLock : false,
+          banner: s.composerLock === 'budget_exhausted' ? s.banner : null,
+        }));
       },
 
       deleteConversation(id) {
+        // Same reasoning as `clearAll`: deleting the conversation a turn is streaming into must
+        // stop the turn, not merely stop showing it.
+        const streaming = get().streaming;
+        if (streaming?.conversationId === id) streaming.abort.abort();
         set((s) => {
           const { [id]: _removed, ...rest } = s.conversations;
           const order = s.order.filter((x) => x !== id);
@@ -277,6 +393,15 @@ export const useChatStore = create<ChatState>()(
       },
 
       clearAll() {
+        // Abort an in-flight turn before dropping the reference to its controller.
+        //
+        // "Reset app" used to set `streaming: null` and walk away, which dropped the
+        // AbortController on the floor: the fetch kept running, kept spending the turn budget,
+        // kept holding the session's turn lock — and `stopStreaming` could no longer reach it, so
+        // there was no way to stop it short of closing the tab.
+        get().streaming?.abort.abort();
+        // Removes the legacy keys too, so a reset actually clears what is on disk.
+        clearPersisted();
         set(() => {
           const fresh = newConversation();
           return {
@@ -505,39 +630,73 @@ export const useChatStore = create<ChatState>()(
       },
     }),
     {
-      // Bumped to v2 to force a clean slate on iPhone/mobile browsers that kept serving the old
-      // v1 persisted state (poisoned sessions) after the recent fixes.
-      name: 'chemclaw3.chat.v2',
-      version: 1,
+      /**
+       * A stable key, with schema evolution carried by `version` where it belongs.
+       *
+       * The key used to be versioned instead — it went `chemclaw3.chat.v1` -> `.v2` to force a
+       * clean slate — and that is why the old blob is still on people's disks. zustand's migration
+       * machinery only ever looks inside the blob at the *current* name, so for a v1 user there
+       * was no v2 blob, `migrate` was never called, and megabytes of transcripts sat in the same
+       * origin's quota forever: invisible to `clearAll`, and surviving "Reset app". For a tool
+       * adjacent to GxP work, a reset that visibly clears your work while leaving it on disk is
+       * the wrong answer twice over.
+       *
+       * `clearPersisted` below removes every key this app has ever used, and is called from
+       * `clearAll`.
+       */
+      name: STORAGE_KEY,
+      version: 2,
       storage: createJSONStorage(() => localStorage),
 
-      partialize: (state) => {
-        // Keep only the newest conversations, and never persist a message still marked
-        // 'streaming' — there is no resume endpoint, so on reload it would hang forever.
-        const order = state.order.slice(0, MAX_CONVERSATIONS);
-        const conversations: Record<string, Conversation> = {};
-        for (const id of order) {
-          const conversation = state.conversations[id];
-          if (!conversation) continue;
-          conversations[id] = {
-            ...conversation,
-            messages: conversation.messages.map((m) =>
-              m.role === 'assistant' && m.status === 'streaming'
-                ? {
-                    ...m,
-                    status: 'aborted' as const,
-                    error: {
-                      kind: 'stream' as ApiErrorKind,
-                      message: 'Interrupted by a page reload.',
-                    },
-                  }
-                : m,
-            ),
-          };
-        }
+      /**
+       * Cheap: a slice and a record of existing references, O(conversations) rather than
+       * O(messages).
+       *
+       * This used to `.map()` every message of every persisted conversation to demote a still-
+       * streaming message to 'aborted'. zustand computes `partialize` eagerly on EVERY setState,
+       * and tokens flush once per animation frame — so that walk ran ~60 times a second over the
+       * whole history, ahead of a synchronous `localStorage.setItem` of the same.
+       *
+       * The demotion moved to `migrate`, where it is also more correct: it belongs at load time.
+       * Writing 'aborted' at save time meant the persisted copy briefly lied about a turn that was
+       * still running, and then got rewritten a frame later.
+       */
+      partialize: (state) => ({
+        conversations: Object.fromEntries(
+          state.order
+            .slice(0, MAX_CONVERSATIONS)
+            .map((id) => [id, state.conversations[id]])
+            .filter((entry): entry is [string, Conversation] => entry[1] !== undefined),
+        ),
+        order: state.order.slice(0, MAX_CONVERSATIONS),
         // sessionId IS persisted: it may well still be alive after a reload, and if it is not,
         // the 404 path recreates it transparently.
-        return { conversations, order, activeId: state.activeId };
+        activeId: state.activeId,
+      }),
+
+      /**
+       * Bring a stored blob up to the current shape.
+       *
+       * Every conversation goes through `coerceConversation`, which fills defaults for anything
+       * missing. That is what makes adding a field to `AssistantMessage` a non-event for stored
+       * data — no version bump, no second migration — and it is also where a message left marked
+       * 'streaming' by a reload is retired, since there is no resume endpoint and it would
+       * otherwise hang forever.
+       */
+      migrate: (persisted) => {
+        const state = persisted as Partial<PersistedChat> | undefined;
+        if (!state) return { conversations: {}, order: [], activeId: null };
+        const conversations: Record<string, Conversation> = {};
+        for (const [id, raw] of Object.entries(state.conversations ?? {})) {
+          const conversation = coerceConversation(raw);
+          if (conversation) conversations[id] = conversation;
+        }
+        const order = (state.order ?? []).filter((id) => conversations[id] !== undefined);
+        return {
+          conversations,
+          order,
+          activeId: state.activeId && conversations[state.activeId] ? state.activeId : null,
+        };
       },
     },
   ),

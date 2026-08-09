@@ -47,6 +47,8 @@ export function useJobFeed(sessionId: string | null, auth: AuthProvider): void {
             continue;
           }
           if (!res.ok || !res.body) {
+            // Release the connection before retrying; the body was never read.
+            await res.body?.cancel().catch(() => undefined);
             attempt += 1;
             await backoff(attempt, controller.signal);
             continue;
@@ -79,6 +81,16 @@ export function useJobFeed(sessionId: string | null, auth: AuthProvider): void {
           } finally {
             await reader.cancel().catch(() => undefined);
           }
+
+          // A floor delay on every reconnect, including a clean one.
+          //
+          // `attempt` resets to 0 on a successful response, and a stream that ends normally used
+          // to fall straight back into the loop and re-fetch with no delay at all — so a backend
+          // that closes this stream promptly (an idle timeout, a pod recycle, an ingress capping
+          // stream duration) turned this into an unthrottled request loop against the one endpoint
+          // whose docstring says it is rate-limited per user. It would hammer until it earned the
+          // 429 and only then back off.
+          if (!stopped) await settle(RECONNECT_FLOOR_MS, controller.signal);
         } catch {
           if (stopped || controller.signal.aborted) return;
           attempt += 1;
@@ -96,10 +108,21 @@ export function useJobFeed(sessionId: string | null, auth: AuthProvider): void {
   }, [sessionId, auth]);
 }
 
+/**
+ * Shortest gap between two connections to the push-back stream, however cleanly the last one
+ * ended. Long enough that a fast-closing server cannot turn this into a spin loop, short enough
+ * that a job completing during the gap is noticed promptly.
+ */
+const RECONNECT_FLOOR_MS = 1_000;
+
 /** Exponential backoff with jitter, capped at 30s, abortable. */
 function backoff(attempt: number, signal: AbortSignal): Promise<void> {
   const base = Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5));
-  const delay = base * (0.5 + Math.random() * 0.5);
+  return settle(base * (0.5 + Math.random() * 0.5), signal);
+}
+
+/** Wait `delay` ms, resolving early if aborted. */
+function settle(delay: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, delay);
     signal.addEventListener(

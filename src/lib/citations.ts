@@ -97,9 +97,27 @@ export function remarkCitations() {
  */
 export function looksLikeSmiles(text: string): boolean {
   const s = text.trim();
-  if (s.length < 4 || s.length > 400) return false;
+  // The upper bound is a main-thread guard as much as a heuristic: `smiles-drawer`'s parse is
+  // synchronous, so an adversarially long string from model output would block rendering. 200 is
+  // far above any structure that reads sensibly inline.
+  if (s.length < 4 || s.length > 200) return false;
   if (/\s/.test(s)) return false;
   if (!/^[A-Za-z0-9@+\-[\]()=#$%/\\.*]+$/.test(s)) return false;
+
+  // Reject the chemistry-prose tokens this claimed to reject and did not.
+  //
+  // The docstring above has always said it rejects things like `pH` — but trace `pH=7.4` through
+  // the old rules: length 6, no whitespace, every character in the allowed set, `=` satisfies the
+  // structural requirement and `p` satisfies the organic-subset one. It passed, and so did
+  // `1H-NMR` and `C2H5OH`, each producing a ⌬ toggle on prose that errors when clicked.
+  //
+  // What actually distinguishes them is that they are measurements and labels, not structures:
+  // a `=` used as assignment rather than a double bond, a decimal number, an NMR/IR label.
+  if (/^[a-zA-Z]{1,3}\s*=/.test(s)) return false; // pH=7.4, T=298, dH=-45
+  if (/\d\.\d/.test(s)) return false; // any decimal figure
+  if (/^\d+[HCNPF]-/i.test(s)) return false; // 1H-NMR, 13C-NMR
+  if (/(NMR|IR|MS|HPLC|GC|UV|TLC|ppm|equiv)/i.test(s)) return false;
+
   // Require at least one structural character; plain words would otherwise pass.
   if (!/[()[\]=#]|[0-9]/.test(s)) return false;
   // Must contain an element that can start an organic-subset atom.

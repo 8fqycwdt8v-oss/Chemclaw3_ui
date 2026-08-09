@@ -118,6 +118,30 @@ test('the conversation panel can be closed again on a narrow screen', async ({ p
   await expect(sidebar).toBeHidden();
 });
 
+test('an over-cap upload gets a 413, not a reset connection', async ({ page }) => {
+  // This is the one assertion a Node client cannot make. The first version of the body cap called
+  // `req.destroy()` in the same tick as `res.end()`, and a Node client happened to surface the 413
+  // anyway — while a browser, still mid-upload, discarded the response and reported
+  // ERR_CONNECTION_RESET. `client.ts` then rendered "could not reach the service" for a file that
+  // was simply too large, which is the opposite diagnosis. Only a real browser distinguishes them.
+  await page.goto('/');
+  const result = await page.evaluate(async () => {
+    try {
+      const res = await fetch('/api/sessions', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        // Over the 4 MB cap by a clear margin.
+        body: JSON.stringify({ padding: 'x'.repeat(5_000_000) }),
+      });
+      return { status: res.status, detail: await res.text() };
+    } catch (err) {
+      return { status: 0, detail: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  expect(result.status).toBe(413);
+  expect(result.detail).toMatch(/limit/);
+});
+
 test('the composer stays visible and usable at a phone width', async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 720 });
   await page.goto('/');

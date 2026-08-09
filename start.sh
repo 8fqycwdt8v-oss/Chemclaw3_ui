@@ -15,7 +15,7 @@ export BIND_HOST="${BIND_HOST:-0.0.0.0}"
 # out loud. Both opt-outs are required and both are refused by default:
 #   ALLOW_INSECURE_AUTH — lets the BFF boot with AUTH_MODE=dev on a non-loopback interface.
 #   ALLOW_DEV_AUTH      — lets the built bundle fall back to the no-token auth provider.
-# Anyone deploying this for real removes these two lines and sets AUTH_MODE=msal.
+# Anyone deploying this for real removes these two lines and sets AUTH_MODE=bff.
 export ALLOW_INSECURE_AUTH="${ALLOW_INSECURE_AUTH:-true}"
 export ALLOW_DEV_AUTH="${ALLOW_DEV_AUTH:-true}"
 

@@ -47,7 +47,18 @@ const server = http.createServer(async (req, res) => {
   if (path === '/jobs') return json(res, 200, []);
   if (path === '/proposals') return json(res, 200, []);
   if (path === '/approvals') return json(res, 200, []);
-  if (path === '/sessions' && req.method === 'POST') return json(res, 200, { session_id: SESSION });
+  if (path === '/sessions' && req.method === 'POST') {
+    // Read the body before answering, which is what a real ASGI server does — Starlette hands the
+    // handler a fully-received request. Answering first is a difference that matters: the BFF's
+    // body cap can only write a 413 while its own response headers are unsent, so a mock that
+    // replies before the upload finishes turns an over-cap request into a 200 and hides the cap.
+    await new Promise((resolve) => {
+      req.on('data', () => {});
+      req.on('end', resolve);
+      req.on('close', resolve);
+    });
+    return json(res, 200, { session_id: SESSION });
+  }
   if (path === '/sessions' && req.method === 'GET') return json(res, 200, []);
   if (path.endsWith('/messages') && req.method === 'GET') return json(res, 200, []);
 

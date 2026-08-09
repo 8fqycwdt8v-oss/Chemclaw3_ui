@@ -82,14 +82,65 @@ Vite inlines `import.meta.env` at build time, browser-facing settings are served
 
 ### Enabling Entra SSO
 
-The backend enforces Entra when `CHEMCLAW_ENTRA_REQUIRED=true`. Set `AUTH_MODE=msal` here at the
-same time, plus:
+The backend enforces Entra when `CHEMCLAW_ENTRA_REQUIRED=true`. Set an authenticated `AUTH_MODE`
+here at the same time. There are two, and they differ in **who holds the token**:
 
-| Variable          | Value                                                               |
-| ----------------- | ------------------------------------------------------------------- |
-| `ENTRA_TENANT_ID` | your tenant GUID                                                    |
-| `ENTRA_CLIENT_ID` | **this SPA's** app registration (platform: Single-page application) |
-| `API_SCOPE`       | `api://<api-client-id>/<scope>`, e.g. `.../Chat.Access`             |
+| `AUTH_MODE` | Who completes the OIDC flow | Where the token lives  | XSS can steal a token? |
+| ----------- | --------------------------- | ---------------------- | ---------------------- |
+| `bff`       | this server                 | sealed httpOnly cookie | no                     |
+| `msal-spa`  | MSAL, in the browser        | `sessionStorage`       | yes                    |
+
+`bff` is the default and the recommendation. Under `msal-spa` a bearer token sits in web storage
+for the life of the tab, readable by any script that runs on the origin — a compromised dependency,
+an extension, a hole in a renderer — and usable from anywhere for its full lifetime. Under `bff`
+the page never sees a token at all: requests authenticate by cookie and this server attaches the
+bearer on the way through.
+
+> **`AUTH_MODE=msal` now resolves to `bff`.** An existing deployment that changes nothing will
+> **refuse to start** until `ENTRA_CLIENT_SECRET` and `SESSION_SECRET` are set, and the refusal says
+> so. To keep the previous browser-MSAL behaviour exactly as it was, set `AUTH_MODE=msal-spa`.
+
+Both modes need:
+
+| Variable          | Value                                                   |
+| ----------------- | ------------------------------------------------------- |
+| `ENTRA_TENANT_ID` | your tenant GUID                                        |
+| `ENTRA_CLIENT_ID` | **this app's** own registration                         |
+| `API_SCOPE`       | `api://<api-client-id>/<scope>`, e.g. `.../Chat.Access` |
+
+`bff` additionally needs:
+
+| Variable              | Value                                                                    |
+| --------------------- | ------------------------------------------------------------------------ |
+| `ENTRA_CLIENT_SECRET` | a client secret — this is a **confidential** client                      |
+| `SESSION_SECRET`      | ≥32 chars, seals the session cookie (`openssl rand -base64 48`)          |
+| `PUBLIC_ORIGIN`       | this deployment's browser-facing origin, e.g. `https://chem.example.com` |
+
+**The app registration's platform differs by mode**, and this is the easiest thing to get wrong:
+`bff` needs a **Web** platform with `<PUBLIC_ORIGIN>/auth/callback` as a redirect URI, while
+`msal-spa` needs a **Single-page application** platform. Presenting a client secret against a SPA
+registration is refused with AADSTS9002326, which does not read as "wrong platform".
+
+#### What BFF custody costs
+
+Worth stating plainly rather than discovering:
+
+- **CSRF becomes a real surface.** Before this the origin carried no cookies, so a cross-site
+  request carried no credentials. It does now, and three independent checks defend it:
+  `SameSite=Lax`, an `Origin`/`Referer` comparison, and a double-submit token the SPA echoes in
+  `x-csrf-token`. See `server/auth/csrf.ts`.
+- **The session lives in a cookie, and cookies have a size limit.** An Entra access token runs
+  1–2 KB and a refresh token about 1 KB, so a sealed session is split across up to four numbered
+  cookies. Exceeding that ceiling **throws** rather than truncating — a truncated session would
+  present as "sign-in randomly does not stick", which is close to undiagnosable from a bug report.
+- **There is no server-side session store, so there is no revocation.** A sealed cookie is valid
+  until it expires; `/auth/logout` clears the browser's copy rather than invalidating a record.
+  That is the trade for a stateless design that survives a restart and scales across replicas with
+  nothing new to run.
+- **A real tenant round trip is untested in this repo.** The flow is covered by unit tests, by an
+  end-to-end suite against a mock provider (`tests/bffAuthFlow.test.ts`), and by a browser suite
+  against a second mock (`e2e/bffAuth.spec.ts`) — but there is no tenant here, so the first genuine
+  confirmation will be a real sign-in.
 
 Three things account for most "the token looks fine but the API returns 401" incidents:
 
@@ -102,9 +153,11 @@ Three things account for most "the token looks fine but the API returns 401" inc
 3. **There is no `CHEMCLAW_ENTRA_CLIENT_ID` on the backend.** Its settings model is
    `extra="forbid"`, so exporting one aborts its startup. The SPA client id belongs only here.
 
-Silent token refresh uses a hidden iframe to `login.microsoftonline.com`, so the CSP is built
-conditionally on `AUTH_MODE` (`server/config.ts`). Copying the backend's `connect-src 'self'`
+Under `msal-spa`, silent token refresh uses a hidden iframe to `login.microsoftonline.com`, so the
+CSP is relaxed for that mode (`server/config.ts`). Copying the backend's `connect-src 'self'`
 verbatim breaks refresh about an hour after login — a failure that looks like a random logout.
+`bff` needs none of those relaxations, because nothing in the browser talks to Entra: sign-in is a
+plain top-level navigation, which CSP does not govern. So `bff` ships the strict policy.
 
 ## Layout
 
@@ -189,4 +242,9 @@ Two settings decide whether this UI is safe to expose, and both fail closed:
   trusting the bundler to have eliminated it. Without this, a `/config.js` that failed to load
   silently selected a provider that sends no `Authorization` header at all.
 
-An `AUTH_MODE` value that is neither `msal` nor `dev` is a startup error, not a fallback.
+An `AUTH_MODE` value that is none of `bff`, `msal-spa` or `dev` is a startup error, not a fallback.
+
+A third setting is worth listing alongside the two above, because it is what makes the strongest
+posture the default: **`AUTH_MODE=bff` keeps the bearer token out of the browser entirely**, so the
+worst an XSS on this origin can do is make requests while the user is present, rather than walk away
+with a token it can replay from anywhere for the next hour.

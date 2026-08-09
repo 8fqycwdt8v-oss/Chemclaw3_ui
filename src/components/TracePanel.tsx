@@ -24,7 +24,7 @@ import { ChevronRight, CircleX } from 'lucide-react';
 import type { TraceEntry } from '../state/types.ts';
 import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
-import { JobResultCard } from './JobResultCard.tsx';
+import { JobFailureCard, JobResultCard } from './JobResultCard.tsx';
 import { ToolIcon } from '@/components/chem/toolIcons';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -122,7 +122,9 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
             Started <span className="font-medium">{entry.job?.kind ?? 'job'}</span>
           </span>
           <span className="font-mono text-2xs text-ink-subtle">{entry.job?.jobId}</span>
-          <Badge tone="brand">runs asynchronously</Badge>
+          {/* Dropped once an ending arrived. The badge is a claim about the present tense, and a
+              job that finished — either way — is not still running. The row below says which. */}
+          {!entry.job?.settled && <Badge tone="brand">runs asynchronously</Badge>}
         </p>
       );
 
@@ -130,6 +132,16 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
       return (
         <div className="rounded-lg border border-border-subtle bg-surface-raised p-3">
           <JobResultCard jobId={entry.job?.jobId ?? ''} summary={entry.job?.summary} />
+        </div>
+      );
+
+    case 'job_failed':
+      return (
+        <div className="rounded-lg border border-danger/40 bg-danger-soft p-3">
+          <JobFailureCard
+            jobId={entry.jobFailure?.jobId ?? ''}
+            reason={entry.jobFailure?.reason ?? ''}
+          />
         </div>
       );
 

@@ -11,6 +11,7 @@
  * of throwing.
  */
 
+import { CircleX } from 'lucide-react';
 import type { JobSummary } from '../../shared/events.ts';
 import { formatEnergy } from '../lib/format.ts';
 import { Molecule } from './Molecule.tsx';
@@ -46,6 +47,36 @@ export function JobResultCard({
           {formatEnergy(energy)}
         </p>
       )}
+    </>
+  );
+}
+
+/**
+ * The other ending, and the one this UI used to have no rendering for at all.
+ *
+ * Same two arrival points as `JobResultCard`, same argument for sharing one component. The wording
+ * carries a distinction the wire cannot: `reason` is documented as possibly empty, and an empty
+ * reason must still read as a failure rather than as a blank card, so the fallback sentence says
+ * what is known ("it failed") and does not guess at what is not ("why").
+ */
+export function JobFailureCard({
+  jobId,
+  reason,
+}: {
+  jobId: string;
+  reason: string;
+}): React.JSX.Element {
+  return (
+    <>
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <CircleX aria-hidden className="size-3.5 shrink-0 text-danger-ink" />
+        <span className="font-mono text-2xs text-ink-muted">{jobId}</span>
+        <Badge tone="danger">failed</Badge>
+      </div>
+      <p className="text-2xs text-danger-ink">
+        {reason.trim() ||
+          'The service reported no reason. The job did not produce a result — it is not still running.'}
+      </p>
     </>
   );
 }

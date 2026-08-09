@@ -84,7 +84,9 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
       }
       if (cancelled || remote.length === 0) return;
       const messages: ChatMessage[] = remote
-        .filter((m) => m.text?.trim())
+        // A message with no text but with calls is still worth showing — that is a turn whose
+        // work is the whole record of it. Only a message that is empty in both senses is dropped.
+        .filter((m) => m.text?.trim() || m.tool_calls?.length)
         .map((m, i) =>
           m.role === 'user'
             ? { id: `h${i}`, role: 'user' as const, text: m.text, at: Date.now() }
@@ -98,12 +100,28 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
                 confidence: null,
                 unsupportedClaims: [],
                 reviewRequired: false,
+                // Null rather than guessed: the transcript records the answer, not which verifier
+                // scored it, and there is no confidence to qualify anyway.
+                verifiedBy: null,
                 // Empty on a rehydrated transcript, and honestly so: the backend persists the
                 // messages, not which connectors happened to be down when each was produced.
                 degradedConnectors: [],
                 // Same reason: a rehydrated message is finished, so it is not waiting on anything.
                 queued: false,
-                trace: [],
+                // Rebuilt from what the service stored. Every call is closed — a transcript is
+                // written after the turn, so nothing in it can still be running — and `result` is
+                // null for a call that raised, which reads as `failed` rather than as "returned
+                // nothing". The two are different and the row says which.
+                trace: (m.tool_calls ?? []).map((call, j) => ({
+                  id: `h${i}t${j}`,
+                  at: Date.now(),
+                  kind: 'tool_call' as const,
+                  toolCall: {
+                    tool: call.tool,
+                    arguments: call.arguments,
+                    ...(call.result === null ? { failed: true } : { result: call.result }),
+                  },
+                })),
                 latestPlan: null,
                 error: null,
               },

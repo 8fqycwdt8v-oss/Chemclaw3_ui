@@ -25,7 +25,8 @@ import { Undo2, X } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { useChatStore } from '../state/chatStore.ts';
 import { relativeTime } from '../lib/format.ts';
-import { JobResultCard } from './JobResultCard.tsx';
+import { cn } from '../lib/cn.ts';
+import { JobFailureCard, JobResultCard } from './JobResultCard.tsx';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
@@ -33,8 +34,8 @@ export function JobFeed(): React.JSX.Element | null {
   const jobFeed = useChatStore((s) => s.jobFeed);
   const activeId = useChatStore((s) => s.activeId);
   const conversations = useChatStore((s) => s.conversations);
-  const dismiss = useChatStore((s) => s.dismissJobCompleted);
-  const restore = useChatStore((s) => s.restoreJobCompleted);
+  const dismiss = useChatStore((s) => s.dismissJobItem);
+  const restore = useChatStore((s) => s.restoreJobItem);
   const [undoable, setUndoable] = useState<string | null>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const navigate = useNavigate();
@@ -54,7 +55,7 @@ export function JobFeed(): React.JSX.Element | null {
 
   return (
     <section
-      aria-label="Completed background jobs"
+      aria-label="Finished background jobs"
       role="status"
       aria-live="polite"
       className="border-t border-border-subtle bg-surface-sunken px-4 py-3"
@@ -89,7 +90,14 @@ export function JobFeed(): React.JSX.Element | null {
               return (
                 <li
                   key={item.event.job_id}
-                  className="relative rounded-lg border border-border-subtle bg-surface-raised p-3 pr-8 shadow-xs"
+                  className={cn(
+                    'relative rounded-lg border p-3 pr-8 shadow-xs',
+                    // Tinted at the card level, not just in the text: a failure and a success in
+                    // the same row of cards have to be distinguishable before either is read.
+                    item.event.type === 'job_failed'
+                      ? 'border-danger/40 bg-danger-soft'
+                      : 'border-border-subtle bg-surface-raised',
+                  )}
                 >
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -106,7 +114,11 @@ export function JobFeed(): React.JSX.Element | null {
                     <TooltipContent>Dismiss — you can undo for a few seconds</TooltipContent>
                   </Tooltip>
 
-                  <JobResultCard jobId={item.event.job_id} summary={item.event.summary} />
+                  {item.event.type === 'job_failed' ? (
+                    <JobFailureCard jobId={item.event.job_id} reason={item.event.reason} />
+                  ) : (
+                    <JobResultCard jobId={item.event.job_id} summary={item.event.summary} />
+                  )}
 
                   <p className="mt-2 flex flex-wrap items-center gap-x-2 text-2xs text-ink-subtle">
                     {/* "Seen", not "finished": the backend sends no completion time, and a job may

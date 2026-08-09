@@ -31,43 +31,26 @@ devDependencies so `vite build` can run. Tests currently cannot be run on Replit
 
 ---
 
-## Issue 2: GET /api/sessions and GET /api/sessions/{id}/messages whitelisted in BFF but missing from backend
+## ~~Issue 2: GET /api/sessions and GET /api/sessions/{id}/messages missing from backend~~ — RESOLVED
 
-The BFF route whitelist (`server/routes.ts`) includes:
+Both routes now exist on the service (`api/routes/sessions.py`: `list_sessions`, `get_messages`).
+The sidebar merge and `useRemoteTranscript` work against a service running with
+`CHEMCLAW_SESSION_STORE=postgres`.
 
-- `GET /api/sessions` → `/sessions` (list sessions)
-- `GET /api/sessions/{sid}/messages` → `/sessions/{sid}/messages` (read transcript)
-
-Both return `404`/`405` from the Chemclaw3 FastAPI backend (only `POST /sessions` and
-`POST /sessions/{id}/messages` exist).
-
-**Impact:** Sidebar conversation list is local-only; transcripts fall back to `localStorage`.
-
-**Fix:** Add to `service/app.py` in Chemclaw3:
-
-- `GET /sessions` — list sessions for current principal (needs `CHEMCLAW_SESSION_STORE=postgres`)
-- `GET /sessions/{session_id}/messages` — return stored transcript
+This route also returns `tool_calls` on every message, which this client's `TranscriptMessage` type
+did not declare — so a transcript read back from the server used to lose the agent's work. Fixed
+alongside this correction; `useRemoteTranscript` now rebuilds the trace from them.
 
 ---
 
-## Issue 3: GET /approvals and POST /approvals/{id}/decision missing from backend
+## ~~Issue 3: GET /approvals and POST /approvals/{id}/decision missing from backend~~ — RESOLVED
 
-The BFF whitelists:
+All three routes now exist (`api/routes/approvals.py`: `list_approvals`, `get_approval`, `decide`),
+so the Approve/Reject buttons complete a hold against a live service.
 
-- `GET /api/approvals` → `/approvals`
-- `GET /api/approvals/{id}` → `/approvals/{id}`
-- `POST /api/approvals/{id}/decision` → `/approvals/{id}/decision`
-
-All return `404`. The `InteractionApprovalWorkflow` exists in the backend but has no HTTP surface.
-
-**Impact:** Approve/Reject buttons in the UI 404 when clicked; approval holds cannot be completed
-via the browser.
-
-**Fix:** Implement the REST surface in `service/app.py`:
-
-- `GET /approvals` — list pending holds
-- `GET /approvals/{hold_id}` — describe one hold
-- `POST /approvals/{hold_id}/decision` — signal the Temporal workflow
+`GET /approvals` returning `PendingApproval[]` — `approval_id`, `question`, `requested_by` — is
+what a pending-approvals inbox would be built on, and this issue was the stated reason there is no
+inbox. **That reason is gone.** See `USER-STORIES.md` F3.
 
 ---
 

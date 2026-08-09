@@ -219,18 +219,25 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       .getState()
       .failTurn(conversationId, messageId, { kind: apiError.kind, message: apiError.message });
 
+    // The service's own id for the failed turn, when it sent one. Appended to the banner text
+    // rather than given a field of its own: it is the one thing a support conversation needs and
+    // nothing in the UI can act on it, so it belongs where it can be selected and copied.
+    const text = apiError.correlationId
+      ? `${apiError.message} (reference ${apiError.correlationId})`
+      : apiError.message;
+
     // 429 is terminal — the budget does not replenish on a retry, so leave the composer locked
     // and say so. Everything else releases the composer and surfaces a banner.
     if (apiError.kind === 'budget_exhausted') {
       useChatStore.getState().setComposerLock('budget_exhausted');
-      useChatStore.getState().setBanner({ kind: 'error', text: apiError.message });
+      useChatStore.getState().setBanner({ kind: 'error', text });
       return;
     }
 
     useChatStore.getState().setComposerLock(false);
     useChatStore.getState().setBanner({
       kind: 'error',
-      text: apiError.message,
+      text,
       action:
         apiError.kind === 'unauthorized'
           ? 'reauth'

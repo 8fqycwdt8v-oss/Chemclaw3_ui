@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { sendMessage, warmSession } from '../src/state/sendMessage.ts';
 import type { AuthProvider } from '../src/auth/types.ts';
-import { sseFrames, sseResponse, stubFetch } from './helpers.ts';
+import { answerEvent, sseFrames, sseResponse, stubFetch } from './helpers.ts';
 
 const devAuth: AuthProvider = {
   mode: 'dev',
@@ -26,9 +26,7 @@ const devAuth: AuthProvider = {
   handleUnauthorized: async () => false,
 };
 
-const ANSWER = sseFrames([
-  { type: 'answer', text: 'ok', confidence: null, unsupported_claims: [], review_required: false },
-]);
+const ANSWER = sseFrames([answerEvent({ text: 'ok' })]);
 
 let restore: (() => void) | null = null;
 

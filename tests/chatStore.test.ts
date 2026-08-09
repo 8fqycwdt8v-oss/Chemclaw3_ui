@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { newConversation, useChatStore } from '../src/state/chatStore.ts';
 import type { AssistantMessage } from '../src/state/types.ts';
+import { answerEvent } from './helpers.ts';
 
 const reset = (): void => {
   useChatStore.setState({
@@ -44,13 +45,9 @@ describe('chatStore', () => {
 
     useChatStore.getState().applyEvent(cid, mid, { type: 'token', text: 'Acetic ' });
     useChatStore.getState().applyEvent(cid, mid, { type: 'token', text: 'acid.' });
-    useChatStore.getState().applyEvent(cid, mid, {
-      type: 'answer',
-      text: 'Acetic acid.',
-      confidence: 0.9,
-      unsupported_claims: [],
-      review_required: false,
-    });
+    useChatStore
+      .getState()
+      .applyEvent(cid, mid, answerEvent({ text: 'Acetic acid.', confidence: 0.9 }));
 
     const message = assistantOf(cid, mid);
     expect(message.streamedText).toBe('Acetic acid.');
@@ -63,13 +60,18 @@ describe('chatStore', () => {
   it('records verifier signals from the answer', () => {
     const cid = useChatStore.getState().createConversation();
     const mid = useChatStore.getState().startAssistantMessage(cid);
-    useChatStore.getState().applyEvent(cid, mid, {
-      type: 'answer',
-      text: 'maybe',
-      confidence: 0.31,
-      unsupported_claims: ['yield was 92%'],
-      review_required: true,
-    });
+    useChatStore
+      .getState()
+      .applyEvent(
+        cid,
+        mid,
+        answerEvent({
+          text: 'maybe',
+          confidence: 0.31,
+          unsupported_claims: ['yield was 92%'],
+          review_required: true,
+        }),
+      );
 
     const message = assistantOf(cid, mid);
     expect(message.reviewRequired).toBe(true);
@@ -97,13 +99,7 @@ describe('chatStore', () => {
     const cid = useChatStore.getState().createConversation();
     const mid = useChatStore.getState().startAssistantMessage(cid);
     useChatStore.getState().applyEvent(cid, mid, { type: 'token', text: 'x' });
-    useChatStore.getState().applyEvent(cid, mid, {
-      type: 'answer',
-      text: 'x',
-      confidence: null,
-      unsupported_claims: [],
-      review_required: false,
-    });
+    useChatStore.getState().applyEvent(cid, mid, answerEvent({ text: 'x' }));
     expect(assistantOf(cid, mid).trace).toHaveLength(0);
   });
 
@@ -130,7 +126,7 @@ describe('chatStore', () => {
   });
 
   it('keeps a job completion in the cross-turn feed', () => {
-    useChatStore.getState().pushJobCompleted(
+    useChatStore.getState().pushJobFinished(
       {
         type: 'job_completed',
         job_id: 'qm-1',
@@ -138,7 +134,23 @@ describe('chatStore', () => {
       },
       'a'.repeat(32),
     );
-    expect(useChatStore.getState().jobFeed[0]?.event.summary.molecule_smiles).toBe('CCO');
+    const item = useChatStore.getState().jobFeed[0]?.event;
+    expect(item?.type).toBe('job_completed');
+    expect(item?.type === 'job_completed' && item.summary.molecule_smiles).toBe('CCO');
+  });
+
+  it('keeps a job failure in the same feed, as a failure', () => {
+    // The case the feed used to drop entirely: `job_failed` was not in `EVENT_TYPES`, so
+    // `normalizeEvent` returned null and the launch row went on saying "runs asynchronously".
+    useChatStore
+      .getState()
+      .pushJobFinished(
+        { type: 'job_failed', job_id: 'qm-2', reason: 'the solver did not converge' },
+        'a'.repeat(32),
+      );
+    const item = useChatStore.getState().jobFeed[0]?.event;
+    expect(item?.type).toBe('job_failed');
+    expect(item?.type === 'job_failed' && item.reason).toBe('the solver did not converge');
   });
 });
 

@@ -40,13 +40,38 @@ async function request<T>(path: string, getToken: TokenGetter, init: RequestInit
 export interface SessionSummary {
   session_id: string;
   created_at?: string;
+  /**
+   * NOT sent by the service — `SessionSummary` there is `session_id` and `created_at` only.
+   *
+   * Kept optional and kept here because the sidebar's fallback ("Earlier conversation") reads as a
+   * placeholder for a title that failed to load, when in fact there is no title to load. Whoever
+   * removes this should change that copy in the same commit, or add the field upstream.
+   */
   title?: string;
 }
 
+/** One tool call as the transcript records it. `arguments` and `result` are truncated server-side
+ *  (400 chars) exactly as their streamed counterparts are, and are raw strings either way. */
+export interface TranscriptToolCall {
+  tool: string;
+  arguments: string;
+  result: string | null;
+}
+
 export interface TranscriptMessage {
+  index: number;
   role: string;
   text: string;
-  created_at?: string;
+  /**
+   * The calls the agent made producing this message.
+   *
+   * This type used to declare `created_at` and no `tool_calls`, which was wrong in both
+   * directions: the service sends no timestamp, and it does send these. The visible cost was that
+   * reading a conversation back from the server — the whole point of `GET /sessions/{id}/messages`
+   * — silently lost every trace row, so a transcript rehydrated on a second device showed answers
+   * with no working behind them.
+   */
+  tool_calls: TranscriptToolCall[];
 }
 
 export interface AttachmentSummary {

@@ -78,8 +78,21 @@ function confidenceTone(value: number): { tone: 'ok' | 'warn' | 'danger'; label:
   return { tone: 'danger', label: 'low' };
 }
 
+/**
+ * What produced the score, in the fewest words that stay true.
+ *
+ * The two backends are not two implementations of one measurement. The citation gate is
+ * deterministic and scores the answer against the tool results this turn actually saw; the judge
+ * is a model scoring it against the claims. A reader comparing 0.82 from one against 0.82 from the
+ * other is comparing nothing, and the number alone gives them no way to know that.
+ */
+const VERIFIER_LABEL: Record<'judge' | 'citation-gate', string> = {
+  judge: 'scored by a model judge',
+  'citation-gate': 'scored against this turn’s evidence',
+};
+
 export function AnswerFooter({ message }: { message: AssistantMessage }): React.JSX.Element | null {
-  const { confidence, unsupportedClaims } = message;
+  const { confidence, unsupportedClaims, verifiedBy } = message;
   if (confidence === null && unsupportedClaims.length === 0) return null;
 
   const scored = confidence !== null ? confidenceTone(confidence) : null;
@@ -87,11 +100,14 @@ export function AnswerFooter({ message }: { message: AssistantMessage }): React.
   return (
     <div className="mt-3 flex flex-col gap-2 border-t border-border-subtle pt-3">
       {scored && confidence !== null && (
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Badge tone={scored.tone}>
             <span className="font-mono tabular-nums">{confidence.toFixed(2)}</span>
             <span className="font-normal opacity-80">{scored.label} confidence</span>
           </Badge>
+          {verifiedBy && (
+            <span className="text-2xs text-ink-muted">{VERIFIER_LABEL[verifiedBy]}</span>
+          )}
         </div>
       )}
 

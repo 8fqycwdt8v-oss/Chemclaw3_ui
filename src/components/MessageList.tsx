@@ -23,7 +23,7 @@
 import { memo, useEffect, useLayoutEffect, useRef } from 'react';
 import { FlaskConical } from 'lucide-react';
 import type { AssistantMessage, ChatMessage, Conversation } from '../state/types.ts';
-import { Markdown } from './Markdown.tsx';
+import { Markdown } from './LazyMarkdown.tsx';
 import { TracePanel } from './TracePanel.tsx';
 import { AnswerFooter, CapabilityDegradedPill, ReviewRequiredPill } from './AnswerBadges.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';

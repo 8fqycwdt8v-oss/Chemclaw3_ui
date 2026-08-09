@@ -257,7 +257,9 @@ export function Composer({ conversationId }: { conversationId: string }): React.
               Stop
             </Button>
           ) : (
-            <Button size="sm" onClick={submit} disabled={!canSend}>
+            // The label is visually replaced by an icon on narrow screens, so the name has to be
+            // carried explicitly — otherwise the primary control of the app is unnamed on a phone.
+            <Button size="sm" onClick={submit} disabled={!canSend} aria-label="Send">
               <Send className="sm:hidden" />
               <span className="hidden sm:inline">Send</span>
             </Button>

@@ -18,7 +18,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "check:openapi": "node scripts/check-openapi.mjs"
+    "check:contrast": "node scripts/check-contrast.mjs"
   },
   "dependencies": {
     "@azure/msal-browser": "^5.17.1",

@@ -92,7 +92,10 @@ export function Switch({ className, ...props }: React.ComponentProps<typeof W.Ro
       data-slot="switch"
       className={cn(
         'peer inline-flex h-4.5 w-8 shrink-0 items-center rounded-full border border-transparent transition-colors',
-        'data-[state=checked]:bg-brand data-[state=unchecked]:bg-border-strong',
+        // The unchecked track IS the control's boundary — there is nothing else to identify the
+        // switch by — so it has to clear 3:1 against the surface (WCAG 2.2 SC 1.4.11).
+        // `border-strong` is a divider colour and does not; `ink-subtle` does.
+        'data-[state=checked]:bg-brand data-[state=unchecked]:bg-ink-subtle',
         'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
         'disabled:cursor-not-allowed disabled:opacity-50',
         className,

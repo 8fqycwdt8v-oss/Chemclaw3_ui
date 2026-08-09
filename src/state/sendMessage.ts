@@ -6,6 +6,7 @@
  */
 
 import { api } from '../api/client.ts';
+import { prefetchMarkdown } from '../components/LazyMarkdown.tsx';
 import { ApiError } from '../api/errors.ts';
 import { streamTurn } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
@@ -50,6 +51,9 @@ function createTokenBatcher(conversationId: string, messageId: string) {
 
   return {
     push(text: string): void {
+      // The answer will need the markdown chunk the moment it settles. Fetching it now, in
+      // parallel with the rest of the stream, is what keeps the Suspense fallback off screen.
+      prefetchMarkdown();
       pending += text;
       if (scheduled) return;
       scheduled = true;

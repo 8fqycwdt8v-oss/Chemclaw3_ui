@@ -8,12 +8,14 @@
  */
 
 import { useEffect, useMemo, useRef } from 'react';
-import type { AssistantMessage, ChatMessage, Conversation } from '../state/types.ts';
+import type { AssistantMessage, ChatMessage, Conversation, TurnError } from '../state/types.ts';
 import { messagesFor, useEntityStore } from '../chem/entities.ts';
+import { returnedFigures } from '../chem/provenance.ts';
 import { Markdown } from './Markdown.tsx';
 import { TracePanel } from './TracePanel.tsx';
 import { AnswerFooter, CapabilityDegradedPill, ReviewRequiredPill } from './AnswerBadges.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
+import { errorNextStep } from '../lib/format.ts';
 import { cn } from '../lib/cn.ts';
 
 function PlanChecklist({ todos }: { todos: string[] }): React.JSX.Element | null {
@@ -29,6 +31,34 @@ function PlanChecklist({ todos }: { todos: string[] }): React.JSX.Element | null
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/**
+ * A failed turn, with what to do about it.
+ *
+ * The three typed fields were all on the wire and none reached the screen: only `message` was
+ * rendered, so a turn that wrote nothing, a turn that blew its budget and a turn whose database was
+ * down produced one undifferentiated red box and no next step.
+ *
+ * The correlation id is shown in full, and is not the session id. It is the key the audit trail is
+ * keyed on — the one thing an operator needs to find the turn — and the backend states outright
+ * that it is not sensitive (a random per-turn hex string). Hiding it costs a bug report its only
+ * useful contents.
+ */
+function TurnErrorCard({ error }: { error: TurnError }): React.JSX.Element {
+  const nextStep = errorNextStep(error.code, error.retryable);
+  return (
+    <div className="mt-2 rounded-md border border-danger/40 bg-danger-soft px-3 py-2">
+      <p className="text-sm text-danger">{error.message}</p>
+      {nextStep && <p className="mt-1.5 text-sm text-danger">{nextStep}</p>}
+      {error.correlationId && (
+        <p className="mt-1.5 text-xs text-danger">
+          Quote this if you report it:{' '}
+          <span className="font-mono select-all">{error.correlationId}</span>
+        </p>
+      )}
     </div>
   );
 }
@@ -49,6 +79,11 @@ function AssistantBubble({
   const question = message.trace.findLast?.((e) => e.kind === 'question')?.question;
   const approval = message.trace.findLast?.((e) => e.kind === 'approval_request')?.approval;
 
+  // Recomputed only when the trace grows, so the answer is not re-parsed on every token of the
+  // *next* turn. Empty on a turn whose tools returned no numbers, which is what switches the
+  // grounding overlay off rather than flagging every figure in it.
+  const figures = useMemo(() => returnedFigures(message.trace), [message.trace]);
+
   return (
     <div className="max-w-none">
       <CapabilityDegradedPill message={message} />
@@ -62,7 +97,7 @@ function AssistantBubble({
             <span className="caret">▌</span>
           </div>
         ) : (
-          <Markdown>{body}</Markdown>
+          <Markdown figures={figures}>{body}</Markdown>
         )
       ) : (
         streaming && (
@@ -79,11 +114,7 @@ function AssistantBubble({
         <p className="mt-2 text-xs text-ink-muted">Stopped before the answer was complete.</p>
       )}
 
-      {message.error && (
-        <div className="mt-2 rounded-md border border-danger/40 bg-danger-soft px-3 py-2">
-          <p className="text-sm text-danger">{message.error.message}</p>
-        </div>
-      )}
+      {message.error && <TurnErrorCard error={message.error} />}
 
       {question && <QuestionPrompt question={question.question} options={question.options} />}
       {approval && (

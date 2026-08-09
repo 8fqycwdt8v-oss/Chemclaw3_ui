@@ -69,6 +69,27 @@ export interface TraceEntry {
     result?: string;
     failed?: boolean;
     unresolved?: boolean;
+    /**
+     * The distinct numeric values this call returned, untruncated.
+     *
+     * Beside `result` rather than parsed out of it, because `result` is the 200-character preview
+     * and mining chemistry from that arbitrary cut is the thing this codebase forbids outright.
+     * `tool_result.numbers` is a separate, whole field for exactly this consumer: it is what the
+     * answer's figures are checked against (`src/chem/provenance.ts`).
+     *
+     * Absent means "this call has not returned yet, or predates the field"; empty means "it
+     * returned and produced no numbers". The grounding check needs both to stay distinguishable —
+     * a turn with nothing to check against must annotate nothing at all.
+     */
+    numbers?: number[];
+    /**
+     * The note ids this call returned, untruncated.
+     *
+     * The exact answer to "which notes was the model shown this turn", which `remarkCitations`
+     * currently has to guess at from the shape of tokens in prose. Carried now so the guess can be
+     * replaced later; nothing reads it yet.
+     */
+    noteIds?: string[];
   };
   toolFailure?: { tool: string; message: string };
   /**

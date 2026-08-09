@@ -88,7 +88,7 @@ function newAssistantMessage(): AssistantMessage {
 function closeToolCall(
   trace: TraceEntry[],
   tool: string,
-  ending: { result: string } | { failed: true },
+  ending: { result: string; numbers: number[]; noteIds: string[] } | { failed: true },
 ): TraceEntry[] {
   const index = trace.findIndex(
     (entry) =>
@@ -397,10 +397,19 @@ export const useChatStore = create<ChatState>()(
 
         if (event.type === 'tool_result') {
           // Not its own row: it closes the `tool_call` row already in the trace.
+          //
+          // `numbers` and `note_ids` ride onto the row with the preview rather than being dropped
+          // here, which is where they used to die. They are the only structured data the wire
+          // carries and the only thing an answer's figures can honestly be checked against; the
+          // preview beside them is truncated and must never be mined for the same purpose.
           set((s) =>
             updateAssistant(s, conversationId, messageId, (m) => ({
               ...m,
-              trace: closeToolCall(m.trace, event.tool, { result: event.preview }),
+              trace: closeToolCall(m.trace, event.tool, {
+                result: event.preview,
+                numbers: event.numbers,
+                noteIds: event.note_ids,
+              }),
             })),
           );
           return;

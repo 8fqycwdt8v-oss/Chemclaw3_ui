@@ -115,10 +115,15 @@ describe('tool_result in the trace', () => {
 
     const trace = assistantOf(cid, mid).trace;
     expect(trace).toHaveLength(1);
+    // `numbers` and `noteIds` land on the row too, empty here because this builder's defaults are
+    // a minimally-configured service's. Empty, not absent: the grounding overlay asks "did this
+    // turn return any figure at all", and a call that returned none has to answer no.
     expect(trace[0]?.toolCall).toEqual({
       tool: 'predict_pka',
       arguments: '{"s":"CCO"}',
       result: 'pKa 15.9',
+      numbers: [],
+      noteIds: [],
     });
   });
 

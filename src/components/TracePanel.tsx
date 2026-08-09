@@ -18,6 +18,7 @@ import { useState } from 'react';
 import type { TraceEntry } from '../state/types.ts';
 import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
+import { methodFor } from '../chem/provenance.ts';
 import { JobResultCard } from './JobResultCard.tsx';
 
 /**
@@ -91,6 +92,60 @@ const TOOL_ICON: Record<string, string> = {
   read_attachment: '📖',
 };
 
+/**
+ * What method produced this row's numbers, and what its authors say it does not establish.
+ *
+ * The badge is always visible once the panel is open, because "which method" is the question US-8
+ * says a chemist should never have to ask; the caveat is one click further in, because these are
+ * two to four lines each and five of them stacked is the annotation clutter that trains people to
+ * stop reading.
+ *
+ * Every caveat is the backend's own wording (see `src/chem/provenance.ts`). A tool this frontend
+ * has no sourced method for renders nothing at all — a confidently wrong method label would be
+ * worse than the silence it replaced.
+ */
+function MethodBadge({ tool }: { tool: string }): React.JSX.Element | null {
+  const method = methodFor(tool);
+  if (!method) return null;
+  return (
+    <div className="mt-1">
+      <span className="inline-flex items-center rounded border border-border-subtle bg-surface px-1.5 py-px text-[0.7rem] text-ink-muted">
+        {method.method}
+      </span>
+      {method.caveat && (
+        <details className="mt-1">
+          <summary className="cursor-pointer text-xs text-ink-muted">what it does not say</summary>
+          <p className="mt-1 border-l-2 border-warn/40 pl-2 text-xs text-ink-muted">
+            {method.caveat}
+          </p>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The numbers this call returned, in full.
+ *
+ * From `tool_result.numbers`, never from the preview beside it — the preview is cut at an
+ * arbitrary byte and this list is not, which is the entire reason the backend sends both. It is
+ * also what the figure marks in the answer above were checked against, so a reader who distrusts a
+ * mark can see the evidence rather than take it on faith.
+ */
+function ReturnedNumbers({ numbers }: { numbers: number[] }): React.JSX.Element | null {
+  if (numbers.length === 0) return null;
+  return (
+    <details className="mt-1">
+      <summary className="cursor-pointer text-xs text-ink-muted">
+        {numbers.length} value{numbers.length === 1 ? '' : 's'} returned (untruncated)
+      </summary>
+      <p className="mt-1 break-words rounded bg-surface-sunken p-2 font-mono text-xs">
+        {numbers.join(', ')}
+      </p>
+    </details>
+  );
+}
+
 function JobCard({ entry }: { entry: TraceEntry }): React.JSX.Element {
   const failed = entry.kind === 'job_failed';
   return (
@@ -129,6 +184,7 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
             <span className="font-medium">{toolLabel(entry.toolCall?.tool ?? 'tool')}</span>
             <span className="font-mono text-xs text-ink-muted">{entry.toolCall?.tool}</span>
           </p>
+          <MethodBadge tool={entry.toolCall?.tool ?? ''} />
           {entry.toolCall?.arguments && (
             <details className="mt-1">
               <summary className="cursor-pointer text-xs text-ink-muted">arguments</summary>
@@ -145,6 +201,7 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
               <pre className="mt-1 overflow-x-auto rounded bg-surface-sunken p-2 font-mono text-xs">
                 {entry.toolCall.result}
               </pre>
+              <ReturnedNumbers numbers={entry.toolCall.numbers ?? []} />
             </div>
           )}
           {/* Still open: not "we are hiding the result" but "the call has not come back". The

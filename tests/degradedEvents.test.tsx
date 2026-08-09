@@ -77,7 +77,11 @@ describe('capability_degraded', () => {
         message={{ degradedConnectors: ['eln', 'molfp'] } as unknown as AssistantMessage}
       />,
     );
-    expect(screen.getByText(/eln, molfp/)).toBeTruthy();
+    // The raw names are still there — an operator needs them to check the deployment — but each
+    // now sits beside what its absence cost the answer. `provenance.test.ts` covers that mapping;
+    // this only pins that neither name was dropped on the way through.
+    expect(screen.getByText('(eln)')).toBeTruthy();
+    expect(screen.getByText('(molfp)')).toBeTruthy();
     expect(screen.getByText(/fewer tools/i)).toBeTruthy();
   });
 

@@ -81,7 +81,7 @@ export async function createMsalAuth(): Promise<AuthProvider> {
   }
 
   return {
-    mode: 'msal',
+    mode: 'msal-spa',
 
     get account() {
       return toAccount(pca.getActiveAccount());

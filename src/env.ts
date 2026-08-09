@@ -9,7 +9,14 @@
  * bytes than the rest of this module.
  */
 
-export type AuthMode = 'dev' | 'msal';
+/**
+ * Which auth provider to build. Mirrors `server/config.ts`'s `AuthMode`.
+ *
+ * `bff` is the mode where this page holds no token at all: sign-in is a navigation to the BFF's
+ * `/auth/login`, and every request authenticates by cookie. `msal-spa` is the previous behaviour,
+ * with MSAL running here and tokens in `sessionStorage`.
+ */
+export type AuthMode = 'dev' | 'bff' | 'msal-spa';
 
 export interface RuntimeConfig {
   authMode: AuthMode;
@@ -63,12 +70,19 @@ const fromVite = (): ConfigSource => {
 };
 
 /**
- * `'dev'`/`'msal'` if the value names a mode, `undefined` if it is absent, `'invalid'` if it is
- * neither — a typo must not resolve to a mode, least of all the unauthenticated one.
+ * A mode if the value names one, `undefined` if it is absent, `'invalid'` if it is neither — a typo
+ * must not resolve to a mode, least of all the unauthenticated one.
+ *
+ * `msal` is accepted as an alias for `msal-spa` here, and note this is the *opposite* of the
+ * server's resolution of the same string, where it means `bff`. That is not an inconsistency: the
+ * BFF always emits a resolved mode into `/config.js`, so the only way this function ever sees the
+ * literal `msal` is `VITE_AUTH_MODE` in a bare `vite dev` — and in that setup there is no BFF to
+ * hold a token, so browser-MSAL is the only thing that could work.
  */
 function parseAuthMode(raw: unknown): AuthMode | 'invalid' | undefined {
   if (raw === undefined || raw === null || raw === '') return undefined;
-  if (raw === 'dev' || raw === 'msal') return raw;
+  if (raw === 'dev' || raw === 'bff' || raw === 'msal-spa') return raw;
+  if (raw === 'msal') return 'msal-spa';
   return 'invalid';
 }
 
@@ -89,10 +103,16 @@ export interface ResolvedRuntimeConfig extends RuntimeConfig {
 /**
  * Resolve the runtime config, failing **closed** when auth mode cannot be established.
  *
- * An unresolved mode becomes `'msal'` with empty tenant/client/scope, which `configProblems`
+ * An unresolved mode becomes `'msal-spa'` with empty tenant/client/scope, which `configProblems`
  * then reports — so `App` renders the configuration screen and no request is ever made. Choosing
- * `'msal'` rather than a new sentinel is deliberate: the safe fallback has to be a mode that
+ * `'msal-spa'` rather than a new sentinel is deliberate: the safe fallback has to be a mode that
  * *cannot* accidentally work, and an MSAL config with nothing filled in is exactly that.
+ *
+ * Note it must NOT be `bff`, tempting though the safer-by-default framing makes it. `bff` mode
+ * needs no client-side configuration at all, so there is nothing for `configProblems` to find
+ * missing — an unresolved config would fall back to a mode that looks perfectly well-formed and
+ * would sit there redirecting to an `/auth/login` that the server, not being in `bff` mode, does
+ * not serve. The fallback has to be visibly broken, not quietly wrong.
  *
  * A **development** build keeps the old convenience: `vite dev` with no BFF has no `/config.js`,
  * and requiring one there would break the documented bare-Vite workflow for no security gain,
@@ -121,17 +141,17 @@ function resolve(): ResolvedRuntimeConfig {
 
   let authMode: AuthMode;
   let authModeSource: AuthModeSource;
-  if (windowMode === 'dev' || windowMode === 'msal') {
+  if (windowMode !== undefined && windowMode !== 'invalid') {
     authMode = windowMode;
     authModeSource = 'runtime-config';
-  } else if (viteMode === 'dev' || viteMode === 'msal') {
+  } else if (viteMode !== undefined && viteMode !== 'invalid') {
     authMode = viteMode;
     authModeSource = 'build-env';
   } else if (import.meta.env?.DEV && !configScriptRan()) {
     authMode = 'dev';
     authModeSource = 'dev-build-default';
   } else {
-    authMode = 'msal';
+    authMode = 'msal-spa';
     authModeSource = 'unresolved';
   }
 
@@ -188,12 +208,13 @@ export function configProblems(c: ResolvedRuntimeConfig = config): string[] {
   }
   if (c.invalidAuthMode !== null) {
     problems.push(
-      `AUTH_MODE "${c.invalidAuthMode}" is not a valid mode. Expected "msal" or "dev". ` +
+      `AUTH_MODE "${c.invalidAuthMode}" is not a valid mode. Expected "bff", "msal-spa" or ` +
+        '"dev". ' +
         'It is being treated as a configuration error rather than silently falling back.',
     );
   }
 
-  if (c.authMode === 'msal') {
+  if (c.authMode === 'msal-spa') {
     if (!c.entraTenantId) problems.push('ENTRA_TENANT_ID is not set.');
     if (!c.entraClientId) problems.push('ENTRA_CLIENT_ID is not set (the SPA app registration).');
     if (!c.apiScope) {

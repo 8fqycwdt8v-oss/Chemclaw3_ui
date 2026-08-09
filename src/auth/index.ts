@@ -22,8 +22,17 @@ export type { AuthAccount, AuthProvider } from './types.ts';
 declare const __ALLOW_DEV_AUTH__: boolean;
 
 export async function createAuthProvider(): Promise<AuthProvider> {
-  if (config.authMode === 'msal') {
-    // Dynamic import keeps MSAL out of the bundle entirely on the dev path.
+  if (config.authMode === 'bff') {
+    // Dynamically imported for symmetry with the branches below, though this one costs almost
+    // nothing either way: it is a hundred lines and a `fetch`, against MSAL's hundreds of
+    // kilobytes. Not shipping that library to every user is a real, if secondary, benefit of
+    // moving custody to the server.
+    const { createBffAuth } = await import('./bffAuth.ts');
+    return createBffAuth();
+  }
+
+  if (config.authMode === 'msal-spa') {
+    // Dynamic import keeps MSAL out of the bundle entirely on every other path.
     const { createMsalAuth } = await import('./msalAuth.ts');
     return createMsalAuth();
   }
@@ -40,6 +49,6 @@ export async function createAuthProvider(): Promise<AuthProvider> {
 
   throw new Error(
     'AUTH_MODE=dev is not permitted in this production build. Rebuild with ALLOW_DEV_AUTH=true ' +
-      'to deliberately ship an unauthenticated UI, or configure AUTH_MODE=msal.',
+      'to deliberately ship an unauthenticated UI, or configure AUTH_MODE=bff.',
   );
 }

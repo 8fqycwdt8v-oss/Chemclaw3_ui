@@ -39,7 +39,8 @@ export function createDevAuth(): AuthProvider {
       throw new ApiError(
         'unauthorized',
         'The Chemclaw service now requires sign-in, but this UI is running in dev auth mode. ' +
-          'Redeploy it with AUTH_MODE=msal and the tenant, client id, and API scope configured.',
+          'Redeploy it with AUTH_MODE=bff and the tenant, client id, client secret and API ' +
+          'scope configured.',
       );
     },
   };

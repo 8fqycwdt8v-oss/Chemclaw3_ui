@@ -33,7 +33,7 @@ describe('a missing /config.js', () => {
     const c = resolveConfig();
     expect(c.authModeSource).toBe('unresolved');
     // Fails closed onto msal-with-nothing-configured, which cannot accidentally work.
-    expect(c.authMode).toBe('msal');
+    expect(c.authMode).toBe('msal-spa');
   });
 
   it('is reported as its own problem, naming /config.js rather than a tenant id', () => {
@@ -76,7 +76,7 @@ describe('an explicit mode from the runtime config', () => {
   it('accepts a complete msal config', () => {
     asProdBuild();
     withWindowConfig({
-      authMode: 'msal',
+      authMode: 'msal-spa',
       entraTenantId: 't',
       entraClientId: 'c',
       apiScope: 'api://x/Chat.Access',
@@ -99,7 +99,7 @@ describe('apiScope shape', () => {
   it('rejects a bare App ID URI, which yields an ID token the backend refuses', () => {
     const c: ResolvedRuntimeConfig = {
       ...resolveConfig(),
-      authMode: 'msal',
+      authMode: 'msal-spa',
       entraTenantId: 't',
       entraClientId: 'c',
       apiScope: 'api://x',

@@ -15,6 +15,7 @@ import { useEffect } from 'react';
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import { normalizeEvent } from '../../shared/events.ts';
 import { paths } from '../api/endpoints.ts';
+import { CREDENTIALS, credentialHeaders } from '../api/http.ts';
 import { config } from '../env.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from '../state/chatStore.ts';
@@ -34,9 +35,10 @@ export function useJobFeed(sessionId: string | null, auth: AuthProvider): void {
           const res = await fetch(`${config.apiBase}${paths.events(sessionId)}`, {
             signal: controller.signal,
             cache: 'no-store',
+            credentials: CREDENTIALS,
             headers: {
               accept: 'text/event-stream',
-              ...(token ? { authorization: `Bearer ${token}` } : {}),
+              ...credentialHeaders(token),
             },
           });
 

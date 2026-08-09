@@ -8,6 +8,7 @@
 
 import { useEffect, useState } from 'react';
 import { paths } from '../api/endpoints.ts';
+import { CREDENTIALS } from '../api/http.ts';
 import { config } from '../env.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore } from '../state/chatStore.ts';
@@ -86,7 +87,9 @@ export function TopBar({
 
         <div className="ml-auto flex items-center gap-3 text-xs text-ink-muted">
           <span title={`build ${config.appVersion}`}>{config.appVersion}</span>
-          {auth.mode === 'msal' &&
+          {/* Both authenticated modes, not just browser-MSAL. Testing for the mode by name is
+              what would have hidden the sign-in control entirely under `bff`. */}
+          {auth.mode !== 'dev' &&
             (account ? (
               <>
                 <span title={account.username}>{account.name}</span>
@@ -155,7 +158,10 @@ export function TopBar({
 /** Kept local so the health poll cannot accidentally acquire a token on every tick. */
 async function api_health(): Promise<boolean> {
   try {
-    const res = await fetch(`${config.apiBase}${paths.readyz()}`, { cache: 'no-store' });
+    const res = await fetch(`${config.apiBase}${paths.readyz()}`, {
+      cache: 'no-store',
+      credentials: CREDENTIALS,
+    });
     return res.ok;
   } catch {
     return false;

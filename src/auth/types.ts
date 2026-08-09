@@ -5,9 +5,14 @@
  * and `api` take only a `() => Promise<string | null>`. Switching between the disabled-auth dev
  * posture and real Entra SSO is therefore one factory call in `createAuthProvider`, not a rewrite.
  *
- * `getAccessToken` resolving to `null` means "send no Authorization header". That is exactly what
- * the backend expects while `CHEMCLAW_ENTRA_REQUIRED=false`, where every request is attributed to
- * a shared `dev-user` principal.
+ * `getAccessToken` resolving to `null` means "send no Authorization header", and two quite
+ * different modes rely on it. In `dev` it means what it looks like: the backend has
+ * `CHEMCLAW_ENTRA_REQUIRED=false` and attributes every request to a shared `dev-user` principal. In
+ * `bff` it means the request is authenticated by cookie and the BFF will attach the real token
+ * server-side — the user is fully signed in and this page simply never sees their token.
+ *
+ * That second case is why nothing downstream may treat a `null` token as "not signed in". Check
+ * `account`, which is the actual answer to that question in every mode.
  */
 
 export interface AuthAccount {
@@ -21,7 +26,9 @@ export interface AuthAccount {
 }
 
 export interface AuthProvider {
-  readonly mode: 'dev' | 'msal';
+  /** Mirrors the resolved `AuthMode`. `bff` is the mode in which `getAccessToken` returns `null`
+   *  even though the user is fully signed in — the token is held by the server. */
+  readonly mode: 'dev' | 'msal-spa' | 'bff';
   readonly account: AuthAccount | null;
   getAccessToken(): Promise<string | null>;
   login(): Promise<void>;

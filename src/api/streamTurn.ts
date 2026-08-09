@@ -20,6 +20,7 @@ import {
   type ErrorEvent,
 } from '../../shared/events.ts';
 import { ApiError, errorFromEvent, errorFromStatus, readDetail } from './errors.ts';
+import { CREDENTIALS, credentialHeaders } from './http.ts';
 import { paths } from './endpoints.ts';
 import { config } from '../env.ts';
 
@@ -29,7 +30,7 @@ export interface StreamTurnOptions {
   /** Plan the turn without launching anything expensive (the backend's `dry_run`). */
   dryRun?: boolean;
   signal: AbortSignal;
-  /** Resolves to `null` in dev-auth mode, in which case no Authorization header is sent. */
+  /** Resolves to `null` under both dev auth and BFF custody; see `auth/types.ts`. */
   getToken: () => Promise<string | null>;
   onEvent: (event: ChemclawEvent) => void;
 }
@@ -48,10 +49,11 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       method: 'POST',
       signal: opts.signal,
       cache: 'no-store',
+      credentials: CREDENTIALS,
       headers: {
         'content-type': 'application/json',
         accept: 'text/event-stream',
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...credentialHeaders(token),
       },
       body: JSON.stringify({ message: opts.message, dry_run: opts.dryRun ?? false }),
     });

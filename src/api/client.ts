@@ -13,6 +13,7 @@
 
 import { config } from '../env.ts';
 import { ApiError, errorFromStatus, readDetail } from './errors.ts';
+import { CREDENTIALS, credentialHeaders } from './http.ts';
 import { paths } from './endpoints.ts';
 
 export type TokenGetter = () => Promise<string | null>;
@@ -48,12 +49,13 @@ async function request<T>(path: string, getToken: TokenGetter, init: RequestInit
       ...init,
       signal,
       cache: 'no-store',
+      credentials: CREDENTIALS,
       headers: {
         accept: 'application/json',
         ...(init.body && !(init.body instanceof FormData)
           ? { 'content-type': 'application/json' }
           : {}),
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        ...credentialHeaders(token),
         ...init.headers,
       },
     });

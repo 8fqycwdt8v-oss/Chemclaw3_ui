@@ -22,13 +22,13 @@
   },
   "dependencies": {
     "@azure/msal-browser": "^5.17.1",
+    "@rdkit/rdkit": "^2025.3.4-1.0.0",
     "eventsource-parser": "^3.1.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "sirv": "^3.0.2",
-    "smiles-drawer": "^2.4.1",
     "unist-util-visit": "^5.1.0",
     "zustand": "^5.0.14"
   },

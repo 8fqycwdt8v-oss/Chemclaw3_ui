@@ -38,8 +38,18 @@ function buildCsp(mode: AuthMode): string {
   const directives: Record<string, string[]> = {
     'default-src': ["'self'"],
     // No inline scripts: /config.js is a real same-origin file precisely so this can stay strict.
-    'script-src': ["'self'"],
-    // Tailwind injects a stylesheet; smiles-drawer emits inline style attributes on its SVG.
+    //
+    // `'wasm-unsafe-eval'` is what lets RDKit instantiate (`src/chem/rdkit.ts`). Despite the name
+    // it does NOT re-admit `eval` or inline script — it is the narrow, purpose-built permission
+    // for compiling a WebAssembly module, and it is the only alternative to `'unsafe-eval'`,
+    // which would.
+    //
+    // **This one fails only in the container.** The Vite dev server serves `index.html` itself and
+    // never applies this header, so structures render perfectly on :5173 and every one of them is
+    // blank behind the BFF. Same shape as the MSAL iframe note below: a header whose absence is
+    // invisible in the environment you develop in.
+    'script-src': ["'self'", "'wasm-unsafe-eval'"],
+    // Tailwind injects a stylesheet; RDKit emits inline style attributes on the SVG it draws.
     'style-src': ["'self'", "'unsafe-inline'"],
     // blob: covers a canvas->objectURL path if a structure is ever exported as an image.
     'img-src': ["'self'", 'data:', 'blob:'],

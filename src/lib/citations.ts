@@ -12,6 +12,7 @@
 
 import { visit, SKIP } from 'unist-util-visit';
 import type { Node, Parent } from 'unist';
+import { JOB_ID_PATTERN, NOTE_ID_PATTERN, isJobId } from '../chem/recognise.ts';
 
 interface TextNode extends Node {
   type: 'text';
@@ -24,23 +25,23 @@ interface LinkNode extends Node {
   children: Node[];
 }
 
-/** Identifier shapes the backend actually emits. Note stems come from the knowledge graph; QM
- *  job ids are minted by the Temporal workflow as `qm-<hash>`. */
-const PATTERNS: { kind: string; re: RegExp }[] = [
-  { kind: 'reaction', re: /\breaction-[A-Za-z0-9_-]{1,64}\b/g },
-  { kind: 'note', re: /\bnote-[A-Za-z0-9_-]{1,64}\b/g },
-  { kind: 'qm', re: /\bqm-[A-Za-z0-9]{4,64}\b/g },
-];
+/**
+ * Identifier shapes the backend actually emits.
+ *
+ * The previous list here was `reaction-`, `note-` and `qm-`, and the first two matched **nothing**:
+ * a note of type `reaction` has an id beginning `rxn-`, and no note this system has ever written
+ * begins `note-`. So the chip that exists to make a citation checkable was firing on almost no real
+ * citation. The prefixes now come from `src/chem/recognise.ts`, which reads them off the corpus.
+ *
+ * Still a heuristic over prose: `tool_result.note_ids` is the exact answer to which notes a turn
+ * saw, and a caller holding it should prefer it.
+ */
+const combined = new RegExp(
+  [NOTE_ID_PATTERN.source, JOB_ID_PATTERN.source].join('|'),
+  'g',
+);
 
-const combined = new RegExp(PATTERNS.map((p) => p.re.source).join('|'), 'g');
-
-const kindOf = (token: string): string => {
-  for (const { kind, re } of PATTERNS) {
-    re.lastIndex = 0;
-    if (new RegExp(`^${re.source}$`).test(token)) return kind;
-  }
-  return 'note';
-};
+const kindOf = (token: string): string => (isJobId(token) ? 'job' : 'note');
 
 /**
  * Remark plugin. Splits text nodes on citation-shaped tokens and emits links with a
@@ -86,23 +87,6 @@ export function remarkCitations() {
   };
 }
 
-/**
- * A heuristic "does this look like a SMILES string" test, used to offer a render affordance on
- * inline code spans.
- *
- * Deliberately conservative. Chemistry prose is full of tokens that superficially resemble SMILES
- * (`pH`, `NMR`, `1H`, unit strings), and auto-rendering a structure for something that is not a
- * molecule is worse than not offering it at all — so this demands a bond/branch/ring character
- * and rejects anything with whitespace or characters SMILES never uses.
- */
-export function looksLikeSmiles(text: string): boolean {
-  const s = text.trim();
-  if (s.length < 4 || s.length > 400) return false;
-  if (/\s/.test(s)) return false;
-  if (!/^[A-Za-z0-9@+\-[\]()=#$%/\\.*]+$/.test(s)) return false;
-  // Require at least one structural character; plain words would otherwise pass.
-  if (!/[()[\]=#]|[0-9]/.test(s)) return false;
-  // Must contain an element that can start an organic-subset atom.
-  if (!/[CNOPSFBIcnops]/.test(s)) return false;
-  return true;
-}
+/** Re-exported so the markdown renderer keeps one import for "what does this text look like".
+ *  The recogniser itself lives with the rest of the chemistry in `src/chem/recognise.ts`. */
+export { looksLikeSmiles } from '../chem/recognise.ts';

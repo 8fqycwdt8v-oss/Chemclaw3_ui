@@ -105,6 +105,83 @@ export async function isMolecule(smiles: string): Promise<boolean> {
   return withMol(rdkit, smiles, () => true) ?? false;
 }
 
+/**
+ * The canonical SMILES for an MDL molblock — a `.mol` file's contents, or one record of an `.sdf`.
+ *
+ * `get_mol` is the same entry point as for SMILES; RDKit sniffs the format. So this is not here to
+ * reach a different parser, it is here because **nothing outside this module may hold a `JSMol`**
+ * and a component that wanted to read a dropped file would otherwise have to. It also names the
+ * intent at the call site, where "is this a molblock or a SMILES" is a question the caller has
+ * already answered and the reader should not have to re-derive.
+ *
+ * The 2D coordinates in the block are deliberately dropped. The entity key and the text inserted
+ * into a message are both SMILES, and `moleculeSvg` recomputes a depiction anyway — keeping the
+ * drawn coordinates would mean two spellings of one compound again, this time geometric.
+ */
+export async function canonicalSmilesFromMolblock(molblock: string): Promise<string | null> {
+  const rdkit = await loadRDKit();
+  if (!rdkit) return null;
+  // An empty canvas exported from a sketcher is a syntactically valid molblock with zero atoms,
+  // and RDKit reads it happily — as the empty SMILES. That is not a structure, so it fails here
+  // rather than being inserted into a message as nothing at all.
+  return withMol(rdkit, molblock, (mol) => mol.get_smiles() || null);
+}
+
+/**
+ * The structures in a `.mol` or `.sdf` file.
+ *
+ * **What a multi-record SDF does here, and why.** An SDF is a concatenation of molblocks separated
+ * by a `$$$$` line, and a chemist's screening file routinely holds hundreds. Three options were on
+ * the table: take the first record, refuse the file, or read them all. The first is the trap — it
+ * silently discards data, and "silently dropped a reagent is a wrong table" is a failure this
+ * codebase already names elsewhere. Refusing is defensible but unhelpful: the common case is a
+ * two-record file where the chemist wants the second one.
+ *
+ * So every record is read and returned, and the caller shows one at a time with the count visible.
+ * The composer inserts **one** structure per accept because one SMILES is what a message means;
+ * a chemist who wants all of them steps through and inserts each. That keeps the "this is what I
+ * understood you to mean" confirmation intact, which pasting a hundred structures in one action
+ * would not.
+ *
+ * Records RDKit refuses are not returned — they cannot be drawn or compared — but they are counted,
+ * because "12 of 15 records were readable" and "12 records" are different facts about a file.
+ */
+export interface MolfileRecords {
+  /** Canonical SMILES, in file order. */
+  smiles: string[];
+  /** Records present in the file that RDKit could not read. */
+  unreadable: number;
+}
+
+export async function moleculesFromMolfile(text: string): Promise<MolfileRecords> {
+  const records = splitSdfRecords(text);
+  const smiles: string[] = [];
+  let unreadable = 0;
+
+  for (const record of records) {
+    const canonical = await canonicalSmilesFromMolblock(record);
+    if (canonical) smiles.push(canonical);
+    else unreadable += 1;
+  }
+
+  return { smiles, unreadable };
+}
+
+/**
+ * Split SDF text into its records.
+ *
+ * Pure string handling, no RDKit: the delimiter is a line containing exactly `$$$$`, which is the
+ * SDF spec and cannot appear inside a molblock's fixed-width atom or bond table. A plain `.mol`
+ * file has no delimiter at all and comes back as a single record, which is why the caller does not
+ * need to know which of the two it was handed.
+ */
+export function splitSdfRecords(text: string): string[] {
+  return text
+    .split(/^\$\$\$\$[^\S\n]*$/m)
+    .map((record) => record.trim())
+    .filter((record) => record.length > 0);
+}
+
 export interface DrawOptions {
   width: number;
   height: number;

@@ -20,6 +20,20 @@
  * And it is the same rule that keeps `tool_result.preview` out: the service truncates it at an
  * arbitrary byte, and a SMILES cut short often stays valid as a smaller, wrong molecule.
  *
+ * ### The structure a chemist supplied (`ingestUserStructure`)
+ *
+ * A molecule pasted, dropped as a MOL file, or drawn in the sketcher is admitted, and it satisfies
+ * the rule rather than bending it. Read the rule for what it is defending against: *inference*. The
+ * things it excludes — prose scanning, a truncated preview — are all cases where the UI guessed
+ * that a run of characters was a molecule and could be wrong. Here there is no guess. A human
+ * pointed at this structure, saw it drawn back to them, and pressed a button; the source is as
+ * structured as a tool argument and considerably better attested than a job summary, because the
+ * person who will read the rail is the person who put it there.
+ *
+ * It clears the two mechanical conditions as well: it round-trips through RDKit exactly like every
+ * other admitted structure, and nothing about it is truncated. What it does *not* have is a turn
+ * behind it — see `Mention.messageId` below.
+ *
  * ## Identity
  *
  * Molecules are keyed by **canonical** SMILES, resolved through RDKit. Two spellings of one
@@ -41,12 +55,30 @@ export type EntityKind = 'molecule' | 'reaction' | 'job' | 'note';
 
 /** Where an entity was seen. One row per (message, tool) so the rail can say *why* it is here. */
 export interface Mention {
-  /** The assistant message whose turn this sighting belongs to. */
+  /** The assistant message whose turn this sighting belongs to, or `COMPOSER_MENTION` for a
+   *  structure the user supplied before any turn ran. */
   messageId: string;
   /** The tool that produced or consumed it, when it came from a tool. */
   tool?: string;
+  /** How the user supplied it, when no tool did. Kept separate from `tool` rather than folded into
+   *  it: the rail's provenance line answers "which tools touched this", and writing `sketch` there
+   *  would be a tool name that does not exist. */
+  source?: UserStructureSource;
   at: number;
 }
+
+/** How a structure reached the composer. */
+export type UserStructureSource = 'paste' | 'file' | 'sketch';
+
+/**
+ * The `messageId` a composer-supplied structure is filed under.
+ *
+ * It matches no message, deliberately — there is no turn behind it yet. Selecting such an entity
+ * therefore filters the transcript to nothing, which reads as "no turn has discussed this", and
+ * that is exactly true. Once the message is sent, the turn's own `tool_call` events attach real
+ * mentions to the same canonical key and the rail entry joins the conversation.
+ */
+export const COMPOSER_MENTION = 'composer';
 
 interface EntityBase {
   key: string;
@@ -99,6 +131,10 @@ export interface EntityState {
   pinned: string[];
 
   ingest: (messageId: string, event: ChemclawEvent) => Promise<void>;
+  /** Admit a structure the user pasted, dropped or drew. See the promotion rule above for why this
+   *  belongs. Returns the canonical key, or `null` if RDKit refused — the caller has already shown
+   *  the chemist a drawing, so a refusal here means something changed under it. */
+  ingestUserStructure: (raw: string, source: UserStructureSource) => Promise<string | null>;
   select: (key: string | null) => void;
   togglePin: (key: string) => void;
   clear: () => void;
@@ -118,7 +154,10 @@ function upsert(state: EntityState, entity: Entity, mention: Mention): Partial<E
   // Deduplicate sightings: the same tool naming the same molecule twice in one turn is one fact,
   // and a mention list that counted it twice would make the rail's "seen in 4 turns" a lie.
   const seen = existing.mentions.some(
-    (m) => m.messageId === mention.messageId && m.tool === mention.tool,
+    (m) =>
+      m.messageId === mention.messageId &&
+      m.tool === mention.tool &&
+      m.source === mention.source,
   );
 
   const merged: Entity = {
@@ -269,6 +308,33 @@ export const useEntityStore = create<EntityState>()((set, get) => ({
         // is *about*. Prose can link to an entity this store holds; it cannot mint one.
         return;
     }
+  },
+
+  async ingestUserStructure(raw, source) {
+    const at = Date.now();
+    // Canonicalised here rather than trusted from the caller, even though the composer has already
+    // canonicalised it to draw the preview. The key is the identity of the entity; deriving it in
+    // one place is what stops a second caller one day admitting a molecule under a raw spelling.
+    const canonical = await canonicalSmiles(raw);
+    if (!canonical) return null;
+
+    set((s) =>
+      upsert(
+        s,
+        {
+          kind: 'molecule',
+          key: canonical,
+          smiles: canonical,
+          // The chemist's own spelling, kept for the same reason a tool argument's is: they should
+          // be able to recognise what they typed in a rail that shows them the canonical form.
+          aliases: raw !== canonical ? [raw] : [],
+          mentions: [],
+          firstSeen: at,
+        },
+        { messageId: COMPOSER_MENTION, source, at },
+      ),
+    );
+    return canonical;
   },
 
   select(key) {

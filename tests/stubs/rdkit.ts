@@ -50,6 +50,66 @@ const KNOWN: Record<string, string> = {
   'CCOC(C)=O': 'CCOC(C)=O',
 };
 
+/**
+ * Molfile support, keyed on **atom composition**.
+ *
+ * `get_mol` takes a molblock as readily as a SMILES — that is the whole reason the structure input
+ * can drop a `.mol` file straight into this module — so the fake has to accept one too, and an
+ * empty mock would let a broken molfile path pass every test.
+ *
+ * What it does is parse the V2000 counts line and the element symbol out of each atom line, and
+ * look the resulting formula up here. That keeps it behavioural in the two ways the calling code
+ * depends on: a **truncated** block (fewer atom lines than the counts line promises) is refused,
+ * which is the case a real screening file produces; and an **empty** canvas — a valid block with
+ * zero atoms, which is what a sketcher exports before anything is drawn — reads as the empty
+ * SMILES, so the "nothing drawn" branch is reachable.
+ *
+ * Bonds are ignored. That is a real limit of the fake and it is the reason this maps composition
+ * rather than structure: it cannot tell two isomers apart, so no test may depend on it doing so.
+ */
+const MOLBLOCK_FORMULAE: Record<string, string> = {
+  'C2O1': 'CCO',
+  'C2O2': 'CC(=O)O',
+  'C1O1': 'CO',
+  'C6': 'c1ccccc1',
+  'O1': 'O',
+  'Br1C7O1': 'COc1ccc(Br)cc1',
+};
+
+/**
+ * The SMILES a molblock stands for, `''` for an empty one, or `null` if this is not a molblock the
+ * fake can read.
+ */
+function molblockSmiles(input: string): string | null {
+  const lines = input.split(/\r?\n/);
+  // Line 4 is the counts line, and `V2000` at its end is what identifies the dialect. Anything
+  // else — a SMILES string, a V3000 block, a CSV someone dropped on the file target — is not ours.
+  const counts = lines[3];
+  if (!counts || !/V2000\s*$/.test(counts)) return null;
+
+  const atomCount = Number.parseInt(counts.slice(0, 3), 10);
+  if (!Number.isInteger(atomCount) || atomCount < 0) return null;
+  if (atomCount === 0) return '';
+
+  const tally = new Map<string, number>();
+  for (let i = 0; i < atomCount; i += 1) {
+    const line = lines[4 + i];
+    // The counts line promised an atom that is not there: the file is truncated, and a truncated
+    // structure is the failure this whole codebase refuses to render.
+    if (!line) return null;
+    const symbol = line.slice(31, 34).trim();
+    if (!symbol) return null;
+    tally.set(symbol, (tally.get(symbol) ?? 0) + 1);
+  }
+
+  const formula = [...tally.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([symbol, n]) => `${symbol}${n}`)
+    .join('');
+
+  return MOLBLOCK_FORMULAE[formula] ?? null;
+}
+
 /** SMARTS the fake can answer substructure questions about, and which molecules they hit. */
 const SMARTS_HITS: Record<string, string[]> = {
   '[Br]': ['COc1ccc(Br)cc1'],
@@ -101,7 +161,12 @@ function makeMol(smiles: string, isQuery: boolean): StubMol {
 
 const rdkitModule = {
   get_mol(input: string): StubMol | null {
-    return input in KNOWN ? makeMol(input, false) : null;
+    if (input in KNOWN) return makeMol(input, false);
+    const fromMolblock = molblockSmiles(input);
+    // `''` is a real answer here — a molblock with no atoms — and it must produce a *handle* whose
+    // SMILES is empty rather than a null. The caller's `get_smiles() || null` is what turns it into
+    // "not a structure", and routing it through the handle is what proves that handle gets freed.
+    return fromMolblock === null ? null : makeMol(fromMolblock, false);
   },
   get_qmol(input: string): StubMol | null {
     return input in SMARTS_HITS ? makeMol(input, true) : null;

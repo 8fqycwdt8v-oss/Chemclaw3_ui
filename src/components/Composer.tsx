@@ -13,17 +13,23 @@ import { useEffect, useRef, useState } from 'react';
 import { MAX_MESSAGE_CHARS } from '../../shared/events.ts';
 import { api } from '../api/client.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
+import { useEntityStore } from '../chem/entities.ts';
 import { useChatStore } from '../state/chatStore.ts';
 import { sendMessage, stopStreaming } from '../state/sendMessage.ts';
 import { cn } from '../lib/cn.ts';
+import { StructureInput, type AcceptedStructure } from './StructureInput.tsx';
 
 export function Composer({ conversationId }: { conversationId: string }): React.JSX.Element {
   const { auth } = useAuth();
   const [text, setText] = useState('');
   const [dryRun, setDryRun] = useState(false);
   const [uploading, setUploading] = useState<string | null>(null);
+  const [structureOpen, setStructureOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  /** Where the caret was when the structure panel took focus. Captured on open rather than read
+   *  back on insert, because by then the caret belongs to the panel's own input. */
+  const caretRef = useRef<number | null>(null);
 
   const composerLock = useChatStore((s) => s.composerLock);
   const streaming = useChatStore((s) => s.streaming);
@@ -72,6 +78,44 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     void sendMessage({ conversationId, text: message, dryRun, auth });
   };
 
+  /**
+   * Put an accepted structure into the message being written — and nowhere else.
+   *
+   * It is inserted at the caret rather than sent, because a structure is almost never the whole
+   * question: "screen this for hazards" and "what is the pKa of this" are what a chemist is
+   * actually writing, and a panel that sent the SMILES on its own would force them to describe the
+   * molecule twice.
+   *
+   * It is also promoted into the entity rail. A structure a human drew or dropped and confirmed
+   * satisfies the rail's structured-source rule rather than weakening it — the rule exists to keep
+   * out strings the UI *guessed* were molecules, and there is no guess here (see the promotion-rule
+   * docstring in `src/chem/entities.ts`).
+   */
+  const insertStructure = ({ canonical, raw, source }: AcceptedStructure): void => {
+    // The raw spelling, not the canonical one: the store canonicalises for the key and keeps what
+    // was typed as an alias, so the rail can show a chemist the string they recognise.
+    void useEntityStore.getState().ingestUserStructure(raw, source);
+
+    const at = caretRef.current ?? text.length;
+    const before = text.slice(0, at);
+    const after = text.slice(at);
+    // A SMILES glued to the previous word is a different token, and `looksLikeSmiles` would be
+    // right to refuse it. Pad only where padding is missing, so the chemist's own spacing survives.
+    const fragment = `${before && !/\s$/.test(before) ? ' ' : ''}${canonical}${after && !/^\s/.test(after) ? ' ' : ''}`;
+
+    setText(`${before}${fragment}${after}`);
+    setStructureOpen(false);
+
+    const caret = before.length + fragment.length;
+    // After the state has been committed and the textarea is back on screen; setting the range
+    // against the pre-update value would put the caret in the wrong place.
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      el?.focus();
+      el?.setSelectionRange(caret, caret);
+    });
+  };
+
   const onUpload = async (file: File): Promise<void> => {
     if (!sessionId) {
       setUploading('Send a message first so the conversation has a session.');
@@ -102,6 +146,10 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           </p>
         )}
         {uploading && <p className="mb-2 text-xs text-ink-muted">{uploading}</p>}
+
+        {structureOpen && (
+          <StructureInput onAccept={insertStructure} onClose={() => setStructureOpen(false)} />
+        )}
 
         <div
           className={cn(
@@ -147,6 +195,25 @@ export function Composer({ conversationId }: { conversationId: string }): React.
             className="rounded px-1.5 py-1 text-ink-muted hover:bg-surface-sunken"
           >
             📎
+          </button>
+
+          {/* Distinct from the paperclip: that uploads a working file to the session, this puts a
+              structure into the sentence being written. Conflating them would be the obvious
+              mistake, since both start with a file dialog. */}
+          <button
+            type="button"
+            title="Insert a structure — paste SMILES, drop a MOL/SDF, or draw it"
+            aria-expanded={structureOpen}
+            onClick={() => {
+              caretRef.current = textareaRef.current?.selectionStart ?? null;
+              setStructureOpen((open) => !open);
+            }}
+            className={cn(
+              'rounded px-1.5 py-1 hover:bg-surface-sunken',
+              structureOpen ? 'text-accent' : 'text-ink-muted',
+            )}
+          >
+            ⌬
           </button>
 
           {isStreaming ? (

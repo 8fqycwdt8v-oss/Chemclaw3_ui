@@ -15,9 +15,23 @@
  * then misses the one row that mattered.
  */
 
-import { useEntityStore, type Entity, type JobEntity, type MoleculeEntity } from '../chem/entities.ts';
+import {
+  useEntityStore,
+  type Entity,
+  type JobEntity,
+  type MoleculeEntity,
+  type UserStructureSource,
+} from '../chem/entities.ts';
 import { cn } from '../lib/cn.ts';
 import { Molecule, Reaction } from './Molecule.tsx';
+
+/** Past tense, because the provenance line reads as a list of things that happened to the entity —
+ *  beside a tool name, "drawn" sits where "predict_pka" would. */
+const USER_SOURCE_LABEL: Record<UserStructureSource, string> = {
+  paste: 'pasted',
+  file: 'from file',
+  sketch: 'drawn',
+};
 
 const KIND_LABEL: Record<Entity['kind'], string> = {
   molecule: 'Molecules',
@@ -97,9 +111,17 @@ function Row({ entity }: { entity: Entity }): React.JSX.Element {
       </button>
 
       <div className="mt-1 flex items-center justify-between">
-        {/* Why this row is here, in the smallest useful form: which tools touched it. */}
+        {/* Why this row is here, in the smallest useful form: which tools touched it — or, for a
+            structure the chemist supplied themselves, how they supplied it, which is the same
+            question answered from the other side. */}
         <span className="truncate text-[10px] text-ink-muted">
-          {[...new Set(entity.mentions.map((m) => m.tool).filter(Boolean))].join(', ') || '—'}
+          {[
+            ...new Set(
+              entity.mentions
+                .map((m) => m.tool ?? (m.source ? USER_SOURCE_LABEL[m.source] : undefined))
+                .filter(Boolean),
+            ),
+          ].join(', ') || '—'}
         </span>
         <button
           type="button"

@@ -15,6 +15,11 @@ export default defineConfig({
       // The stub is behavioural (see its docstring) so the drawing path is genuinely exercised.
       { find: /^@rdkit\/rdkit\/dist\/RDKit_minimal\.wasm\?url$/, replacement: stub('./tests/stubs/wasmUrl.ts') },
       { find: /^@rdkit\/rdkit$/, replacement: stub('./tests/stubs/rdkit.ts') },
+      // The Ketcher *adapter*, not the seam. `src/chem/sketcher.ts` runs for real — the lazy
+      // import, the cached module promise, the degrade-to-null — and only the file that actually
+      // instantiates a 12 MB WASM editor is replaced. Loading the real one under happy-dom would
+      // take the whole suite hostage to a Web Worker and a WebGL-adjacent canvas for no coverage.
+      { find: /^\.\/sketcher\.ketcher\.tsx$/, replacement: stub('./tests/stubs/sketcher.tsx') },
     ],
   },
   test: {

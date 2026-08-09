@@ -49,7 +49,18 @@ function buildCsp(mode: AuthMode): string {
     // blank behind the BFF. Same shape as the MSAL iframe note below: a header whose absence is
     // invisible in the environment you develop in.
     'script-src': ["'self'", "'wasm-unsafe-eval'"],
-    // Tailwind injects a stylesheet; RDKit emits inline style attributes on the SVG it draws.
+    // The structure sketcher (`src/chem/sketcher.ketcher.tsx`) runs Indigo in a Web Worker, built
+    // by Vite as `new Worker(new URL('/assets/indigoWorker-….js', import.meta.url))` — a real
+    // same-origin file, not a blob, so `'self'` is the whole requirement. Verified against the
+    // emitted bundle rather than assumed; if a future bundler setting inlines the worker this
+    // needs `blob:` and there is no dev-server symptom to warn you (see the note above).
+    //
+    // Stated rather than inherited. CSP3 falls worker-src back to child-src, then script-src, so
+    // this is already permitted today — but it is permitted *by the RDKit line*, and someone
+    // narrowing that has no reason to think they are also switching off the sketcher.
+    'worker-src': ["'self'"],
+    // Tailwind injects a stylesheet; RDKit emits inline style attributes on the SVG it draws; the
+    // sketcher's UI is Emotion, which injects <style> elements at runtime.
     'style-src': ["'self'", "'unsafe-inline'"],
     // blob: covers a canvas->objectURL path if a structure is ever exported as an image.
     'img-src': ["'self'", 'data:', 'blob:'],

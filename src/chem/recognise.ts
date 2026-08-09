@@ -66,6 +66,33 @@ export function looksLikeSmiles(text: string): boolean {
 }
 
 /**
+ * Does this look like a **compound name** rather than a structure?
+ *
+ * Asked only after RDKit has already refused the string, and used for one thing: to tell a chemist
+ * who typed `4-bromoanisole` into a SMILES box why nothing was drawn. "Not a valid structure" is
+ * true and useless there; "a name is not a structure" is the actual answer.
+ *
+ * The backend *can* do this conversion — `resolve_compound` in the `chem` connector is RDKit plus a
+ * vendored dataset — but it is an agent tool with no HTTP route, reachable only inside a turn. So
+ * this function exists to produce a sentence, not a lookup. Inventing an endpoint, or shipping a
+ * name table to the browser, would both be worse than saying what is true.
+ *
+ * The test is deliberately narrow, because a wrong guess here is a confident wrong explanation:
+ * structural punctuation disqualifies (a name has no `()[]=#@`), and there must be a run of at
+ * least three letters containing something the bare organic subset does not allow — the `m` and `a`
+ * of `bromoanisole`, the `e` and `z` of `benzene`. A malformed SMILES made only of legal atom
+ * letters gets the plain "not a structure" message instead, which is the right way for this to be
+ * wrong.
+ */
+export function looksLikeCompoundName(text: string): boolean {
+  const s = text.trim();
+  if (s.length < 3 || s.length > 200) return false;
+  if (looksLikeSmiles(s) || looksLikeReactionSmiles(s)) return false;
+  if (/[()[\]=#@$*\\/]/.test(s)) return false;
+  return (s.match(/[A-Za-z]{3,}/g) ?? []).some((run) => !BARE_SMILES_LETTERS.test(run));
+}
+
+/**
  * Does this look like a reaction SMILES?
  *
  * The grammar is `reactants>agents>products`, so the marker is two `>` characters with something

@@ -9,10 +9,15 @@
  * What is pinned here is the binding, not the button. The hash posted back must be the hash of
  * the plan the human was shown, which is why it is read when the card appears rather than when a
  * button is pressed; and a 409 must re-read the plan rather than approve whatever is current now.
+ *
+ * Deciding now takes two clicks: the card's button opens a confirmation, and the dialog's button
+ * commits. That is deliberate — the decision is irreversible and attributable, and a single tap
+ * was one mis-aimed thumb away from approving work nobody read. The tests go through the dialog
+ * rather than around it, because the dialog is part of the contract now.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ApprovalPrompt } from '../src/components/Prompts.tsx';
 import { api } from '../src/api/client.ts';
 import { ApiError } from '../src/api/errors.ts';
@@ -22,6 +27,13 @@ vi.mock('../src/auth/AuthContext.tsx', () => ({
 }));
 
 const SID = 'b'.repeat(32);
+
+/** Open the named decision's confirmation and commit it. */
+async function decideVia(triggerName: RegExp): Promise<void> {
+  fireEvent.click(await screen.findByRole('button', { name: triggerName }));
+  const dialog = await screen.findByRole('alertdialog');
+  fireEvent.click(within(dialog).getByRole('button', { name: triggerName }));
+}
 
 const planStatus = (hash: string, plan: string[] = ['Run xTB on the aryl bromide']) => ({
   session_id: SID,
@@ -50,7 +62,7 @@ describe('plan approval', () => {
     const decide = vi.spyOn(api, 'decidePlan').mockResolvedValue();
     render(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
 
-    fireEvent.click(await screen.findByText('Approve plan'));
+    await decideVia(/approve plan/i);
 
     await waitFor(() => expect(decide).toHaveBeenCalled());
     expect(decide.mock.calls[0]?.slice(0, 3)).toEqual([SID, true, 'h1']);
@@ -61,7 +73,7 @@ describe('plan approval', () => {
     const decide = vi.spyOn(api, 'decidePlan').mockResolvedValue();
     render(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
 
-    fireEvent.click(await screen.findByText('Decline'));
+    await decideVia(/decline/i);
 
     await waitFor(() => expect(decide).toHaveBeenCalled());
     expect(decide.mock.calls[0]?.[1]).toBe(false);
@@ -79,7 +91,7 @@ describe('plan approval', () => {
     );
     render(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
 
-    fireEvent.click(await screen.findByText('Approve plan'));
+    await decideVia(/approve plan/i);
 
     expect(await screen.findByText('Run DFT on the aryl bromide')).toBeTruthy();
     expect(getPlan).toHaveBeenCalledTimes(2);
@@ -101,7 +113,7 @@ describe('plan approval', () => {
       <ApprovalPrompt prompt="Save this note?" approvalId="approval-q-42" sessionId={SID} />,
     );
 
-    fireEvent.click(screen.getByText('Approve'));
+    await decideVia(/^approve$/i);
 
     await waitFor(() => expect(decideApproval).toHaveBeenCalled());
     expect(getPlan).not.toHaveBeenCalled();

@@ -162,6 +162,10 @@ export interface ChatState {
   activeId: string | null;
   composerLock: ComposerLock;
   banner: Banner | null;
+  /** Unsent text, keyed by conversation. Component state leaked across conversation switches:
+   *  the composer does not unmount when `conversationId` changes, so a draft typed in one could
+   *  be sent into another. */
+  drafts: Record<string, string>;
   /** Cross-turn job completions from `GET /sessions/{id}/events`. Not persisted. */
   jobFeed: JobCompletedEvent[];
   streaming: { conversationId: string; messageId: string; abort: AbortController } | null;
@@ -186,6 +190,7 @@ export interface ChatState {
 
   setComposerLock: (lock: ComposerLock) => void;
   setBanner: (banner: Banner | null) => void;
+  setDraft: (conversationId: string, text: string) => void;
   setStreaming: (s: ChatState['streaming']) => void;
   pushJobCompleted: (event: JobCompletedEvent) => void;
   dismissJobCompleted: (jobId: string) => void;
@@ -222,6 +227,7 @@ export const useChatStore = create<ChatState>()(
       activeId: null,
       composerLock: false,
       banner: null,
+      drafts: {},
       jobFeed: [],
       streaming: null,
 
@@ -439,6 +445,10 @@ export const useChatStore = create<ChatState>()(
       setComposerLock(composerLock) {
         set({ composerLock });
       },
+      setDraft(conversationId, text) {
+        set((s) => ({ drafts: { ...s.drafts, [conversationId]: text } }));
+      },
+
       setBanner(banner) {
         set({ banner });
       },

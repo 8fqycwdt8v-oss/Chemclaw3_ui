@@ -1,20 +1,25 @@
-import { useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { configProblems } from './env.ts';
 import { useAuth } from './auth/AuthContext.tsx';
 import { useChatStore } from './state/chatStore.ts';
 import { api } from './api/client.ts';
 import { useJobFeed } from './hooks/useJobFeed.ts';
+import { useVisualViewport } from './hooks/useVisualViewport.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { TopBar } from './components/TopBar.tsx';
 import { MessageList } from './components/MessageList.tsx';
 import { JobFeed } from './components/JobFeed.tsx';
 import { Composer } from './components/Composer.tsx';
+import { Announcer } from '@/components/chem/Announcer';
+import { SkipLinks } from '@/components/chem/SkipLinks';
+import { TooltipProvider } from '@/components/ui/tooltip';
+import { Loading } from '@/components/chem/Feedback';
 import type { ChatMessage } from './state/types.ts';
 
 function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
   return (
     <div className="flex h-full items-center justify-center p-8">
-      <div className="max-w-lg rounded-lg border border-danger/40 bg-danger-soft p-5">
+      <div className="max-w-md rounded-xl border border-danger/40 bg-danger-soft p-5 shadow-sm">
         <h1 className="mb-2 font-semibold text-danger-ink">Configuration error</h1>
         <ul className="list-disc space-y-1 pl-5 text-sm">
           {problems.map((problem) => (
@@ -33,6 +38,9 @@ export function App(): React.JSX.Element {
   const { auth } = useAuth();
   const activeId = useChatStore((s) => s.activeId);
   const conversation = useChatStore((s) => (activeId ? s.conversations[activeId] : undefined));
+  const [rehydrateNonce, setRehydrateNonce] = useState(0);
+
+  useVisualViewport();
 
   // Always have a conversation to type into.
   useEffect(() => {
@@ -102,30 +110,51 @@ export function App(): React.JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [conversation?.id, conversation?.sessionId, conversation?.messages.length, auth]);
+  }, [
+    conversation?.id,
+    conversation?.sessionId,
+    conversation?.messages.length,
+    auth,
+    rehydrateNonce,
+  ]);
 
   useJobFeed(conversation?.sessionId ?? null, auth);
+
+  // What the banner's Retry does. The retryable failures reachable from here are the transcript
+  // read and, once the store carries one, the last turn — both are re-driven by clearing the
+  // banner and letting the effect above run again.
+  const onRetry = useCallback(() => {
+    useChatStore.getState().setBanner(null);
+    setRehydrateNonce((n) => n + 1);
+  }, []);
 
   const problems = configProblems();
   if (problems.length > 0) return <ConfigError problems={problems} />;
 
   return (
-    <div className="flex h-full">
-      <Sidebar />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar />
-        {conversation ? (
-          <>
-            <MessageList conversation={conversation} />
-            <JobFeed />
-            <Composer conversationId={conversation.id} />
-          </>
-        ) : (
-          <div className="flex flex-1 items-center justify-center">
-            <p className="text-sm text-ink-muted">Starting a conversation…</p>
-          </div>
-        )}
+    <TooltipProvider>
+      <SkipLinks />
+      <Announcer />
+
+      <div className="flex h-full">
+        <Sidebar />
+        <div className="flex min-w-0 flex-1 flex-col">
+          <TopBar onRetry={onRetry} />
+          <main className="flex min-h-0 flex-1 flex-col">
+            {conversation ? (
+              <>
+                <MessageList conversation={conversation} />
+                <JobFeed />
+                <Composer conversationId={conversation.id} />
+              </>
+            ) : (
+              <div className="flex flex-1 items-center justify-center">
+                <Loading>Starting a conversation…</Loading>
+              </div>
+            )}
+          </main>
+        </div>
       </div>
-    </div>
+    </TooltipProvider>
   );
 }

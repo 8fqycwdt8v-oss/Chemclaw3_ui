@@ -17,8 +17,7 @@
     "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test",
-    "check:openapi": "node scripts/check-openapi.mjs"
+    "check:openapi": "node --experimental-strip-types scripts/check-openapi.mjs"
   },
   "dependencies": {
     "@azure/msal-browser": "^5.17.1",

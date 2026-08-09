@@ -9,6 +9,11 @@
  * Two remark plugins rewrite the text, and their ORDER matters: `remarkCitations` runs first and
  * turns note ids into link nodes, so `remarkGrounding` — which skips anything inside a link —
  * cannot then mistake the digits inside `rxn-4821` for a measurement.
+ *
+ * Both take what the turn's tools actually returned as their options — the note ids and the numeric
+ * values — and both degrade the same way when a turn has neither: the grounding overlay switches
+ * off rather than flagging everything, and the citation chips fall back to recognising ids by their
+ * prefix rather than chipping nothing.
  */
 
 import { useMemo, type ComponentProps } from 'react';
@@ -94,19 +99,25 @@ const components: Components = {
   },
 };
 
-/** Hoisted so the default does not mint a new array identity on every render, which would defeat
+/** Hoisted so the defaults do not mint a new array identity on every render, which would defeat
  *  the memo below. */
 const NO_FIGURES: readonly number[] = [];
+const NO_NOTE_IDS: readonly string[] = [];
 
 export function Markdown({
   children,
   figures = NO_FIGURES,
+  noteIds = NO_NOTE_IDS,
 }: {
   children: string;
   /** The values this turn's tools returned. Empty — the default, and the case for every caller
    *  that has nothing to check against — disables figure marking entirely rather than painting
    *  every number as unsupported. */
   figures?: readonly number[];
+  /** The note ids this turn's tools returned, threaded exactly as `figures` is. Empty falls the
+   *  citation plugin back to recognising ids by their prefix, which is a guess; non-empty is the
+   *  service's own answer and replaces it. */
+  noteIds?: readonly string[];
 }): React.JSX.Element {
   // The `[plugin, options]` tuple rather than a pre-applied transformer: unified calls a plugin
   // with its options and expects the transformer back, so passing `remarkGrounding(figures)`
@@ -117,8 +128,8 @@ export function Markdown({
   // Taken off the component rather than imported from `unified`, which is a transitive dependency
   // this package does not declare.
   const plugins = useMemo<ComponentProps<typeof ReactMarkdown>['remarkPlugins']>(
-    () => [remarkGfm, remarkCitations, [remarkGrounding, figures]],
-    [figures],
+    () => [remarkGfm, [remarkCitations, noteIds], [remarkGrounding, figures]],
+    [figures, noteIds],
   );
 
   return (

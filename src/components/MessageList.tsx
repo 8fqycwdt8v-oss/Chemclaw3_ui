@@ -11,6 +11,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import type { AssistantMessage, ChatMessage, Conversation, TurnError } from '../state/types.ts';
 import { messagesFor, useEntityStore } from '../chem/entities.ts';
 import { returnedFigures } from '../chem/provenance.ts';
+import { returnedNoteIds } from '../lib/citations.ts';
 import { Markdown } from './Markdown.tsx';
 import { TracePanel } from './TracePanel.tsx';
 import { AnswerFooter, CapabilityDegradedPill, ReviewRequiredPill } from './AnswerBadges.tsx';
@@ -83,6 +84,11 @@ function AssistantBubble({
   // *next* turn. Empty on a turn whose tools returned no numbers, which is what switches the
   // grounding overlay off rather than flagging every figure in it.
   const figures = useMemo(() => returnedFigures(message.trace), [message.trace]);
+  // The same thread, one field over: the ids the turn's tools really returned, which the citation
+  // plugin uses in place of guessing at note-shaped tokens in the prose. Empty on a turn with no
+  // tool results — and on any backend that predates the field — which is what keeps the guess as
+  // the fallback rather than making it the only mode.
+  const citedNotes = useMemo(() => returnedNoteIds(message.trace), [message.trace]);
 
   return (
     <div className="max-w-none">
@@ -97,7 +103,9 @@ function AssistantBubble({
             <span className="caret">▌</span>
           </div>
         ) : (
-          <Markdown figures={figures}>{body}</Markdown>
+          <Markdown figures={figures} noteIds={citedNotes}>
+            {body}
+          </Markdown>
         )
       ) : (
         streaming && (

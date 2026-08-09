@@ -107,9 +107,15 @@ export const isCalcRef = (text: string): boolean => CALC_REF.test(text.trim());
  * two match **nothing** the backend has ever written — so citation chips were firing on almost no
  * real citation.
  *
- * This is still a heuristic over prose. `tool_result.note_ids` is the authoritative answer to
- * "which notes did this turn actually see", and where a caller has it, it should be preferred:
- * it is exact, it is untruncated, and it cannot false-positive on an ordinary hyphenated word.
+ * This is still a heuristic over prose, and it is now the **fallback** rather than the mechanism.
+ * `remarkCitations` uses `tool_result.note_ids` — the service's exact, untruncated answer to which
+ * notes a turn actually saw — wherever the turn has them, and reaches here only when it does not:
+ * an older backend, or a turn that called no tools. It is also what `NoteView` renders a stored
+ * note body with, where there is no turn behind the text at all.
+ *
+ * Worth keeping in view when reading a chip: under the authoritative list a note-shaped token the
+ * turn did not return gets no chip, which is the point. Under this fallback it gets one on the
+ * strength of its prefix alone.
  */
 const NOTE_PREFIXES = [
   'compound',

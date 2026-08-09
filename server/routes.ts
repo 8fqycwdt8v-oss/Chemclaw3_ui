@@ -10,7 +10,8 @@
  * `POST /sessions` returns). That validation doubles as traversal protection: a path segment
  * that matches this pattern cannot contain `/`, `.` or an encoded escape.
  *
- * Route list verified against 8fqycwdt8v-oss/Chemclaw3 @ d5ed9e3 (service/app.py).
+ * Route list verified against 8fqycwdt8v-oss/Chemclaw3 @ d5ed9e3 (service/app.py), except the
+ * tool-result read, which tracks an unmerged PR and is marked as such at its pattern.
  */
 
 const SID = '([0-9a-f]{32})';
@@ -70,6 +71,25 @@ const JOB = '([A-Za-z0-9_-]{1,128})';
  */
 const PROPOSAL = '([0-9]{1,19})';
 
+/**
+ * Tool-result references.
+ *
+ * Exactly 64 lowercase hex characters, because the ref **is** a SHA-256 hex digest: the backend
+ * content-addresses a tool result by the hash of its own text, so `[0-9a-f]` is the entire
+ * alphabet and 64 is the entire length. This is `SID`'s situation rather than `APPROVAL`'s —
+ * nothing model-written and nothing user-written ever reaches this segment, so pinning it to the
+ * digest's exact shape refuses at the proxy every string the backend could not have minted, and
+ * costs nothing that any real ref needs. No length cap is written because the pattern is already
+ * one length.
+ *
+ * As with `SID`, the narrowness doubles as traversal protection: a segment matching this cannot
+ * contain `/`, `.` or a percent escape, so `..` is unspellable and no decode step is required.
+ *
+ * From an unmerged backend PR (8fqycwdt8v-oss/Chemclaw3 #157). If review renames the route, this
+ * entry and `src/chem/results.ts` are the two places that change.
+ */
+const RESULT_REF = '([0-9a-f]{64})';
+
 export interface Route {
   method: string;
   pattern: RegExp;
@@ -112,6 +132,19 @@ export const ROUTES: readonly Route[] = [
     method: 'POST',
     pattern: new RegExp(`^/api/sessions/${SID}/attachments$`),
     target: (m) => `/sessions/${m[1]}/attachments`,
+    sse: false,
+  },
+
+  // The full text of one tool result, which the 200-character `tool_result.preview` cannot carry
+  // and which a typed result card needs whole. Scoped under the session upstream — a ref is
+  // unguessable but not secret, so the route resolves through the same ownership gate as the turn
+  // stream rather than treating the ref as a bearer token. Read lazily, one result at a time, by
+  // a surface that has decided to render it: that is what preserves the streaming budget the
+  // truncation exists to protect.
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/tool-results/${RESULT_REF}$`),
+    target: (m) => `/sessions/${m[1]}/tool-results/${m[2]}`,
     sse: false,
   },
 

@@ -88,7 +88,9 @@ function newAssistantMessage(): AssistantMessage {
 function closeToolCall(
   trace: TraceEntry[],
   tool: string,
-  ending: { result: string; numbers: number[]; noteIds: string[] } | { failed: true },
+  ending:
+    | { result: string; numbers: number[]; noteIds: string[]; resultRef?: string }
+    | { failed: true },
 ): TraceEntry[] {
   const index = trace.findIndex(
     (entry) =>
@@ -402,6 +404,10 @@ export const useChatStore = create<ChatState>()(
           // here, which is where they used to die. They are the only structured data the wire
           // carries and the only thing an answer's figures can honestly be checked against; the
           // preview beside them is truncated and must never be mined for the same purpose.
+          //
+          // `result_ref` joins them for the same reason and answers the question they cannot: what
+          // *shape* the result had. It is a handle rather than the payload, so the row costs the
+          // same 64 characters whether or not anyone ever looks at it.
           set((s) =>
             updateAssistant(s, conversationId, messageId, (m) => ({
               ...m,
@@ -409,6 +415,10 @@ export const useChatStore = create<ChatState>()(
                 result: event.preview,
                 numbers: event.numbers,
                 noteIds: event.note_ids,
+                // Only when there is one to carry. "Not stored" is already spelled by the absence,
+                // and writing an empty string into every persisted row to say so would be storage
+                // spent on a fact the missing key states for free.
+                ...(event.result_ref ? { resultRef: event.result_ref } : {}),
               }),
             })),
           );

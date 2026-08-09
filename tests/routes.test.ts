@@ -4,6 +4,8 @@ import { resolveRoute } from '../server/routes.ts';
 const SID = 'a'.repeat(32);
 /** The shape `job_workflow_id` mints: `{connector}-{job}-{16 hex}`. */
 const JOB = 'qm-compute_dft_energy-0123456789abcdef';
+/** A tool-result ref is a SHA-256 hex digest of the result's own text: 64 lowercase hex. */
+const REF = '3b'.repeat(32);
 
 describe('proxy route whitelist', () => {
   it('resolves every route the UI actually calls', () => {
@@ -16,6 +18,7 @@ describe('proxy route whitelist', () => {
       ['POST', `/api/sessions/${SID}/messages`, `/sessions/${SID}/messages`],
       ['GET', `/api/sessions/${SID}/events`, `/sessions/${SID}/events`],
       ['POST', `/api/sessions/${SID}/attachments`, `/sessions/${SID}/attachments`],
+      ['GET', `/api/sessions/${SID}/tool-results/${REF}`, `/sessions/${SID}/tool-results/${REF}`],
       ['GET', `/api/sessions/${SID}/plan`, `/sessions/${SID}/plan`],
       ['POST', `/api/sessions/${SID}/plan/decision`, `/sessions/${SID}/plan/decision`],
       ['GET', '/api/approvals', '/approvals'],
@@ -46,6 +49,9 @@ describe('proxy route whitelist', () => {
     expect(resolveRoute('GET', '/api/jobs')?.sse).toBe(false);
     expect(resolveRoute('GET', '/api/proposals')?.sse).toBe(false);
     expect(resolveRoute('GET', '/api/profiles')?.sse).toBe(false);
+    // A tool result is a single JSON document read on demand, not a stream — it is fetched from
+    // the same session as the turn stream, which is the only reason it could be mistaken for one.
+    expect(resolveRoute('GET', `/api/sessions/${SID}/tool-results/${REF}`)?.sse).toBe(false);
   });
 
   it('refuses service routes the UI has no business reaching', () => {
@@ -132,6 +138,40 @@ describe('proxy route whitelist', () => {
       // browser is precisely the caller that must never reach it, so adding the proposal routes
       // must not have dragged it along.
       expect(resolveRoute('POST', '/api/events/knowledge-merged')).toBeNull();
+    });
+  });
+
+  describe('tool-result refs', () => {
+    // The ref is a SHA-256 hex digest and nothing else — never model-written, never user-written —
+    // so the pattern is pinned to the digest's exact shape rather than to a permissive class. That
+    // is `SID`'s situation, and it buys the same thing: traversal is refused by the shape of the
+    // id, with no decode step in this proxy.
+    it('passes through a digest', () => {
+      expect(resolveRoute('GET', `/api/sessions/${SID}/tool-results/${REF}`)).toMatchObject({
+        path: `/sessions/${SID}/tool-results/${REF}`,
+      });
+    });
+
+    it('refuses anything that is not one', () => {
+      for (const bad of [
+        `/api/sessions/${SID}/tool-results/${'a'.repeat(63)}`, // one short
+        `/api/sessions/${SID}/tool-results/${'a'.repeat(65)}`, // one long
+        `/api/sessions/${SID}/tool-results/${'A'.repeat(64)}`, // hashlib.hexdigest() is lowercase
+        `/api/sessions/${SID}/tool-results/${'g'.repeat(64)}`, // outside the hex alphabet
+        `/api/sessions/${SID}/tool-results/../../../etc/passwd`,
+        `/api/sessions/${SID}/tool-results/`,
+        // The ref is session-scoped upstream precisely so it is not a bearer token; a bare
+        // collection route would be the shape that made it one.
+        `/api/tool-results/${REF}`,
+      ]) {
+        expect(resolveRoute('GET', bad), bad).toBeNull();
+      }
+    });
+
+    it('is readable and nothing else — a stored result is not writable or deletable', () => {
+      for (const method of ['POST', 'PUT', 'DELETE']) {
+        expect(resolveRoute(method, `/api/sessions/${SID}/tool-results/${REF}`), method).toBeNull();
+      }
     });
   });
 

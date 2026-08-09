@@ -10,9 +10,17 @@
  *  - **Canonical identity.** `COc1ccc(Br)cc1` and `BrC1=CC=C(OC)C=C1` are the same molecule and
  *    different strings. Anything that collects the molecules of a conversation needs them to be
  *    one entity, and no amount of string handling gets there.
- *  - **Substructure highlighting.** The safety connector returns the SMARTS motif each hazard flag
- *    matched. Showing *where* on the molecule the alert fired is the difference between a citation
- *    a chemist can check and one they must take on faith.
+ *  - **Substructure highlighting.** `substructure_matches` is *given* a SMARTS query, so the pattern
+ *    is in the turn's own tool arguments and every hit can be drawn with the queried motif lit up.
+ *
+ *    This paragraph used to claim the safety connector returns the SMARTS motif each hazard flag
+ *    matched. It does not, and the mistake is worth leaving recorded because it is an easy one to
+ *    repeat from the field name alone: `HazardFlag.matched` is *the input the rule fired on* — a
+ *    SMILES, or `"a + b"` for a pair rule — while the rule's pattern stays in the connector's own
+ *    `rules.yaml` and never crosses the wire. `GenotoxAlert.motif` is a chemist's name for the
+ *    motif ("aromatic nitro"), not a pattern either. So a hazard card can redraw the structure that
+ *    fired, and cannot yet show where on it. `CitedFlags` probes for a `smarts` field anyway, so
+ *    the highlight appears the day the backend echoes one.
  *  - **Validation.** A recogniser that guesses at SMILES-shaped text is only safe if something can
  *    say "that is not a molecule" before it is drawn.
  *

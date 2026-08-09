@@ -14,6 +14,7 @@
  */
 
 import { config } from '../env.ts';
+import { toolResultPath, type StoredToolResult } from '../chem/results.ts';
 import { ApiError, errorFromStatus, readDetail } from './errors.ts';
 
 export type TokenGetter = () => Promise<string | null>;
@@ -237,6 +238,23 @@ export const api = {
       if (err instanceof ApiError && err.kind === 'session_not_found') return [];
       throw err;
     }
+  },
+
+  /**
+   * The full text of one tool result, by the ref its `tool_result` event carried.
+   *
+   * Called only when a chemist expands the row, and that is the point: the 200-character preview
+   * exists so a whole evidence sweep is never pushed at every consumer, and fetching every result
+   * as it streamed would spend the budget the truncation was protecting. One result, once, because
+   * somebody chose to look at it.
+   *
+   * Does not degrade here. A caller that cannot read a result has a real fallback — the preview it
+   * already holds — and swallowing the failure into an empty payload would make "the result is
+   * unreadable" indistinguishable from "the result was empty", which is the collapse the backend's
+   * own models spend their verdicts avoiding. The renderer decides; this reports.
+   */
+  getToolResult(sessionId: string, ref: string, getToken: TokenGetter): Promise<StoredToolResult> {
+    return request<StoredToolResult>(toolResultPath(sessionId, ref), getToken);
   },
 
   uploadAttachment(

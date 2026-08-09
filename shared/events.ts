@@ -20,6 +20,10 @@
  * kept, so the card said "runs asynchronously" for the rest of the conversation. Three misses with
  * one shape between them is what `scripts/check-openapi.mjs` is for.
  *
+ * One field here runs ahead of `261b166` rather than behind it: `tool_result.result_ref` mirrors an
+ * unmerged PR and says so at its declaration. It is the only optional field in the union, for that
+ * reason and no other.
+ *
  * This file is imported by both the SPA (bundled by Vite) and the mock backend (bundled by
  * esbuild). Keep it dependency-free.
  */
@@ -245,6 +249,33 @@ export interface ToolResultEvent {
    * reads as completeness.
    */
   numbers: number[];
+  /**
+   * A reference to this result's full text, fetchable from `GET /sessions/{id}/tool-results/{ref}`
+   * — the SHA-256 of the text itself, so the same result from the same call is the same ref.
+   *
+   * The third field split out of `preview` by the argument the two above already make, and the one
+   * that finishes it. `note_ids` answers "which ids", `numbers` answers "which figures"; neither
+   * can give a consumer the result's **shape**, so a `ScreenResult`'s severities and citations, a
+   * `ChargeTable`'s rows and a solvent ranking still reached the chemist only as prose the model
+   * wrote about them. The payload deliberately stays off the wire: a surface pulls the one result
+   * it decided to render, once, rather than every result being streamed to every consumer.
+   *
+   * **Empty means "not stored" — three causes, one meaning**: the store is off, the result was
+   * over `stream_max_result_bytes` (128 KiB, and refused whole rather than trimmed, because half a
+   * `ScreenResult` is still valid JSON and renders as a *complete* hazard screen with flags
+   * missing), or the write failed. So a consumer has exactly one thing to check, and the answer is
+   * always "fall back to `preview`".
+   *
+   * Optional here and required-with-a-default upstream, which is the one place this mirror is
+   * knowingly looser than the contract it mirrors: the field comes from an **unmerged** PR
+   * (8fqycwdt8v-oss/Chemclaw3 #157, branch `claude/tool-result-surface`), so every backend in
+   * service today omits it from the frame entirely. Absent and empty therefore have to read the
+   * same — and they do, because "not stored" is what both mean, and `isFetchableRef`
+   * (`src/chem/results.ts`) is the one predicate that decides it. That module is also the single
+   * place that knows the route and the response shape behind this handle; when the PR lands, this
+   * becomes required like its neighbours and nothing that reads it changes.
+   */
+  result_ref?: string;
 }
 
 export type ChemclawEvent =
@@ -439,6 +470,14 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         preview: asString(o.preview),
         note_ids: asStringArray(o.note_ids),
         numbers: asNumberArray(o.numbers),
+        // Carried only when the frame carried one — deliberately not the discipline the two lists
+        // above follow, and the difference is the whole reason each is written the way it is. An
+        // absent `note_ids` defaulted to `[]` because absent must not read as a wildcard to a
+        // grounding check; here absent and empty already mean one thing ("not stored — render the
+        // preview"), so there is no second reading to close off. And the field mirrors an unmerged
+        // PR: a frame from a backend that has never heard of it normalises to exactly the event it
+        // has always normalised to.
+        ...(typeof o.result_ref === 'string' ? { result_ref: o.result_ref } : {}),
       };
     case 'question':
       return {

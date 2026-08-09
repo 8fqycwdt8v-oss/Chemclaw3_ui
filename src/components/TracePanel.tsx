@@ -10,8 +10,11 @@
  * running rather than one whose result was withheld. Three states per row: running, returned,
  * failed.
  *
- * `arguments` and `result` are raw strings the backend truncates to 200 characters, so both are
- * displayed as-is rather than parsed as JSON.
+ * `arguments` is a raw string the backend truncates to 200 characters, so it is displayed as-is
+ * rather than parsed as JSON. The result used to be the same and no longer has to be: a returned
+ * row carries a `result_ref`, and expanding it fetches the full typed payload and renders a card
+ * (`./results/ResultCard.tsx`). The preview remains the fallback for every row that has no ref,
+ * whose fetch fails, or whose shape nothing cards — which is most of them, and is fine.
  */
 
 import { useState } from 'react';
@@ -20,6 +23,7 @@ import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
 import { methodFor } from '../chem/provenance.ts';
 import { JobResultCard } from './JobResultCard.tsx';
+import { ResultCard } from './results/ResultCard.tsx';
 
 /**
  * Icon per tool. An unknown tool falls back to a neutral wrench, so a gap here is cosmetic.
@@ -196,11 +200,11 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
           )}
           {entry.toolCall?.result !== undefined && (
             <div className="mt-1">
-              <p className="text-xs text-ink-muted">returned</p>
-              {/* Same truncation discipline as the arguments above; also never parsed. */}
-              <pre className="mt-1 overflow-x-auto rounded bg-surface-sunken p-2 font-mono text-xs">
-                {entry.toolCall.result}
-              </pre>
+              <ResultCard
+                tool={entry.toolCall.tool}
+                preview={entry.toolCall.result}
+                resultRef={entry.toolCall.resultRef}
+              />
               <ReturnedNumbers numbers={entry.toolCall.numbers ?? []} />
             </div>
           )}
@@ -290,8 +294,8 @@ export function TracePanel({ trace }: { trace: TraceEntry[] }): React.JSX.Elemen
           )}
         >
           <p className="text-xs text-ink-muted">
-            Tool calls the agent made, each with what it returned. Previews are truncated by the
-            service, so a long result is shown in part.
+            Tool calls the agent made, each with what it returned. What the service streams is a
+            truncated preview; a returned row can fetch its full result and render it.
           </p>
           {shown.map((entry) => (
             <Row key={entry.id} entry={entry} />

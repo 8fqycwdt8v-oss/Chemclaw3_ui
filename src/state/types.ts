@@ -90,6 +90,21 @@ export interface TraceEntry {
      * replaced later; nothing reads it yet.
      */
     noteIds?: string[];
+    /**
+     * The handle for this call's full, untruncated result — the third field split out of the
+     * preview, and the one that carries the result's *shape* rather than its ids or its figures.
+     *
+     * Not the result: a ref, which a row fetches only when a chemist expands it
+     * (`src/components/results/ResultCard.tsx`). Storing the payload here instead would put every
+     * result of every turn in the persisted store, which is the streaming budget's problem moved
+     * one layer down rather than solved.
+     *
+     * Empty or absent both mean "not stored", which is one meaning with three causes upstream, and
+     * a row in that state renders exactly what it rendered before this existed: the preview. That
+     * is also what a deployment on a backend without the field gets, since the field comes from an
+     * unmerged PR (`src/chem/results.ts`).
+     */
+    resultRef?: string;
   };
   toolFailure?: { tool: string; message: string };
   /**

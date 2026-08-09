@@ -63,8 +63,15 @@ export function QuestionPrompt({
   );
 }
 
-/** Yes/No controls plus whatever the decision produced — the shape both branches below render. */
-function DecisionControls({
+/**
+ * Yes/No controls plus whatever the decision produced.
+ *
+ * Exported for the approvals inbox, which answers the same holds from a different place. Shared
+ * rather than reimplemented, because the thing worth keeping identical is the confirmation copy:
+ * the two dialogs below are what make a decision deliberate, and a second inbox-flavoured wording
+ * of "this cannot be undone" is how one of them ends up softer than the other.
+ */
+export function DecisionControls({
   state,
   error,
   labels,

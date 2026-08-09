@@ -65,11 +65,16 @@ function useServerSessions(): 'idle' | 'degraded' {
           const next = { ...s.conversations };
           const ids: string[] = [];
           for (const summary of additions) {
-            const created = summary.created_at ? Date.parse(summary.created_at) : Date.now();
+            const created = Date.parse(summary.created_at) || Date.now();
             const conversation = {
               ...newConversation(),
               sessionId: summary.session_id,
-              title: summary.title?.trim() || 'Earlier conversation',
+              // A placeholder with a short life: the rehydrate effect reads this session's
+              // transcript as soon as the conversation is opened and renames it from the first
+              // thing the chemist actually asked. It used to be `summary.title?.trim() || …`,
+              // which looked like it was preferring a server-supplied name — the server has never
+              // sent one, so the guard was decoration in front of a constant.
+              title: 'Earlier conversation',
               createdAt: created,
               // Was left at Date.now() from newConversation(), so every conversation restored
               // from the server read "just now" — the one thing a timestamp exists to deny.

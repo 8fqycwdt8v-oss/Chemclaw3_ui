@@ -79,13 +79,50 @@ createServer(async (req, res) => {
 
   if (path === '/healthz' || path === '/readyz') return json(res, 200, { ok: true });
   if (path === '/sessions' && req.method === 'POST') return json(res, 200, { session_id: SID });
-  if (path === '/sessions' && req.method === 'GET') return json(res, 200, { sessions: [] });
+  // A bare array, which is what `list_sessions` returns. This used to answer `{sessions: []}`, so
+  // `remote.length` was undefined, `remote.filter` threw, and every browser test quietly ran
+  // against the sidebar's degraded branch — the fixture was testing the error path by accident.
+  if (path === '/sessions' && req.method === 'GET') return json(res, 200, []);
+  // One hold, always, and a decision route that records nothing. Constant rather than stateful on
+  // purpose: `fullyParallel` runs these specs against one fixture process, so a decision that
+  // emptied the queue would race every other spec's view of the inbox. What the browser test is
+  // for is the round trip — through the BFF whitelist, to the right path, with the right body —
+  // and the client's own state is what renders the outcome.
+  if (path === '/approvals' && req.method === 'GET') {
+    return json(res, 200, [
+      {
+        approval_id: 'approval-int-7',
+        question: 'Record that BrettPhos outperformed Xantphos in the Suzuki screen?',
+        requested_by: 'dev-principal',
+      },
+    ]);
+  }
+  if (path.startsWith('/approvals/') && path.endsWith('/decision') && req.method === 'POST') {
+    req.resume();
+    res.writeHead(204);
+    return res.end();
+  }
   if (path.endsWith('/messages') && req.method === 'GET') {
-    // A shared-link session has a transcript to pull back; everything else is empty.
+    // A shared-link session has a transcript to pull back; everything else is empty. Shaped as
+    // `TranscriptMessage`: `index` and `tool_calls` included, because what the agent *did* is
+    // half of what a reload has to restore, and a `result: null` call is the third outcome the
+    // panel has to render without claiming the call is still running.
     if (path.includes(SHARED_SID)) {
       return json(res, 200, [
-        { role: 'user', text: 'What did we decide about the ligand?' },
-        { role: 'assistant', text: 'BrettPhos, at 1.2 equiv base.' },
+        { index: 0, role: 'user', text: 'What did we decide about the ligand?', tool_calls: [] },
+        {
+          index: 1,
+          role: 'assistant',
+          text: 'BrettPhos, at 1.2 equiv base.',
+          tool_calls: [
+            {
+              tool: 'search_notes',
+              arguments: '{"query":"ligand selection"}',
+              result: 'Note eln-4471: BrettPhos chosen after the Xantphos run stalled.',
+            },
+            { tool: 'screen_hazards', arguments: '{"smiles":"CCO"}', result: null },
+          ],
+        },
       ]);
     }
     return json(res, 200, []);

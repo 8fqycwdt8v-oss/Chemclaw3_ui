@@ -18,6 +18,7 @@ import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { resetSession } from '../state/sendMessage.ts';
 import { SidebarBody } from './Sidebar.tsx';
+import { ApprovalsInbox } from './ApprovalsInbox.tsx';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 import { Badge } from '@/components/ui/badge';
@@ -111,6 +112,8 @@ export function TopBar({ onRetry }: { onRetry?: () => void }): React.JSX.Element
         )}
 
         <div className="ml-auto flex items-center gap-1">
+          {/* Before the theme toggle, because it is the only control here that can be urgent. */}
+          <ApprovalsInbox />
           <ThemeToggle />
 
           {auth.mode === 'msal' && !account && (

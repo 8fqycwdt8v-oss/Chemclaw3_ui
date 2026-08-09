@@ -1,10 +1,15 @@
 /**
  * Non-streaming calls to the Chemclaw service, through the BFF.
  *
- * Endpoints verified against 8fqycwdt8v-oss/Chemclaw3 @ d5ed9e3 (service/app.py). Two of them —
- * `GET /sessions` and `GET /sessions/{id}/messages` — are added by the companion backend change;
- * both degrade to an empty result rather than throwing, so this UI runs against a service that
- * does not have them yet.
+ * Endpoints verified against 8fqycwdt8v-oss/Chemclaw3 @ c46b004, reading
+ * `src/chemclaw/api/routes/*.py` and `src/chemclaw/api/schemas.py`. Every route this module calls
+ * now exists there: `GET /sessions`, `GET /sessions/{id}/messages`, `GET /approvals`,
+ * `GET /approvals/{id}` and `POST /approvals/{id}/decision` all landed after the note in ISSUES.md
+ * was written, which is why several of them are richer than the shapes this client used to expect.
+ *
+ * The 404-degradation on the two session reads is kept anyway. It is no longer "the backend has
+ * not built this": it is "this UI is deployed independently of the service and can meet an older
+ * one", which is a standing condition rather than a temporary gap.
  */
 
 import { config } from '../env.ts';
@@ -37,16 +42,54 @@ async function request<T>(path: string, getToken: TokenGetter, init: RequestInit
   return (await res.json()) as T;
 }
 
+/**
+ * One of the caller's sessions, as `GET /sessions` lists them.
+ *
+ * There is deliberately no `title` here, though this interface used to declare one. The service's
+ * `SessionSummary` is `{session_id, created_at}` and nothing else — a session is minted before
+ * anyone has said anything, so the server has no name for it at creation and never revisits the
+ * row. An optional field the server never sends is not forward-compatibility, it is a reader being
+ * told a value might arrive when it cannot; the sidebar's `summary.title?.trim() || 'Earlier
+ * conversation'` was really an unconditional constant with a plausible-looking guard in front.
+ * The title is recovered from the transcript instead — see `App.tsx`.
+ */
 export interface SessionSummary {
   session_id: string;
-  created_at?: string;
-  title?: string;
+  /** ISO-8601, from the durable ownership row. Not the last activity — see ISSUES.md. */
+  created_at: string;
+}
+
+/**
+ * One tool the agent invoked during a turn, as the stored transcript remembers it.
+ *
+ * `result` is `null` when the pairing is incomplete — a turn that died mid-call, or a call whose
+ * result row was pruned. That is a third state, not a failure and not a success: the call ran and
+ * how it ended was not recorded. Rendering it either way would claim something the store does not
+ * know, so it maps to `unresolved` rather than to `failed`.
+ */
+export interface TranscriptToolCall {
+  tool: string;
+  arguments: string;
+  result: string | null;
 }
 
 export interface TranscriptMessage {
   role: string;
   text: string;
-  created_at?: string;
+  /**
+   * Position in the stored transcript — a stable key without the wire contract exposing a row id.
+   * Optional only because an older service omits it; the current one always sends it.
+   */
+  index?: number;
+  /**
+   * What the agent *did* during this message, not only what it said.
+   *
+   * The service always held this (a MAF message carries its own `function_call` contents) and the
+   * transcript route used to flatten it away, so a reload turned every answer into bare prose and
+   * lost the whole trace. It is served now, and dropping it here would reproduce the same loss one
+   * layer further out. Optional for the same reason `index` is.
+   */
+  tool_calls?: TranscriptToolCall[];
 }
 
 export interface AttachmentSummary {
@@ -58,9 +101,20 @@ export interface AttachmentSummary {
   excerpt: string;
 }
 
+/**
+ * One durable Yes/No hold still awaiting a click, as `GET /approvals` lists them.
+ *
+ * This was an index signature over `unknown` while the endpoint was believed not to exist, which
+ * made every field a guess and the whole type unusable for rendering. The service's shape is
+ * three required strings, owner-scoped: a hold authorizes a knowledge write, so it is listed and
+ * answerable only by the chemist whose turn raised it.
+ */
 export interface PendingApproval {
-  approval_id?: string;
-  [key: string]: unknown;
+  approval_id: string;
+  /** What the hold is asking, already phrased for a human. */
+  question: string;
+  /** The Entra oid of the chemist whose turn raised it — always the caller, given the scoping. */
+  requested_by: string;
 }
 
 /** The plan a session is proposing, and the hash a decision on it must be bound to. */
@@ -158,8 +212,15 @@ export const api = {
     });
   },
 
-  /** Pending approvals. Degrades to `[]` like `listSessions` — the backend's approval workflow
-   *  has no HTTP surface yet (see ISSUES.md), so a 404 here is the expected answer, not a fault. */
+  /**
+   * The caller's open approval holds — the review queue.
+   *
+   * Still degrades to `[]` on a 404, but for a different reason than when this was written: the
+   * route exists, so a 404 now means an older service rather than an unbuilt one. It keeps
+   * throwing everything else, because the inbox has to be able to tell "no holds" from "we could
+   * not ask" — a queue that silently reads empty when the query failed is the one failure mode a
+   * queue of unsigned approvals must not have.
+   */
   async listApprovals(getToken: TokenGetter): Promise<PendingApproval[]> {
     try {
       return await request<PendingApproval[]>('/approvals', getToken);

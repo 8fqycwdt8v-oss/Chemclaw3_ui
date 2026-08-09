@@ -10,8 +10,11 @@
  * running rather than one whose result was withheld. Three states per row: running, returned,
  * failed.
  *
- * `arguments` and `result` are raw strings the backend truncates to 200 characters, so both are
- * displayed as-is rather than parsed as JSON.
+ * `arguments` and `result` are raw strings the backend truncates, so both are displayed as-is
+ * rather than parsed as JSON. No width is quoted here any more: the live stream truncates at
+ * `agent_audit_max_arg_chars` (200) and the stored transcript at its own, wider bound (400), so a
+ * reloaded row is legitimately longer than the same row was live. Naming one number made the
+ * other one a lie the moment rehydrated traces started rendering.
  *
  * The disclosure is a Radix Collapsible so the trigger actually reports `aria-expanded` and
  * `aria-controls`; the hand-rolled toggle it replaces announced nothing about what it controlled.
@@ -59,7 +62,10 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
       );
 
     case 'tool_call': {
-      const running = entry.toolCall?.result === undefined && !entry.toolCall?.failed;
+      const running =
+        entry.toolCall?.result === undefined &&
+        !entry.toolCall?.failed &&
+        !entry.toolCall?.unresolved;
       return (
         <div>
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
@@ -76,7 +82,7 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
                 />
                 arguments
               </summary>
-              {/* Raw, truncated to 200 chars server-side — never parsed as JSON. */}
+              {/* Raw, truncated server-side — never parsed as JSON. */}
               <Pre>{entry.toolCall.arguments}</Pre>
             </details>
           )}
@@ -95,6 +101,11 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
               <span aria-hidden className="size-1.5 animate-pulse rounded-full bg-brand" />
               running…
             </p>
+          )}
+          {/* Reached only by a reloaded transcript. Says the one true thing rather than picking
+              whichever of "running", "returned" or "failed" would look tidiest. */}
+          {entry.toolCall?.unresolved && (
+            <p className="mt-1 text-2xs text-ink-muted">outcome not recorded</p>
           )}
         </div>
       );

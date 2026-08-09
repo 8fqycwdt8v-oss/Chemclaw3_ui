@@ -47,8 +47,21 @@ export interface TraceEntry {
    * without it a failed call would read "running…" for the rest of the conversation. It carries
    * no message: the `tool_failed` row that follows is where the reason belongs, and saying it
    * twice in adjacent rows is not saying it better.
+   *
+   * `unresolved` is the fourth state, and only a *rehydrated* transcript can be in it. The stored
+   * transcript pairs each call with its result by `call_id`, and returns `result: null` when the
+   * pairing is incomplete — a turn that died mid-call, or a result row that was pruned. That is
+   * neither failure nor success: the call ran and how it ended was not recorded. Without this flag
+   * it would fall into the "neither field set" branch and animate "running…" forever inside a
+   * transcript that finished days ago, which is the exact false claim `failed` was added to stop.
    */
-  toolCall?: { tool: string; arguments: string; result?: string; failed?: boolean };
+  toolCall?: {
+    tool: string;
+    arguments: string;
+    result?: string;
+    failed?: boolean;
+    unresolved?: boolean;
+  };
   toolFailure?: { tool: string; message: string };
   job?: { jobId: string; kind?: string; summary?: JobSummary };
   question?: { question: string; options: string[] };

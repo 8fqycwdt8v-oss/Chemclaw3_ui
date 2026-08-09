@@ -46,11 +46,40 @@ test('an unknown conversation says so rather than redirecting', async ({ page })
   await expect(page).toHaveURL(/\/c\/[0-9a-f-]+$/);
 });
 
-test('a shared session link adopts the session and pulls its transcript', async ({ page }) => {
+test('a shared session link adopts the session and pulls its transcript', async ({
+  page,
+  isMobile,
+}) => {
   await page.goto(`/s/${SHARED_SID}`);
 
   await expect(page).toHaveURL(/\/c\/[0-9a-f-]+$/);
   await expect(page.getByText('BrettPhos, at 1.2 equiv base.')).toBeVisible();
+
+  // And it is named after what was asked in it. The service sends no title with a session — it
+  // mints one before anyone has spoken — so every restored conversation read "Earlier
+  // conversation" until the title was recovered from the transcript. Below `lg` the list lives in
+  // a drawer, so the assertion has to open it rather than assume a sidebar.
+  if (isMobile) await page.getByRole('button', { name: 'Conversations' }).click();
+  await expect(
+    page.getByRole('button', { name: /Actions for What did we decide about the ligand\?/ }),
+  ).toHaveCount(1);
+});
+
+test('a reloaded transcript restores what the agent did, not only what it said', async ({
+  page,
+}) => {
+  // The stored transcript carries each message's tool calls; this client used to discard them, so
+  // a reload rendered the prose and lost every step behind it.
+  await page.goto(`/s/${SHARED_SID}`);
+  await expect(page.getByText('BrettPhos, at 1.2 equiv base.')).toBeVisible();
+
+  await page.getByRole('button', { name: /Show the agent’s work \(2 steps\)/ }).click();
+  await expect(page.getByText('Note eln-4471')).toBeVisible();
+
+  // The second call came back with `result: null` — the service could not pair it. That is neither
+  // a failure nor a call still in flight, and a finished transcript must not animate "running…".
+  await expect(page.getByText('outcome not recorded')).toBeVisible();
+  await expect(page.getByText('running…')).toHaveCount(0);
 });
 
 test('a malformed share link is explained, not redirected', async ({ page }) => {

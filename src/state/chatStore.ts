@@ -19,6 +19,7 @@ import type {
   ComposerLock,
   Conversation,
   TraceEntry,
+  UserMessage,
 } from './types.ts';
 
 /**
@@ -148,6 +149,9 @@ const titleFrom = (text: string): string => {
   if (!trimmed) return 'New conversation';
   return trimmed.length > TITLE_MAX ? `${trimmed.slice(0, TITLE_MAX)}…` : trimmed;
 };
+
+/** Narrowing predicate, so `find` hands back a `UserMessage` rather than a `ChatMessage`. */
+const isUser = (m: ChatMessage): m is UserMessage => m.role === 'user';
 
 export function newConversation(): Conversation {
   const now = Date.now();
@@ -437,10 +441,27 @@ export const useChatStore = create<ChatState>()(
         set((s) => {
           const conversation = s.conversations[conversationId];
           if (!conversation || messages.length === 0) return {};
+          // Name it from what was actually said.
+          //
+          // `GET /sessions` returns `{session_id, created_at}` — no title, because the server mints
+          // a session before anyone has spoken and never revisits the row. So every conversation
+          // restored from another device arrived in the sidebar as "Earlier conversation", and a
+          // chemist with a week of history got a list of identical rows sorted by a date, which is
+          // a worse list than no list.
+          //
+          // Only when this conversation is empty, which is not a formality: it is the same
+          // precondition the rehydrate effect runs under (`messageCount === 0`), so a title being
+          // replaced here can only ever be the placeholder from `newConversation()` or the
+          // sidebar's stub. A conversation someone has typed into keeps the name it earned.
+          const first = conversation.messages.length === 0 ? messages.find(isUser) : undefined;
           return {
             conversations: {
               ...s.conversations,
-              [conversationId]: { ...conversation, messages },
+              [conversationId]: {
+                ...conversation,
+                ...(first ? { title: titleFrom(first.text) } : {}),
+                messages,
+              },
             },
           };
         });

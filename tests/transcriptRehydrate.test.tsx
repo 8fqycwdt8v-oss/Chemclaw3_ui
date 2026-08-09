@@ -18,14 +18,30 @@ import { stubFetch } from './helpers.ts';
 
 const SID = 'a'.repeat(32);
 
+/** Exactly the shape `GET /sessions/{id}/messages` returns — index, text and what it did. */
 const TRANSCRIPT = [
-  { role: 'user', text: 'What did we decide about the ligand?' },
-  { role: 'assistant', text: 'BrettPhos, at 1.2 equiv base.' },
+  { index: 0, role: 'user', text: 'What did we decide about the ligand?', tool_calls: [] },
+  {
+    index: 1,
+    role: 'assistant',
+    text: 'BrettPhos, at 1.2 equiv base.',
+    tool_calls: [
+      { tool: 'search_notes', arguments: '{"q":"ligand"}', result: 'Note eln-4471.' },
+      { tool: 'screen_hazards', arguments: '{"smiles":"CCO"}', result: null },
+    ],
+  },
 ];
 
 /** A conversation with a session and no messages — the shape both cases share. */
 const seed = (sessionOrigin: 'local' | 'server') => {
-  const conversation = { ...newConversation(), sessionId: SID, sessionOrigin };
+  const conversation = {
+    ...newConversation(),
+    sessionId: SID,
+    sessionOrigin,
+    // What the sidebar's stub carries for a session it learned about from `GET /sessions`, which
+    // returns no title of any kind.
+    title: sessionOrigin === 'server' ? 'Earlier conversation' : 'New conversation',
+  };
   useChatStore.setState({
     conversations: { [conversation.id]: conversation },
     order: [conversation.id],
@@ -120,5 +136,57 @@ describe('transcript rehydrate', () => {
 
     await waitFor(() => expect(useChatStore.getState().banner?.kind).toBe('warn'));
     expect(useChatStore.getState().banner?.action).toBe('retry');
+  });
+
+  it('restores what the agent did, not only what it said', async () => {
+    // The service persists each message's tool calls and serves them back; this client used to
+    // hardcode `trace: []`, so a reload rendered the prose and lost every step behind it.
+    const stub = stubFetch((url) =>
+      url.includes('/messages')
+        ? new Response(JSON.stringify(TRANSCRIPT), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        : new Response(JSON.stringify({ detail: 'not found' }), { status: 404 }),
+    );
+    restore = stub.restore;
+
+    const id = seed('server');
+    renderShell(id);
+
+    await screen.findByText('BrettPhos, at 1.2 equiv base.');
+    const conversation = useChatStore.getState().conversations[id];
+    const answer = conversation?.messages.find((m) => m.role === 'assistant');
+    expect(answer?.role === 'assistant' ? answer.trace : []).toHaveLength(2);
+
+    // And the disclosure that fronts it counts them, so the trace is reachable and not merely
+    // present in the store.
+    expect(
+      await screen.findByRole('button', { name: /Show the agent’s work \(2 steps\)/ }),
+    ).toBeTruthy();
+  });
+
+  it('names a restored conversation after what was actually asked in it', async () => {
+    // `GET /sessions` is `{session_id, created_at}` — no title, because the server mints a session
+    // before anyone has spoken. Every conversation restored from another device therefore arrived
+    // as "Earlier conversation", and a week of history was a list of identical rows.
+    const stub = stubFetch((url) =>
+      url.includes('/messages')
+        ? new Response(JSON.stringify(TRANSCRIPT), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        : new Response(JSON.stringify({ detail: 'not found' }), { status: 404 }),
+    );
+    restore = stub.restore;
+
+    const id = seed('server');
+    renderShell(id);
+
+    await waitFor(() =>
+      expect(useChatStore.getState().conversations[id]?.title).toBe(
+        'What did we decide about the ligand?',
+      ),
+    );
   });
 });

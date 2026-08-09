@@ -19,7 +19,7 @@ import { TopBar } from './components/TopBar.tsx';
 import { MessageList } from './components/MessageList.tsx';
 import { JobFeed } from './components/JobFeed.tsx';
 import { Composer } from './components/Composer.tsx';
-import type { ChatMessage } from './state/types.ts';
+import { transcriptToMessages } from './state/transcript.ts';
 
 function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
   return (
@@ -83,31 +83,8 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
         return;
       }
       if (cancelled || remote.length === 0) return;
-      const messages: ChatMessage[] = remote
-        .filter((m) => m.text?.trim())
-        .map((m, i) =>
-          m.role === 'user'
-            ? { id: `h${i}`, role: 'user' as const, text: m.text, at: Date.now() }
-            : {
-                id: `h${i}`,
-                role: 'assistant' as const,
-                at: Date.now(),
-                status: 'done' as const,
-                streamedText: '',
-                finalText: m.text,
-                confidence: null,
-                unsupportedClaims: [],
-                reviewRequired: false,
-                // Empty on a rehydrated transcript, and honestly so: the backend persists the
-                // messages, not which connectors happened to be down when each was produced.
-                degradedConnectors: [],
-                // Same reason: a rehydrated message is finished, so it is not waiting on anything.
-                queued: false,
-                trace: [],
-                latestPlan: null,
-                error: null,
-              },
-        );
+      const messages = transcriptToMessages(remote);
+      if (messages.length === 0) return;
       useChatStore.getState().hydrateTranscript(conversationId, messages);
     })();
     return () => {

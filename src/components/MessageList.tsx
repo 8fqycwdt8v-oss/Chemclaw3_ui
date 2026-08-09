@@ -170,7 +170,7 @@ const Bubble = memo(function Bubble({
       tabIndex={-1}
       className={cn(
         'rounded-2xl rounded-bl-md border border-border-subtle bg-surface-raised px-4 py-3.5 shadow-xs',
-        'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
+        'focus-ring',
       )}
     >
       <AssistantBubble message={message} sessionId={sessionId} />

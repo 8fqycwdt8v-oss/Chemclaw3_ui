@@ -49,12 +49,15 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   const text = useChatStore((s) => s.drafts[conversationId] ?? '');
   const setDraft = useChatStore((s) => s.setDraft);
 
-  // A soft keyboard cannot produce Shift+Enter, so Enter has to mean "newline" there.
-  const [coarsePointer, setCoarsePointer] = useState(false);
+  // A soft keyboard cannot produce Shift+Enter, so Enter has to mean "newline" there. Read once
+  // at mount rather than set from inside the effect: the effect version rendered twice, and the
+  // first render had the wrong key behaviour.
+  const [coarsePointer, setCoarsePointer] = useState(
+    () => window.matchMedia?.('(pointer: coarse)').matches ?? false,
+  );
   useEffect(() => {
     const query = window.matchMedia?.('(pointer: coarse)');
     if (!query) return;
-    setCoarsePointer(query.matches);
     const onChange = (e: MediaQueryListEvent): void => setCoarsePointer(e.matches);
     query.addEventListener('change', onChange);
     return () => query.removeEventListener('change', onChange);
@@ -68,13 +71,18 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   // We use a ref so the handler always sees the current blocked/dryRun/conversationId values
   // without being recreated on every render.
   const autoSendRef = useRef<((message: string) => void) | null>(null);
-  autoSendRef.current = (message: string) => {
-    const isBlocked =
-      useChatStore.getState().composerLock !== false || useChatStore.getState().streaming !== null;
-    if (isBlocked || message.length > MAX_MESSAGE_CHARS || !message.trim()) return;
-    setDraft(conversationId, '');
-    void sendMessage({ conversationId, text: message, dryRun, auth });
-  };
+  // Refreshed after every commit rather than assigned during render: a ref write in the render
+  // body is a side effect, and under StrictMode's double render it happens twice.
+  useEffect(() => {
+    autoSendRef.current = (message: string) => {
+      const isBlocked =
+        useChatStore.getState().composerLock !== false ||
+        useChatStore.getState().streaming !== null;
+      if (isBlocked || message.length > MAX_MESSAGE_CHARS || !message.trim()) return;
+      setDraft(conversationId, '');
+      void sendMessage({ conversationId, text: message, dryRun, auth });
+    };
+  });
 
   useEffect(() => {
     const onPrefill = (event: Event): void => {
@@ -291,7 +299,9 @@ export function Composer({ conversationId }: { conversationId: string }): React.
               </span>
             ) : (
               <span className="hidden sm:inline">
-                {coarsePointer ? 'Tap Send to submit' : 'Enter to send · Shift+Enter for a new line'}
+                {coarsePointer
+                  ? 'Tap Send to submit'
+                  : 'Enter to send · Shift+Enter for a new line'}
               </span>
             )}
           </span>

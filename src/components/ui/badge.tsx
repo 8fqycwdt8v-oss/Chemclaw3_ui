@@ -33,12 +33,16 @@ export const badgeVariants = cva(
 );
 
 export interface BadgeProps
-  extends React.HTMLAttributes<HTMLSpanElement>,
-    VariantProps<typeof badgeVariants> {
+  extends React.HTMLAttributes<HTMLSpanElement>, VariantProps<typeof badgeVariants> {
   asChild?: boolean;
 }
 
-export function Badge({ className, tone, asChild = false, ...props }: BadgeProps): React.JSX.Element {
+export function Badge({
+  className,
+  tone,
+  asChild = false,
+  ...props
+}: BadgeProps): React.JSX.Element {
   const Comp = asChild ? Slot.Root : 'span';
   return <Comp data-slot="badge" className={cn(badgeVariants({ tone }), className)} {...props} />;
 }

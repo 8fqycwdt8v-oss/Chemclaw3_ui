@@ -15,12 +15,6 @@ const num = (name: string, fallback: number): number => {
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
-const bool = (name: string, fallback = false): boolean => {
-  const raw = process.env[name]?.trim().toLowerCase();
-  if (raw === undefined || raw === '') return fallback;
-  return raw === 'true' || raw === '1' || raw === 'yes';
-};
-
 const authMode: AuthMode = str('AUTH_MODE', 'dev') === 'msal' ? 'msal' : 'dev';
 
 /** Entra's login host, needed in the CSP when MSAL is on — see `csp` below. */

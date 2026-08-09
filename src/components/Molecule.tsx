@@ -87,13 +87,15 @@ export function Molecule({ smiles, className, maxWidth = 320 }: MoleculeProps): 
 
   useEffect(() => {
     let cancelled = false;
-    setFailed(false);
 
     loadDrawer()
       .then(({ parse, drawer }) => {
         if (cancelled || !svgRef.current) return;
         const tree = parse(smiles);
         drawer.draw(tree, svgRef.current, theme);
+        // Cleared on success rather than at the top of the effect: resetting synchronously made
+        // a re-render of an already-failed structure flash its fallback away and back.
+        setFailed(false);
       })
       .catch(() => {
         // An invalid or exotic SMILES must never leave a blank box — we render the raw string
@@ -160,7 +162,7 @@ export function InlineSmiles({ smiles }: { smiles: string }): React.JSX.Element 
           className={cn(
             'tap-target rounded-sm border border-border-subtle px-1 text-[0.7em] text-ink-muted',
             'transition-colors hover:bg-surface-sunken hover:text-ink',
-            'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
+            'focus-ring',
           )}
         >
           {open ? 'hide' : '⌬'}

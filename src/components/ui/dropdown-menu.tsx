@@ -8,7 +8,6 @@ import { cn } from '@/lib/utils';
 
 export const DropdownMenu = M.Root;
 export const DropdownMenuTrigger = M.Trigger;
-export const DropdownMenuGroup = M.Group;
 
 export function DropdownMenuContent({
   className,
@@ -56,7 +55,12 @@ export function DropdownMenuLabel({
   className,
   ...props
 }: React.ComponentProps<typeof M.Label>): React.JSX.Element {
-  return <M.Label className={cn('px-2 py-1.5 text-xs font-medium text-ink-subtle', className)} {...props} />;
+  return (
+    <M.Label
+      className={cn('px-2 py-1.5 text-xs font-medium text-ink-subtle', className)}
+      {...props}
+    />
+  );
 }
 
 export function DropdownMenuSeparator({

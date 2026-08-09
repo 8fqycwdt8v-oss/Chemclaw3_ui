@@ -10,7 +10,6 @@ import { cn } from '@/lib/utils';
 
 export const Sheet = D.Root;
 export const SheetTrigger = D.Trigger;
-export const SheetClose = D.Close;
 
 const SIDE = {
   left: [
@@ -65,7 +64,7 @@ export function SheetContent({
           aria-label="Close"
           className={cn(
             'tap-target absolute top-3 right-3 rounded-sm text-ink-muted transition-colors',
-            'hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
+            'hover:text-ink focus-ring',
           )}
         >
           <X className="size-4" />

@@ -21,6 +21,14 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # exhaustive-deps above all: a stale closure in an effect fails intermittently, which is the
+      # worst way for a bug to fail and the hardest to catch in review.
+      - name: Lint
+        run: npm run lint
+
+      - name: Format
+        run: npm run format:check
+
       - name: Unit tests
         run: npm test
 

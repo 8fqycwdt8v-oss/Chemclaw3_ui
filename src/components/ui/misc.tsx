@@ -1,42 +1,16 @@
 /**
- * The small primitives — Popover, Collapsible, Separator, Skeleton, Switch, Label.
+ * The small primitives — Collapsible, Skeleton, Switch, Label.
  *
- * Grouped in one file rather than six: each is a handful of lines, and the registry's
+ * Grouped in one file rather than four: each is a handful of lines, and the registry's
  * one-file-per-primitive layout only pays off when a CLI is writing them.
+ *
+ * Kept deliberately short of a component library: a primitive earns its place here by having a
+ * caller. Popover, Separator and a full Dialog were written during the rebuild, went unused, and
+ * were deleted rather than left as furniture.
  */
 
-import { Collapsible as C, Label as L, Popover as P, Separator as S, Switch as W } from 'radix-ui';
+import { Collapsible as C, Label as L, Switch as W } from 'radix-ui';
 import { cn } from '@/lib/utils';
-
-/* ── Popover ─────────────────────────────────────────────────────────────── */
-
-export const Popover = P.Root;
-export const PopoverTrigger = P.Trigger;
-export const PopoverAnchor = P.Anchor;
-
-export function PopoverContent({
-  className,
-  align = 'center',
-  sideOffset = 6,
-  ...props
-}: React.ComponentProps<typeof P.Content>): React.JSX.Element {
-  return (
-    <P.Portal>
-      <P.Content
-        data-slot="popover-content"
-        align={align}
-        sideOffset={sideOffset}
-        className={cn(
-          'z-50 w-72 rounded-lg border border-border-subtle bg-surface-overlay p-3 shadow-md outline-none',
-          'data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95',
-          'data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95',
-          className,
-        )}
-        {...props}
-      />
-    </P.Portal>
-  );
-}
 
 /* ── Collapsible ─────────────────────────────────────────────────────────────
    Gives the trace panel `aria-expanded` and `aria-controls` for free — the hand-rolled
@@ -45,28 +19,6 @@ export function PopoverContent({
 export const Collapsible = C.Root;
 export const CollapsibleTrigger = C.Trigger;
 export const CollapsibleContent = C.Content;
-
-/* ── Separator ───────────────────────────────────────────────────────────── */
-
-export function Separator({
-  className,
-  orientation = 'horizontal',
-  decorative = true,
-  ...props
-}: React.ComponentProps<typeof S.Root>): React.JSX.Element {
-  return (
-    <S.Root
-      decorative={decorative}
-      orientation={orientation}
-      className={cn(
-        'shrink-0 bg-border-subtle',
-        orientation === 'horizontal' ? 'h-px w-full' : 'h-full w-px',
-        className,
-      )}
-      {...props}
-    />
-  );
-}
 
 /* ── Skeleton ────────────────────────────────────────────────────────────────
    Reserves the space its content will occupy. The point is no layout shift when the real
@@ -86,7 +38,10 @@ export function Skeleton({ className, ...props }: React.ComponentProps<'div'>): 
    Replaces a bare <input type="checkbox">, which rendered as a light-mode control on a dark
    surface until `color-scheme` was declared, and offered no focus styling at all. */
 
-export function Switch({ className, ...props }: React.ComponentProps<typeof W.Root>): React.JSX.Element {
+export function Switch({
+  className,
+  ...props
+}: React.ComponentProps<typeof W.Root>): React.JSX.Element {
   return (
     <W.Root
       data-slot="switch"
@@ -96,7 +51,7 @@ export function Switch({ className, ...props }: React.ComponentProps<typeof W.Ro
         // switch by — so it has to clear 3:1 against the surface (WCAG 2.2 SC 1.4.11).
         // `border-strong` is a divider colour and does not; `ink-subtle` does.
         'data-[state=checked]:bg-brand data-[state=unchecked]:bg-ink-subtle',
-        'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
+        'focus-ring',
         'disabled:cursor-not-allowed disabled:opacity-50',
         className,
       )}
@@ -114,7 +69,10 @@ export function Switch({ className, ...props }: React.ComponentProps<typeof W.Ro
 
 /* ── Label ───────────────────────────────────────────────────────────────── */
 
-export function Label({ className, ...props }: React.ComponentProps<typeof L.Root>): React.JSX.Element {
+export function Label({
+  className,
+  ...props
+}: React.ComponentProps<typeof L.Root>): React.JSX.Element {
   return (
     <L.Root
       data-slot="label"

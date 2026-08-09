@@ -12,11 +12,7 @@ import { ApiError, errorFromStatus, readDetail } from './errors.ts';
 
 export type TokenGetter = () => Promise<string | null>;
 
-async function request<T>(
-  path: string,
-  getToken: TokenGetter,
-  init: RequestInit = {},
-): Promise<T> {
+async function request<T>(path: string, getToken: TokenGetter, init: RequestInit = {}): Promise<T> {
   const token = await getToken();
   let res: Response;
   try {

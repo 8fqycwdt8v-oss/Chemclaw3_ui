@@ -108,7 +108,7 @@ function ConversationRow({
         aria-current={active ? 'page' : undefined}
         className={cn(
           'w-full rounded-lg px-2.5 py-2 pr-9 text-left transition-colors',
-          'focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
+          'focus-ring',
           active ? 'bg-surface-raised shadow-2xs' : 'hover:bg-surface-raised/60',
         )}
       >

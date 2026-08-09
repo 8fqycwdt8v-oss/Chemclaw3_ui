@@ -42,7 +42,9 @@ export function JobResultCard({
       {smiles && <Molecule smiles={smiles} className="my-1" />}
 
       {energy !== null && (
-        <p className="mt-2 font-mono text-2xs tabular-nums text-ink-muted">{formatEnergy(energy)}</p>
+        <p className="mt-2 font-mono text-2xs tabular-nums text-ink-muted">
+          {formatEnergy(energy)}
+        </p>
       )}
     </>
   );

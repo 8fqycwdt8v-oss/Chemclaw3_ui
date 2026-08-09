@@ -48,9 +48,9 @@ beforeEach(() => {
 
 describe('normalizeEvent', () => {
   it('accepts tool_result', () => {
-    expect(normalizeEvent({ type: 'tool_result', tool: 'predict_pka', preview: 'pKa 9.2' })).toEqual(
-      { type: 'tool_result', tool: 'predict_pka', preview: 'pKa 9.2' },
-    );
+    expect(
+      normalizeEvent({ type: 'tool_result', tool: 'predict_pka', preview: 'pKa 9.2' }),
+    ).toEqual({ type: 'tool_result', tool: 'predict_pka', preview: 'pKa 9.2' });
   });
 
   it('coerces a malformed frame rather than dropping the event', () => {
@@ -67,7 +67,11 @@ describe('tool_result in the trace', () => {
   it('completes the call it answers instead of adding a row', () => {
     const { cid, mid } = startTurn();
     const store = useChatStore.getState();
-    store.applyEvent(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: '{"s":"CCO"}' });
+    store.applyEvent(cid, mid, {
+      type: 'tool_call',
+      tool: 'predict_pka',
+      arguments: '{"s":"CCO"}',
+    });
     store.applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'pKa 15.9' });
 
     const trace = assistantOf(cid, mid).trace;

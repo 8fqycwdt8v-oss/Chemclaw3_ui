@@ -109,9 +109,7 @@ describe('plan approval', () => {
     // The two cases share a card and nothing else: a hold is answered by its own id.
     const getPlan = vi.spyOn(api, 'getPlan');
     const decideApproval = vi.spyOn(api, 'decideApproval').mockResolvedValue();
-    render(
-      <ApprovalPrompt prompt="Save this note?" approvalId="approval-q-42" sessionId={SID} />,
-    );
+    render(<ApprovalPrompt prompt="Save this note?" approvalId="approval-q-42" sessionId={SID} />);
 
     await decideVia(/^approve$/i);
 

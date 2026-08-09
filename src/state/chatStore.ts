@@ -505,7 +505,8 @@ export const useChatStore = create<ChatState>()(
       migrate: (persisted, version) => {
         if (version >= 2) return persisted as PersistedState;
         const state = persisted as Partial<PersistedState> | undefined;
-        if (!state?.conversations || !state.order) return { conversations: {}, order: [], activeId: null };
+        if (!state?.conversations || !state.order)
+          return { conversations: {}, order: [], activeId: null };
 
         // A message left mid-stream by a build that predates the partialize guard would otherwise
         // rehydrate as 'streaming' and spin forever — there is no resume endpoint.
@@ -525,7 +526,8 @@ export const useChatStore = create<ChatState>()(
         return {
           conversations,
           order,
-          activeId: state.activeId && conversations[state.activeId] ? state.activeId : (order[0] ?? null),
+          activeId:
+            state.activeId && conversations[state.activeId] ? state.activeId : (order[0] ?? null),
         };
       },
 

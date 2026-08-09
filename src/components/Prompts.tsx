@@ -138,23 +138,24 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
   const { auth } = useAuth();
   const [plan, setPlan] = useState<{ hash: string; todos: string[] } | null>(null);
   // `unavailable` is the older-service path: no plan route, so the composer fallback stands in.
+  // Derived from the session at mount: with no session there is no plan route to read, and
+  // flipping to 'unavailable' from inside the effect rendered a spinner for one frame first.
   const [state, setState] = useState<
     'loading' | 'idle' | 'sending' | 'approved' | 'rejected' | 'failed' | 'unavailable'
-  >('loading');
+  >(sessionId ? 'loading' : 'unavailable');
   const [error, setError] = useState<string | null>(null);
 
   // Through a ref, so the read below depends on the session alone. `useAuth()` hands back a fresh
   // object on every render, and an effect that listed it as a dependency re-read the plan on each
   // state change — five GETs for one card, and each state update triggered another.
   const authRef = useRef(auth);
-  authRef.current = auth;
+  useEffect(() => {
+    authRef.current = auth;
+  });
   const token = useCallback((): Promise<string | null> => authRef.current.getAccessToken(), []);
 
   useEffect(() => {
-    if (!sessionId) {
-      setState('unavailable');
-      return;
-    }
+    if (!sessionId) return;
     let live = true;
     void (async () => {
       try {

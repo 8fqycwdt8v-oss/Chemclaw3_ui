@@ -26,7 +26,7 @@ export const buttonVariants = cva(
   [
     'inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap',
     'rounded-md font-medium transition-[color,background-color,border-color,box-shadow] duration-150',
-    'outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
+    'outline-none focus-ring',
     'disabled:pointer-events-none disabled:border-transparent disabled:bg-surface-sunken',
     'disabled:text-ink-subtle disabled:shadow-none',
     "[&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4",
@@ -60,8 +60,7 @@ export const buttonVariants = cva(
 );
 
 export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof buttonVariants> {
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>, VariantProps<typeof buttonVariants> {
   asChild?: boolean;
 }
 

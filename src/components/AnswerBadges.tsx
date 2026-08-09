@@ -100,7 +100,7 @@ export function AnswerFooter({ message }: { message: AssistantMessage }): React.
           <summary
             className={cn(
               'flex cursor-pointer list-none items-center gap-1 text-xs font-medium text-danger-ink',
-              'tap-target rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring',
+              'tap-target rounded-sm focus-ring',
             )}
           >
             <ChevronRight

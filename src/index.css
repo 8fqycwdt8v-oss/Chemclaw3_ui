@@ -45,7 +45,7 @@
 
   --ink: oklch(24% 0.012 75);
   --ink-muted: oklch(48% 0.012 75);
-  --ink-subtle: oklch(60% 0.010 75);
+  --ink-subtle: oklch(60% 0.01 75);
 
   --line: oklch(90.5% 0.006 85);
   --line-strong: oklch(84% 0.008 85);
@@ -53,7 +53,7 @@
   --brand: oklch(52% 0.135 215);
   --brand-fg: oklch(99% 0.005 215);
   --brand-soft: oklch(95.5% 0.028 215);
-  --brand-ink: oklch(40% 0.120 215);
+  --brand-ink: oklch(40% 0.12 215);
 
   --ok: oklch(47% 0.115 150);
   --ok-fg: oklch(99% 0 0);
@@ -62,12 +62,12 @@
 
   --warn: oklch(55% 0.125 68);
   --warn-fg: oklch(99% 0 0);
-  --warn-soft: oklch(96% 0.040 68);
+  --warn-soft: oklch(96% 0.04 68);
   --warn-ink: oklch(42% 0.105 60);
 
   --danger: oklch(51% 0.19 27);
   --danger-fg: oklch(99% 0 0);
-  --danger-soft: oklch(96% 0.030 27);
+  --danger-soft: oklch(96% 0.03 27);
   --danger-ink: oklch(42% 0.165 27);
 
   --ring: oklch(52% 0.135 215);
@@ -80,34 +80,34 @@
   --surface: oklch(20.5% 0.008 80);
   --surface-raised: oklch(24.5% 0.009 80);
   --surface-sunken: oklch(17.5% 0.008 80);
-  --surface-overlay: oklch(26% 0.010 80);
+  --surface-overlay: oklch(26% 0.01 80);
 
   --ink: oklch(95% 0.005 85);
-  --ink-muted: oklch(74% 0.010 85);
-  --ink-subtle: oklch(63% 0.010 85);
+  --ink-muted: oklch(74% 0.01 85);
+  --ink-subtle: oklch(63% 0.01 85);
 
-  --line: oklch(31% 0.010 80);
+  --line: oklch(31% 0.01 80);
   --line-strong: oklch(41% 0.012 80);
 
   --brand: oklch(74% 0.115 215);
-  --brand-fg: oklch(19% 0.030 215);
+  --brand-fg: oklch(19% 0.03 215);
   --brand-soft: oklch(30% 0.045 215);
-  --brand-ink: oklch(85% 0.090 215);
+  --brand-ink: oklch(85% 0.09 215);
 
   --ok: oklch(76% 0.125 150);
-  --ok-fg: oklch(18% 0.030 150);
+  --ok-fg: oklch(18% 0.03 150);
   --ok-soft: oklch(28% 0.045 150);
-  --ok-ink: oklch(86% 0.100 150);
+  --ok-ink: oklch(86% 0.1 150);
 
   --warn: oklch(80% 0.125 68);
-  --warn-fg: oklch(20% 0.040 60);
-  --warn-soft: oklch(31% 0.050 60);
-  --warn-ink: oklch(88% 0.100 68);
+  --warn-fg: oklch(20% 0.04 60);
+  --warn-soft: oklch(31% 0.05 60);
+  --warn-ink: oklch(88% 0.1 68);
 
   --danger: oklch(71% 0.155 27);
-  --danger-fg: oklch(18% 0.040 27);
+  --danger-fg: oklch(18% 0.04 27);
   --danger-soft: oklch(29% 0.055 27);
-  --danger-ink: oklch(86% 0.110 27);
+  --danger-ink: oklch(86% 0.11 27);
 
   --ring: oklch(74% 0.115 215);
 }
@@ -290,9 +290,11 @@
 
 /* ── Utilities ───────────────────────────────────────────────────────────── */
 
-/* One focus recipe for the whole app. Previously there was exactly one focus
-   style anywhere, and the composer textarea set `outline-none` with nothing in
-   its place — a keyboard user got no indication of where they were. */
+/* THE focus recipe. One definition, used by the Button base and by every control that is not a
+   Button, so there is exactly one answer to "what does focus look like here".
+
+   Before this there was exactly one focus style in the whole app, and the composer textarea — the
+   primary input — set `outline-none` with nothing in its place. */
 @utility focus-ring {
   &:focus-visible {
     outline: 2px solid var(--color-ring);

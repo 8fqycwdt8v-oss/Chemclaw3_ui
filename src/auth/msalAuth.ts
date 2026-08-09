@@ -17,11 +17,7 @@
  *     `extra="forbid"`, so exporting one aborts its startup. The SPA client id lives only here.
  */
 
-import type {
-  AccountInfo,
-  Configuration,
-  IPublicClientApplication,
-} from '@azure/msal-browser';
+import type { AccountInfo, Configuration, IPublicClientApplication } from '@azure/msal-browser';
 import { config } from '../env.ts';
 import type { AuthAccount, AuthProvider } from './types.ts';
 
@@ -62,9 +58,8 @@ const REAUTH_KEY = 'chemclaw.lastReauth';
 const REAUTH_COOLDOWN_MS = 60_000;
 
 export async function createMsalAuth(): Promise<AuthProvider> {
-  const { PublicClientApplication, InteractionRequiredAuthError } = await import(
-    '@azure/msal-browser'
-  );
+  const { PublicClientApplication, InteractionRequiredAuthError } =
+    await import('@azure/msal-browser');
 
   const pca: IPublicClientApplication = new PublicClientApplication(buildMsalConfig());
   await pca.initialize();

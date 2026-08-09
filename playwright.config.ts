@@ -35,7 +35,10 @@ export default defineConfig({
   },
 
   projects: [
-    { name: 'desktop', use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 860 } } },
+    {
+      name: 'desktop',
+      use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 860 } },
+    },
     { name: 'mobile', use: { ...devices['Pixel 7'] } },
   ],
 

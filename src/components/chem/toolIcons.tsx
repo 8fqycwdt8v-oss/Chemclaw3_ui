@@ -45,7 +45,23 @@ const TOOL_ICON: Record<string, LucideIcon> = {
   substructure_matches: ScanSearch,
 };
 
-/** Unknown tools get a generic icon rather than nothing — the row still needs its left rail. */
-export function toolIcon(tool: string | undefined): LucideIcon {
-  return (tool && TOOL_ICON[tool]) || Wrench;
+/**
+ * A component rather than a `toolIcon()` that hands back one to render.
+ *
+ * Returning a component from a call made during render is indistinguishable, to React and to the
+ * linter, from *defining* one there — which would remount and lose state on every render. The
+ * lookup here is a constant map so the identity is stable either way, but the shape that says so
+ * is a component with a prop.
+ *
+ * Unknown tools get a generic icon rather than nothing: the row still needs its left rail.
+ */
+export function ToolIcon({
+  tool,
+  className,
+}: {
+  tool: string | undefined;
+  className?: string;
+}): React.JSX.Element {
+  const Icon: LucideIcon = (tool && TOOL_ICON[tool]) || Wrench;
+  return <Icon aria-hidden className={className} />;
 }

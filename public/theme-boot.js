@@ -23,7 +23,7 @@
           ? 'dark'
           : 'light'
         : choice;
-  } catch (err) {
+  } catch {
     // Private mode, disabled storage, a hostile embedder — any of these is survivable.
     // A wrong-but-readable theme beats an unstyled page.
     root.dataset.theme = 'light';

@@ -19,12 +19,13 @@
  * and a second collapsed control would make that selection ambiguous.
  */
 
+import { memo } from 'react';
 import { ChevronRight, CircleX } from 'lucide-react';
 import type { TraceEntry } from '../state/types.ts';
 import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
 import { JobResultCard } from './JobResultCard.tsx';
-import { toolIcon } from '@/components/chem/toolIcons';
+import { ToolIcon } from '@/components/chem/toolIcons';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/misc';
@@ -58,18 +59,17 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
       );
 
     case 'tool_call': {
-      const Icon = toolIcon(entry.toolCall?.tool);
       const running = entry.toolCall?.result === undefined && !entry.toolCall?.failed;
       return (
         <div>
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-            <Icon aria-hidden className="size-3.5 shrink-0 text-ink-subtle" />
+            <ToolIcon tool={entry.toolCall?.tool} className="size-3.5 shrink-0 text-ink-subtle" />
             <span className="font-medium">{toolLabel(entry.toolCall?.tool ?? 'tool')}</span>
             <span className="font-mono text-2xs text-ink-subtle">{entry.toolCall?.tool}</span>
           </p>
           {entry.toolCall?.arguments && (
             <details className="group mt-1">
-              <summary className="tap-target inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-2xs text-ink-muted hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+              <summary className="tap-target inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-2xs text-ink-muted hover:text-ink focus-ring">
                 <ChevronRight
                   aria-hidden
                   className="size-3 transition-transform group-open:rotate-90"
@@ -138,7 +138,9 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
         <p className="text-sm">
           Proposed note <span className="font-mono text-2xs">{entry.note?.noteId}</span> for review
           {entry.note?.reference && (
-            <span className="ml-1 font-mono text-2xs text-ink-subtle">({entry.note.reference})</span>
+            <span className="ml-1 font-mono text-2xs text-ink-subtle">
+              ({entry.note.reference})
+            </span>
           )}
         </p>
       );
@@ -153,7 +155,17 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
   }
 }
 
-export function TracePanel({ trace }: { trace: TraceEntry[] }): React.JSX.Element | null {
+/**
+ * Memoised on `trace` identity, which is the point: `appendTokens` spreads the message but leaves
+ * the trace array alone, so during a stream this subtree would otherwise re-render once per
+ * animation frame to produce exactly the same output. The finished bubbles above are already
+ * covered by `memo(Bubble)`; this is what covers the one that is still streaming.
+ */
+export const TracePanel = memo(function TracePanel({
+  trace,
+}: {
+  trace: TraceEntry[];
+}): React.JSX.Element | null {
   const shown = trace.filter((e) => e.kind !== 'question' && e.kind !== 'approval_request');
   if (shown.length === 0) return null;
 
@@ -198,4 +210,4 @@ export function TracePanel({ trace }: { trace: TraceEntry[] }): React.JSX.Elemen
       </CollapsibleContent>
     </Collapsible>
   );
-}
+});

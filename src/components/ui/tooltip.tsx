@@ -34,9 +34,7 @@ export function Tooltip(props: React.ComponentProps<typeof T.Root>): React.JSX.E
   );
 }
 
-export function TooltipTrigger(
-  props: React.ComponentProps<typeof T.Trigger>,
-): React.JSX.Element {
+export function TooltipTrigger(props: React.ComponentProps<typeof T.Trigger>): React.JSX.Element {
   return <T.Trigger data-slot="tooltip-trigger" {...props} />;
 }
 

@@ -41,13 +41,22 @@ export function AlertDialogContent({
   );
 }
 
-export function AlertDialogHeader({ className, ...props }: React.ComponentProps<'div'>): React.JSX.Element {
+export function AlertDialogHeader({
+  className,
+  ...props
+}: React.ComponentProps<'div'>): React.JSX.Element {
   return <div className={cn('flex flex-col gap-1.5', className)} {...props} />;
 }
 
-export function AlertDialogFooter({ className, ...props }: React.ComponentProps<'div'>): React.JSX.Element {
+export function AlertDialogFooter({
+  className,
+  ...props
+}: React.ComponentProps<'div'>): React.JSX.Element {
   return (
-    <div className={cn('flex flex-col-reverse gap-2 sm:flex-row sm:justify-end', className)} {...props} />
+    <div
+      className={cn('flex flex-col-reverse gap-2 sm:flex-row sm:justify-end', className)}
+      {...props}
+    />
   );
 }
 
@@ -80,6 +89,9 @@ export function AlertDialogCancel({
   ...props
 }: React.ComponentProps<typeof A.Cancel>): React.JSX.Element {
   return (
-    <A.Cancel className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), className)} {...props} />
+    <A.Cancel
+      className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), className)}
+      {...props}
+    />
   );
 }

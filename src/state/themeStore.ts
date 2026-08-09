@@ -23,7 +23,9 @@ export type ResolvedTheme = 'light' | 'dark';
 const STORAGE_KEY = 'chemclaw3.theme';
 
 const darkQuery = (): MediaQueryList | null =>
-  typeof window === 'undefined' ? null : (window.matchMedia?.('(prefers-color-scheme: dark)') ?? null);
+  typeof window === 'undefined'
+    ? null
+    : (window.matchMedia?.('(prefers-color-scheme: dark)') ?? null);
 
 const systemTheme = (): ResolvedTheme => (darkQuery()?.matches ? 'dark' : 'light');
 

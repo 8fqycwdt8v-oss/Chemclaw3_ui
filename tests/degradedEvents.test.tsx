@@ -83,7 +83,9 @@ describe('capability_degraded', () => {
 
   it('renders nothing when every connector came up', () => {
     const { container } = render(
-      <CapabilityDegradedPill message={{ degradedConnectors: [] } as unknown as AssistantMessage} />,
+      <CapabilityDegradedPill
+        message={{ degradedConnectors: [] } as unknown as AssistantMessage}
+      />,
     );
     expect(container.firstChild).toBeNull();
   });

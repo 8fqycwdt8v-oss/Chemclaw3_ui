@@ -18,6 +18,15 @@ export interface RuntimeConfig {
   apiScope: string;
   apiBase: string;
   appVersion: string;
+  /**
+   * Create the backend session while the user is still typing, so their first message costs one
+   * round-trip instead of two.
+   *
+   * Runtime-switchable because it changes a backend resource pattern: every conversation someone
+   * types into occupies a slot in the service's live-session LRU, sent or not. If that turns out
+   * to matter, this can be turned off without a client rebuild.
+   */
+  warmSessions: boolean;
 }
 
 declare global {
@@ -55,6 +64,7 @@ function resolve(): RuntimeConfig {
     apiScope: pick(w.apiScope, v.apiScope),
     apiBase: pick(w.apiBase, v.apiBase, '/api'),
     appVersion: pick(w.appVersion, 'dev'),
+    warmSessions: w.warmSessions !== false,
   };
 }
 

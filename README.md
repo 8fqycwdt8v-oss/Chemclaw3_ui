@@ -19,14 +19,16 @@ bearer token.
 - **Streams a turn** and renders every event in the service's contract — tokens, plan revisions,
   tool calls, launched jobs, proposed notes, questions, approvals, and the final answer.
 - **Shows the agent's work** in a collapsible trace panel. Honest about its limits: the service
-  streams tool *invocations* only, so the panel says what was called, never what came back.
+  streams tool _invocations_ only, so the panel says what was called, never what came back.
 - **Renders structures** from SMILES — the `molecule_smiles` a finished QM job pushes back, plus an
   opt-in toggle on inline SMILES in answers.
-- **Surfaces verifier signals** — a "needs expert review" pill at the *top* of a low-confidence
+- **Surfaces verifier signals** — a "needs expert review" pill at the _top_ of a low-confidence
   answer, plus the confidence score and any unsupported claims.
 - **Answers approvals.** A durable hold gets real Approve/Reject buttons wired to
-  `POST /approvals/{id}/decision`; a plan approval says plainly that it is answered by your next
-  message, because that is the only channel the service has for it.
+  `POST /approvals/{id}/decision`; a plan approval posts to `POST /sessions/{id}/plan/decision`,
+  bound to the hash of the plan that was actually shown. Both go through a confirmation: the
+  decision is irreversible and attributable. Against a service that predates the plan route, the
+  card falls back to answering in the conversation and says that is what it is doing.
 - **Survives a reload** — conversations persist locally and rehydrate from the service.
 - **Is ready for Entra SSO** without a rewrite: one env var switches the auth provider.
 
@@ -80,15 +82,15 @@ Vite inlines `import.meta.env` at build time, browser-facing settings are served
 The backend enforces Entra when `CHEMCLAW_ENTRA_REQUIRED=true`. Set `AUTH_MODE=msal` here at the
 same time, plus:
 
-| Variable | Value |
-| --- | --- |
-| `ENTRA_TENANT_ID` | your tenant GUID |
+| Variable          | Value                                                               |
+| ----------------- | ------------------------------------------------------------------- |
+| `ENTRA_TENANT_ID` | your tenant GUID                                                    |
 | `ENTRA_CLIENT_ID` | **this SPA's** app registration (platform: Single-page application) |
-| `API_SCOPE` | `api://<api-client-id>/<scope>`, e.g. `.../Chat.Access` |
+| `API_SCOPE`       | `api://<api-client-id>/<scope>`, e.g. `.../Chat.Access`             |
 
 Three things account for most "the token looks fine but the API returns 401" incidents:
 
-1. **The scope must be the API's.** Requesting only `openid`/`profile` yields an *ID* token whose
+1. **The scope must be the API's.** Requesting only `openid`/`profile` yields an _ID_ token whose
    `aud` is the SPA client id; the backend checks `aud == CHEMCLAW_ENTRA_AUDIENCE`. Graph's
    `.default` is equally wrong.
 2. **The API app registration needs `accessTokenAcceptedVersion: 2`.** The backend pins the issuer
@@ -106,27 +108,55 @@ verbatim breaks refresh about an hour after login — a failure that looks like 
 ```
 server/     the BFF — route whitelist, streaming proxy, static host, /config.js
 src/        the SPA — api/ auth/ state/ components/
+  components/ui/    primitives (button, sheet, alert-dialog, …) on Radix + cva
+  components/chem/  composites built from them (StatusDot, ConfirmDialog, …)
 shared/     the event contract, mirrored from the service's service/events.py
-scripts/    dev launcher, server bundler, smoke test
+scripts/    dev launcher, server bundler, smoke test, contrast gate
+e2e/        Playwright specs and the SSE fixture service
+public/     theme boot script, favicon — served as-is by the BFF
 ```
 
-Two files carry most of the difficulty and are commented accordingly:
+Three files carry most of the difficulty and are commented accordingly:
+
+- **`src/index.css`** — the design tokens, and one trap worth knowing before you add a
+  theme-dependent one. **`@theme` cannot be nested to express a theme.** Tailwind v4 merges every
+  `@theme` block into one map regardless of the at-rule around it, hoists the first into `:root` and
+  deletes the rest, so last write wins unconditionally. This file used to carry a second `@theme`
+  inside `@media (prefers-color-scheme: dark)`; it compiled to a single `:root` holding the _dark_
+  values and no media query at all, and the app was dark in both OS modes. Anything theme-dependent
+  is a plain custom property, and `@theme inline` maps the utility names onto it.
 
 - **`server/proxy.ts`** — every SSE trap. Chiefly: it forces `accept-encoding: identity` (a
   compressed event stream buffers until the compressor's window fills), and it destroys the upstream
   request when the client disconnects. That last line is what makes **Stop** work: the service has
   no cancel endpoint, so propagating the disconnect is the only way it releases the session's turn
   lock — without it, the next message comes back 409.
+- **`src/components/MessageList.tsx`** — `Bubble` is memoised because `updateAssistant` replaces
+  the messages array every animation frame while returning the same object for messages it did not
+  touch. Never give anything on this path a custom `areEqual`: one forgotten field and a streaming
+  answer freezes mid-sentence, and no unit test catches it.
+
 - **`src/state/chatStore.ts`** — the store keeps `streamedText` and `finalText` apart because
-  `answer.text` is the *full concatenation* of every token. Any code path that combined them would
+  `answer.text` is the _full concatenation_ of every token. Any code path that combined them would
   render the whole answer twice. There is deliberately none.
 
 ## Testing
 
 ```sh
-npm test          # vitest
+npm test               # vitest — store, stream parsing, route whitelist, component contracts
 npm run typecheck
+npm run lint           # eslint — react-hooks/exhaustive-deps above all, plus jsx-a11y
+npm run check:contrast # WCAG ratios for every token pair the UI composes, both themes
+npm run test:e2e       # Playwright — layout, focus, keyboard, theme, mobile drawer
 ```
+
+`check:contrast` converts OKLCH to sRGB rather than comparing lightness values: OKLCH's `L` is
+perceptual and WCAG is defined on sRGB relative luminance, so two tokens that look far apart can
+still fail. That gap is exactly how white-on-accent survived in dark mode at roughly 2:1.
+
+`test:e2e` runs the real BFF against `e2e/fixture-service.mjs`, which emits SSE frames with real
+gaps between them. Stubbing the network inside the page would hand the whole body over at once and
+pass against a chain that buffers end to end — the one failure this project most wants to catch.
 
 Unit tests stub `fetch` with canned SSE bytes — no server is started. That is the only practical way
 to exercise what a healthy backend will not produce on demand: frames split across chunk boundaries,

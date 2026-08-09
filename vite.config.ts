@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
@@ -6,9 +7,16 @@ const BFF_PORT = Number(process.env.BFF_PORT ?? 8787);
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // `@/…` is what the vendored shadcn components import by. Mirrored in tsconfig.json and — the
+  // one that gets forgotten — vitest.config.ts, which is a separate config with its own resolver.
+  resolve: {
+    alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
+  },
   build: {
     outDir: 'dist/client',
-    sourcemap: true,
+    // `hidden` still emits maps for error reporting but drops the sourceMappingURL comment, so
+    // production bundles stop advertising them to anyone who opens devtools.
+    sourcemap: 'hidden',
   },
   server: {
     port: 5173,

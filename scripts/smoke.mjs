@@ -121,8 +121,10 @@ let sessionId;
   // held and released in one go rather than streamed.
   if (arrivals.length >= 3) {
     const spread = arrivals.at(-1) - arrivals[0];
-    if (spread > 50) ok('frames arrived incrementally', `${spread}ms spread over ${arrivals.length} frames`);
-    else bad('frames arrived all at once', `${spread}ms spread — something is buffering the stream`);
+    if (spread > 50)
+      ok('frames arrived incrementally', `${spread}ms spread over ${arrivals.length} frames`);
+    else
+      bad('frames arrived all at once', `${spread}ms spread — something is buffering the stream`);
   } else {
     console.log(`  · only ${arrivals.length} frame(s); cannot judge buffering`);
   }

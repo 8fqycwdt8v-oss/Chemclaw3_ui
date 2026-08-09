@@ -6,10 +6,13 @@
  */
 
 import { api } from '../api/client.ts';
+import { config } from '../env.ts';
+import { prefetchMarkdown } from '../components/LazyMarkdown.tsx';
 import { ApiError } from '../api/errors.ts';
 import { streamTurn } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from './chatStore.ts';
+import { announceStatus, describeAnswer } from './announce.ts';
 
 export interface SendOptions {
   conversationId: string;
@@ -18,15 +21,56 @@ export interface SendOptions {
   auth: AuthProvider;
 }
 
-/** Ensure the conversation has a live server session, creating one if needed. */
+/**
+ * Sessions being minted right now, keyed by conversation.
+ *
+ * Module scope, not the store (a Promise is not serialisable, and `clearAll` would drop it
+ * mid-flight) and not a ref (the composer's keystroke and the send path are different callers that
+ * must share). It also survives StrictMode's double-invoke, which is the bug this defends.
+ */
+const sessionsInFlight = new Map<string, Promise<string>>();
+
+/**
+ * Ensure the conversation has a live server session, creating one if needed.
+ *
+ * Shared by the send path and by `warmSession`, so a warm already in flight is awaited rather than
+ * raced. Two concurrent creates would otherwise mint two backend sessions and leave the store
+ * pointing at the one the in-flight turn is NOT using — context lost with nothing to flag it.
+ */
 async function ensureSession(conversationId: string, auth: AuthProvider): Promise<string> {
-  const store = useChatStore.getState();
-  const existing = store.conversations[conversationId]?.sessionId;
+  const existing = useChatStore.getState().conversations[conversationId]?.sessionId;
   if (existing) return existing;
 
-  const { session_id } = await api.createSession(() => auth.getAccessToken());
-  useChatStore.getState().setSessionId(conversationId, session_id);
-  return session_id;
+  const pending = sessionsInFlight.get(conversationId);
+  if (pending) return pending;
+
+  const creating = api
+    .createSession(() => auth.getAccessToken())
+    // Compare-and-set: whoever gets there first wins, and both callers are told the winner. A
+    // loser's session is an orphan that ages out of the backend's LRU.
+    .then(({ session_id }) =>
+      useChatStore.getState().setSessionIdIfAbsent(conversationId, session_id),
+    )
+    .finally(() => sessionsInFlight.delete(conversationId));
+
+  sessionsInFlight.set(conversationId, creating);
+  return creating;
+}
+
+/**
+ * Mint the session ahead of the first send.
+ *
+ * The first message otherwise costs two sequential round-trips — `POST /sessions`, then
+ * `POST /messages` — with the user's bubble and a spinner already on screen for both. Doing the
+ * first one while they are still typing hides it entirely.
+ *
+ * Failure is deliberately silent: this is speculative, and `ensureSession` will try again for
+ * real when they actually send.
+ */
+export function warmSession(conversationId: string, auth: AuthProvider): void {
+  if (!config.warmSessions) return;
+  if (useChatStore.getState().conversations[conversationId]?.sessionId) return;
+  void ensureSession(conversationId, auth).catch(() => undefined);
 }
 
 /**
@@ -50,6 +94,9 @@ function createTokenBatcher(conversationId: string, messageId: string) {
 
   return {
     push(text: string): void {
+      // The answer will need the markdown chunk the moment it settles. Fetching it now, in
+      // parallel with the rest of the stream, is what keeps the Suspense fallback off screen.
+      prefetchMarkdown();
       pending += text;
       if (scheduled) return;
       scheduled = true;
@@ -58,6 +105,15 @@ function createTokenBatcher(conversationId: string, messageId: string) {
     },
     flush,
   };
+}
+
+/** The settled answer, read back for the completion announcement. */
+function answerText(conversationId: string, messageId: string): string {
+  const message = useChatStore
+    .getState()
+    .conversations[conversationId]?.messages.find((m) => m.id === messageId);
+  if (!message || message.role !== 'assistant') return '';
+  return message.finalText ?? message.streamedText;
 }
 
 export async function sendMessage(opts: SendOptions): Promise<void> {
@@ -90,6 +146,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           return;
         }
         batcher.flush();
+        // A queued turn is the one state a listener cannot infer from silence: nothing is
+        // running yet, and without this the wait is indistinguishable from a hang.
+        if (event.type === 'queued') announceStatus('Waiting for a free slot on the server.');
         useChatStore.getState().applyEvent(conversationId, messageId, event);
       },
     });
@@ -109,6 +168,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         await runOnce(sessionId);
         useChatStore.getState().finishTurn(conversationId, messageId, 'done');
         useChatStore.getState().setComposerLock(false);
+        // Announced, not focused: moving focus here would interrupt a listener mid-sentence.
+        // The answer carries tabIndex={-1} so they can navigate to it when ready.
+        announceStatus(describeAnswer(answerText(conversationId, messageId)));
         return;
       } catch (err) {
         if (!(err instanceof ApiError)) throw err;
@@ -146,8 +208,12 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     if (apiError.kind === 'aborted') {
       useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
       useChatStore.getState().setComposerLock(false);
+      announceStatus('Stopped before the answer was complete.');
       return;
     }
+
+    // Failures are NOT announced here. `failTurn` raises a banner that already carries
+    // `role="alert"`, and a second polite announcement of the same sentence reads it twice.
 
     useChatStore
       .getState()

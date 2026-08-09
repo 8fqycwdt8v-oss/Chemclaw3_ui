@@ -1,0 +1,54 @@
+# The checks that were being run by hand, if at all. There was no .github directory before this.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # exhaustive-deps above all: a stale closure in an effect fails intermittently, which is the
+      # worst way for a bug to fail and the hardest to catch in review.
+      - name: Lint
+        run: npm run lint
+
+      - name: Format
+        run: npm run format:check
+
+      - name: Unit tests
+        run: npm test
+
+      # Cheap, and the failure mode it catches (a token pair that reads fine and measures 2:1)
+      # is invisible in review.
+      - name: Contrast
+        run: npm run check:contrast
+
+      - name: Build
+        run: npm run build
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser tests
+        run: npm run test:e2e
+
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

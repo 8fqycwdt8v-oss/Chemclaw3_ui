@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { useChatStore } from '../src/state/chatStore.ts';
+import { newConversation, useChatStore } from '../src/state/chatStore.ts';
 import type { AssistantMessage } from '../src/state/types.ts';
 
 const reset = (): void => {
@@ -130,11 +130,87 @@ describe('chatStore', () => {
   });
 
   it('keeps a job completion in the cross-turn feed', () => {
-    useChatStore.getState().pushJobCompleted({
-      type: 'job_completed',
-      job_id: 'qm-1',
-      summary: { molecule_smiles: 'CCO', total_energy_hartree: -154.09, converged: true },
+    useChatStore.getState().pushJobCompleted(
+      {
+        type: 'job_completed',
+        job_id: 'qm-1',
+        summary: { molecule_smiles: 'CCO', total_energy_hartree: -154.09, converged: true },
+      },
+      'a'.repeat(32),
+    );
+    expect(useChatStore.getState().jobFeed[0]?.event.summary.molecule_smiles).toBe('CCO');
+  });
+});
+
+describe('removing conversations does not strand live state', () => {
+  // deleteConversation existed from the beginning with no caller. Giving it one (the row menu)
+  // exposed that it tore down the conversation but not the turn attached to it.
+  const seed = (over: Partial<ReturnType<typeof useChatStore.getState>> = {}) => {
+    useChatStore.setState({
+      conversations: {
+        a: { ...newConversation(), id: 'a', title: 'a' },
+        b: { ...newConversation(), id: 'b', title: 'b' },
+      },
+      order: ['a', 'b'],
+      activeId: 'a',
+      drafts: { a: 'half-written question', b: 'other draft' },
+      composerLock: false,
+      banner: null,
+      streaming: null,
+      ...over,
     });
-    expect(useChatStore.getState().jobFeed[0]?.summary.molecule_smiles).toBe('CCO');
+  };
+
+  it('drops the deleted conversation’s draft', () => {
+    seed();
+    useChatStore.getState().deleteConversation('a');
+
+    expect(useChatStore.getState().drafts.a).toBeUndefined();
+    expect(useChatStore.getState().drafts.b).toBe('other draft');
+  });
+
+  it('aborts and unlocks when the deleted conversation owns the running turn', () => {
+    const abort = new AbortController();
+    seed({
+      composerLock: 'turn_in_flight',
+      streaming: { conversationId: 'a', messageId: 'm1', abort },
+    });
+
+    useChatStore.getState().deleteConversation('a');
+
+    // Without this the composer stays locked forever: the turn it waits on can no longer report.
+    expect(abort.signal.aborted).toBe(true);
+    expect(useChatStore.getState().streaming).toBeNull();
+    expect(useChatStore.getState().composerLock).toBe(false);
+    expect(useChatStore.getState().activeId).toBe('b');
+  });
+
+  it('leaves a turn belonging to another conversation alone', () => {
+    const abort = new AbortController();
+    seed({
+      composerLock: 'turn_in_flight',
+      streaming: { conversationId: 'a', messageId: 'm1', abort },
+    });
+
+    useChatStore.getState().deleteConversation('b');
+
+    expect(abort.signal.aborted).toBe(false);
+    expect(useChatStore.getState().streaming).not.toBeNull();
+    expect(useChatStore.getState().composerLock).toBe('turn_in_flight');
+  });
+
+  it('clearAll leaves nothing behind — drafts included', () => {
+    const abort = new AbortController();
+    seed({
+      composerLock: 'turn_in_flight',
+      streaming: { conversationId: 'a', messageId: 'm1', abort },
+    });
+
+    useChatStore.getState().clearAll();
+
+    expect(abort.signal.aborted).toBe(true);
+    expect(useChatStore.getState().drafts).toEqual({});
+    expect(useChatStore.getState().composerLock).toBe(false);
+    expect(Object.keys(useChatStore.getState().conversations)).toHaveLength(1);
   });
 });

@@ -12,11 +12,7 @@ import { ApiError, errorFromStatus, readDetail } from './errors.ts';
 
 export type TokenGetter = () => Promise<string | null>;
 
-async function request<T>(
-  path: string,
-  getToken: TokenGetter,
-  init: RequestInit = {},
-): Promise<T> {
+async function request<T>(path: string, getToken: TokenGetter, init: RequestInit = {}): Promise<T> {
   const token = await getToken();
   let res: Response;
   try {
@@ -114,21 +110,63 @@ export const api = {
     }
   },
 
-  uploadAttachment(
+  /**
+   * Upload a working file, reporting progress and honouring a cancel.
+   *
+   * XHR rather than `fetch`, which is the one place in this client that deviates: `fetch` still
+   * cannot report upload progress in any shipping browser, and an SOP or a large CSV over a lab
+   * VPN is exactly where an indeterminate spinner stops being honest. Everything else here stays
+   * on `fetch`.
+   */
+  async uploadAttachment(
     sessionId: string,
     file: File,
     getToken: TokenGetter,
+    options: { onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
   ): Promise<AttachmentSummary> {
+    const token = await getToken();
     const form = new FormData();
     form.append('file', file);
-    return request<AttachmentSummary>(`/sessions/${sessionId}/attachments`, getToken, {
-      method: 'POST',
-      body: form,
+
+    return new Promise<AttachmentSummary>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `${config.apiBase}/sessions/${sessionId}/attachments`);
+      xhr.responseType = 'json';
+      xhr.setRequestHeader('accept', 'application/json');
+      if (token) xhr.setRequestHeader('authorization', `Bearer ${token}`);
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) options.onProgress?.(e.loaded / e.total);
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(xhr.response as AttachmentSummary);
+          return;
+        }
+        const detail =
+          typeof xhr.response === 'object' && xhr.response !== null
+            ? (xhr.response as { detail?: unknown }).detail
+            : undefined;
+        reject(errorFromStatus(xhr.status, typeof detail === 'string' ? detail : undefined));
+      };
+      xhr.onerror = () => reject(new ApiError('network', 'Could not reach the Chemclaw service.'));
+      xhr.onabort = () => reject(new ApiError('aborted', 'Upload cancelled.'));
+
+      options.signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+      xhr.send(form);
     });
   },
 
-  listApprovals(getToken: TokenGetter): Promise<PendingApproval[]> {
-    return request<PendingApproval[]>('/approvals', getToken);
+  /** Pending approvals. Degrades to `[]` like `listSessions` — the backend's approval workflow
+   *  has no HTTP surface yet (see ISSUES.md), so a 404 here is the expected answer, not a fault. */
+  async listApprovals(getToken: TokenGetter): Promise<PendingApproval[]> {
+    try {
+      return await request<PendingApproval[]>('/approvals', getToken);
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'session_not_found') return [];
+      throw err;
+    }
   },
 
   /** Deliver the human Yes/No to a durable approval hold. Deliberately an HTTP route on the

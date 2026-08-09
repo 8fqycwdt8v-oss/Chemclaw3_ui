@@ -14,7 +14,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { normalizeEvent } from '../shared/events.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { MessageList } from '../src/components/MessageList.tsx';
-import type { AssistantMessage, Conversation } from '../src/state/types.ts';
+import type { AssistantMessage } from '../src/state/types.ts';
 
 const assistantOf = (conversationId: string, messageId: string): AssistantMessage => {
   const message = useChatStore
@@ -22,12 +22,6 @@ const assistantOf = (conversationId: string, messageId: string): AssistantMessag
     .conversations[conversationId]?.messages.find((m) => m.id === messageId);
   if (!message || message.role !== 'assistant') throw new Error('no assistant message');
   return message;
-};
-
-const conversationOf = (conversationId: string): Conversation => {
-  const conversation = useChatStore.getState().conversations[conversationId];
-  if (!conversation) throw new Error('no conversation');
-  return conversation;
 };
 
 const startTurn = (): { cid: string; mid: string } => {
@@ -84,7 +78,7 @@ describe('the streaming placeholder', () => {
     const { cid, mid } = startTurn();
     useChatStore.getState().applyEvent(cid, mid, { type: 'queued' });
 
-    render(<MessageList conversation={conversationOf(cid)} />);
+    render(<MessageList conversationId={cid} />);
     expect(screen.getByText(/waiting for a free slot/i)).toBeTruthy();
     expect(screen.queryByText('Thinking…')).toBeNull();
   });
@@ -92,7 +86,7 @@ describe('the streaming placeholder', () => {
   it('says "Thinking…" when the turn was admitted straight away', () => {
     const { cid } = startTurn();
 
-    render(<MessageList conversation={conversationOf(cid)} />);
+    render(<MessageList conversationId={cid} />);
     expect(screen.getByText('Thinking…')).toBeTruthy();
     expect(screen.queryByText(/waiting for a free slot/i)).toBeNull();
   });
@@ -106,7 +100,7 @@ describe('the streaming placeholder', () => {
     store.applyEvent(cid, mid, { type: 'queued' });
     store.applyEvent(cid, mid, { type: 'token', text: 'The pKa is 9.2.' });
 
-    render(<MessageList conversation={conversationOf(cid)} />);
+    render(<MessageList conversationId={cid} />);
     expect(screen.queryByText(/waiting for a free slot/i)).toBeNull();
     expect(screen.getByText(/The pKa is 9.2./)).toBeTruthy();
   });

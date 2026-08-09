@@ -1,130 +1,199 @@
 /**
  * Header: service health, auth state, and the error banner.
  *
- * `/readyz` is called once and deliberately not treated as blocking. It builds the agent lazily on
- * first call, so the very first request after a cold start is slow — showing "warming up" is
- * honest, whereas gating the UI on it would look like a hang.
+ * The health poll stays unauthenticated and local so it cannot acquire a token on every tick, and
+ * it now pauses while the tab is hidden — a backgrounded tab used to keep hitting the BFF every
+ * 30s for as long as it was left open.
+ *
+ * The banner renders the `retry` action. `sendMessage` has always set it for the retryable kinds
+ * (503 capacity, and the BFF's own 502 mapped to `network`), and this component only handled
+ * `reset` and `reauth` — so the two failures most likely to be transient produced a red bar with
+ * no way forward, and the message the chemist had just typed was already gone from the composer.
  */
 
 import { useEffect, useState } from 'react';
+import { Menu, RefreshCw, X } from 'lucide-react';
 import { config } from '../env.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { resetSession } from '../state/sendMessage.ts';
+import { SidebarBody } from './Sidebar.tsx';
+import { Button } from '@/components/ui/button';
+import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
+import { Badge } from '@/components/ui/badge';
+import { StatusDot, type Status } from '@/components/chem/StatusDot';
+import { ThemeToggle } from '@/components/chem/ThemeToggle';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 type Health = 'checking' | 'ok' | 'down';
 
-export function TopBar(): React.JSX.Element {
+const HEALTH: Record<Health, { status: Status; label: string }> = {
+  checking: { status: 'pending', label: 'checking' },
+  ok: { status: 'ok', label: 'connected' },
+  down: { status: 'down', label: 'unreachable' },
+};
+
+export function TopBar({ onRetry }: { onRetry?: () => void }): React.JSX.Element {
   const { auth, refresh } = useAuth();
   const [health, setHealth] = useState<Health>('checking');
+  const [drawer, setDrawer] = useState(false);
   const banner = useChatStore((s) => s.banner);
   const activeId = useChatStore((s) => s.activeId);
 
   useEffect(() => {
     let cancelled = false;
-    const check = async (): Promise<void> => {
-      const ok = await api_health();
-      if (!cancelled) setHealth(ok ? 'ok' : 'down');
+    const check = (): void => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      void api_health().then((ok) => {
+        if (!cancelled) setHealth(ok ? 'ok' : 'down');
+      });
     };
-    void check();
-    const timer = setInterval(() => void check(), 30_000);
+    check();
+    const timer = setInterval(check, 30_000);
+    // Catch up immediately on return rather than waiting out the rest of the interval.
+    document.addEventListener('visibilitychange', check);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      document.removeEventListener('visibilitychange', check);
     };
   }, []);
 
   const account = auth.account;
+  const meta = HEALTH[health];
 
   return (
-    <header className="border-b border-border-subtle bg-surface-raised">
-      <div className="flex items-center gap-3 px-4 py-2">
-        <span className="font-semibold">Chemclaw</span>
+    <header className="border-b border-border-subtle bg-surface-raised/85 backdrop-blur-sm">
+      <div className="flex items-center gap-2 px-3 py-2 pt-[max(0.5rem,env(safe-area-inset-top))] sm:px-4">
+        <Sheet open={drawer} onOpenChange={setDrawer}>
+          <SheetTrigger asChild>
+            <Button variant="ghost" size="icon-sm" aria-label="Conversations" className="lg:hidden">
+              <Menu />
+            </Button>
+          </SheetTrigger>
+          <SheetContent side="left" title="Conversations" className="p-0">
+            <div className="flex h-full flex-col pt-10">
+              <SidebarBody onNavigate={() => setDrawer(false)} />
+            </div>
+          </SheetContent>
+        </Sheet>
 
-        <span
-          className="flex items-center gap-1.5 text-xs text-ink-muted"
-          title={`Chemclaw service: ${health}`}
-        >
-          <span
-            className={
-              health === 'ok'
-                ? 'text-ok'
-                : health === 'down'
-                  ? 'text-danger'
-                  : 'text-ink-muted'
-            }
-          >
-            ●
-          </span>
-          {health === 'ok' ? 'connected' : health === 'down' ? 'unreachable' : 'checking'}
-        </span>
+        {/* The app's only h1. There was none at all in the running app — only on its two failure
+            screens — so heading navigation began at h2 with no root above it. */}
+        <h1 className="text-sm font-semibold tracking-tight">Chemclaw</h1>
+
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="inline-flex items-center">
+              {/* The label is hidden on the narrowest screens but never removed: the dot's colour
+                  must not be the only carrier of the state. */}
+              <StatusDot status={meta.status} label={meta.label} showLabel={false} />
+              <span className="sr-only-live sm:not-sr-only sm:ml-1.5 sm:text-xs sm:text-ink-muted">
+                {meta.label}
+              </span>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>Chemclaw service: {meta.label}</TooltipContent>
+        </Tooltip>
 
         {auth.mode === 'dev' && (
-          <span
-            className="rounded border border-warn/40 bg-warn-soft px-1.5 py-0.5 text-xs text-warn"
-            title="CHEMCLAW_ENTRA_REQUIRED is off: requests are attributed to a shared dev principal"
-          >
+          <Badge tone="warn" className="hidden sm:inline-flex">
             dev auth — no sign-in
-          </span>
+          </Badge>
         )}
 
-        <div className="ml-auto flex items-center gap-3 text-xs text-ink-muted">
-          <span title={`build ${config.appVersion}`}>{config.appVersion}</span>
-          {auth.mode === 'msal' &&
-            (account ? (
-              <>
-                <span title={account.username}>{account.name}</span>
-                <button
-                  type="button"
-                  onClick={() => void auth.logout()}
-                  className="underline underline-offset-2 hover:text-ink"
-                >
-                  Sign out
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                onClick={() => {
-                  void auth.login();
-                  refresh();
-                }}
-                className="rounded bg-accent px-2.5 py-1 text-white"
+        <div className="ml-auto flex items-center gap-1">
+          <ThemeToggle />
+
+          {auth.mode === 'msal' && !account && (
+            <Button
+              size="xs"
+              onClick={() => {
+                void auth.login();
+                refresh();
+              }}
+            >
+              Sign in
+            </Button>
+          )}
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="xs"
+                aria-label="Account and build details"
+                className="max-w-32 truncate"
               >
-                Sign in
-              </button>
-            ))}
+                {account?.name ?? config.appVersion}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuLabel>Build {config.appVersion}</DropdownMenuLabel>
+              {auth.mode === 'dev' && (
+                <DropdownMenuLabel className="max-w-56 text-2xs font-normal whitespace-normal text-ink-muted">
+                  Dev auth: requests are attributed to a shared principal, not to you.
+                </DropdownMenuLabel>
+              )}
+              {account && (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel className="font-normal text-ink">
+                    {account.username}
+                  </DropdownMenuLabel>
+                  <DropdownMenuItem onSelect={() => void auth.logout()}>Sign out</DropdownMenuItem>
+                </>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
       {banner && (
-        <div className="flex items-center gap-3 border-t border-border-subtle bg-danger-soft px-4 py-1.5">
-          <p className="text-sm text-danger">{banner.text}</p>
+        <div
+          role="alert"
+          className="flex flex-wrap items-center gap-2 border-t border-border-subtle bg-danger-soft px-4 py-2"
+        >
+          <p className="text-sm text-danger-ink">{banner.text}</p>
+
+          {banner.action === 'retry' && onRetry && (
+            <Button variant="outline-destructive" size="xs" onClick={onRetry}>
+              <RefreshCw />
+              Retry
+            </Button>
+          )}
           {banner.action === 'reset' && activeId && (
-            <button
-              type="button"
+            <Button
+              variant="outline-destructive"
+              size="xs"
               onClick={() => void resetSession(activeId, auth)}
-              className="rounded border border-danger/40 px-2 py-0.5 text-xs text-danger"
             >
               Start a fresh session
-            </button>
+            </Button>
           )}
           {banner.action === 'reauth' && (
-            <button
-              type="button"
-              onClick={() => void auth.login()}
-              className="rounded border border-danger/40 px-2 py-0.5 text-xs text-danger"
-            >
+            <Button variant="outline-destructive" size="xs" onClick={() => void auth.login()}>
               Sign in again
-            </button>
+            </Button>
           )}
-          <button
-            type="button"
+
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            aria-label="Dismiss"
+            className="tap-target ml-auto"
             onClick={() => useChatStore.getState().setBanner(null)}
-            className="ml-auto text-xs text-ink-muted"
           >
-            Dismiss
-          </button>
+            <X />
+          </Button>
         </div>
       )}
     </header>

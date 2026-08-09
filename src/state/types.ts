@@ -113,6 +113,18 @@ export interface Conversation {
   id: string;
   /** The server handle. Null before the first turn; replaced on a 404. */
   sessionId: string | null;
+  /**
+   * Where `sessionId` came from.
+   *
+   * `'server'` means the session was listed by `GET /sessions` or opened from a shared link, so
+   * there is a transcript on the backend worth reading. `'local'` means this browser minted it —
+   * on the first send, or ahead of it by `warmSession` — so there is nothing to read back and
+   * asking would be a wasted round-trip that raises a banner if it fails.
+   *
+   * It describes where the id came from, not what state the conversation is in, so it stays true
+   * as the session is rotated underneath.
+   */
+  sessionOrigin: 'local' | 'server';
   title: string;
   createdAt: number;
   updatedAt: number;

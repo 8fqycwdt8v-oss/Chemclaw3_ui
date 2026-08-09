@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Chemclaw">
+  <!--
+    A hexagon (the ring every chemist reads instantly) with a bonded substituent.
+    currentColor-free and theme-aware: the two fills below are picked to stay legible on both a
+    light and a dark browser tab strip, which an SVG favicon cannot query.
+  -->
+  <rect width="32" height="32" rx="7" fill="#0e6c8e" />
+  <g fill="none" stroke="#f2fbff" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M13 7.6 19.4 11.3 19.4 18.7 13 22.4 6.6 18.7 6.6 11.3 Z" />
+    <path d="M19.4 11.3 25.2 8" />
+    <circle cx="26.2" cy="7.4" r="1.7" fill="#f2fbff" stroke="none" />
+  </g>
+</svg>

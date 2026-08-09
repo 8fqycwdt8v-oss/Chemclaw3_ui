@@ -2,8 +2,18 @@
 <html lang="en" class="h-full">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover is what makes env(safe-area-inset-*) resolve to anything but 0, which
+         the composer needs so it does not sit under an iPhone's home indicator. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>Chemclaw — process &amp; analytical development assistant</title>
+
+    <!--
+      Resolve the theme before the stylesheet, so the first paint is already correct.
+      A file rather than an inline script: `script-src 'self'` carries no nonce and no hashes
+      (server/config.ts), so an inline block would be refused and every load would flash.
+    -->
+    <script src="/theme-boot.js"></script>
+
     <!--
       Runtime configuration, served by the BFF from its own environment (server/runtimeConfig.ts).
       A separate same-origin file rather than an inline script, so `script-src 'self'` covers it
@@ -11,6 +21,16 @@
       time so that one image can serve any tenant without a rebuild.
     -->
     <script src="/config.js"></script>
+
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#fbfaf8" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#1c1b19" media="(prefers-color-scheme: dark)" />
+    <meta
+      name="description"
+      content="Chemclaw — a process and analytical development assistant for pharmaceutical and chemical R&amp;D."
+    />
+
     <script type="module" src="/src/main.tsx"></script>
   </head>
   <body class="h-full">

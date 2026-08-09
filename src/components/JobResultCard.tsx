@@ -14,6 +14,7 @@
 import type { JobSummary } from '../../shared/events.ts';
 import { formatEnergy } from '../lib/format.ts';
 import { Molecule } from './Molecule.tsx';
+import { Badge } from '@/components/ui/badge';
 
 export function JobResultCard({
   jobId,
@@ -30,20 +31,20 @@ export function JobResultCard({
 
   return (
     <>
-      <div className="mb-2 flex items-center gap-2">
-        <span className="font-mono text-xs text-ink-muted">{jobId}</span>
-        {converged === true && (
-          <span className="rounded bg-ok-soft px-1.5 py-0.5 text-xs text-ok">converged</span>
-        )}
-        {converged === false && (
-          <span className="rounded bg-warn-soft px-1.5 py-0.5 text-xs text-warn">
-            not converged
-          </span>
-        )}
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        {/* The id stays the sole content of its element: it is what a chemist copies into a
+            ticket, and what the job tests match exactly. */}
+        <span className="font-mono text-2xs text-ink-muted">{jobId}</span>
+        {converged === true && <Badge tone="ok">converged</Badge>}
+        {converged === false && <Badge tone="warn">not converged</Badge>}
       </div>
-      {smiles && <Molecule smiles={smiles} width={280} height={190} />}
+
+      {smiles && <Molecule smiles={smiles} className="my-1" />}
+
       {energy !== null && (
-        <p className="mt-2 font-mono text-xs text-ink-muted">{formatEnergy(energy)}</p>
+        <p className="mt-2 font-mono text-2xs tabular-nums text-ink-muted">
+          {formatEnergy(energy)}
+        </p>
       )}
     </>
   );

@@ -22,12 +22,13 @@
 
 import { memo, useEffect, useLayoutEffect, useRef } from 'react';
 import { FlaskConical } from 'lucide-react';
-import type { AssistantMessage, ChatMessage, Conversation } from '../state/types.ts';
+import type { AssistantMessage, ChatMessage } from '../state/types.ts';
 import { Markdown } from './LazyMarkdown.tsx';
 import { TracePanel } from './TracePanel.tsx';
 import { AnswerFooter, CapabilityDegradedPill, ReviewRequiredPill } from './AnswerBadges.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
+import { useChatStore } from '../state/chatStore.ts';
 import { ElapsedTimer } from '@/components/chem/ElapsedTimer';
 import { EmptyState } from '@/components/chem/Feedback';
 import { cn } from '@/lib/utils';
@@ -178,7 +179,19 @@ const Bubble = memo(function Bubble({
   );
 });
 
-export function MessageList({ conversation }: { conversation: Conversation }): React.JSX.Element {
+/**
+ * Takes an id, not a conversation.
+ *
+ * `updateAssistant` replaces the conversation object on every animation frame, so a parent that
+ * selects the whole object re-renders at the same rate and drags its siblings — the header, the
+ * job feed, the composer — with it. Subscribing to the two fields this actually needs keeps that
+ * churn inside the transcript, where `memo(Bubble)` already absorbs it.
+ */
+export function MessageList({ conversationId }: { conversationId: string }): React.JSX.Element {
+  const messages = useChatStore((s) => s.conversations[conversationId]?.messages);
+  const sessionId = useChatStore((s) => s.conversations[conversationId]?.sessionId ?? null);
+  const contextLost = useChatStore((s) => s.conversations[conversationId]?.contextLost ?? false);
+
   const endRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -201,8 +214,6 @@ export function MessageList({ conversation }: { conversation: Conversation }): R
     return () => observer.disconnect();
   }, []);
 
-  const messages = conversation.messages;
-
   // Layout effect so the scroll lands in the same frame as the paint. Assigning scrollTop is
   // cheaper than scrollIntoView and does not walk the tree looking for a scroll container.
   useLayoutEffect(() => {
@@ -220,7 +231,7 @@ export function MessageList({ conversation }: { conversation: Conversation }): R
       <h2 className="sr-only-live">Conversation</h2>
 
       <div className="mx-auto flex w-full max-w-prose flex-col gap-5">
-        {conversation.contextLost && (
+        {contextLost && (
           <div role="alert" className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2.5">
             <p className="text-sm text-warn-ink">
               This conversation’s server session was replaced. The assistant no longer remembers the
@@ -229,15 +240,15 @@ export function MessageList({ conversation }: { conversation: Conversation }): R
           </div>
         )}
 
-        {messages.length === 0 && (
+        {messages?.length === 0 && (
           <EmptyState icon={<FlaskConical className="size-5" />} title="Chemclaw">
             Process &amp; analytical development assistant. Ask about a reaction, a property, or
             what to run next.
           </EmptyState>
         )}
 
-        {messages.map((message) => (
-          <Bubble key={message.id} message={message} sessionId={conversation.sessionId} />
+        {messages?.map((message) => (
+          <Bubble key={message.id} message={message} sessionId={sessionId} />
         ))}
         <div ref={endRef} className="h-px" />
       </div>

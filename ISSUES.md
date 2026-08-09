@@ -68,3 +68,35 @@ via the browser.
 - `GET /approvals` — list pending holds
 - `GET /approvals/{hold_id}` — describe one hold
 - `POST /approvals/{hold_id}/decision` — signal the Temporal workflow
+
+---
+
+## Known gaps in the UI rebuild (`claude/frontend-optimization-design-2agt1q`)
+
+The rebuild's commit messages describe what was built. This records what was not, because the
+commits do not, and the omissions are all in one area.
+
+**Long-transcript performance is not addressed.** Memoising the message bubbles and the trace panel
+fixed the per-frame cost of streaming into an _existing_ transcript. The separate problem — that a
+long transcript is expensive to render at all — is untouched: there is no `content-visibility` on
+message wrappers, no cap on how many messages render, and no "load earlier" control. A conversation
+with several hundred messages is no better off than before the rebuild.
+
+**The boot sequence still blocks on auth.** `AuthGate` renders the whole app only once
+`createAuthProvider()` resolves, so in `msal` mode the first paint waits on an MSAL round-trip and
+shows the word "Starting…". The transcript lives in `localStorage` and needs no token, so the shell
+could paint first and gate only the composer. `TranscriptSkeleton` was written for that change and
+deleted when the change was not made.
+
+**First send still costs two sequential round-trips** — `POST /sessions` then `POST /messages` —
+where warming the session on the first keystroke would hide one.
+
+Also not done, and lower value: conversation search; a pending-approvals inbox (`api.listApprovals`
+is implemented and has no caller); `@axe-core/playwright` and screenshot baselines in the e2e suite;
+upload progress and cancellation.
+
+**Unchanged from the pre-rebuild state, and still true:** job completions arrive only for the
+conversation that is currently open, are not persisted across a reload, and never notify a user who
+has tabbed away — see the note in `JobFeed.tsx` about the push-back path dying one step from the
+chemist. It now renders, which it did not before; the cross-conversation and durability halves are
+still missing. Nothing in the app is deep-linkable, and the browser Back button does nothing.

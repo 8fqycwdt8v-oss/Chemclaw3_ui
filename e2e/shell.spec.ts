@@ -17,15 +17,24 @@ test('the theme choice survives a reload', async ({ page }) => {
 
 test('a skip link is the first thing a keyboard reaches', async ({ page }) => {
   await page.goto('/');
+  // The tab order only means anything once the app has rendered its controls.
+  await expect(page.getByPlaceholder(/Ask about a reaction/)).toBeVisible();
 
-  // Chromium's first Tab moves focus off the document itself before entering the page, so the
-  // assertion is "the first element the tab order reaches", not "the second keypress".
-  await page.keyboard.press('Tab');
-  if (await page.evaluate(() => document.activeElement === document.body)) {
+  // Chromium's first Tab moves focus off the document before entering the page, so "first" is
+  // about the first element the tab order actually lands on, not the first keypress. Walk until
+  // focus leaves <body> and assert on where it first stopped — the claim is that nothing in the
+  // app comes before the skip link, so any other landing spot is a failure.
+  let landed = 'body';
+  for (let i = 0; i < 3 && landed === 'body'; i += 1) {
     await page.keyboard.press('Tab');
+    landed = await page.evaluate(() => {
+      const el = document.activeElement;
+      if (!el || el === document.body) return 'body';
+      return `${el.tagName.toLowerCase()}:${(el.textContent ?? '').trim().slice(0, 40)}`;
+    });
   }
 
-  await expect(page.getByRole('link', { name: 'Skip to conversation' })).toBeFocused();
+  expect(landed).toBe('a:Skip to conversation');
 });
 
 test('the composer shows a focus ring', async ({ page }) => {

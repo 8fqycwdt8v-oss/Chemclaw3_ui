@@ -36,8 +36,18 @@ function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
 
 export function App(): React.JSX.Element {
   const { auth } = useAuth();
+  // Narrow selectors, deliberately. `updateAssistant` replaces the conversation object on every
+  // animation frame, so selecting the object here re-rendered App — and with it the header, the
+  // job feed and the composer — at the token rate. These three change only when they mean
+  // something, and zustand v5 has no implicit shallow compare to fall back on.
   const activeId = useChatStore((s) => s.activeId);
-  const conversation = useChatStore((s) => (activeId ? s.conversations[activeId] : undefined));
+  const exists = useChatStore((s) => Boolean(s.activeId && s.conversations[s.activeId]));
+  const sessionId = useChatStore((s) =>
+    s.activeId ? (s.conversations[s.activeId]?.sessionId ?? null) : null,
+  );
+  const messageCount = useChatStore((s) =>
+    s.activeId ? (s.conversations[s.activeId]?.messages.length ?? 0) : 0,
+  );
   const [rehydrateNonce, setRehydrateNonce] = useState(0);
 
   useVisualViewport();
@@ -55,7 +65,7 @@ export function App(): React.JSX.Element {
   // Restore the transcript for a conversation whose session survived but whose messages were not
   // in localStorage — a different browser, or a cleared cache.
   useEffect(() => {
-    if (!conversation?.sessionId || conversation.messages.length > 0) return;
+    if (!activeId || !sessionId || messageCount > 0) return;
     let cancelled = false;
     void (async () => {
       // `getMessages` swallows only `session_not_found`; a 401, a 500 or a dropped connection all
@@ -63,9 +73,7 @@ export function App(): React.JSX.Element {
       // to retry — the reader could not tell "nothing was said yet" from "we could not load it".
       let remote: Awaited<ReturnType<typeof api.getMessages>>;
       try {
-        remote = await api.getMessages(conversation.sessionId as string, () =>
-          auth.getAccessToken(),
-        );
+        remote = await api.getMessages(sessionId, () => auth.getAccessToken());
       } catch (err) {
         if (!cancelled) {
           useChatStore.getState().setBanner({
@@ -105,20 +113,14 @@ export function App(): React.JSX.Element {
                 error: null,
               },
         );
-      useChatStore.getState().hydrateTranscript(conversation.id, messages);
+      useChatStore.getState().hydrateTranscript(activeId, messages);
     })();
     return () => {
       cancelled = true;
     };
-  }, [
-    conversation?.id,
-    conversation?.sessionId,
-    conversation?.messages.length,
-    auth,
-    rehydrateNonce,
-  ]);
+  }, [activeId, sessionId, messageCount, auth, rehydrateNonce]);
 
-  useJobFeed(conversation?.sessionId ?? null, auth);
+  useJobFeed(sessionId, auth);
 
   // What the banner's Retry does. The retryable failures reachable from here are the transcript
   // read and, once the store carries one, the last turn — both are re-driven by clearing the
@@ -141,11 +143,11 @@ export function App(): React.JSX.Element {
         <div className="flex min-w-0 flex-1 flex-col">
           <TopBar onRetry={onRetry} />
           <main className="flex min-h-0 flex-1 flex-col">
-            {conversation ? (
+            {activeId && exists ? (
               <>
-                <MessageList conversation={conversation} />
+                <MessageList conversationId={activeId} />
                 <JobFeed />
-                <Composer conversationId={conversation.id} />
+                <Composer conversationId={activeId} />
               </>
             ) : (
               <div className="flex flex-1 items-center justify-center">

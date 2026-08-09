@@ -162,10 +162,11 @@ plain top-level navigation, which CSP does not govern. So `bff` ships the strict
 ## Layout
 
 ```
-server/     the BFF — route whitelist, streaming proxy, static host, /config.js
+server/     the BFF — route whitelist, streaming proxy, static host, /config.js, auth/
 src/        the SPA — api/ auth/ state/ components/
 shared/     the event contract, mirrored from the service's service/events.py
 scripts/    dev launcher, server bundler, smoke test
+docs/       backend-requests.md — the changes this frontend needs upstream, with anchors
 ```
 
 Two files carry most of the difficulty and are commented accordingly:

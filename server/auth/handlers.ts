@@ -196,11 +196,8 @@ export async function currentSession(
   return refreshed;
 }
 
-async function handleLogin(
-  req: IncomingMessage,
-  res: ServerResponse,
-  query: URLSearchParams,
-): Promise<void> {
+/** Synchronous: PKCE and the sealed login state are local work, with no round trip to make yet. */
+function handleLogin(req: IncomingMessage, res: ServerResponse, query: URLSearchParams): void {
   const pkce = createPkce();
   const state = randomToken();
   const nonce = randomToken();
@@ -224,7 +221,6 @@ async function handleLogin(
       challenge: pkce.challenge,
     }),
   );
-  return Promise.resolve();
 }
 
 async function handleCallback(
@@ -386,7 +382,7 @@ export async function handleAuthRoute(
   const query = new URLSearchParams(rawUrl.slice(path.length).replace(/^\?/, ''));
 
   if (path === '/auth/login' && method === 'GET') {
-    await handleLogin(req, res, query);
+    handleLogin(req, res, query);
     return true;
   }
   if (path === '/auth/callback' && method === 'GET') {

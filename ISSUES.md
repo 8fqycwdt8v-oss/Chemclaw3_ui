@@ -27,6 +27,10 @@ this reason. The guard against a repeat is now mechanical rather than documentar
 
 ## Known limitations
 
+Five of the entries below can only be closed in the backend. They are written up as a
+specification — with the real file and line anchors, and the reasoning the backend has already
+recorded for the positions it took — in [`docs/backend-requests.md`](docs/backend-requests.md).
+
 ### 1. `GET /jobs` is not owner-scoped, so "Everyone's" is the honest default
 
 This is the backend's stated position rather than a bug: `find_past_jobs`, the agent tool over the

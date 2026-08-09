@@ -15,7 +15,13 @@ import { resetSession } from '../state/sendMessage.ts';
 
 type Health = 'checking' | 'ok' | 'down';
 
-export function TopBar(): React.JSX.Element {
+export function TopBar({
+  onToggleSidebar,
+  sidebarOpen,
+}: {
+  onToggleSidebar: () => void;
+  sidebarOpen: boolean;
+}): React.JSX.Element {
   const { auth, refresh } = useAuth();
   const [health, setHealth] = useState<Health>('checking');
   const banner = useChatStore((s) => s.banner);
@@ -40,6 +46,19 @@ export function TopBar(): React.JSX.Element {
   return (
     <header className="border-b border-border-subtle bg-surface-raised">
       <div className="flex items-center gap-3 px-4 py-2">
+        {/* The only route to the conversation list, "New conversation" and "Reset app" on a
+            narrow screen — where the sidebar is off-canvas. Hidden on md+, where it is always
+            visible and a toggle would be noise. */}
+        <button
+          type="button"
+          onClick={onToggleSidebar}
+          aria-expanded={sidebarOpen}
+          aria-controls="conversation-sidebar"
+          aria-label="Conversations"
+          className="rounded px-1.5 py-0.5 text-ink-muted hover:text-ink md:hidden"
+        >
+          ☰
+        </button>
         <span className="font-semibold">Chemclaw</span>
 
         <span
@@ -95,7 +114,12 @@ export function TopBar(): React.JSX.Element {
       </div>
 
       {banner && (
-        <div className="flex items-center gap-3 border-t border-border-subtle bg-danger-soft px-4 py-1.5">
+        // `role="alert"` so a failure is announced rather than only shown. This is the app's one
+        // global error surface and it was silent to screen readers.
+        <div
+          role="alert"
+          className="flex items-center gap-3 border-t border-border-subtle bg-danger-soft px-4 py-1.5"
+        >
           <p className="text-sm text-danger">{banner.text}</p>
           {banner.action === 'reset' && activeId && (
             <button

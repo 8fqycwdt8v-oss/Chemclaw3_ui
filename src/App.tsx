@@ -19,6 +19,8 @@ type View = 'chat' | 'jobs' | 'proposals';
 export function App(): React.JSX.Element {
   const { auth } = useAuth();
   const [view, setView] = useState<View>('chat');
+  // Closed by default on small screens; `md:` styles keep it always-visible on wide ones.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const activeId = useChatStore((s) => s.activeId);
   const conversation = useChatStore((s) => (activeId ? s.conversations[activeId] : undefined));
 
@@ -108,10 +110,10 @@ export function App(): React.JSX.Element {
   useJobFeed(conversation?.sessionId ?? null, auth);
 
   return (
-    <div className="flex h-full">
-      <Sidebar />
+    <div className="relative flex h-full">
+      <Sidebar open={sidebarOpen} />
       <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar />
+        <TopBar onToggleSidebar={() => setSidebarOpen((v) => !v)} sidebarOpen={sidebarOpen} />
         <nav
           aria-label="Views"
           className="flex gap-1 border-b border-border-subtle px-4 py-1.5 text-xs"

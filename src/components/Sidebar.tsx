@@ -61,7 +61,7 @@ const SidebarRow = memo(function SidebarRow({
   );
 });
 
-export function Sidebar(): React.JSX.Element {
+export function Sidebar({ open }: { open: boolean }): React.JSX.Element {
   const { auth } = useAuth();
   const order = useChatStore((s) => s.order);
   const activeId = useChatStore((s) => s.activeId);
@@ -109,7 +109,23 @@ export function Sidebar(): React.JSX.Element {
   }, [auth]);
 
   return (
-    <aside className="hidden w-64 shrink-0 flex-col border-r border-border-subtle bg-surface-sunken md:flex">
+    /*
+     * Off-canvas on small screens rather than absent.
+     *
+     * This was `hidden … md:flex` with no replacement, so on a phone there was no conversation
+     * switcher, no "New conversation", and — the one that matters — no "Reset app". The commit
+     * that added that reset button was specifically about mobile browsers serving poisoned
+     * persisted state, so hiding the only recovery control on the affected platform left exactly
+     * those users with no way out. `TopBar` owns the toggle.
+     */
+    <aside
+      id="conversation-sidebar"
+      className={cn(
+        'w-64 shrink-0 flex-col border-r border-border-subtle bg-surface-sunken md:flex',
+        'absolute inset-y-0 left-0 z-20 md:static',
+        open ? 'flex' : 'hidden',
+      )}
+    >
       <div className="p-3">
         <button
           type="button"

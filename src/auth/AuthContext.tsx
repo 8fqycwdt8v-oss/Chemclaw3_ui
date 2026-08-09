@@ -25,15 +25,40 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
 
   useEffect(() => {
     let cancelled = false;
+
+    // A bounded bootstrap. `pca.initialize()` and `handleRedirectPromise()` both talk to the
+    // identity provider, and neither has its own timeout — so a blocked or slow tenant left the
+    // app on "Starting…" indefinitely, which is indistinguishable from a hang and gives the user
+    // nothing to report.
+    const timeout = setTimeout(() => {
+      if (!cancelled) {
+        setError(
+          'Sign-in did not finish in time. The identity provider may be unreachable from this ' +
+            'network. Reload to try again.',
+        );
+      }
+    }, 20_000);
+
     createAuthProvider()
       .then((provider) => {
-        if (!cancelled) setAuth(provider);
+        if (cancelled) return;
+        clearTimeout(timeout);
+        setAuth(provider);
+        // The account is exposed as a getter on the provider, which React cannot observe. Bumping
+        // the revision once here is what makes the signed-in name appear after a redirect returns
+        // — previously `refresh()` was called only from the Sign in button, i.e. immediately
+        // BEFORE navigating away, so it could never reflect the account it was meant to show.
+        setRevision((r) => r + 1);
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Authentication failed.');
+        if (cancelled) return;
+        clearTimeout(timeout);
+        setError(err instanceof Error ? err.message : 'Authentication failed.');
       });
+
     return () => {
       cancelled = true;
+      clearTimeout(timeout);
     };
   }, []);
 

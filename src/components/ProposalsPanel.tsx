@@ -78,6 +78,7 @@ function DecisionForm({
         value={reason}
         onChange={(e) => setReason(e.target.value)}
         rows={2}
+        aria-label="Reason for this decision"
         className="mt-1 w-full rounded border border-border-subtle bg-surface p-2 text-sm focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
       />
       <div className="mt-2 flex gap-2">

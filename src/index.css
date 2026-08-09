@@ -8,10 +8,14 @@
   --color-surface-sunken: oklch(96.5% 0.005 250);
   --color-border-subtle: oklch(90% 0.006 250);
   --color-ink: oklch(23% 0.015 250);
-  --color-ink-muted: oklch(52% 0.014 250);
+  /* 52% on a 99% surface is right at the AA boundary, and this token carries a lot of small
+     (text-xs) copy. 46% clears it with room. */
+  --color-ink-muted: oklch(46% 0.014 250);
   --color-accent: oklch(52% 0.13 205);
   --color-accent-soft: oklch(95% 0.03 205);
-  --color-warn: oklch(62% 0.15 65);
+  /* Darkened from 62% to 45%. On --color-warn-soft (96%) the old pair was roughly 3:1, below
+     WCAG AA's 4.5:1 for body text — on the two components whose entire job is to warn. */
+  --color-warn: oklch(45% 0.13 65);
   --color-warn-soft: oklch(96% 0.04 65);
   --color-danger: oklch(55% 0.19 25);
   --color-danger-soft: oklch(96% 0.03 25);
@@ -149,4 +153,32 @@ body {
   .caret {
     animation: none;
   }
+}
+
+/*
+ * A visible focus indicator, everywhere, for keyboard users.
+ *
+ * There was none: the composer set `outline-none` with no replacement and the stylesheet defined
+ * no global rule, so the only focusable element in the app with a visible ring was the job-card
+ * dismiss button. Everything else could be tabbed to invisibly.
+ *
+ * `:focus-visible` rather than `:focus`, so a mouse click does not leave a ring behind.
+ */
+:where(a, button, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Visually hidden but announced — for live regions and labels that would be noise on screen. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border-width: 0;
 }

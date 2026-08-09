@@ -82,7 +82,9 @@ function AssistantBubble({
       )}
 
       {message.status === 'aborted' && (
-        <p className="mt-2 text-xs text-ink-muted">Stopped before the answer was complete.</p>
+        <p role="status" className="mt-2 text-xs text-ink-muted">
+          Stopped before the answer was complete.
+        </p>
       )}
 
       {message.error && (
@@ -166,7 +168,17 @@ export function MessageList({ conversation }: { conversation: Conversation }): R
   }, [conversation.messages.length, streamedLength]);
 
   return (
-    <div ref={scrollerRef} className="flex-1 overflow-y-auto px-4 py-6">
+    // `role="log"` with a polite live region: a screen reader is told when an answer arrives
+    // rather than being left to discover it. Deliberately NOT `aria-live` on the streaming text
+    // itself — that would re-announce the whole answer on every token.
+    <div
+      ref={scrollerRef}
+      role="log"
+      aria-label="Conversation"
+      aria-live="polite"
+      aria-relevant="additions"
+      className="flex-1 overflow-y-auto px-4 py-6"
+    >
       <div className={cn('mx-auto flex max-w-3xl flex-col gap-4')}>
         {conversation.contextLost && (
           <div className="rounded-md border border-warn/40 bg-warn-soft px-3 py-2">

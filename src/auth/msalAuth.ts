@@ -19,7 +19,13 @@
 
 import type { AccountInfo, Configuration, IPublicClientApplication } from '@azure/msal-browser';
 import { config } from '../env.ts';
+import { ApiError } from '../api/errors.ts';
 import type { AuthAccount, AuthProvider } from './types.ts';
+
+/** Diagnostics go to the console, where an operator can read them; never to the user's card. */
+const log = (message: string, err: unknown): void => {
+  console.warn(`[auth] ${message}:`, err);
+};
 
 export function buildMsalConfig(): Configuration {
   return {
@@ -97,7 +103,19 @@ export async function createMsalAuth(): Promise<AuthProvider> {
           await pca.acquireTokenRedirect({ account, scopes: apiScopes() });
           return null; // navigation in flight; this request is abandoned
         }
-        throw err;
+        // Rethrown as an ApiError rather than raw.
+        //
+        // `getAccessToken` is awaited OUTSIDE the try/catch in both `client.request` and
+        // `streamTurn` — those only wrap `fetch` — so a raw MSAL error escaped all the way to
+        // `sendMessage`, was wrapped as `kind: 'stream'`, and rendered verbatim in an error card.
+        // MSAL's internal strings ("interaction_in_progress", token-cache diagnostics) are not
+        // user-facing copy, and they say nothing a chemist can act on.
+        log('token acquisition failed', err);
+        throw new ApiError(
+          'unauthorized',
+          'Could not obtain a sign-in token for the Chemclaw service. Sign in again, and if it ' +
+            'keeps happening the app registration may be misconfigured.',
+        );
       }
     },
 
@@ -118,7 +136,16 @@ export async function createMsalAuth(): Promise<AuthProvider> {
       // without this the app would redirect-loop — which is indistinguishable from a hang and
       // hides the actual error. At most one forced re-auth per minute.
       const last = Number(sessionStorage.getItem(REAUTH_KEY) ?? 0);
-      if (Date.now() - last < REAUTH_COOLDOWN_MS) return false;
+      if (Date.now() - last < REAUTH_COOLDOWN_MS) {
+        // Inside the cooldown there is nothing useful left to try, and the caller needs to know
+        // that rather than seeing a bare 401 with no explanation of why no redirect happened.
+        throw new ApiError(
+          'unauthorized',
+          'Sign-in was attempted moments ago and the service still refused the token. This ' +
+            'usually means the API scope or audience is misconfigured rather than that your ' +
+            'session expired.',
+        );
+      }
       sessionStorage.setItem(REAUTH_KEY, String(Date.now()));
 
       const account = pca.getActiveAccount();

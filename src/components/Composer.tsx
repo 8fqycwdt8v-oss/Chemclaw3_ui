@@ -135,12 +135,18 @@ export function Composer({ conversationId }: { conversationId: string }): React.
               }
             }}
             placeholder="Ask about a reaction, a property, or what to run next…"
-            className="max-h-50 min-h-6 flex-1 resize-none bg-transparent text-[0.95rem] outline-none placeholder:text-ink-muted"
+            // A placeholder is not a label: it disappears on focus and is not reliably announced.
+            aria-label="Message"
+            aria-describedby="composer-hint"
+            // `outline-none` with no replacement left keyboard users with no visible focus at all
+            // on the app's primary control. The ring is the replacement, not a decoration.
+            className="max-h-50 min-h-6 flex-1 resize-none bg-transparent text-[0.95rem] outline-none placeholder:text-ink-muted focus-visible:outline-none"
           />
 
           <input
             ref={fileRef}
             type="file"
+            aria-label="Attach a file"
             className="hidden"
             onChange={(e) => {
               const file = e.target.files?.[0];
@@ -151,6 +157,9 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           <button
             type="button"
             title="Attach a working file (CSV, SOP) to this conversation"
+            // Emoji are not a reliable accessible name — a screen reader may announce "paperclip",
+            // something else, or nothing at all, and `title` is inconsistently exposed.
+            aria-label="Attach a file"
             onClick={() => fileRef.current?.click()}
             className="rounded px-1.5 py-1 text-ink-muted hover:bg-surface-sunken"
           >
@@ -177,16 +186,25 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           )}
         </div>
 
+        <p id="composer-hint" className="sr-only">
+          Press Enter to send, Shift and Enter for a new line.
+        </p>
+
         <div className="mt-1.5 flex items-center justify-between text-xs text-ink-muted">
           <label className="flex cursor-pointer items-center gap-1.5">
-            <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
+            <input
+              type="checkbox"
+              checked={dryRun}
+              aria-label="Dry run"
+              onChange={(e) => setDryRun(e.target.checked)}
+            />
             {/* The backend's own dry_run: plan the turn without launching anything expensive. */}
             <span title="Plan the turn without launching QM jobs or other expensive work">
               Dry run
             </span>
           </label>
           {text.length > MAX_MESSAGE_CHARS * 0.8 && (
-            <span className={tooLong ? 'text-danger' : undefined}>
+            <span role="status" aria-live="polite" className={tooLong ? 'text-danger' : undefined}>
               {text.length.toLocaleString()} / {MAX_MESSAGE_CHARS.toLocaleString()}
             </span>
           )}

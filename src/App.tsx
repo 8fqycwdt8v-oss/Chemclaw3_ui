@@ -50,9 +50,27 @@ export function App(): React.JSX.Element {
     if (!conversation?.sessionId || conversation.messages.length > 0) return;
     let cancelled = false;
     void (async () => {
-      const remote = await api.getMessages(conversation.sessionId as string, () =>
-        auth.getAccessToken(),
-      );
+      // `getMessages` swallows only `session_not_found`; a 401, a 500 or a dropped connection all
+      // rethrow. Unhandled, that surfaced as an empty conversation with no explanation and no way
+      // to retry — the reader could not tell "nothing was said yet" from "we could not load it".
+      let remote: Awaited<ReturnType<typeof api.getMessages>>;
+      try {
+        remote = await api.getMessages(conversation.sessionId as string, () =>
+          auth.getAccessToken(),
+        );
+      } catch (err) {
+        if (!cancelled) {
+          useChatStore.getState().setBanner({
+            kind: 'warn',
+            text:
+              err instanceof Error
+                ? `Could not load this conversation’s earlier messages: ${err.message}`
+                : 'Could not load this conversation’s earlier messages.',
+            action: 'retry',
+          });
+        }
+        return;
+      }
       if (cancelled || remote.length === 0) return;
       const messages: ChatMessage[] = remote
         .filter((m) => m.text?.trim())

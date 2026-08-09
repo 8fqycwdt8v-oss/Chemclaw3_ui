@@ -21,6 +21,13 @@ import type {
   TraceEntry,
 } from './types.ts';
 
+/** Exactly the slice `partialize` writes to localStorage, and what `migrate` must return. */
+interface PersistedState {
+  conversations: Record<string, Conversation>;
+  order: string[];
+  activeId: string | null;
+}
+
 /** Keep persisted state bounded — see `partialize` below. */
 const MAX_CONVERSATIONS = 30;
 const MAX_TRACE_ENTRIES = 200;
@@ -453,9 +460,45 @@ export const useChatStore = create<ChatState>()(
     {
       // Bumped to v2 to force a clean slate on iPhone/mobile browsers that kept serving the old
       // v1 persisted state (poisoned sessions) after the recent fixes.
+      //
+      // The KEY is frozen from here on. Schema changes go through `version` + `migrate` below:
+      // bumping the key again is a silent wipe of everyone's local history, which is only ever
+      // acceptable as the emergency it was the first time.
       name: 'chemclaw3.chat.v2',
-      version: 1,
+      version: 2,
       storage: createJSONStorage(() => localStorage),
+
+      /**
+       * v1 -> v2 adds no fields; it exists to establish the upgrade path and to repair state the
+       * old code could persist but the new code assumes away. Unknown/older versions fall back to
+       * a clean slate rather than guessing.
+       */
+      migrate: (persisted, version) => {
+        if (version >= 2) return persisted as PersistedState;
+        const state = persisted as Partial<PersistedState> | undefined;
+        if (!state?.conversations || !state.order) return { conversations: {}, order: [], activeId: null };
+
+        // A message left mid-stream by a build that predates the partialize guard would otherwise
+        // rehydrate as 'streaming' and spin forever — there is no resume endpoint.
+        const conversations: Record<string, Conversation> = {};
+        for (const [id, conversation] of Object.entries(state.conversations)) {
+          if (!conversation) continue;
+          conversations[id] = {
+            ...conversation,
+            messages: (conversation.messages ?? []).map((m) =>
+              m.role === 'assistant' && m.status === 'streaming'
+                ? { ...m, status: 'aborted' as const }
+                : m,
+            ),
+          };
+        }
+        const order = state.order.filter((id) => conversations[id]);
+        return {
+          conversations,
+          order,
+          activeId: state.activeId && conversations[state.activeId] ? state.activeId : (order[0] ?? null),
+        };
+      },
 
       partialize: (state) => {
         // Keep only the newest conversations, and never persist a message still marked

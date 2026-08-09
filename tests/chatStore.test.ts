@@ -45,18 +45,16 @@ describe('chatStore', () => {
 
     useChatStore.getState().applyEvent(cid, mid, { type: 'token', text: 'Acetic ' });
     useChatStore.getState().applyEvent(cid, mid, { type: 'token', text: 'acid.' });
-    useChatStore
-      .getState()
-      .applyEvent(
-        cid,
-        mid,
-        answerEvent({
-          text: 'Acetic acid.',
-          confidence: 0.9,
-          unsupported_claims: [],
-          review_required: false,
-        }),
-      );
+    useChatStore.getState().applyEvent(
+      cid,
+      mid,
+      answerEvent({
+        text: 'Acetic acid.',
+        confidence: 0.9,
+        unsupported_claims: [],
+        review_required: false,
+      }),
+    );
 
     const message = assistantOf(cid, mid);
     expect(message.streamedText).toBe('Acetic acid.');
@@ -69,18 +67,16 @@ describe('chatStore', () => {
   it('records verifier signals from the answer', () => {
     const cid = useChatStore.getState().createConversation();
     const mid = useChatStore.getState().startAssistantMessage(cid);
-    useChatStore
-      .getState()
-      .applyEvent(
-        cid,
-        mid,
-        answerEvent({
-          text: 'maybe',
-          confidence: 0.31,
-          unsupported_claims: ['yield was 92%'],
-          review_required: true,
-        }),
-      );
+    useChatStore.getState().applyEvent(
+      cid,
+      mid,
+      answerEvent({
+        text: 'maybe',
+        confidence: 0.31,
+        unsupported_claims: ['yield was 92%'],
+        review_required: true,
+      }),
+    );
 
     const message = assistantOf(cid, mid);
     expect(message.reviewRequired).toBe(true);
@@ -108,18 +104,16 @@ describe('chatStore', () => {
     const cid = useChatStore.getState().createConversation();
     const mid = useChatStore.getState().startAssistantMessage(cid);
     useChatStore.getState().applyEvent(cid, mid, { type: 'token', text: 'x' });
-    useChatStore
-      .getState()
-      .applyEvent(
-        cid,
-        mid,
-        answerEvent({
-          text: 'x',
-          confidence: null,
-          unsupported_claims: [],
-          review_required: false,
-        }),
-      );
+    useChatStore.getState().applyEvent(
+      cid,
+      mid,
+      answerEvent({
+        text: 'x',
+        confidence: null,
+        unsupported_claims: [],
+        review_required: false,
+      }),
+    );
     expect(assistantOf(cid, mid).trace).toHaveLength(0);
   });
 

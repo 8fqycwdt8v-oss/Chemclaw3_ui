@@ -50,3 +50,18 @@ jobs:
       # code elimination is a bundler optimisation, not a contract.
       - name: No dev auth in a production bundle
         run: node scripts/assert-no-dev-auth.mjs
+
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # Fails when the BFF whitelist, the event union, an event's field set, the error taxonomy or
+      # the client's endpoint list drifts from the committed backend contract fixture. Regenerating
+      # that fixture is a deliberate, reviewable act — see scripts/gen_backend_contract.py.
+      - name: Backend contract
+        run: npm run check:contract

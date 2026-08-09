@@ -30,6 +30,13 @@ export const CLIENT_ENDPOINTS: readonly ClientEndpoint[] = [
   { method: 'POST', spec: '/sessions/{session_id}/plan/decision' },
   { method: 'GET', spec: '/approvals' },
   { method: 'POST', spec: '/approvals/{approval_id}/decision' },
+  { method: 'GET', spec: '/profiles' },
+  { method: 'GET', spec: '/jobs' },
+  { method: 'GET', spec: '/jobs/{job_id}' },
+  { method: 'DELETE', spec: '/jobs/{job_id}' },
+  { method: 'GET', spec: '/proposals' },
+  { method: 'GET', spec: '/proposals/{proposal_id}' },
+  { method: 'POST', spec: '/proposals/{proposal_id}/decision' },
 ] as const;
 
 /** URL builders, so a path is spelled once and always encoded the same way. */
@@ -47,4 +54,23 @@ export const paths = {
   planDecision: (sessionId: string) => `/sessions/${encodeURIComponent(sessionId)}/plan/decision`,
   approvals: () => '/approvals',
   approvalDecision: (approvalId: string) => `/approvals/${encodeURIComponent(approvalId)}/decision`,
+  profiles: () => '/profiles',
+  jobs: (query: { text?: string; connector?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (query.text) params.set('text', query.text);
+    if (query.connector) params.set('connector', query.connector);
+    const qs = params.toString();
+    return qs ? `/jobs?${qs}` : '/jobs';
+  },
+  job: (jobId: string) => `/jobs/${encodeURIComponent(jobId)}`,
+  proposals: (query: { state?: string; beforeId?: number } = {}) => {
+    const params = new URLSearchParams();
+    if (query.state) params.set('state', query.state);
+    // Keyset pagination: `before_id` is the last row id seen, not a page number.
+    if (query.beforeId) params.set('before_id', String(query.beforeId));
+    const qs = params.toString();
+    return qs ? `/proposals?${qs}` : '/proposals';
+  },
+  proposal: (id: number) => `/proposals/${id}`,
+  proposalDecision: (id: number) => `/proposals/${id}/decision`,
 } as const;

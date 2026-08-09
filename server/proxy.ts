@@ -170,11 +170,31 @@ function buildUpstreamHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
   return headers;
 }
 
+/**
+ * Methods it is safe to replay when the connection dies before any response.
+ *
+ * Observed live: a request landing on a pooled keep-alive socket that the upstream had already
+ * closed fails with ECONNRESET, and the caller sees a 502 for a backend that is perfectly healthy.
+ * The window is small but it is a race no amount of care on the upstream side closes.
+ *
+ * `POST` is deliberately absent, and that is the whole point of having a list. Replaying
+ * `POST /sessions/{id}/messages` would either double-spend the turn budget or collide with the
+ * backend's per-session turn lock and come back 409 — the same reasoning that made `streamTurn`
+ * refuse to auto-retry on the client side. `DELETE /jobs/{id}` is included: cancellation is
+ * idempotent, and asking twice to stop the same run is harmless.
+ */
+const REPLAYABLE_METHODS = new Set(['GET', 'HEAD', 'DELETE']);
+
+/** Connection-level failures, i.e. ones where the request provably never reached a handler. */
+const REPLAYABLE_ERRORS = new Set(['ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT']);
+
 export function proxy(
   req: IncomingMessage,
   res: ServerResponse,
   upstreamPath: string,
   expectSse: boolean,
+  /** Internal: set when this call is already the one retry a request gets. */
+  isRetry = false,
 ): void {
   const upstreamReq = transport.request(
     {
@@ -251,7 +271,23 @@ export function proxy(
       res.destroy();
       return;
     }
-    log.warn(`upstream error for ${req.method} ${upstreamPath}: ${err.message}`);
+
+    // Replay once through a fresh connection when the failure was the connection itself and the
+    // method is safe to repeat. Only for a request with no body to re-send — `req` has already
+    // been consumed by the pipe, so a body-carrying request cannot be replayed even in principle.
+    const method = req.method ?? 'GET';
+    const replayable =
+      !isRetry &&
+      REPLAYABLE_METHODS.has(method) &&
+      REPLAYABLE_ERRORS.has(err.code ?? '') &&
+      !req.readableDidRead;
+    if (replayable) {
+      log.debug(`retrying ${method} ${upstreamPath} once after ${err.code}`);
+      proxy(req, res, upstreamPath, expectSse, true);
+      return;
+    }
+
+    log.warn(`upstream error for ${method} ${upstreamPath}: ${err.message}`);
     res.writeHead(502, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ detail: 'upstream unavailable', code: err.code ?? 'EPROXY' }));
   });

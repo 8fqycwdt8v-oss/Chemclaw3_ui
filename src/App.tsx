@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useAuth } from './auth/AuthContext.tsx';
 import { useChatStore } from './state/chatStore.ts';
 import { api } from './api/client.ts';
@@ -8,10 +8,17 @@ import { TopBar } from './components/TopBar.tsx';
 import { MessageList } from './components/MessageList.tsx';
 import { JobFeed } from './components/JobFeed.tsx';
 import { Composer } from './components/Composer.tsx';
+import { JobsPanel } from './components/JobsPanel.tsx';
+import { ProposalsPanel } from './components/ProposalsPanel.tsx';
+import { ProfilePicker } from './components/ProfilePicker.tsx';
 import type { ChatMessage } from './state/types.ts';
+
+/** The three things this UI can show. Chat is the default and everything else is a side surface. */
+type View = 'chat' | 'jobs' | 'proposals';
 
 export function App(): React.JSX.Element {
   const { auth } = useAuth();
+  const [view, setView] = useState<View>('chat');
   const activeId = useChatStore((s) => s.activeId);
   const conversation = useChatStore((s) => (activeId ? s.conversations[activeId] : undefined));
 
@@ -105,17 +112,43 @@ export function App(): React.JSX.Element {
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar />
-        {conversation ? (
-          <>
-            <MessageList conversation={conversation} />
-            <JobFeed />
-            <Composer conversationId={conversation.id} />
-          </>
-        ) : (
-          <div className="flex flex-1 items-center justify-center">
-            <p className="text-sm text-ink-muted">Starting a conversation…</p>
-          </div>
-        )}
+        <nav
+          aria-label="Views"
+          className="flex gap-1 border-b border-border-subtle px-4 py-1.5 text-xs"
+        >
+          {(['chat', 'jobs', 'proposals'] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              aria-current={view === v ? 'page' : undefined}
+              onClick={() => setView(v)}
+              className={
+                view === v
+                  ? 'rounded bg-accent-soft px-2 py-0.5 text-accent focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none'
+                  : 'rounded px-2 py-0.5 text-ink-muted hover:text-ink focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none'
+              }
+            >
+              {v === 'chat' ? 'Chat' : v === 'jobs' ? 'Runs' : 'Proposed notes'}
+            </button>
+          ))}
+        </nav>
+
+        {view === 'jobs' && <JobsPanel />}
+        {view === 'proposals' && <ProposalsPanel />}
+
+        {view === 'chat' &&
+          (conversation ? (
+            <>
+              <ProfilePicker conversationId={conversation.id} />
+              <MessageList conversation={conversation} />
+              <JobFeed />
+              <Composer conversationId={conversation.id} />
+            </>
+          ) : (
+            <div className="flex flex-1 items-center justify-center">
+              <p className="text-sm text-ink-muted">Starting a conversation…</p>
+            </div>
+          ))}
       </div>
     </div>
   );

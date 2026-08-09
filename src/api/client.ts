@@ -1,10 +1,14 @@
 /**
  * Non-streaming calls to the Chemclaw service, through the BFF.
  *
- * Endpoints verified against 8fqycwdt8v-oss/Chemclaw3 @ d5ed9e3 (service/app.py). Two of them —
- * `GET /sessions` and `GET /sessions/{id}/messages` — are added by the companion backend change;
- * both degrade to an empty result rather than throwing, so this UI runs against a service that
- * does not have them yet.
+ * The endpoint list is declared in `endpoints.ts` and checked against the backend's real route
+ * table by `scripts/check-contract.mjs`, so this file cannot quietly drift from the service again.
+ * It previously claimed verification against a commit the backend was hundreds of changes past.
+ *
+ * `listSessions` and `getMessages` still swallow a 404 into an empty result. That was written when
+ * those routes did not exist upstream; they do now, and a 404 means "unknown session, or not
+ * yours" — deliberately indistinguishable. The degradation is kept because the outcome is the same
+ * either way (there is no transcript to show), but it is no longer about an older service.
  */
 
 import { config } from '../env.ts';
@@ -97,6 +101,71 @@ export interface PlanStatus {
   decided_by: string | null;
 }
 
+/** A durable run, as `job_records` remembers it. */
+export interface JobRecord {
+  job_id: string;
+  connector: string;
+  job: string;
+  rationale?: string;
+  summary?: string;
+  note_id?: string;
+  completed_at?: string | null;
+  /** Who asked for it. The list is NOT owner-scoped upstream, so this is how a "mine" view is built. */
+  requested_by?: string;
+}
+
+/** One job's live status. `status` is free-form; the terminal set is completed/failed/cancelled/
+ *  terminated/timed_out, and anything else means still running. */
+export interface JobStatus {
+  job_id: string;
+  status: string;
+  summary?: string | null;
+  result?: Record<string, unknown>;
+  rationale?: string;
+}
+
+export const TERMINAL_JOB_STATUSES = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'terminated',
+  'timed_out',
+]);
+
+/** A note the agent proposed, awaiting human sign-off through the PR gate. */
+export interface ProposalSummary {
+  id: number;
+  note_id: string;
+  note_type: string;
+  /** `open` | `merged` | `rejected` | `failed`. */
+  state: string;
+  branch: string;
+  reference: string;
+  actor: string;
+  submitted_at?: string | null;
+  decided_at?: string | null;
+  decided_by?: string;
+  reason?: string;
+}
+
+export interface ProposalFile {
+  path: string;
+  content: string;
+}
+
+export interface ProposalDetail extends ProposalSummary {
+  content: string;
+  /**
+   * The other files this proposal touches.
+   *
+   * A proposal is a multi-file unit, so a review surface that renders only `content` is showing a
+   * partial submission and asking someone to sign off on it.
+   */
+  dependencies: ProposalFile[];
+  session_id: string;
+  correlation_id: string;
+}
+
 export const api = {
   async health(): Promise<boolean> {
     try {
@@ -107,8 +176,19 @@ export const api = {
     }
   },
 
-  createSession(getToken: TokenGetter): Promise<{ session_id: string }> {
-    return request<{ session_id: string }>(paths.sessions(), getToken, { method: 'POST' });
+  /**
+   * Start a session, optionally on a named agent profile.
+   *
+   * The profile is fixed for the session's life — the backend resolves it once so a conversation
+   * cannot have its instructions and tools change underneath its own history — so this is the only
+   * point at which it can be chosen. An unknown name is a 400, not a 500 on the first turn.
+   */
+  createSession(getToken: TokenGetter, profile?: string | null): Promise<{ session_id: string }> {
+    return request<{ session_id: string }>(paths.sessions(), getToken, {
+      method: 'POST',
+      // The body is optional upstream; send one only when there is something to say.
+      ...(profile ? { body: JSON.stringify({ profile }) } : {}),
+    });
   },
 
   /** The caller's sessions. Returns `[]` if the backend predates this endpoint (404) or has
@@ -190,5 +270,73 @@ export const api = {
       }
       throw err;
     }
+  },
+
+  /** The specialised agents a new session can be started as. Empty on any failure — a picker that
+   *  cannot load is a missing convenience, not a reason to block starting a conversation. */
+  async listProfiles(getToken: TokenGetter): Promise<string[]> {
+    try {
+      return await request<string[]>(paths.profiles(), getToken);
+    } catch {
+      return [];
+    }
+  },
+
+  /** Durable runs this system has finished, newest first. Not owner-scoped by the backend. */
+  listJobs(
+    getToken: TokenGetter,
+    query: { text?: string; connector?: string } = {},
+  ): Promise<JobRecord[]> {
+    return request<JobRecord[]>(paths.jobs(query), getToken);
+  },
+
+  getJob(jobId: string, getToken: TokenGetter): Promise<JobStatus> {
+    return request<JobStatus>(paths.job(jobId), getToken);
+  },
+
+  /**
+   * Ask Temporal to stop a run. 202 means the request was delivered, NOT that it stopped —
+   * cancellation is cooperative, so the caller must poll `getJob`.
+   *
+   * 403 when the caller lacks the privileged role, which is the expected answer for most users:
+   * a job id excludes its requester by design, so two chemists asking for the same campaign share
+   * one run and neither is more entitled to cancel it.
+   */
+  cancelJob(jobId: string, getToken: TokenGetter): Promise<{ status: string; job_id: string }> {
+    return request<{ status: string; job_id: string }>(paths.job(jobId), getToken, {
+      method: 'DELETE',
+    });
+  },
+
+  /** The PR-gate queue. `beforeId` is keyset pagination: pass the last id seen. */
+  listProposals(
+    getToken: TokenGetter,
+    query: { state?: string; beforeId?: number } = {},
+  ): Promise<ProposalSummary[]> {
+    return request<ProposalSummary[]>(paths.proposals(query), getToken);
+  },
+
+  getProposal(id: number, getToken: TokenGetter): Promise<ProposalDetail> {
+    return request<ProposalDetail>(paths.proposal(id), getToken);
+  },
+
+  /**
+   * Sign off on a proposed note.
+   *
+   * `reason` is mandatory on a rejection and the backend answers 422 without it — deliberately:
+   * a rejection with no recorded reason is the one outcome the audit record cannot reconstruct.
+   * Refusal order upstream is 403 (no review role) -> 422 (no reason) -> 404 -> 409 (already
+   * decided), and each means something different to the reviewer.
+   */
+  decideProposal(
+    id: number,
+    approved: boolean,
+    reason: string,
+    getToken: TokenGetter,
+  ): Promise<void> {
+    return request<void>(paths.proposalDecision(id), getToken, {
+      method: 'POST',
+      body: JSON.stringify({ approved, reason }),
+    });
   },
 };

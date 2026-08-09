@@ -10,7 +10,12 @@
  * `POST /sessions` returns). That validation doubles as traversal protection: a path segment
  * that matches this pattern cannot contain `/`, `.` or an encoded escape.
  *
- * Route list verified against 8fqycwdt8v-oss/Chemclaw3 @ d5ed9e3 (service/app.py).
+ * Each route declares the backend path template it targets (`spec`), and
+ * `scripts/check-contract.mjs` asserts — in both directions — that this list matches the service's
+ * real route table. A backend route that is neither proxied nor named in that script's
+ * DELIBERATELY_UNPROXIED list fails the build, so a new upstream surface cannot go unnoticed
+ * simply because nobody looked. The header used to claim verification against a commit the
+ * backend was hundreds of changes past, which is exactly the failure mode that replaces.
  */
 
 const SID = '([0-9a-f]{32})';
@@ -37,6 +42,18 @@ const SID = '([0-9a-f]{32})';
  * The length cap and the closed character set still hold.
  */
 const APPROVAL = "([A-Za-z0-9._:~!*'()%-]{1,128})";
+
+/**
+ * Durable job ids.
+ *
+ * `job_workflow_id` hashes `[connector, job, payload]`, so the id is a generated token rather
+ * than anything user-authored. The character set is therefore closed and narrow, and unlike
+ * `APPROVAL` there is no argument for widening it: nothing about a job id comes from a model.
+ */
+const JOB = '([A-Za-z0-9._:-]{1,128})';
+
+/** Proposal ids are a Postgres bigint primary key — digits, nothing else. */
+const PROPOSAL = '([0-9]{1,19})';
 
 export interface Route {
   method: string;
@@ -161,6 +178,63 @@ export const ROUTES: readonly Route[] = [
     target: (m) => `/approvals/${m[1]}/decision`,
     sse: false,
     spec: '/approvals/{approval_id}/decision',
+  },
+
+  // Session profiles: which specialised agent a new conversation talks to. The backend 400s an
+  // unknown name, and nothing exposed the list — so a surface had to hardcode names living in
+  // files it cannot see.
+  {
+    method: 'GET',
+    pattern: /^\/api\/profiles$/,
+    target: () => '/profiles',
+    sse: false,
+    spec: '/profiles',
+  },
+
+  // Durable runs. Deliberately NOT owner-scoped upstream (`find_past_jobs`, the agent tool over
+  // the same table, is unscoped for cross-project learning), so the UI filters by `requested_by`
+  // rather than pretending the list is private.
+  { method: 'GET', pattern: /^\/api\/jobs$/, target: () => '/jobs', sse: false, spec: '/jobs' },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/jobs/${JOB}$`),
+    target: (m) => `/jobs/${m[1]}`,
+    sse: false,
+    spec: '/jobs/{job_id}',
+  },
+  // Cancellation needs a privileged role and answers 202: the request was delivered, not that the
+  // run has stopped. A job's id excludes its requester by design, so a running job has no single
+  // owner to authorise stopping it.
+  {
+    method: 'DELETE',
+    pattern: new RegExp(`^/api/jobs/${JOB}$`),
+    target: (m) => `/jobs/${m[1]}`,
+    sse: false,
+    spec: '/jobs/{job_id}',
+  },
+
+  // The PR-gate's review queue. This is what makes the `note_proposed` event actionable: until
+  // now a note was pushed to a branch and that was the end of it as far as this UI was concerned.
+  {
+    method: 'GET',
+    pattern: /^\/api\/proposals$/,
+    target: () => '/proposals',
+    sse: false,
+    spec: '/proposals',
+  },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/proposals/${PROPOSAL}$`),
+    target: (m) => `/proposals/${m[1]}`,
+    sse: false,
+    spec: '/proposals/{proposal_id}',
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/proposals/${PROPOSAL}/decision$`),
+    target: (m) => `/proposals/${m[1]}/decision`,
+    sse: false,
+    spec: '/proposals/{proposal_id}/decision',
   },
 ] as const;
 

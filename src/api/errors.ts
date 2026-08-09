@@ -3,7 +3,11 @@
  *
  * The Chemclaw service's status codes each mean something specific and each want a different
  * response from the UI, so they are mapped once here rather than being re-interpreted at every
- * call site. Statuses verified against service/app.py @ d5ed9e3.
+ * call site.
+ *
+ * Two failures arrive by different routes and must not be conflated: an HTTP status, for anything
+ * refused before the response begins, and an in-stream `error` event, for anything that goes wrong
+ * once a turn is already streaming. `errorFromStatus` and `errorFromEvent` are the two doors.
  */
 
 import type { ChemclawErrorCode, ErrorEvent } from '../../shared/events.ts';

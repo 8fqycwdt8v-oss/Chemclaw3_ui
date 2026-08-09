@@ -42,6 +42,7 @@ export function newConversation(): Conversation {
   return {
     id: uid(),
     sessionId: null,
+    profile: null,
     title: 'New conversation',
     createdAt: now,
     updatedAt: now,
@@ -172,7 +173,8 @@ export interface ChatState {
   jobFeed: (JobCompletedEvent | JobFailedEvent)[];
   streaming: { conversationId: string; messageId: string; abort: AbortController } | null;
 
-  createConversation: () => string;
+  createConversation: (profile?: string | null) => string;
+  setProfile: (conversationId: string, profile: string | null) => void;
   selectConversation: (id: string) => void;
   deleteConversation: (id: string) => void;
   clearAll: () => void;
@@ -231,8 +233,8 @@ export const useChatStore = create<ChatState>()(
       jobFeed: [],
       streaming: null,
 
-      createConversation() {
-        const conversation = newConversation();
+      createConversation(profile = null) {
+        const conversation = { ...newConversation(), profile };
         set((s) => ({
           conversations: { ...s.conversations, [conversation.id]: conversation },
           order: [conversation.id, ...s.order],
@@ -241,6 +243,20 @@ export const useChatStore = create<ChatState>()(
           banner: null,
         }));
         return conversation.id;
+      },
+
+      setProfile(conversationId, profile) {
+        set((s) => {
+          const conversation = s.conversations[conversationId];
+          // Only before a session exists: after that the backend has already fixed it.
+          if (!conversation || conversation.sessionId) return {};
+          return {
+            conversations: {
+              ...s.conversations,
+              [conversationId]: { ...conversation, profile },
+            },
+          };
+        });
       },
 
       selectConversation(id) {

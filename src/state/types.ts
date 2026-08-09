@@ -157,6 +157,15 @@ export interface Conversation {
   id: string;
   /** The server handle. Null before the first turn; replaced on a 404. */
   sessionId: string | null;
+  /**
+   * The agent profile this conversation talks to, chosen when it is created.
+   *
+   * Persisted with the conversation rather than read back from the server, because it has to
+   * survive a session being replaced: the backend fixes a profile for a session's lifetime, so a
+   * recreated session must be given the same one or the conversation changes agent halfway
+   * through its own transcript.
+   */
+  profile: string | null;
   title: string;
   createdAt: number;
   updatedAt: number;

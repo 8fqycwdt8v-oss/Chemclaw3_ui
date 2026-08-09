@@ -115,3 +115,48 @@ describe('proxy route whitelist', () => {
     });
   });
 });
+
+describe('the surfaces added alongside the backend', () => {
+  it('proxies the job routes, including the reviewer-gated cancel', () => {
+    expect(resolveRoute('GET', '/api/jobs')?.path).toBe('/jobs');
+    expect(resolveRoute('GET', '/api/jobs/qm-abc123')?.path).toBe('/jobs/qm-abc123');
+    expect(resolveRoute('DELETE', '/api/jobs/qm-abc123')?.path).toBe('/jobs/qm-abc123');
+  });
+
+  it('proxies the PR-gate review queue', () => {
+    expect(resolveRoute('GET', '/api/proposals')?.path).toBe('/proposals');
+    expect(resolveRoute('GET', '/api/proposals/42')?.path).toBe('/proposals/42');
+    expect(resolveRoute('POST', '/api/proposals/42/decision')?.path).toBe('/proposals/42/decision');
+  });
+
+  it('proxies the profile list', () => {
+    expect(resolveRoute('GET', '/api/profiles')?.path).toBe('/profiles');
+  });
+
+  it('keeps proposal ids numeric, as the backend primary key is', () => {
+    // A non-numeric segment is not a proposal id, so it must not reach the service at all.
+    expect(resolveRoute('GET', '/api/proposals/abc')).toBeNull();
+    expect(resolveRoute('GET', '/api/proposals/1;drop')).toBeNull();
+    expect(resolveRoute('GET', '/api/proposals/../secrets')).toBeNull();
+  });
+
+  it('refuses a job id outside the generated-token character set', () => {
+    expect(resolveRoute('GET', '/api/jobs/../../etc/passwd')).toBeNull();
+    expect(resolveRoute('GET', '/api/jobs/has space')).toBeNull();
+    expect(resolveRoute('GET', `/api/jobs/${'x'.repeat(129)}`)).toBeNull();
+  });
+
+  it('does not invent methods the backend does not serve', () => {
+    expect(resolveRoute('DELETE', '/api/proposals/42')).toBeNull();
+    expect(resolveRoute('POST', '/api/jobs')).toBeNull();
+    expect(resolveRoute('POST', '/api/profiles')).toBeNull();
+  });
+
+  it('still refuses the operator surfaces', () => {
+    // The list grew by seven routes; the things that must stay internal must stay internal.
+    for (const path of ['/api/metrics', '/api/schedules', '/api/events/knowledge-merged']) {
+      expect(resolveRoute('GET', path)).toBeNull();
+      expect(resolveRoute('POST', path)).toBeNull();
+    }
+  });
+});

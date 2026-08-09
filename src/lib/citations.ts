@@ -106,17 +106,21 @@ export function looksLikeSmiles(text: string): boolean {
 
   // Reject the chemistry-prose tokens this claimed to reject and did not.
   //
-  // The docstring above has always said it rejects things like `pH` — but trace `pH=7.4` through
-  // the old rules: length 6, no whitespace, every character in the allowed set, `=` satisfies the
-  // structural requirement and `p` satisfies the organic-subset one. It passed, and so did
-  // `1H-NMR` and `C2H5OH`, each producing a ⌬ toggle on prose that errors when clicked.
+  // The first attempt at this rejected a large slice of real chemistry, which is worse than the
+  // false positives it was fixing. `/^[a-zA-Z]{1,3}\s*=/` was meant to catch `pH=7.4`; what it
+  // actually caught was every small carbonyl and cumulene — `O=C(O)c1ccccc1` (benzoic acid),
+  // `CC=O`, `O=C=O`, `OC=O`, `C=CC=C`, `CN=C=O`, `ClC=C`. Acetone survived only because a `(`
+  // happens to sit between its letters and its `=`. And the instrument-token rule was
+  // case-insensitive, so `IR` matched `[Ir]` and iridium catalysts vanished.
   //
-  // What actually distinguishes them is that they are measurements and labels, not structures:
-  // a `=` used as assignment rather than a double bond, a decimal number, an NMR/IR label.
-  if (/^[a-zA-Z]{1,3}\s*=/.test(s)) return false; // pH=7.4, T=298, dH=-45
-  if (/\d\.\d/.test(s)) return false; // any decimal figure
+  // What actually separates a measurement from a structure is the shape of what follows the `=`:
+  // an assignment is followed by a number, a double bond is followed by an atom.
+  if (/^[A-Za-z][A-Za-z]?\s*=\s*[-+]?\d/.test(s)) return false; // pH=7.4, T=298, dH=-45
+  if (/\d\.\d/.test(s)) return false; // any decimal figure; unreachable in valid SMILES
   if (/^\d+[HCNPF]-/i.test(s)) return false; // 1H-NMR, 13C-NMR
-  if (/(NMR|IR|MS|HPLC|GC|UV|TLC|ppm|equiv)/i.test(s)) return false;
+  // Case-SENSITIVE, and anchored to a token boundary: `Ir` is iridium, `IR` is a spectrometer.
+  if (/(^|[^A-Za-z])(NMR|HPLC|TLC|GC|MS|UV|IR)([^A-Za-z]|$)/.test(s)) return false;
+  if (/(ppm|equiv)/i.test(s)) return false;
 
   // Require at least one structural character; plain words would otherwise pass.
   if (!/[()[\]=#]|[0-9]/.test(s)) return false;

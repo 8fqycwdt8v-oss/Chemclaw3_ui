@@ -16,24 +16,45 @@ import { InlineSmiles } from './Molecule.tsx';
 /**
  * URL schemes a link or image in model output may use.
  *
- * react-markdown applies a safe default already, but a library default is not a guarantee this
- * repo makes: nothing pinned it, nothing configured it, and no test asserted it — so a single
- * `urlTransform={(u) => u}` added later, or a move off react-markdown, would silently reopen
- * `javascript:` and `data:text/html` on text the model writes. Stating it here makes it ours, and
- * `tests/markdown.test.tsx` holds it.
+ * react-markdown ships a safe default, but a library default is not a guarantee this repo makes:
+ * nothing pinned it, nothing configured it, and no test asserted it — so a `urlTransform={u => u}`
+ * added later, or a move off react-markdown, would silently reopen `javascript:`.
  *
- * `#cite/` fragments are handled before this runs (they become chips), and ordinary relative
- * links have no scheme at all, so both pass the `no scheme` branch.
+ * The first attempt at stating it here was **weaker than the default it replaced**, which is worth
+ * recording. It matched the scheme with `/^([a-zA-Z][a-zA-Z0-9+.-]*):/`, requiring the characters
+ * to be contiguous — so `java\tscript:alert(1)` matched nothing and was returned untouched. The URL
+ * parser strips ASCII tab, LF and CR *before* reading the scheme, so that string is
+ * `javascript:alert(1)` by the time it reaches the browser, and CommonMark decodes `&#9;` inside a
+ * link destination, making it reachable from model output. The library's own check —
+ * `indexOf(':')` with a prefix test — was never fooled by it.
+ *
+ * So: strip what the parser strips, then test the whole prefix before the first colon. A scheme
+ * cannot contain `/`, `?` or `#`, so a colon appearing after one of those is part of a path, not a
+ * scheme.
  */
-const SAFE_SCHEMES = new Set(['http:', 'https:', 'mailto:', 'tel:']);
+const SAFE_SCHEMES = new Set(['http', 'https', 'mailto', 'tel']);
 
-export function safeUrl(url: string): string {
-  const trimmed = url.trim();
-  if (trimmed.startsWith('#') || trimmed.startsWith('/') || trimmed.startsWith('.')) return trimmed;
-  // A bare `foo/bar` is relative and safe; anything with a scheme must name one we allow.
-  const match = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(trimmed);
-  if (!match) return trimmed;
-  return SAFE_SCHEMES.has(match[1]!.toLowerCase() + ':') ? trimmed : '';
+/** Characters the URL parser removes anywhere in the input before parsing it. */
+const URL_STRIPPED = /[\t\n\r]/g;
+
+export function safeUrl(url: string): string | undefined {
+  const cleaned = url.replace(URL_STRIPPED, '').trim();
+  if (cleaned === '') return undefined;
+
+  const colon = cleaned.indexOf(':');
+  const slash = cleaned.indexOf('/');
+  const question = cleaned.indexOf('?');
+  const hash = cleaned.indexOf('#');
+
+  // No colon, or a colon that falls inside the path/query/fragment: relative, and safe.
+  const relative =
+    colon === -1 ||
+    (slash !== -1 && slash < colon) ||
+    (question !== -1 && question < colon) ||
+    (hash !== -1 && hash < colon);
+  if (relative) return cleaned;
+
+  return SAFE_SCHEMES.has(cleaned.slice(0, colon).toLowerCase()) ? cleaned : undefined;
 }
 
 /** Hoisted: a new array per render defeats react-markdown's own memoisation of the pipeline. */

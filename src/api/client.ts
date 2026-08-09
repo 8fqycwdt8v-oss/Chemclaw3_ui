@@ -36,6 +36,13 @@ async function request<T>(path: string, getToken: TokenGetter, init: RequestInit
   // Compose with any caller-supplied signal rather than replacing it.
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+  // The body reads are INSIDE the try, not after it.
+  //
+  // The composed signal governs the response body as well as the headers, so a timeout that
+  // elapses while the body is still streaming — headers fast, body slow, which is the normal shape
+  // of a hung backend — made `res.json()` reject with a raw `TimeoutError` DOMException. That
+  // sailed past every `instanceof ApiError` check in this module and rendered "signal timed out"
+  // to the user. This module's whole contract is that a failure arrives as an `ApiError`.
   try {
     res = await fetch(`${config.apiBase}${path}`, {
       ...init,
@@ -50,16 +57,23 @@ async function request<T>(path: string, getToken: TokenGetter, init: RequestInit
         ...init.headers,
       },
     });
-  } catch {
+
+    if (!res.ok) throw errorFromStatus(res.status, await readDetail(res));
+    if (res.status === 204) return undefined as T;
+    return (await res.json()) as T;
+  } catch (err) {
+    // A typed failure from `errorFromStatus` passes straight through; only transport-level
+    // rejections get reinterpreted below.
+    if (err instanceof ApiError) throw err;
+    // The caller's own abort is checked FIRST. It is a deliberate cancellation, and reporting it
+    // as "could not reach the service" both lies and hides the caller's intent — and the composed
+    // signal exists precisely so callers can abort, so that path must be the one it gets right.
+    if (init.signal?.aborted) throw new ApiError('aborted', 'Cancelled.');
     if (timeout.aborted) {
       throw new ApiError('network', 'The Chemclaw service did not respond in time.');
     }
     throw new ApiError('network', 'Could not reach the Chemclaw service.');
   }
-
-  if (!res.ok) throw errorFromStatus(res.status, await readDetail(res));
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
 }
 
 export interface SessionSummary {

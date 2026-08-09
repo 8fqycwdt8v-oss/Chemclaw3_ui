@@ -25,7 +25,23 @@ describe('safeUrl', () => {
     'vbscript:msgbox(1)',
     'file:///etc/passwd',
   ])('strips %s', (url) => {
-    expect(safeUrl(url)).toBe('');
+    expect(safeUrl(url)).toBeUndefined();
+  });
+
+  // The bypass corpus. A previous version of this function matched the scheme with a contiguous
+  // regex, so every one of these was returned untouched — and the URL parser strips ASCII tab, LF
+  // and CR before reading the scheme, so all of them ARE `javascript:` by the time a browser sees
+  // them. CommonMark decodes `&#9;` inside a link destination, so they are reachable from model
+  // output. The react-markdown default this replaced blocked them; the replacement did not.
+  it.each([
+    'java\tscript:alert(1)',
+    'java\nscript:alert(1)',
+    'java\rscript:alert(1)',
+    'javascript\t:alert(1)',
+    '\tjavascript:alert(1)',
+    'ja\tva\nscr\ript:alert(1)',
+  ])('strips %j, which the URL parser would reassemble', (url) => {
+    expect(safeUrl(url)).toBeUndefined();
   });
 
   it.each([
@@ -36,6 +52,9 @@ describe('safeUrl', () => {
     '/local/route',
     '#cite/note/abc',
     'relative/path',
+    './sibling',
+    // A colon after a slash is part of a path, not a scheme.
+    '/a/b:c',
   ])('keeps %s', (url) => {
     expect(safeUrl(url)).toBe(url);
   });
@@ -52,7 +71,16 @@ describe('Markdown', () => {
   it('drops a javascript: href rather than rendering it', () => {
     render(<Markdown>{'[click me](javascript:alert(1))'}</Markdown>);
     const link = document.querySelector('a');
-    expect(link?.getAttribute('href')).not.toMatch(/javascript/i);
+    // The attribute is absent, not empty. `href=""` would navigate to the current page, which is
+    // not what "blocked" should mean — so this asserts absence rather than a non-matching value.
+    expect(link?.hasAttribute('href')).toBe(false);
+  });
+
+  it('drops an entity-encoded tab-separated javascript: href', () => {
+    // `&#9;` decodes to a TAB inside the link destination, which the URL parser then removes.
+    render(<Markdown>{'[x](java&#9;script:alert&#40;1&#41;)'}</Markdown>);
+    const link = document.querySelector('a');
+    expect(link?.hasAttribute('href')).toBe(false);
   });
 
   it('opens external links without leaking the referrer or the opener', () => {

@@ -11,6 +11,7 @@ import { ApiError } from '../api/errors.ts';
 import { streamTurn } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from './chatStore.ts';
+import { announceStatus, describeAnswer } from './announce.ts';
 
 export interface SendOptions {
   conversationId: string;
@@ -64,6 +65,15 @@ function createTokenBatcher(conversationId: string, messageId: string) {
   };
 }
 
+/** The settled answer, read back for the completion announcement. */
+function answerText(conversationId: string, messageId: string): string {
+  const message = useChatStore
+    .getState()
+    .conversations[conversationId]?.messages.find((m) => m.id === messageId);
+  if (!message || message.role !== 'assistant') return '';
+  return message.finalText ?? message.streamedText;
+}
+
 export async function sendMessage(opts: SendOptions): Promise<void> {
   const { conversationId, text, dryRun, auth } = opts;
   const store = useChatStore.getState();
@@ -94,6 +104,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           return;
         }
         batcher.flush();
+        // A queued turn is the one state a listener cannot infer from silence: nothing is
+        // running yet, and without this the wait is indistinguishable from a hang.
+        if (event.type === 'queued') announceStatus('Waiting for a free slot on the server.');
         useChatStore.getState().applyEvent(conversationId, messageId, event);
       },
     });
@@ -113,6 +126,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         await runOnce(sessionId);
         useChatStore.getState().finishTurn(conversationId, messageId, 'done');
         useChatStore.getState().setComposerLock(false);
+        // Announced, not focused: moving focus here would interrupt a listener mid-sentence.
+        // The answer carries tabIndex={-1} so they can navigate to it when ready.
+        announceStatus(describeAnswer(answerText(conversationId, messageId)));
         return;
       } catch (err) {
         if (!(err instanceof ApiError)) throw err;
@@ -150,8 +166,12 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     if (apiError.kind === 'aborted') {
       useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
       useChatStore.getState().setComposerLock(false);
+      announceStatus('Stopped before the answer was complete.');
       return;
     }
+
+    // Failures are NOT announced here. `failTurn` raises a banner that already carries
+    // `role="alert"`, and a second polite announcement of the same sentence reads it twice.
 
     useChatStore
       .getState()

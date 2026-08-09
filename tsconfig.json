@@ -20,5 +20,18 @@
     "resolveJsonModule": true,
     "isolatedModules": true
   },
-  "include": ["src", "server", "shared", "tests", "scripts", "vite.config.ts"]
+  // `vitest.config.ts` is deliberately absent: vitest bundles its own copy of vite, and its
+  // `Plugin` type is structurally incompatible with vite 8's (rollup vs rolldown plugin context).
+  // Including it buys nothing but a cast that would hide a genuine version skew if one ever
+  // mattered. Everything else that ships TypeScript is checked.
+  "include": [
+    "src",
+    "server",
+    "shared",
+    "tests",
+    "e2e",
+    "scripts",
+    "vite.config.ts",
+    "playwright.config.ts"
+  ]
 }

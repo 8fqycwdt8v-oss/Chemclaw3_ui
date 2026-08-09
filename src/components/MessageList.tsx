@@ -124,7 +124,9 @@ const AssistantBubble = memo(function AssistantBubble({
       )}
 
       {message.error && (
-        <div role="alert" className="mt-2 rounded-lg border border-danger/40 bg-danger-soft px-3 py-2">
+        // Deliberately NOT role="alert". `failTurn` raises a banner carrying the same sentence,
+        // and that one already announces — two alerts with identical text read it out twice.
+        <div className="mt-2 rounded-lg border border-danger/40 bg-danger-soft px-3 py-2">
           <p className="text-sm text-danger-ink">{message.error.message}</p>
         </div>
       )}

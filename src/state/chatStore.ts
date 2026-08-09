@@ -249,24 +249,43 @@ export const useChatStore = create<ChatState>()(
       },
 
       deleteConversation(id) {
+        // A turn belonging to the conversation being deleted has to be stopped here, not left to
+        // finish into a conversation that no longer exists. Aborting also releases the backend's
+        // per-session turn lock, which is the whole reason Stop propagates a disconnect.
+        const streaming = get().streaming;
+        const wasStreamingThis = streaming?.conversationId === id;
+        if (wasStreamingThis) streaming?.abort.abort();
+
         set((s) => {
           const { [id]: _removed, ...rest } = s.conversations;
+          const { [id]: _draft, ...drafts } = s.drafts;
           const order = s.order.filter((x) => x !== id);
           return {
             conversations: rest,
+            drafts,
             order,
             activeId: s.activeId === id ? (order[0] ?? null) : s.activeId,
+            // Without this, deleting mid-turn leaves the composer locked with nothing to unlock
+            // it: the turn it was waiting on can no longer report back.
+            ...(wasStreamingThis
+              ? { streaming: null, composerLock: false as const, banner: null }
+              : {}),
           };
         });
       },
 
       clearAll() {
+        // "Reset app" is the escape hatch from a poisoned state, so it has to leave nothing
+        // behind — including an in-flight turn that would otherwise write into a conversation
+        // this just deleted.
+        get().streaming?.abort.abort();
         set(() => {
           const fresh = newConversation();
           return {
             conversations: { [fresh.id]: fresh },
             order: [fresh.id],
             activeId: fresh.id,
+            drafts: {},
             composerLock: false,
             banner: null,
             jobFeed: [],

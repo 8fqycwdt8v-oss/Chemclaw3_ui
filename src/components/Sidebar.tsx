@@ -18,6 +18,7 @@ import { MoreHorizontal, Plus, Trash2, TriangleAlert } from 'lucide-react';
 import { api } from '../api/client.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore, newConversation } from '../state/chatStore.ts';
+import { announceStatus } from '../state/announce.ts';
 import { relativeTime } from '../lib/format.ts';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -197,11 +198,15 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
               id={id}
               active={id === activeId}
               onSelect={() => {
+                const title = conversations[id]?.title ?? 'conversation';
+                const count = conversations[id]?.messages.length ?? 0;
                 useChatStore.getState().selectConversation(id);
                 onNavigate?.();
                 // Land the reader in the transcript rather than leaving focus on a list item
-                // whose content just changed underneath it.
+                // whose content just changed underneath it, and say what they landed in — the
+                // transcript itself gives no spoken cue that it swapped.
                 document.getElementById('transcript')?.focus({ preventScroll: true });
+                announceStatus(`Opened ${title}. ${count} message${count === 1 ? '' : 's'}.`);
               }}
             />
           ))}

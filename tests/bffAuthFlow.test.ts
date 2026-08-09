@@ -243,7 +243,11 @@ beforeAll(async () => {
         // process to errors only means waiting forever for something that is never printed.
         LOG_LEVEL: 'info',
         PUBLIC_ORIGIN: `http://127.0.0.1:${bffPort}`,
-        CLIENT_DIR: 'dist/client',
+        // Deliberately a path that does not exist. This is a unit suite and it must not depend
+        // on a client build having been run — and it doubles as the regression test at the bottom
+        // of this file, where the server used to crash rather than 404. The built bundle is
+        // covered by the Playwright suite, which serves it for real.
+        CLIENT_DIR: 'dist/client-absent-on-purpose',
       },
     },
   );
@@ -497,6 +501,22 @@ describe('logout', () => {
       headers: { origin: 'https://evil.test' },
     });
     expect(res.status).toBe(403);
+  });
+});
+
+describe('serving without a client build', () => {
+  it('answers 404 for the SPA rather than refusing to start', async () => {
+    // This process is spawned above with a CLIENT_DIR that does not exist, so every assertion in
+    // this file already depends on the server tolerating that — but only implicitly, and an
+    // implicit dependency is one a future change can quietly break. `sirv()` walks the directory
+    // eagerly at construction, so it used to throw ENOENT from inside `totalist` at module scope,
+    // immediately after a warning promising that static assets would merely 404. CI caught it;
+    // review did not.
+    const res = await call('/');
+    expect(res.status).toBe(404);
+    // And the parts that do not need a bundle are entirely unaffected.
+    expect((await call('/healthz')).status).toBe(200);
+    expect((await call('/auth/me')).status).toBe(200);
   });
 });
 

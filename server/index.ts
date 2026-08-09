@@ -24,38 +24,55 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-if (!existsSync(cfg.clientDir)) {
+/**
+ * Static asset serving, or a stand-in that does what the warning below promises.
+ *
+ * `sirv()` walks the directory eagerly at construction, so pointing it at a path that does not
+ * exist throws `ENOENT: scandir` from inside `totalist` — at module scope, before `listen`. The
+ * warning immediately above therefore said "static assets will 404" and the process then died with
+ * a stack naming a transitive dependency. Every API route, `/healthz` and the whole auth flow are
+ * perfectly serviceable without a client build; a mistyped `CLIENT_DIR` should cost the SPA, not
+ * the server.
+ *
+ * Found by CI rather than by review: the unit suite spawns this process, and the check job has no
+ * client build.
+ */
+const clientDirExists = existsSync(cfg.clientDir);
+if (!clientDirExists) {
   log.warn(`client directory ${cfg.clientDir} does not exist — static assets will 404.`);
   log.warn('Run `npm run build:client` first, or use `npm run dev` for the Vite dev server.');
 }
 
-const assets = sirv(cfg.clientDir, {
-  // SPA fallback, so /auth/callback and any client route resolve to index.html.
-  single: true,
-  etag: true,
-  // Serve precompressed siblings when they exist, rather than compressing at request time —
-  // request-time compression would mean a compression middleware in this process, and the one
-  // everybody reaches for silently destroys Server-Sent Events.
-  //
-  // These are now actually produced: the comment used to claim it was serving "Vite's
-  // precompressed output", but nothing in the build generated a single `.gz` or `.br`, so both
-  // flags were inert and every asset shipped uncompressed. `scripts/compress-client.mjs` fills
-  // that in as a build step.
-  gzip: true,
-  brotli: true,
-  setHeaders(res, pathname) {
-    setSecurityHeaders(res);
-    // Hashed assets are immutable; HTML must never be cached or a deploy won't take.
-    //
-    // The test used to be `pathname === '/index.html' || pathname === '/'`, and sirv passes the
-    // REQUESTED pathname rather than the resolved file — so every SPA-fallback route (`/chat/…`,
-    // `/auth/callback`) served index.html with no `Cache-Control` at all and picked up heuristic
-    // freshness from `Last-Modified`. That is exactly the stale-bundle-after-deploy failure this
-    // header exists to prevent. Anything without a file extension resolves to index.html under
-    // `single: true`, so that is the condition to test.
-    if (isHtmlRequest(pathname)) res.setHeader('cache-control', 'no-cache');
-  },
-});
+const assets: ReturnType<typeof sirv> = clientDirExists
+  ? sirv(cfg.clientDir, {
+      // SPA fallback, so /auth/callback and any client route resolve to index.html.
+      single: true,
+      etag: true,
+      // Serve precompressed siblings when they exist, rather than compressing at request time —
+      // request-time compression would mean a compression middleware in this process, and the one
+      // everybody reaches for silently destroys Server-Sent Events.
+      //
+      // These are now actually produced: the comment used to claim it was serving "Vite's
+      // precompressed output", but nothing in the build generated a single `.gz` or `.br`, so both
+      // flags were inert and every asset shipped uncompressed. `scripts/compress-client.mjs` fills
+      // that in as a build step.
+      gzip: true,
+      brotli: true,
+      setHeaders(res, pathname) {
+        setSecurityHeaders(res);
+        // Hashed assets are immutable; HTML must never be cached or a deploy won't take.
+        //
+        // The test used to be `pathname === '/index.html' || pathname === '/'`, and sirv passes
+        // the REQUESTED pathname rather than the resolved file — so every SPA-fallback route
+        // (`/chat/…`, `/auth/callback`) served index.html with no `Cache-Control` at all and
+        // picked up heuristic freshness from `Last-Modified`. That is exactly the stale-bundle-
+        // after-deploy failure this header exists to prevent. Anything without a file extension
+        // resolves to index.html under `single: true`, so that is the condition to test.
+        if (isHtmlRequest(pathname)) res.setHeader('cache-control', 'no-cache');
+      },
+    })
+  : // Hand straight to the caller's `next`, which answers 404 — precisely what the warning says.
+    (_req, _res, next) => next?.();
 
 /** Paths sirv's `single: true` fallback answers with index.html: no extension, or index.html itself. */
 function isHtmlRequest(pathname: string): boolean {

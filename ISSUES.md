@@ -54,21 +54,34 @@ stored data cannot support.
 That shape is a MAF request with no durable hold behind it, and no endpoint exists that could
 answer it. It renders read-only. Making it actionable needs a backend change.
 
-### 5. The plan-approval fallback is unaudited
+### 5. The plan-approval fallback is unaudited, and still exists
 
-When `GET /sessions/{id}/plan` is unavailable, the UI falls back to answering the gate with an
-ordinary chat message ("Approved — go ahead."). That is one tap and it leaves no
-`plan_approvals` row. It is labelled as the degraded path, but a deployment that cares about the
-audit trail should ensure the plan routes are reachable rather than relying on it.
+When the service has no plan route at all, the UI can still answer the gate with an ordinary chat
+message ("Approved — go ahead."), which leaves no `plan_approvals` row. That path is now reached
+only from a 404 — every other failure (401, 403, 5xx, timeout) renders as an error with a retry and
+offers no shortcut, because a failure to _reach_ the gate is not a service that lacks one. It also
+takes an explicit acknowledgement and renders as visibly degraded rather than as an ordinary
+Approve/Decline pair.
 
-### 6. Browser-held access tokens
+The remaining limitation is the honest one: against a service that genuinely has no plan route,
+a decision made here is not in the audit trail. A deployment that cares should ensure the plan
+routes are reachable rather than relying on this.
 
-MSAL runs in the browser with `cacheLocation: 'sessionStorage'`, and the BFF forwards the bearer
-token without inspecting it. This is a proxy, not a token-custody BFF, so an XSS in the SPA could
-exfiltrate an access token; the strict CSP (`script-src 'self'`, no inline scripts, no
-`rehype-raw`) is what stands between the two. Moving custody into the BFF would close that, at the
-cost of session cookies and the CSRF surface this design currently has none of. Recorded as a
-deliberate trade-off, not an oversight.
+### 6. No revocation for a BFF session
+
+`AUTH_MODE=bff` is now the default and the browser holds no bearer token — the previous entry here
+described the opposite posture and is obsolete. What replaces it is a narrower limitation: the
+session is a sealed cookie with no server-side store, so it is valid until it expires. `/auth/logout`
+clears the browser's copy rather than invalidating a record, and a cookie stolen before then remains
+usable for the life of the access token inside it (bounded by the Entra token lifetime, typically an
+hour, and by the refresh token thereafter).
+
+That is the accepted cost of a stateless design that survives a restart and scales across replicas
+with nothing new to run. A deployment needing real revocation would have to add a session store,
+which is a different trade and not one this repo has made.
+
+`msal-spa` remains available and has the old property: tokens in `sessionStorage`, readable by any
+script on the origin. It is not the default for that reason.
 
 ### 7. Verification against a live agent is partial
 

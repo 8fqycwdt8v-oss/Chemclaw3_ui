@@ -275,7 +275,9 @@ export function proxy(
     upstreamReq.destroy();
     if (!res.headersSent) {
       res.writeHead(413, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ detail: `request body exceeds the ${cfg.maxBodyBytes} byte limit` }));
+      res.end(
+        JSON.stringify({ detail: `request body exceeds the ${cfg.maxBodyBytes} byte limit` }),
+      );
     }
     req.destroy();
   });

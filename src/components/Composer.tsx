@@ -179,11 +179,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
 
         <div className="mt-1.5 flex items-center justify-between text-xs text-ink-muted">
           <label className="flex cursor-pointer items-center gap-1.5">
-            <input
-              type="checkbox"
-              checked={dryRun}
-              onChange={(e) => setDryRun(e.target.checked)}
-            />
+            <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
             {/* The backend's own dry_run: plan the turn without launching anything expensive. */}
             <span title="Plan the turn without launching QM jobs or other expensive work">
               Dry run

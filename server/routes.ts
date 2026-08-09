@@ -58,13 +58,37 @@ export interface Route {
 }
 
 export const ROUTES: readonly Route[] = [
-  { method: 'GET', pattern: /^\/api\/healthz$/, target: () => '/healthz', sse: false, spec: '/healthz' },
-  { method: 'GET', pattern: /^\/api\/readyz$/, target: () => '/readyz', sse: false, spec: '/readyz' },
+  {
+    method: 'GET',
+    pattern: /^\/api\/healthz$/,
+    target: () => '/healthz',
+    sse: false,
+    spec: '/healthz',
+  },
+  {
+    method: 'GET',
+    pattern: /^\/api\/readyz$/,
+    target: () => '/readyz',
+    sse: false,
+    spec: '/readyz',
+  },
 
   // Sessions.
-  { method: 'POST', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false, spec: '/sessions' },
+  {
+    method: 'POST',
+    pattern: /^\/api\/sessions$/,
+    target: () => '/sessions',
+    sse: false,
+    spec: '/sessions',
+  },
   // Added by the companion backend change: list the caller's sessions.
-  { method: 'GET', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false, spec: '/sessions' },
+  {
+    method: 'GET',
+    pattern: /^\/api\/sessions$/,
+    target: () => '/sessions',
+    sse: false,
+    spec: '/sessions',
+  },
   // Added by the companion backend change: read a transcript back after a reload.
   {
     method: 'GET',
@@ -117,7 +141,13 @@ export const ROUTES: readonly Route[] = [
   },
 
   // Durable approval holds (the PR-gate's human sign-off).
-  { method: 'GET', pattern: /^\/api\/approvals$/, target: () => '/approvals', sse: false, spec: '/approvals' },
+  {
+    method: 'GET',
+    pattern: /^\/api\/approvals$/,
+    target: () => '/approvals',
+    sse: false,
+    spec: '/approvals',
+  },
   {
     method: 'GET',
     pattern: new RegExp(`^/api/approvals/${APPROVAL}$`),

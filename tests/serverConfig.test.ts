@@ -67,7 +67,9 @@ describe('AUTH_MODE parsing', () => {
     // The whole point: `AUTH_MODE=MSAL` used to resolve to 'dev' — one capitalisation away from
     // an unauthenticated production deployment with frame-ancestors *.
     const problems = validateConfig(cfg({ rawAuthMode: 'MSAL', authModeIsValid: false }));
-    expect(joined(cfg({ rawAuthMode: 'MSAL', authModeIsValid: false }))).toMatch(/not a valid mode/);
+    expect(joined(cfg({ rawAuthMode: 'MSAL', authModeIsValid: false }))).toMatch(
+      /not a valid mode/,
+    );
     expect(problems.some((p) => p.includes('"MSAL"'))).toBe(true);
   });
 

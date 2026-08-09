@@ -57,11 +57,7 @@ function confidenceTone(value: number): { cls: string; label: string } {
   return { cls: 'border-danger/40 bg-danger-soft text-danger', label: 'low' };
 }
 
-export function AnswerFooter({
-  message,
-}: {
-  message: AssistantMessage;
-}): React.JSX.Element | null {
+export function AnswerFooter({ message }: { message: AssistantMessage }): React.JSX.Element | null {
   const hasConfidence = message.confidence !== null;
   const hasClaims = message.unsupportedClaims.length > 0;
   if (!hasConfidence && !hasClaims) return null;

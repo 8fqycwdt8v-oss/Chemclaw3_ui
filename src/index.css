@@ -47,7 +47,12 @@ body,
 body {
   background: var(--color-surface);
   color: var(--color-ink);
-  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -61,12 +66,26 @@ body {
   margin-block: 1.1em 0.5em;
   line-height: 1.3;
 }
-.prose-answer :where(h1) { font-size: 1.35rem; }
-.prose-answer :where(h2) { font-size: 1.18rem; }
-.prose-answer :where(h3) { font-size: 1.05rem; }
-.prose-answer :where(ul) { list-style: disc; padding-inline-start: 1.4em; }
-.prose-answer :where(ol) { list-style: decimal; padding-inline-start: 1.4em; }
-.prose-answer :where(li) { margin-block: 0.25em; }
+.prose-answer :where(h1) {
+  font-size: 1.35rem;
+}
+.prose-answer :where(h2) {
+  font-size: 1.18rem;
+}
+.prose-answer :where(h3) {
+  font-size: 1.05rem;
+}
+.prose-answer :where(ul) {
+  list-style: disc;
+  padding-inline-start: 1.4em;
+}
+.prose-answer :where(ol) {
+  list-style: decimal;
+  padding-inline-start: 1.4em;
+}
+.prose-answer :where(li) {
+  margin-block: 0.25em;
+}
 .prose-answer :where(code) {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.875em;
@@ -111,8 +130,14 @@ body {
 
 /* The streaming caret. */
 @keyframes caret-blink {
-  0%, 45% { opacity: 1; }
-  55%, 100% { opacity: 0.15; }
+  0%,
+  45% {
+    opacity: 1;
+  }
+  55%,
+  100% {
+    opacity: 0.15;
+  }
 }
 .caret {
   display: inline-block;
@@ -121,5 +146,7 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .caret { animation: none; }
+  .caret {
+    animation: none;
+  }
 }

@@ -98,7 +98,7 @@ describe('proxy route whitelist', () => {
 
     // encodeURIComponent leaves !~*'() alone, so these arrive literally. Adding only `%` to the
     // pattern would still have refused them — which is exactly the bug this test exists for.
-    it.each(["approval-Suzuki(A)", "approval-run*2", "approval-o'brien", 'approval-x!y~z'])(
+    it.each(['approval-Suzuki(A)', 'approval-run*2', "approval-o'brien", 'approval-x!y~z'])(
       'passes through an id encodeURIComponent does not escape: %s',
       (id) => {
         expect(encodeURIComponent(id)).toBe(id); // unchanged, so the raw characters must match

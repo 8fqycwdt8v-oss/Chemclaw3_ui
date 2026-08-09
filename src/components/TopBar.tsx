@@ -47,11 +47,7 @@ export function TopBar(): React.JSX.Element {
         >
           <span
             className={
-              health === 'ok'
-                ? 'text-ok'
-                : health === 'down'
-                  ? 'text-danger'
-                  : 'text-ink-muted'
+              health === 'ok' ? 'text-ok' : health === 'down' ? 'text-danger' : 'text-ink-muted'
             }
           >
             ●

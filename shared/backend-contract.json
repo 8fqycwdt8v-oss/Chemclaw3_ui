@@ -4,146 +4,98 @@
   "routes": [
     {
       "path": "/approvals",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/approvals/{approval_id}",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/approvals/{approval_id}/decision",
-      "methods": [
-        "POST"
-      ]
+      "methods": ["POST"]
     },
     {
       "path": "/events/knowledge-merged",
-      "methods": [
-        "POST"
-      ]
+      "methods": ["POST"]
     },
     {
       "path": "/healthz",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/jobs",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/jobs/{job_id}",
-      "methods": [
-        "DELETE"
-      ]
+      "methods": ["DELETE"]
     },
     {
       "path": "/jobs/{job_id}",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/metrics",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/profiles",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/proposals",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/proposals/{proposal_id}",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/proposals/{proposal_id}/decision",
-      "methods": [
-        "POST"
-      ]
+      "methods": ["POST"]
     },
     {
       "path": "/readyz",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/schedules",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/sessions",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/sessions",
-      "methods": [
-        "POST"
-      ]
+      "methods": ["POST"]
     },
     {
       "path": "/sessions/{session_id}/attachments",
-      "methods": [
-        "POST"
-      ]
+      "methods": ["POST"]
     },
     {
       "path": "/sessions/{session_id}/events",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/sessions/{session_id}/messages",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/sessions/{session_id}/messages",
-      "methods": [
-        "POST"
-      ]
+      "methods": ["POST"]
     },
     {
       "path": "/sessions/{session_id}/plan",
-      "methods": [
-        "GET"
-      ]
+      "methods": ["GET"]
     },
     {
       "path": "/sessions/{session_id}/plan/decision",
-      "methods": [
-        "POST"
-      ]
+      "methods": ["POST"]
     }
   ],
-  "ungatable_surfaces": [
-    "Mount "
-  ],
+  "ungatable_surfaces": ["Mount "],
   "events": {
     "answer": {
       "model": "AnswerEvent",

@@ -18,8 +18,7 @@ import { cn } from '../lib/cn.ts';
 type Theme = 'light' | 'dark';
 
 const prefersDark = (): Theme =>
-  typeof window !== 'undefined' &&
-  window.matchMedia?.('(prefers-color-scheme: dark)').matches
+  typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches
     ? 'dark'
     : 'light';
 

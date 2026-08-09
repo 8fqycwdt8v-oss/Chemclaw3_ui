@@ -95,9 +95,7 @@ export function Sidebar(): React.JSX.Element {
                 )}
                 <span className="truncate text-sm">{conversation.title}</span>
               </div>
-              <span className="text-xs text-ink-muted">
-                {relativeTime(conversation.updatedAt)}
-              </span>
+              <span className="text-xs text-ink-muted">{relativeTime(conversation.updatedAt)}</span>
             </button>
           );
         })}

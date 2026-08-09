@@ -122,11 +122,7 @@ function Bubble({
   );
 }
 
-export function MessageList({
-  conversation,
-}: {
-  conversation: Conversation;
-}): React.JSX.Element {
+export function MessageList({ conversation }: { conversation: Conversation }): React.JSX.Element {
   const endRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -159,8 +155,8 @@ export function MessageList({
         {conversation.contextLost && (
           <div className="rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
             <p className="text-sm text-warn">
-              This conversation’s server session was replaced. The assistant no longer remembers
-              the turns above — restate anything it needs.
+              This conversation’s server session was replaced. The assistant no longer remembers the
+              turns above — restate anything it needs.
             </p>
           </div>
         )}

@@ -22,6 +22,7 @@ npm resolves the full dependency tree before installing.
 devDependencies so `vite build` can run. Tests currently cannot be run on Replit.
 
 **Fix options:**
+
 1. Pin `happy-dom` to an older version not flagged by the CVE scanner (e.g. `^15.x`)
 2. Replace `happy-dom` with `jsdom` as the vitest environment
 3. Use `npm overrides` to pin to a non-flagged patch release
@@ -33,6 +34,7 @@ devDependencies so `vite build` can run. Tests currently cannot be run on Replit
 ## Issue 2: GET /api/sessions and GET /api/sessions/{id}/messages whitelisted in BFF but missing from backend
 
 The BFF route whitelist (`server/routes.ts`) includes:
+
 - `GET /api/sessions` → `/sessions` (list sessions)
 - `GET /api/sessions/{sid}/messages` → `/sessions/{sid}/messages` (read transcript)
 
@@ -42,6 +44,7 @@ Both return `404`/`405` from the Chemclaw3 FastAPI backend (only `POST /sessions
 **Impact:** Sidebar conversation list is local-only; transcripts fall back to `localStorage`.
 
 **Fix:** Add to `service/app.py` in Chemclaw3:
+
 - `GET /sessions` — list sessions for current principal (needs `CHEMCLAW_SESSION_STORE=postgres`)
 - `GET /sessions/{session_id}/messages` — return stored transcript
 
@@ -50,6 +53,7 @@ Both return `404`/`405` from the Chemclaw3 FastAPI backend (only `POST /sessions
 ## Issue 3: GET /approvals and POST /approvals/{id}/decision missing from backend
 
 The BFF whitelists:
+
 - `GET /api/approvals` → `/approvals`
 - `GET /api/approvals/{id}` → `/approvals/{id}`
 - `POST /api/approvals/{id}/decision` → `/approvals/{id}/decision`
@@ -60,6 +64,7 @@ All return `404`. The `InteractionApprovalWorkflow` exists in the backend but ha
 via the browser.
 
 **Fix:** Implement the REST surface in `service/app.py`:
+
 - `GET /approvals` — list pending holds
 - `GET /approvals/{hold_id}` — describe one hold
 - `POST /approvals/{hold_id}/decision` — signal the Temporal workflow

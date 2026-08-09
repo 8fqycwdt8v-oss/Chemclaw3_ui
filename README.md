@@ -19,10 +19,10 @@ bearer token.
 - **Streams a turn** and renders every event in the service's contract — tokens, plan revisions,
   tool calls, launched jobs, proposed notes, questions, approvals, and the final answer.
 - **Shows the agent's work** in a collapsible trace panel. Honest about its limits: the service
-  streams tool *invocations* only, so the panel says what was called, never what came back.
+  streams tool _invocations_ only, so the panel says what was called, never what came back.
 - **Renders structures** from SMILES — the `molecule_smiles` a finished QM job pushes back, plus an
   opt-in toggle on inline SMILES in answers.
-- **Surfaces verifier signals** — a "needs expert review" pill at the *top* of a low-confidence
+- **Surfaces verifier signals** — a "needs expert review" pill at the _top_ of a low-confidence
   answer, plus the confidence score and any unsupported claims.
 - **Answers approvals.** A durable hold gets real Approve/Reject buttons wired to
   `POST /approvals/{id}/decision`; a plan approval says plainly that it is answered by your next
@@ -80,15 +80,15 @@ Vite inlines `import.meta.env` at build time, browser-facing settings are served
 The backend enforces Entra when `CHEMCLAW_ENTRA_REQUIRED=true`. Set `AUTH_MODE=msal` here at the
 same time, plus:
 
-| Variable | Value |
-| --- | --- |
-| `ENTRA_TENANT_ID` | your tenant GUID |
+| Variable          | Value                                                               |
+| ----------------- | ------------------------------------------------------------------- |
+| `ENTRA_TENANT_ID` | your tenant GUID                                                    |
 | `ENTRA_CLIENT_ID` | **this SPA's** app registration (platform: Single-page application) |
-| `API_SCOPE` | `api://<api-client-id>/<scope>`, e.g. `.../Chat.Access` |
+| `API_SCOPE`       | `api://<api-client-id>/<scope>`, e.g. `.../Chat.Access`             |
 
 Three things account for most "the token looks fine but the API returns 401" incidents:
 
-1. **The scope must be the API's.** Requesting only `openid`/`profile` yields an *ID* token whose
+1. **The scope must be the API's.** Requesting only `openid`/`profile` yields an _ID_ token whose
    `aud` is the SPA client id; the backend checks `aud == CHEMCLAW_ENTRA_AUDIENCE`. Graph's
    `.default` is equally wrong.
 2. **The API app registration needs `accessTokenAcceptedVersion: 2`.** The backend pins the issuer
@@ -118,7 +118,7 @@ Two files carry most of the difficulty and are commented accordingly:
   no cancel endpoint, so propagating the disconnect is the only way it releases the session's turn
   lock — without it, the next message comes back 409.
 - **`src/state/chatStore.ts`** — the store keeps `streamedText` and `finalText` apart because
-  `answer.text` is the *full concatenation* of every token. Any code path that combined them would
+  `answer.text` is the _full concatenation_ of every token. Any code path that combined them would
   render the whole answer twice. There is deliberately none.
 
 ## Testing

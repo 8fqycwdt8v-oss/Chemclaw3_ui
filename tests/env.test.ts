@@ -11,7 +11,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { configProblems, resolveConfig, type ResolvedRuntimeConfig } from '../src/env.ts';
 
 const withWindowConfig = (value: unknown): void => {
-  (globalThis as { window?: unknown }).window = value === undefined ? {} : { __CHEMCLAW_CONFIG__: value };
+  (globalThis as { window?: unknown }).window =
+    value === undefined ? {} : { __CHEMCLAW_CONFIG__: value };
 };
 
 afterEach(() => {

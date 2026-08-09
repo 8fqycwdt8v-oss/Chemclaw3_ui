@@ -129,9 +129,7 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
         <p className="text-sm">
           Proposed note <span className="font-mono text-xs">{entry.note?.noteId}</span> for review
           {entry.note?.reference && (
-            <span className="ml-1 font-mono text-xs text-ink-muted">
-              ({entry.note.reference})
-            </span>
+            <span className="ml-1 font-mono text-xs text-ink-muted">({entry.note.reference})</span>
           )}
         </p>
       );

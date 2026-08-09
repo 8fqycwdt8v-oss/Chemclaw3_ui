@@ -46,7 +46,9 @@ export function jsonError(status: number, detail: string): Response {
 }
 
 /** Install a fetch stub; returns a restore function and the recorded calls. */
-export function stubFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
+export function stubFetch(
+  handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
+) {
   const calls: { url: string; init?: RequestInit }[] = [];
   const original = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {

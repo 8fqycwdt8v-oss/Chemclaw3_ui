@@ -1,0 +1,508 @@
+# Making the frontend chemistry-aware
+
+A concept study. It works in three moves: what the backend actually offers, the user stories that
+follow from it, and five frontend concepts that could serve them — with what each costs, what each
+cannot do, and a staged path through them.
+
+Backend facts are cited against `8fqycwdt8v-oss/Chemclaw3` @ `261b166`; frontend facts against this
+repo @ `b2fd195`.
+
+---
+
+## 0. The thesis
+
+The UI today is a chemistry-shaped **chat**. It renders exactly one structure — the
+`molecule_smiles` a finished QM job happens to put in its summary dict — plus an opt-in toggle on
+inline SMILES the answer text happens to contain. Everything else chemical reaches the chemist as
+*sentences the model wrote about it*: a hazard screen with severities and literature citations
+arrives as prose, a pKa with its uncertainty arrives as prose, a solvent ranking arrives as prose, a
+similarity search that returned nine structures arrives as a list of note ids.
+
+That is not a rendering deficiency, it is a **modelling** one. The frontend has no concept of a
+molecule, a reaction, a calculation, a hazard flag or a campaign. It has messages and a trace of
+tool names.
+
+So "chemistry-aware" means two things, and they are separable:
+
+1. **Object awareness** — the UI knows the domain's nouns (molecule, reaction, calculation, durable
+   job, campaign, hazard flag, knowledge note), gives them identity across a conversation, and can
+   show, compare and act on them.
+2. **Provenance awareness** — the UI knows that a chemical number is not just a number: it has a
+   method (GFN2-xTB vs DFT), a solvent model, an uncertainty, a calibration history, and a validity
+   claim ("ranking, not absolute"). This backend is unusual in *having* all of that; the frontend
+   currently discards all of it.
+
+Concepts A–E below attack these in different orders and at different prices.
+
+---
+
+## 1. What the backend actually offers
+
+### 1.1 The capability surface
+
+Seven connector bundles (`src/chemclaw/connectors/*/connector.yaml`), 37 declared tools and durable
+jobs, plus ~12 in-process agent tools. The frontend's `KNOWN_TOOLS` list (`shared/events.ts:183`)
+names 15, two of which no longer exist.
+
+| Bundle | Inline tools | Durable jobs | What a UI could show |
+| --- | --- | --- | --- |
+| `chem` (RDKit, pure) | `resolve_compound`, `stoichiometry_table`, `green_metrics`, `render_structure` | — | A **charge table** (`ChargeRow`: role, equivalents, MW, mmol, mass, density, volume), **E-factor/PMI** metrics, a server-rendered SVG structure |
+| `calc` (xTB, cached) | `compute_xtb_energy`, `compute_electronic_properties`, `predict_site_reactivity`, `optimize_geometry`, `compute_thermochemistry`, `predict_pka`, `predict_solubility`, `predict_logd`, `predict_developability_profile`, `calculator_trust`, `calculator_outliers`, `find_calculations`, `list_artifacts`, `fetch_artifact`, `report_measurement` | `compute_reaction_energy`, `compare_solvents`, `scan_coordinate`, `sample_conformers`, `compute_interaction_energy` | Property values **with uncertainty**, Fukui site maps, ΔE/ΔH/ΔG for a balanced reaction, a **ranked solvent screen**, a **scan profile curve**, a conformer ensemble, calibration residuals |
+| `qm` (DFT on HPC) | — | `compute_dft_energy` | Long-running job state, `QMJobResult` (`molecule_smiles`, `total_energy_hartree`, converged) |
+| `bo` (BoFire) | `suggest_next_experiment`, `resume_campaign`, `generate_screening_design`, `campaign_progress`, `predict_outcome` | `start_optimization_campaign` | **Candidate conditions**, objective scales, a **Pareto front**, surrogate fit quality, a screening design table |
+| `safety` (cited tables) | `screen_hazards`, `screen_genotoxic_alerts`, `ich_impurity_limit` | — | **Severity-ranked hazard flags** each with `rule_id`, `explanation`, `citation`, `matched` SMARTS; genotox alerts; ICH Q3C/Q3D limits with class and PDE |
+| `molfp` | `similar_molecules`, `substructure_matches` | — | **Hit lists with structures** and Tanimoto scores, substructure highlighting |
+| `rxnfp` | `similar_reactions` | — | Precedent reactions with DRFP similarity |
+| core (in-process) | `find_notes`, `expand_note`, `find_knowledge_gaps`, `propose_knowledge_note`, `record_failure`, `gather_evidence`, `record_confirmed_answer`, `recall_observations`, `get_durable_job_status`, `find_past_jobs`, `request_development_report`, `ask_clarifying_question` | — | Knowledge-graph neighbourhoods, evidence chunks, note proposals |
+
+Two properties of this surface matter for design:
+
+- **The results are typed on the backend and untyped on the wire.** `HazardFlag`, `ChargeRow`,
+  `ImpurityLimit`, `ExperimentSuggestion`, `MoleculeHit`, `Calibration`, `XtbJobResult` are all
+  Pydantic models. None of that structure survives the trip to the browser (§3, C1).
+- **Everything expensive is already cached and idempotent.** `find_calculations` answers "has this
+  already been run", `job_workflow_id` deliberately excludes the requester so identical requests
+  rejoin one run. A UI can therefore afford to be *exploratory* — offering "compute this" buttons is
+  not the same risk it would be against an uncached backend.
+
+### 1.2 The knowledge graph
+
+`knowledge/` holds Markdown notes with typed frontmatter, one directory per type:
+`compound`, `reaction`, `campaign`, `optimization-campaign`, `playbook`, `interaction`, `report`,
+`experiment-proposal`, `failure-mode`, plus bundle-declared `job-result` and `bo-candidate`.
+
+Compound notes carry `compound_smiles` in frontmatter; reaction notes carry conditions in the body
+and `[[wikilink]]` relations (`knowledge/compound/compound-4-bromoanisole.md`). Notes also carry
+`calc_refs` and `artifact_refs` — the join between "what we know" and "what we computed".
+
+**Every note the agent writes goes through a PR-gate.** `propose_knowledge_note` opens a branch; a
+human approves. The backend exposes this at `GET /proposals`, `GET /proposals/{id}` (with the full
+note content and its dependencies) and `POST /proposals/{id}/decision`.
+
+### 1.3 The HTTP surface (and what the BFF forwards)
+
+| Backend route | In BFF whitelist (`server/routes.ts`)? |
+| --- | --- |
+| `POST /sessions`, `GET /sessions`, `GET /sessions/{id}/messages` | yes |
+| `POST /sessions/{id}/messages` (SSE turn), `GET /sessions/{id}/events` (SSE push-back) | yes |
+| `POST /sessions/{id}/attachments` | yes |
+| `GET /sessions/{id}/plan`, `POST /sessions/{id}/plan/decision` | yes |
+| `GET /approvals`, `GET /approvals/{id}`, `POST /approvals/{id}/decision` | yes |
+| **`GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}`** | **no** |
+| **`GET /proposals`, `GET /proposals/{id}`, `POST /proposals/{id}/decision`** | **no** |
+| **`GET /profiles`** | **no** |
+
+The three missing rows are not missing features — they are implemented, tested backend routes
+(`src/chemclaw/api/routes/jobs.py`, `proposals.py`, `sessions.py:171`) that this UI simply cannot
+reach. `ISSUES.md` records `/approvals` and `/sessions` as backend gaps; both have since been
+implemented upstream, so that file is stale.
+
+Two more capabilities the UI does not use:
+
+- **`MessageIn.dry_run`** (`src/chemclaw/api/schemas.py:26`) — "plan the turn without launching
+  anything expensive". A natural primitive for a *Estimate first* affordance.
+- **`SessionIn.profile`** — start a session as a narrowed agent. `data/profiles/property-lookup.yaml`
+  is exactly a "chemistry calculator mode": five tools, terse answers, no research loop.
+
+### 1.4 The event contract
+
+The backend union (`src/chemclaw/api/events.py`) has **15** members. `shared/events.ts` mirrors 14,
+and three of the mirrored ones have since grown fields:
+
+| Backend | Frontend mirror | Consequence |
+| --- | --- | --- |
+| `job_failed` (`job_id`, `reason`) | **absent** | `normalizeEvent` drops it and `useJobFeed` only handles `job_completed` — a durable job that fails after its turn ends shows "runs asynchronously" forever. The backend added this event *precisely* so that would stop happening. |
+| `tool_result.note_ids: string[]` | **absent** | The untruncated list of note ids a call returned. |
+| `tool_result.numbers: float[]` | **absent** | The untruncated, deduplicated list of **numeric values** a call returned — 5 for an ICH lookup, 27 for a charge table, 49 for a full electronic-properties run. This is real structured chemistry data already on the wire and currently discarded. |
+| `answer.verified_by: "judge" \| "citation-gate" \| null` | **absent** | Whether the confidence score came from the LLM judge or the weaker fallback. Without it, "low confidence" and "the check that earns confidence never ran" render identically. |
+| `error.code` / `retryable` / `correlation_id` | **absent** | A closed 8-member taxonomy (`turn_timeout`, `budget_exhausted`, `loop_cap_reached`, `empty_answer`, …) that would let the UI offer the right next step instead of "try again". |
+
+Also unused: `TranscriptMessage.tool_calls` (`src/chemclaw/api/schemas.py:71`) carries `tool`,
+`arguments` **and `result`** per call, truncated to 400 chars. The UI's `TranscriptMessage`
+interface (`src/api/client.ts:50`) declares only `role`/`text`/`created_at`, so reloading a
+conversation loses its whole trace.
+
+---
+
+## 2. Where the frontend stands
+
+Renders today:
+
+- `job_completed.summary.molecule_smiles` → 2D structure via `smiles-drawer` (`src/components/Molecule.tsx`).
+- `total_energy_hartree` and a converged/not-converged pill (`src/components/JobResultCard.tsx`).
+- Inline `` `code` `` spans that pass `looksLikeSmiles()` → opt-in render toggle (`src/lib/citations.ts:98`).
+- Citation-shaped tokens (`reaction-*`, `note-*`, `qm-*`) → chips (`src/lib/citations.ts:29`).
+- Tool calls and their 200-char result previews as raw `<pre>` (`src/components/TracePanel.tsx`).
+- Verifier signals: `review_required` pill, confidence, unsupported claims.
+
+That is the entire chemistry surface. Concretely: a turn that screens six molecules for hazards,
+computes three pKa values with uncertainties, and ranks four solvents produces **zero** chemistry UI.
+
+### Verified drift worth fixing regardless of which concept is chosen
+
+1. `job_failed` is dropped on the floor (§1.4).
+2. `tool_result.numbers` / `note_ids` are dropped.
+3. `answer.verified_by` is dropped.
+4. `error.code` / `retryable` / `correlation_id` are dropped.
+5. `KNOWN_TOOLS` (`shared/events.ts:183`) and `TOOL_ICON` (`src/components/TracePanel.tsx:23`) list
+   `submit_qm_job` and `get_qm_job_status`, which no longer exist (the real names are
+   `compute_dft_energy` and `get_durable_job_status`), and omit ~35 tools that do.
+6. `/jobs`, `/proposals`, `/profiles` are not in the BFF whitelist.
+7. Transcript rehydration discards `tool_calls`.
+8. `ISSUES.md` issues 2 and 3 are resolved upstream.
+
+---
+
+## 3. Constraints every concept must respect
+
+**C1 — Tool results are 200-char raw previews.** `ToolResultEvent.preview` is truncated by
+`agent_audit_max_arg_chars`, may cut mid-token, and is explicitly *not* JSON. The backend's own
+docstring says why it will stay that way: "never a whole evidence sweep streamed to a browser". Any
+concept that wants a hazard table or a solvent ranking must either (a) get the data another way,
+(b) reconstruct from `numbers`/`note_ids`, or (c) ask for a backend change. **Parsing the preview is
+not an option** and the codebase already says so in three places.
+
+**C2 — `JobSummary` is an untyped dict.** `job_completed.summary` is `dict[str, object]`. The
+existing `JobResultCard` probes every field. Any richer job card must keep probing, and must render
+*something* for a job kind it has never seen.
+
+**C3 — There are no chemistry types on the wire.** No SMILES field, no structure list, no unit, no
+method — except inside the one job summary. Every other structure the UI shows must be *recovered*
+from text (tool arguments, answer prose) with the attendant false-positive risk that
+`looksLikeSmiles()` was written conservatively to avoid.
+
+**C4 — The BFF is a whitelist, not a proxy.** New data means a new route entry, deliberately
+(`server/routes.ts:1`). The browser never talks to the service. This is cheap but it is not free,
+and it is the right place to say "this UI has no business reaching `/metrics`".
+
+**C5 — Bundle budget.** `Molecule.tsx` documents the trade: `smiles-drawer` is pure JS and
+lazy-loaded; `@rdkit/rdkit` is multi-megabyte WASM. Substructure highlighting, canonicalisation and
+reaction drawing are the things that would justify RDKit — and `Molecule.tsx` says it is the only
+file that changes if that day comes.
+
+**C6 — The honesty rule.** `TracePanel.tsx:4` and `README.md:22` both record a discipline: the panel
+must never imply it is showing something it is not. A chemistry-aware UI raises the stakes on this —
+a structure drawn from a mis-detected token, or a value shown without its method, is worse than no
+structure and no value.
+
+---
+
+## 4. User stories
+
+Derived from backend capability, grouped by who asks. Each names the backend basis and what the
+frontend would need. "Reachable today" means: no backend change.
+
+### P1 — Bench / process chemist
+
+| # | Story | Backend basis | Frontend needs | Reachable today |
+| --- | --- | --- | --- | --- |
+| US-1 | *As a process chemist, I want every molecule the agent mentions drawn, so I can check it is the compound I meant before I trust the answer.* | SMILES appear in `tool_call.arguments`, in answer prose, in `job_completed.summary`, in `compound` note frontmatter | SMILES extraction from all four sources; structure rendering; a "this is what I understood you to mean" affordance | yes (partly) |
+| US-2 | *…I want a reaction I describe drawn as a reaction, not as two unrelated structures.* | `similar_reactions` takes reaction SMILES; `compute_reaction_energy` takes balanced species lists | Reaction SMILES parsing (`A.B>>C`), arrow layout | yes |
+| US-3 | *…I want the charge table as a table I can read off at the bench — roles, equivalents, mmol, mass, volume — not as a paragraph.* | `stoichiometry_table` → `ChargeTable`/`ChargeRow` | Structured tool result (C1) **or** reconstruction from `numbers` | needs backend |
+| US-4 | *…I want to see which reagents did not resolve, because a silently-dropped reagent is a wrong table.* | `ChargeTable.unresolved: list[str]` | same as US-3 | needs backend |
+| US-5 | *…I want to paste or draw a structure into the composer instead of typing SMILES.* | every tool takes SMILES | A structure input (paste-SMILES, file drop, optional sketcher) | yes |
+| US-6 | *…I want to ask "what would this cost" before authorising an expensive run.* | `MessageIn.dry_run`, `expensive: true` on `sample_conformers` / `compute_interaction_energy` / `compute_dft_energy` / `start_optimization_campaign` | A dry-run toggle in the composer; a cost/plan preview | yes (BFF already forwards the route; needs the flag in the body) |
+| US-7 | *…I want a compact "calculator mode" for the dozens of property lookups I do a day.* | `SessionIn.profile` + `data/profiles/property-lookup.yaml` | `GET /profiles` in the whitelist; profile picker on session creation | BFF only |
+
+### P2 — Computational chemist
+
+| # | Story | Backend basis | Frontend needs | Reachable today |
+| --- | --- | --- | --- | --- |
+| US-8 | *…I want a computed value shown with its method, solvent model and uncertainty, because a bare number invites a use the method does not support.* | `XtbResult`, `PkaResult`, `SolubilityResult` carry uncertainty; job descriptions carry the caveats verbatim ("semiempirical … for comparing related reactions, not for a number in a report") | Method/uncertainty badges; a caveat surface keyed on tool name | partly (`numbers` gives values, not units) |
+| US-9 | *…I want to know how far to trust this calculator before I authorise work that depends on it.* | `calculator_trust` → `Calibration`, `calculator_outliers` → residuals with `within_uncertainty` | A calibration panel; residual plot | needs backend |
+| US-10 | *…I want a solvent screen shown as a ranking, because the differences are trustworthy and the absolutes are not.* | `compare_solvents` → `SolventComparisonResult` | Ranked bar/table with ΔΔG framing | needs backend |
+| US-11 | *…I want a coordinate scan shown as a curve with the barrier marked.* | `scan_coordinate` → `ScanResult` | Line chart; explicit "upper bound on the ground-state profile, not a TS" caption | needs backend |
+| US-12 | *…I want to reach a finished calculation's artifacts (geometry, vibspectrum) without asking the agent to paste them.* | `list_artifacts` / `fetch_artifact` by `calc_ref` | Artifact list + viewer/download | needs backend or BFF passthrough |
+| US-13 | *…I want to know whether this has already been computed before I start it.* | `find_calculations` (explicitly "the lookup a chemist makes before authorising an expensive run") | A search surface over calculations | needs backend |
+| US-14 | *…I want a long DFT job to tell me when it fails, not just when it succeeds.* | `JobFailedEvent` on `GET /sessions/{id}/events` | Mirror `job_failed`; a failed-job card | **yes — pure frontend bug** |
+
+### P3 — Safety / regulatory reviewer
+
+| # | Story | Backend basis | Frontend needs | Reachable today |
+| --- | --- | --- | --- | --- |
+| US-15 | *…I want hazard flags ranked by severity, each with the motif it matched and its citation, because "advisory" means I must be able to check it.* | `screen_hazards` → `HazardFlag{rule_id, severity, explanation, citation, matched}` | Severity-ordered flag cards; SMARTS → substructure highlight (C5) | needs backend |
+| US-16 | *…I want a genotoxic alert to be visually distinct from a general hazard, because they are different questions.* | `screen_genotoxic_alerts` → `GenotoxAlert` — a separately governed table | Distinct card type | needs backend |
+| US-17 | *…I want an ICH limit shown with its class, its meaning and its unit basis, not as a bare ppm number.* | `ich_impurity_limit` → `ImpurityLimit{limit_class, class_meaning, limits[], citation}` | A limit card; `LimitValue` basis/unit rendering | needs backend |
+| US-18 | *…I want to see plainly when the safety connector was down for a turn, because "no flags" and "not screened" are different answers.* | `capability_degraded` | Already stored on the message — but rendered as a generic notice, not as "this answer contains no hazard screen" | yes (sharpen) |
+
+### P4 — Knowledge steward / approver
+
+| # | Story | Backend basis | Frontend needs | Reachable today |
+| --- | --- | --- | --- | --- |
+| US-19 | *…I want to review the notes the agent proposed — the full note, its dependencies, its session — and approve or reject them here rather than in a git host.* | `GET /proposals`, `GET /proposals/{id}` → `ProposalDetail{content, dependencies, session_id, correlation_id}`, `POST /proposals/{id}/decision` | Review queue + diff/preview + decision buttons | BFF only |
+| US-20 | *…I want a proposed `compound` note to show its structure and a `reaction` note its transformation while I review it.* | `compound_smiles` frontmatter; `[[wikilink]]` relations | Frontmatter parsing + structure rendering in the review view | BFF only |
+| US-21 | *…I want to follow a citation chip to the actual note, not just see it highlighted.* | `expand_note` is an agent tool; there is **no** note-read HTTP route | Either a backend note route, or resolve via the proposal/transcript surfaces | needs backend |
+| US-22 | *…I want pending approvals visible outside the conversation that raised them.* | `GET /approvals` (already whitelisted, already in `client.ts`, currently unused by any view) | An approvals inbox | **yes** |
+
+### P5 — Project lead / operator
+
+| # | Story | Backend basis | Frontend needs | Reachable today |
+| --- | --- | --- | --- | --- |
+| US-23 | *…I want to see every durable run — what is going, what it cost, what it produced — without hunting for job ids in old chats.* | `GET /jobs`, `GET /jobs/{id}` → `DurableJobStatus{status, summary, result, rationale}` | Jobs view | BFF only |
+| US-24 | *…I want to stop a runaway campaign.* | `DELETE /jobs/{id}` (reviewer-gated, 403 otherwise, 202 = cooperative) | Cancel action that handles 403 and 202 honestly | BFF only |
+| US-25 | *…I want a campaign's progress and its recommendation, not a job id.* | `campaign_progress`, `resume_campaign` → `CampaignThread`, `ExperimentSuggestion{candidates, scale, front}` | Campaign view; Pareto/objective plot | needs backend |
+| US-26 | *…I want to know whether a low-confidence answer was scored by the judge or by the fallback gate.* | `answer.verified_by` | Mirror the field; distinguish in `AnswerBadges` | **yes — one field** |
+
+---
+
+## 5. Five concepts
+
+Each is a coherent position, not a feature list. They compose, but they are genuinely different bets
+about where the value is.
+
+---
+
+### Concept A — *Chemistry-aware prose*
+**Premise:** the chemistry is already in the text; teach the renderer to see it.
+
+The answer body, the tool arguments and the citation tokens are treated as a chemistry document
+rather than as markdown. Concretely:
+
+- Extend `looksLikeSmiles` to a small **recogniser suite**: molecule SMILES, reaction SMILES
+  (`>>`), SMARTS (in hazard context), `calc_ref` (`type@version:hash:hash` — the pattern is already
+  regexed backend-side at `kg/note.py:170`), job ids, note ids, ICH substance names.
+- Render molecules **inline and small** where they appear, with the existing opt-in discipline
+  raised to a per-conversation preference rather than a per-token click.
+- Draw reaction SMILES as a reaction (reactants → products), not as N unrelated sketches.
+- Lift SMILES out of `tool_call.arguments` too — a `predict_pka` call whose arguments preview reads
+  `{"smiles": "COc1ccc(Br)cc1"}` should draw that molecule in the trace row.
+- Attach **method caveats by tool name**: a static map from tool → the caveat its own manifest
+  states ("ranking, not an absolute binding energy"; "an upper bound on the ground-state profile").
+  This text exists, is authored by the people who wrote the method, and currently reaches nobody.
+
+**Needs:** nothing from the backend. Recognisers, a caveat table, reaction layout in `Molecule.tsx`.
+
+**Covers:** US-1, US-2, US-8 (partly), US-18.
+
+**Cost:** small. Days, not weeks. No new dependency (reaction layout can be composed from
+`smiles-drawer` per component + a drawn arrow).
+
+**Risk:** false positives. C6 bites hardest here — a mis-detected "SMILES" drawn as a structure is
+an active lie. Mitigation: keep the conservative recogniser, prefer *offering* a render over
+performing one, and never draw from a truncated string (a preview cut mid-token can produce a
+*valid* but *wrong* SMILES — this is the single most dangerous failure mode in this whole document
+and any implementation must refuse to draw from `preview`, only from `arguments` when unterminated
+and from full-text sources otherwise).
+
+**Cannot do:** anything that needs the values a tool returned. No hazard table, no ranking, no
+uncertainty.
+
+---
+
+### Concept B — *The entity rail* (conversation subject index)
+**Premise:** a chemistry conversation is *about* things; give those things identity and a home.
+
+A persistent side rail accumulates the **entities** of the conversation as first-class objects, from
+every place they appear:
+
+```
+molecules     ← tool arguments, answer text, job summaries, note frontmatter
+reactions     ← reaction SMILES, compute_reaction_energy args, similar_reactions
+calculations  ← calc_refs in text, tool_result.numbers attached to their call
+jobs          ← job_started / job_completed / job_failed
+notes         ← note_proposed, citation chips, tool_result.note_ids
+campaigns     ← job kind "campaign", campaign ids in bo tool args
+```
+
+Each entity gets a card: structure, every value the conversation ever attached to it, which tool
+produced each value, and which turn. Clicking one filters the transcript to the turns that mention
+it. Two molecules can be pinned side by side.
+
+This is the concept that most directly answers "chemistry-aware": the UI stops being a log and
+starts being a **workspace with a subject**. It is also the one that pays off most as a conversation
+gets long — which is exactly when a chat UI otherwise degrades.
+
+**Needs:** a client-side entity store keyed by canonical identity. That last word is the catch:
+without RDKit in the browser, `COc1ccc(Br)cc1` and `BrC1=CC=C(OC)C=C1` are different keys. Options:
+(a) accept string identity and de-duplicate imperfectly, (b) pull in RDKit WASM (C5), (c) ask the
+backend to echo canonical SMILES (it already computes it — `core.chem.require_canonical_smiles`).
+Option (c) is one field and is the right ask.
+
+**Covers:** US-1, US-2, US-5, US-12 (as a place to hang artifacts), US-21 (partly), and it is the
+substrate every later concept renders into.
+
+**Cost:** medium. The store and its extraction rules are the work; the cards are cheap.
+
+**Risk:** an entity rail full of noise is worse than none. Needs a strict promotion rule — an entity
+appears only when it came from a *structured* source (a tool argument, a job summary, a note id),
+never from loose prose alone.
+
+**Cannot do:** show what a tool returned, beyond `numbers`/`note_ids`.
+
+---
+
+### Concept C — *Typed result cards* (the instrument panel)
+**Premise:** each tool has a natural rendering; build the fifteen that matter.
+
+`screen_hazards` renders as severity-ordered flag cards with the matched motif highlighted on the
+structure and the citation quoted. `stoichiometry_table` renders as a bench-ready charge table with
+a "unresolved" warning row. `compare_solvents` renders as a ranking with the ΔΔG framing its own
+manifest demands. `scan_coordinate` renders as a curve. `similar_molecules` renders as a hit grid of
+structures with Tanimoto scores. `calculator_trust` renders as a calibration panel.
+
+This is where nearly all of the chemistry value is — and it is **blocked on C1**. The 200-char
+preview cannot carry a `ScreenResult`.
+
+Three ways through, in ascending order of backend cost:
+
+1. **Reconstruct from `numbers` + `note_ids`.** Already on the wire, already untruncated. Gets you a
+   value strip ("this call returned 5 values: 5000, 2, 890, …") but not their labels. Honest, cheap,
+   and much weaker than a real card. Useful as a *bridge*, not a destination.
+2. **A result reference.** Backend adds `tool_result.result_ref`; the UI fetches the full typed
+   result from a new route. This preserves the budget rule that motivated the truncation (the
+   browser pulls what it chooses to render, once, rather than every result being streamed to every
+   surface) and it is the smallest change that unblocks every card.
+3. **Typed payloads on the event.** `tool_result.data: dict` for a whitelist of tools whose results
+   are known-small (hazard screen, ICH lookup, charge table, calibration). Simpler than (2), but it
+   re-opens exactly the budget question the backend closed deliberately, so it should be scoped to
+   bounded results only.
+
+**Covers:** US-3, US-4, US-9, US-10, US-11, US-15, US-16, US-17, US-25.
+
+**Cost:** large, and gated on a backend decision. But it is incremental *after* the gate: each card
+is independent, and the fallback (today's `<pre>`) is always available for an unrecognised tool.
+
+**Risk:** the fifteen-card treadmill. Mitigation: the manifest already classifies tools, so cards
+should key on *result shape*, not on tool name — "a list of cited flags", "a ranked comparison", "a
+table of rows", "a value with uncertainty" — which is four or five renderers, not fifteen.
+
+---
+
+### Concept D — *The chemistry workbench* (beyond the chat)
+**Premise:** some chemistry questions are not conversations. Stop routing them through one.
+
+Chat becomes one surface among several:
+
+- **Jobs** — every durable run, its state, its result, cancel (`GET /jobs`, `DELETE /jobs/{id}`).
+  This is the surface `useJobFeed` gestures at and cannot deliver: a job outlives the conversation
+  that started it, and the backend's own docstring says the job surface exists because "a result
+  from a session that had since been evicted was unreachable".
+- **Review queue** — proposed notes and pending approvals in one inbox (`GET /proposals`,
+  `GET /approvals`). This is the GxP spine of the architecture and it currently has no UI at all.
+- **Profiles** — start a session as `property-lookup` instead of the general agent (`GET /profiles`).
+- **Structure-first entry** — paste a molecule, get actions (screen it, predict its pKa, find
+  similar) that compose a chat turn behind the scenes.
+
+**Needs:** BFF whitelist entries (§1.3) and new views. **No new backend capability.**
+
+**Covers:** US-7, US-19, US-20, US-22, US-23, US-24, and gives US-5 somewhere to live.
+
+**Cost:** medium, and unusually *low-risk*: the data is typed JSON from real routes, so none of C1's
+truncation problems apply. This is the best value-per-risk in the document.
+
+**Risk:** scope. A workbench invites an admin console. Keep it to what a chemist and a reviewer
+actually do; leave `/metrics` and `/schedules` off the whitelist as the BFF's comment already argues.
+
+---
+
+### Concept E — *The provenance overlay*
+**Premise:** in this domain, the qualifier is the content. Render the qualifiers.
+
+Nothing new is drawn; everything shown is *annotated*:
+
+- **Method badges.** GFN2-xTB vs DFT vs a lookup table vs a surrogate model, derived from the tool
+  that produced the value. A chemist should never have to ask which one a number came from.
+- **Uncertainty as first-class.** Where a result carries one, it is rendered with the value, not
+  after it.
+- **Grounding highlights.** `tool_result.numbers` is a list of every figure the turn's tools
+  actually returned. Highlight figures in the answer that appear in it, and flag figures that do
+  not. The backend built this list for exactly this check and documents the live run where its
+  absence produced nine false fabrication verdicts.
+- **Verifier honesty.** Distinguish `verified_by: "judge"` from `"citation-gate"` from `null`
+  (US-26), and render `capability_degraded` as a chemistry statement — "this answer contains no
+  hazard screen because the safety connector was unreachable" — not a generic connector name.
+- **Calibration.** Where `calculator_trust` has been consulted, show it beside the prediction.
+
+**Needs:** mirroring four fields already on the wire (`numbers`, `note_ids`, `verified_by`, `error.code`);
+a tool → method map; and, for calibration, Concept C.
+
+**Covers:** US-8, US-18, US-26, and most of US-9.
+
+**Cost:** small-to-medium. The highest ratio of chemist trust gained per line of code in this
+document, because it is almost entirely *already-transmitted data being discarded*.
+
+**Risk:** annotation clutter. Provenance must be legible at a glance and expandable on demand, or it
+becomes visual noise that trains people to ignore it — which is worse than absent.
+
+---
+
+## 6. Comparison
+
+| | A · prose | B · entity rail | C · result cards | D · workbench | E · provenance |
+| --- | --- | --- | --- | --- | --- |
+| Backend change needed | none | one field (canonical SMILES) — optional | **yes** (result_ref or typed payload) | none | none |
+| BFF change needed | no | no | maybe (result fetch) | **yes** (3 routes) | no |
+| New dependency | no | RDKit if canonicalising client-side | no | no | no |
+| Stories covered | 4 | 5 | 9 | 6 | 4 |
+| Effort | S | M | L | M | S–M |
+| Risk profile | false positives (C6) | noise | backend dependency + treadmill | scope creep | clutter |
+| Value if built alone | modest | high, grows with conversation length | highest | high, independent of chat | high trust, low visibility |
+| Blocks anything? | no | is the substrate for C and E cards | no | no | no |
+
+**They are not alternatives.** A and E are almost free and should happen regardless. D is
+independent of everything and can proceed in parallel. B is the substrate that makes C's cards feel
+like a workspace rather than a stream of widgets. C is the destination and the only one with a hard
+external dependency.
+
+---
+
+## 7. A staged path
+
+**Stage 0 — contract repair (days).** The eight drift items in §2. Independently justified: item 1
+is a user-visible bug (a failed job is silently invisible), and items 2–4 are data the browser is
+already receiving and throwing away. Nothing below is worth building on a stale mirror.
+
+**Stage 1 — A + E (weeks).** Chemistry-aware prose and the provenance overlay. No backend
+dependency, no new dependency, immediately visible to a chemist. Ends with: every molecule drawn,
+every value carrying its method, every unsupported figure flagged.
+
+**Stage 2 — D (weeks, parallel).** Whitelist `/jobs`, `/proposals`, `/profiles`; build the jobs view,
+the review queue, the profile picker. Independent of Stage 1 — different files, different routes —
+so it can run concurrently and by a different person.
+
+**Stage 3 — B (weeks).** The entity rail, keyed on canonical SMILES if the backend echo lands and on
+string identity if it does not.
+
+**Stage 4 — C (open-ended, gated).** Typed result cards, once the backend decision in §8 is made.
+Build the four *shape* renderers first (cited-flag list, ranked comparison, row table,
+value-with-uncertainty); they cover eleven of the fifteen tools worth carding.
+
+---
+
+## 8. What to ask the backend for
+
+Ordered by value per unit of backend work.
+
+1. **A way to reach a full tool result.** `tool_result.result_ref` + a fetch route is the smallest
+   change that unblocks Concept C, and it preserves the streaming budget the truncation exists to
+   protect. Alternative: `data: dict` on the event, restricted to results with a bounded size
+   (hazard screen, genotox alerts, ICH lookup, charge table, calibration, green metrics).
+2. **Canonical SMILES echo.** Any tool that takes a molecule already canonicalises it
+   (`core.chem.require_canonical_smiles`). Echoing it in the result — or in `tool_call` — gives the
+   frontend a stable entity key without shipping RDKit to the browser.
+3. **A note-read route.** `GET /notes/{id}` (or a proposal-independent read of `expand_note`'s
+   `NoteView`) so a citation chip can resolve to the note it cites (US-21). Today the knowledge
+   graph is readable by the agent and by nobody else.
+4. **A typed job summary**, or at least a documented per-kind shape, so `JobResultCard` can stop
+   probing (C2).
+5. Nothing else. `job_failed`, `numbers`, `note_ids`, `verified_by`, `error.code`, `/jobs`,
+   `/proposals`, `/profiles`, `dry_run` and profiles are **already there** — the work on those is
+   entirely on this side of the wire.
+
+---
+
+## 9. Open questions
+
+- **Who is the primary user?** The stories split cleanly by persona, and the concepts rank
+  differently for each. A bench chemist wants A + B; a computational chemist wants C + E; a QA
+  reviewer wants D. Which one the UI is *for* decides the order.
+- **Is RDKit in the browser acceptable?** It unlocks canonical identity, substructure highlighting
+  (US-15's motif rendering), and reliable reaction drawing. It costs multiple megabytes of WASM.
+  `Molecule.tsx` already names substructure highlighting as the thing that would justify it.
+- **Does the deployment run the verifier and the harness?** `verifier_enabled`,
+  `answer_shape_gate_enabled` and `harness_enabled` are all config. Concept E's grounding highlights
+  and the plan surface are worth much less if they are off in production.
+- **Should the UI ever compose a tool call directly?** Everything today goes through a chat turn.
+  Concept D's structure-first entry stops short of this deliberately — it composes a *message*. A
+  real "run this calculation" button would need the authorization story (`agent/authz.py`, the plan
+  gate, `expensive: true`) thought through, and that is a larger question than a frontend concept.

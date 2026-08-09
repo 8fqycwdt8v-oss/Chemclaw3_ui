@@ -108,6 +108,7 @@ server/     the BFF — route whitelist, streaming proxy, static host, /config.j
 src/        the SPA — api/ auth/ state/ components/
 shared/     the event contract, mirrored from the service's service/events.py
 scripts/    dev launcher, server bundler, smoke test
+docs/       design notes — see chemistry-aware-frontend.md
 ```
 
 Two files carry most of the difficulty and are commented accordingly:

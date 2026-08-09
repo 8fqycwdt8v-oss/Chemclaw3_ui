@@ -53,6 +53,17 @@ const APPROVAL = "([A-Za-z0-9._:~!*'()%-]{1,128})";
 const NOTE = "([A-Za-z0-9._:~!*'()%-]{1,128})";
 
 /**
+ * Durable job ids.
+ *
+ * Minted by the service and by Temporal rather than by the model, so unlike `APPROVAL` these are
+ * not arbitrary in principle — but a connector job's id embeds a workflow id whose shape this
+ * repo does not own, and pinning it to a guess is how the approval route spent a release
+ * 404-ing every id with a bracket in it. Same closed set, same length cap, same argument: the
+ * segment is forwarded still-encoded and the service uses it as a lookup key, never as a path.
+ */
+const JOB = "([A-Za-z0-9._:~!*'()%-]{1,128})";
+
+/**
  * A stored tool result's ref.
  *
  * Narrower than every other id here, and it can be: the service defines the ref as the SHA-256
@@ -144,6 +155,47 @@ export const ROUTES: readonly Route[] = [
     method: 'POST',
     pattern: new RegExp(`^/api/sessions/${SID}/plan/decision$`),
     target: (m) => `/sessions/${m[1]}/plan/decision`,
+    sse: false,
+  },
+
+  // The PR-gate review queue.
+  //
+  // A different mechanism from `/approvals` below, despite the similar shape, and worth not
+  // confusing: an approval is a Temporal interaction hold answered mid-turn, a proposal is a
+  // knowledge note waiting to enter the graph. The service calls this "the line that makes
+  // machine-written knowledge safe". Listing is keyset-paginated (`before_id`) and state-filtered
+  // through the query string, which the proxy forwards untouched.
+  { method: 'GET', pattern: /^\/api\/proposals$/, target: () => '/proposals', sse: false },
+  {
+    method: 'GET',
+    pattern: /^\/api\/proposals\/([0-9]{1,19})$/,
+    target: (m) => `/proposals/${m[1]}`,
+    sse: false,
+  },
+  {
+    method: 'POST',
+    pattern: /^\/api\/proposals\/([0-9]{1,19})\/decision$/,
+    target: (m) => `/proposals/${m[1]}/decision`,
+    sse: false,
+  },
+
+  // The durable-run registry.
+  //
+  // Job ids are minted by the service and by Temporal, so they are constrained like an approval
+  // id rather than like a session id. `DELETE` is the operator cancel, role-gated upstream; it is
+  // whitelisted here anyway, because hiding a control the caller is entitled to use is the
+  // frontend's job and refusing to proxy it would break the caller who *is* entitled.
+  { method: 'GET', pattern: /^\/api\/jobs$/, target: () => '/jobs', sse: false },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/jobs/${JOB}$`),
+    target: (m) => `/jobs/${m[1]}`,
+    sse: false,
+  },
+  {
+    method: 'DELETE',
+    pattern: new RegExp(`^/api/jobs/${JOB}$`),
+    target: (m) => `/jobs/${m[1]}`,
     sse: false,
   },
 

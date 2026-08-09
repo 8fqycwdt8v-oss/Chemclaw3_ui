@@ -19,6 +19,8 @@ export interface RuntimeConfig {
   appVersion: string;
   /** See `warmSessions` in src/env.ts — a kill switch for pre-creating backend sessions. */
   warmSessions: boolean;
+  /** The service's privileged app-role names, so the SPA can hide what would 403. */
+  reviewerRoles: string[];
 }
 
 export function runtimeConfig(): RuntimeConfig {
@@ -30,6 +32,7 @@ export function runtimeConfig(): RuntimeConfig {
     apiBase: '/api',
     appVersion: cfg.appVersion,
     warmSessions: cfg.warmSessions,
+    reviewerRoles: cfg.reviewerRoles,
   };
 }
 

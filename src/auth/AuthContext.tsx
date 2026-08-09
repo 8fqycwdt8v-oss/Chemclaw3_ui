@@ -19,6 +19,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 import { authReady } from './bootstrap.ts';
 import { pendingAuth } from './pendingAuth.ts';
 import { useChatStore } from '../state/chatStore.ts';
+import { config } from '../env.ts';
 import type { AuthProvider } from './types.ts';
 
 interface AuthContextValue {
@@ -76,4 +77,29 @@ export function useAuth(): AuthContextValue {
   const ctx = useContext(AuthContext);
   if (!ctx) throw new Error('useAuth must be used inside <AuthGate>');
   return ctx;
+}
+
+/**
+ * Whether this caller may decide a knowledge proposal or cancel a durable job.
+ *
+ * **This is not enforcement and must never be treated as any.** The service decides, and it will
+ * 403 whatever this returns. What it buys is that a chemist without the role is not offered a
+ * button that fails — learning your own permissions from an error message is a bad way to learn
+ * them, and on a proposal decision it is worse, because the reader has already formed a judgement
+ * they now cannot record.
+ *
+ * The dev branch mirrors the service exactly: with `entra_required` off it has no real roles and
+ * `_is_reviewer` returns true for everyone, so hiding the controls here would hide a capability
+ * the service is offering. Under MSAL, an empty `reviewerRoles` yields false for everyone — which
+ * is also the service's posture, since a deployment that enables identity and names no privileged
+ * role fails closed. A queue nobody can review is a misconfiguration to notice, not to paper over.
+ */
+export function useIsReviewer(): boolean {
+  const { auth, revision } = useAuth();
+  // `revision` is not unused: `account` is a getter on the MSAL provider, so this has to re-read
+  // it on sign-in rather than memoising against a value that never changes identity.
+  void revision;
+  if (auth.mode === 'dev') return true;
+  const held = new Set(auth.account?.roles ?? []);
+  return config.reviewerRoles.some((role) => held.has(role));
 }

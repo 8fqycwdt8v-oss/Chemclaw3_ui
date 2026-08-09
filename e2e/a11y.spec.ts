@@ -90,6 +90,16 @@ for (const theme of ['light', 'dark'] as const) {
       await scan(page);
     });
 
+    test('the review queue, with a proposal open', async ({ page }) => {
+      // A modal panel over a list, holding a labelled textarea and two destructive-ish controls —
+      // and the panel is where a decision that cannot be undone is taken. Reached by URL rather
+      // than through the sidebar, because the drawer is already covered below.
+      await page.goto('/review');
+      await page.getByRole('button', { name: /note-suzuki-42/ }).click();
+      await expect(page.getByText(/confidence: 0\.8/)).toBeVisible();
+      await scan(page);
+    });
+
     test('the conversation that is not on this device', async ({ page }) => {
       // A new page, a new focus target, and the one state reached by a link rather than a click.
       await page.goto('/c/does-not-exist');

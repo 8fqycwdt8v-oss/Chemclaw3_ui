@@ -89,7 +89,80 @@ export interface AttachmentSummary {
 
 export interface PendingApproval {
   approval_id?: string;
+  /** What the agent asked, so an inbox row is readable without opening it. */
+  question?: string;
+  requested_by?: string;
   [key: string]: unknown;
+}
+
+/**
+ * One knowledge note waiting to enter the graph, as the PR gate records it.
+ *
+ * Not to be confused with `PendingApproval` despite the shape: an approval is a Temporal
+ * interaction hold answered mid-turn, a proposal is machine-written knowledge waiting for a human
+ * to sign it into the record. The service calls the gate "the line that makes machine-written
+ * knowledge safe"; these are the things standing on it.
+ */
+export interface ProposalSummary {
+  id: number;
+  note_id: string;
+  note_type: string;
+  /** `pending` until decided; then `approved` or `rejected`. */
+  state: string;
+  branch: string;
+  reference: string;
+  /** The principal whose turn produced it. */
+  actor: string;
+  submitted_at: string | null;
+  decided_at: string | null;
+  decided_by: string;
+  reason: string;
+}
+
+/** A file the proposal would land alongside the note — a minted compound note, typically. */
+export interface ProposalFile {
+  path: string;
+  content: string;
+}
+
+/**
+ * A proposal with the bytes it would commit.
+ *
+ * `content` and `dependencies` are the point of the detail route: a GxP sign-off is on what would
+ * actually enter the tree, not on a summary of it. `correlation_id` joins the decision to the
+ * audit trail of the turn that proposed it.
+ */
+export interface ProposalDetail extends ProposalSummary {
+  content: string;
+  dependencies: ProposalFile[];
+  session_id: string;
+  correlation_id: string;
+}
+
+/**
+ * One finished durable run, from the permanent job record rather than from Temporal.
+ *
+ * `rationale` is the field that makes this a registry rather than a log: it is why the run was
+ * launched, recorded at launch, and it is what `find_past_jobs` searches. Results survive Temporal
+ * history expiry here, so a job whose session is long gone is still answerable.
+ */
+export interface JobRecordSummary {
+  job_id: string;
+  connector: string;
+  job: string;
+  rationale: string;
+  summary: string;
+  note_id: string;
+  completed_at: string | null;
+}
+
+/** One job's live status and structured result. */
+export interface DurableJobStatus {
+  job_id: string;
+  status: string;
+  summary: string | null;
+  result: Record<string, unknown>;
+  rationale: string;
 }
 
 /**
@@ -278,6 +351,92 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ approved }),
     });
+  },
+
+  /**
+   * The PR-gate review queue.
+   *
+   * `state` filters (`pending` is what a reviewer wants) and `before_id` is keyset pagination —
+   * an id, not an offset, so a decision landing mid-scroll cannot shift the page under the reader.
+   *
+   * Degrades to `[]` on a 404 like the other list routes, and for the same reason: a service
+   * without the queue should leave an empty screen, not a banner.
+   */
+  async listProposals(
+    getToken: TokenGetter,
+    options: { state?: string; beforeId?: number } = {},
+  ): Promise<ProposalSummary[]> {
+    const query = new URLSearchParams();
+    if (options.state) query.set('state', options.state);
+    if (options.beforeId) query.set('before_id', String(options.beforeId));
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    try {
+      return await request<ProposalSummary[]>(`/proposals${suffix}`, getToken);
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'session_not_found') return [];
+      throw err;
+    }
+  },
+
+  /** One proposal with the exact bytes it would commit. Not swallowed: it is opened by a click. */
+  getProposal(id: number, getToken: TokenGetter): Promise<ProposalDetail> {
+    return request<ProposalDetail>(`/proposals/${id}`, getToken);
+  },
+
+  /**
+   * Sign a proposal into the record, or refuse it.
+   *
+   * `reason` is required on a rejection — the service 422s a blank one, and rightly: a note
+   * rejected without a stated reason tells the next reviewer, and the agent, nothing. It is
+   * optional on an approval, where the bytes are the record.
+   */
+  decideProposal(
+    id: number,
+    approved: boolean,
+    reason: string,
+    getToken: TokenGetter,
+  ): Promise<void> {
+    return request<void>(`/proposals/${id}/decision`, getToken, {
+      method: 'POST',
+      body: JSON.stringify({ approved, reason }),
+    });
+  },
+
+  /**
+   * The durable-run registry.
+   *
+   * Deliberately not scoped to the caller upstream — a run is a fact about the lab, and "what did
+   * we already compute for this substrate" is the question it exists to answer. `text` searches
+   * the recorded rationale, which is why a run three months old is findable at all.
+   */
+  async listJobs(
+    getToken: TokenGetter,
+    options: { text?: string; connector?: string } = {},
+  ): Promise<JobRecordSummary[]> {
+    const query = new URLSearchParams();
+    if (options.text) query.set('text', options.text);
+    if (options.connector) query.set('connector', options.connector);
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    try {
+      return await request<JobRecordSummary[]>(`/jobs${suffix}`, getToken);
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'session_not_found') return [];
+      throw err;
+    }
+  },
+
+  getJob(jobId: string, getToken: TokenGetter): Promise<DurableJobStatus> {
+    return request<DurableJobStatus>(`/jobs/${encodeURIComponent(jobId)}`, getToken);
+  },
+
+  /**
+   * Ask the service to cancel a running job.
+   *
+   * 202, not 204: cancellation is *requested*, and a workflow already past its last cancellation
+   * point will finish anyway. The caller must not tell the chemist it stopped.
+   */
+  cancelJob(jobId: string, getToken: TokenGetter): Promise<void> {
+    return request<void>(`/jobs/${encodeURIComponent(jobId)}`, getToken, { method: 'DELETE' });
   },
 
   /** The plan a session is proposing, read for the hash that binds a decision to it. */

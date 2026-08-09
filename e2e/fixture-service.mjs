@@ -184,5 +184,74 @@ createServer(async (req, res) => {
     return;
   }
 
+  // The PR-gate review queue.
+  if (path === '/proposals' && req.method === 'GET') {
+    return json(res, 200, [
+      {
+        id: 7,
+        note_id: 'note-suzuki-42',
+        note_type: 'reaction',
+        state: 'pending',
+        branch: 'agent/note-suzuki-42',
+        reference: 'refs/heads/agent/note-suzuki-42',
+        actor: 'chemist@example.com',
+        submitted_at: '2026-08-09T10:00:00Z',
+        decided_at: null,
+        decided_by: '',
+        reason: '',
+      },
+    ]);
+  }
+  if (path === '/proposals/7' && req.method === 'GET') {
+    return json(res, 200, {
+      id: 7,
+      note_id: 'note-suzuki-42',
+      note_type: 'reaction',
+      state: 'pending',
+      branch: 'agent/note-suzuki-42',
+      reference: 'refs/heads/agent/note-suzuki-42',
+      actor: 'chemist@example.com',
+      submitted_at: '2026-08-09T10:00:00Z',
+      decided_at: null,
+      decided_by: '',
+      reason: '',
+      content: '---\ntype: reaction\nconfidence: 0.8\n---\nRan in 2-MeTHF at 70 °C.',
+      dependencies: [],
+      session_id: SID,
+      correlation_id: 'turn-e2e-2',
+    });
+  }
+  if (path === '/proposals/7/decision' && req.method === 'POST') {
+    req.resume();
+    res.writeHead(204);
+    return res.end();
+  }
+
+  // The durable-run registry.
+  if (path === '/jobs' && req.method === 'GET') {
+    const text = url.searchParams.get('text') ?? '';
+    if (text && !'nitration selectivity'.includes(text)) return json(res, 200, []);
+    return json(res, 200, [
+      {
+        job_id: 'calc-9f2c',
+        connector: 'calc',
+        job: 'compare_solvents',
+        rationale: 'Decide whether 2-MeTHF or CPME favours the coupling.',
+        summary: '4 solvents ranked by ΔG.',
+        note_id: '',
+        completed_at: '2026-08-01T09:00:00Z',
+      },
+    ]);
+  }
+  if (path.startsWith('/jobs/') && req.method === 'GET') {
+    return json(res, 200, {
+      job_id: path.slice('/jobs/'.length),
+      status: 'completed',
+      summary: '4 solvents ranked by ΔG.',
+      result: { best: '2-MeTHF' },
+      rationale: 'Decide whether 2-MeTHF or CPME favours the coupling.',
+    });
+  }
+
   json(res, 404, { detail: 'not found' });
 }).listen(port, () => console.log(`fixture service on :${port}`));

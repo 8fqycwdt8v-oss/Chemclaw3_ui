@@ -77,6 +77,7 @@ export interface BffConfig {
   sseHeartbeatMs: number;
   upstreamConnectTimeoutMs: number;
   warmSessions: boolean;
+  reviewerRoles: string[];
   csp: string;
   logLevel: string;
 }
@@ -100,6 +101,17 @@ export const cfg: BffConfig = {
   // Pre-creating a session while the user types costs the service one live-session slot per
   // conversation typed into, sent or not. Default on; switchable without a client rebuild.
   warmSessions: bool('WARM_SESSIONS', true),
+  // The app roles that may decide a knowledge proposal or cancel a durable job. These are the
+  // service's own `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`, and they have to be told to this process
+  // rather than guessed: the names are chosen per deployment, so a hardcoded list would be wrong
+  // everywhere. Used only to hide affordances that would come back 403 — the service enforces.
+  //
+  // Empty is meaningful and matches the service's posture: under enforcement it fails closed, so
+  // nobody is offered a decision, which is a misconfiguration to notice rather than paper over.
+  reviewerRoles: str('REVIEWER_ROLES')
+    .split(',')
+    .map((role) => role.trim())
+    .filter(Boolean),
   sseHeartbeatMs: num('SSE_HEARTBEAT_MS', 15_000),
   upstreamConnectTimeoutMs: num('UPSTREAM_CONNECT_TIMEOUT_MS', 10_000),
   csp: buildCsp(authMode),

@@ -27,6 +27,19 @@ export interface RuntimeConfig {
    * to matter, this can be turned off without a client rebuild.
    */
   warmSessions: boolean;
+  /**
+   * App roles whose holders may decide a knowledge proposal or cancel a durable job.
+   *
+   * Configured rather than hardcoded because the names are a deployment's own — they mirror the
+   * service's `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`. Used to hide affordances, never to enforce
+   * anything: the service is the only party that decides, and it will 403 regardless of what
+   * this list says.
+   *
+   * Empty under MSAL means nobody is offered a decision, which is exactly the service's own
+   * fail-closed posture. Irrelevant in dev auth, where the service opens the gate for everyone
+   * and so does `useIsReviewer`.
+   */
+  reviewerRoles: string[];
 }
 
 declare global {
@@ -65,6 +78,7 @@ function resolve(): RuntimeConfig {
     apiBase: pick(w.apiBase, v.apiBase, '/api'),
     appVersion: pick(w.appVersion, 'dev'),
     warmSessions: w.warmSessions !== false,
+    reviewerRoles: Array.isArray(w.reviewerRoles) ? w.reviewerRoles.map(String) : [],
   };
 }
 

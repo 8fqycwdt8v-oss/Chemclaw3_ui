@@ -31,7 +31,7 @@ That surface is this one. The UI's event contract and its BFF route whitelist bo
 those arrived.
 
 **As first written, of 24 workflows: 2 `SERVED`, 13 `PROSE-ONLY`, 5 `NO-UI`, 2 `DEFECT`,
-3 `BLOCKED-BACKEND`.** Seven have moved since — see [What has changed](#what-has-changed) at the
+3 `BLOCKED-BACKEND`.** Twelve have moved since — see [What has changed](#what-has-changed) at the
 end. The verdict columns below are kept current; the argument is not rewritten, because it is the
 reason the work was chosen in this order.
 
@@ -127,8 +127,8 @@ one thing `similar_reactions` returns cannot be drawn.
 | #      | Persona and story                                                 | Aim                                                                                | Backend                                                                       | Verdict           |
 | ------ | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ----------------- |
 | **C1** | Chemist: submit a DFT or conformer job and get on with the day    | Know it landed, be told when it finishes — **and be told when it fails**           | `job_started` / `job_completed` / `job_failed` on `GET /sessions/{id}/events` | **`SERVED`**      |
-| **C2** | Chemist: _"what is running, and can I stop it?"_                  | Kill a mis-launched HPC job before it burns a queue slot                           | `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` (reviewer role)            | `NO-UI`           |
-| **C3** | Chemist: _"what did we run three months ago, and why?"_           | Reuse a result instead of re-running it — `job_records` keeps the launch rationale | `find_past_jobs`, `GET /jobs?text=&connector=`                                | `NO-UI`           |
+| **C2** | Chemist: _"what is running, and can I stop it?"_                  | Kill a mis-launched HPC job before it burns a queue slot                           | `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` (reviewer role)            | **`SERVED`**      |
+| **C3** | Chemist: _"what did we run three months ago, and why?"_           | Reuse a result instead of re-running it — `job_records` keeps the launch rationale | `find_past_jobs`, `GET /jobs?text=&connector=`                                | **`SERVED`**      |
 | **C4** | Computational chemist: download the optimized geometry or Hessian | Take it into another package                                                       | `list_artifacts` / `fetch_artifact` — text only, refuses binaries             | `BLOCKED-BACKEND` |
 
 **C1 was the sharpest defect in this document, and is fixed.** `job_failed` was absent from
@@ -139,8 +139,10 @@ coming, and the trace panel told them it was still running. It now renders as a 
 service's reason, in the trace and in the cross-turn feed, and the launch row's badge is retracted
 on either ending rather than on neither.
 
-**C2.** There is no way to see or cancel a durable job. The only escape from a wedged session is
-the banner's "Start a fresh session", which abandons the job rather than stopping it.
+**C2.** ~~There is no way to see or cancel a durable job.~~ **Built.** `/jobs` lists every run and
+opens one; a reviewer can request cancellation. The wording never says the job stopped — the
+service answers 202 and a workflow past its last cancellation point finishes anyway — which is the
+difference between a control and a claim.
 
 **C4** needs a byte route on the service. An agent tool that returns truncated text cannot hand a
 browser a file.
@@ -187,9 +189,9 @@ error enters the campaign.
 | ------ | --------------------------------------------------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
 | **F1** | Chemist: answer a durable hold                                        | An attributable, irreversible sign-off                                            | `POST /approvals/{id}/decision`                                                                                                                                            | **`SERVED`** |
 | **F2** | Chemist: approve the harness plan before it spends                    | Control what the agent is allowed to execute                                      | `GET /sessions/{id}/plan` + a decision bound to `plan_hash`                                                                                                                | **`SERVED`** |
-| **F3** | Chemist: find every hold waiting on me                                | Nothing stays blocked because someone closed a tab                                | `GET /approvals` → `PendingApproval[]`                                                                                                                                     | `NO-UI`      |
-| **F4** | Reviewer: review machine-written knowledge before it enters the graph | See the exact bytes that would land in the tree; approve, or reject with a reason | `GET /proposals` (keyset paginated, state-filtered), `GET /proposals/{id}` (`content` + `dependencies` + `session_id` + `correlation_id`), `POST /proposals/{id}/decision` | `NO-UI`      |
-| **F5** | Non-reviewer: do not offer me buttons that 403                        | Not learn my permissions from an error message                                    | The `roles` claim; `entra_privileged_role_set`                                                                                                                             | `NO-UI`      |
+| **F3** | Chemist: find every hold waiting on me                                | Nothing stays blocked because someone closed a tab                                | `GET /approvals` → `PendingApproval[]`                                                                                                                                     | **`SERVED`** |
+| **F4** | Reviewer: review machine-written knowledge before it enters the graph | See the exact bytes that would land in the tree; approve, or reject with a reason | `GET /proposals` (keyset paginated, state-filtered), `GET /proposals/{id}` (`content` + `dependencies` + `session_id` + `correlation_id`), `POST /proposals/{id}/decision` | **`SERVED`** |
+| **F5** | Non-reviewer: do not offer me buttons that 403                        | Not learn my permissions from an error message                                    | The `roles` claim; `entra_privileged_role_set`                                                                                                                             | **`SERVED`** |
 
 **F1 and F2 are what this frontend is for.** The plan decision is bound to the hash of the plan
 that was actually rendered, fetched on card mount so the two cannot drift; a 409 re-reads the plan
@@ -198,20 +200,24 @@ confirmation that says the decision is irreversible and attributable; and agains
 predates the plan route the card falls back to answering in the conversation _and says that is what
 it is doing_. Nothing in this document asks for these to change.
 
-**F3.** `api.listApprovals` exists in `src/api/client.ts`, degrades to `[]` on a 404 like its
-siblings — and has no callers. `ISSUES.md` Issue 3 says the endpoint does not exist on the backend,
-"so an inbox would be built against nothing". **That is now stale**: `GET /approvals`,
-`GET /approvals/{id}` and `POST /approvals/{id}/decision` all exist. So does the pair in Issue 2.
+**F3.** ~~`api.listApprovals` exists and has no callers.~~ **Built**, on `/review`. `ISSUES.md`
+Issue 3 said the endpoint did not exist and that an inbox "would be built against nothing"; all
+three approval routes do exist, and both stale issues are corrected. The inbox deliberately does
+not decide a hold in place — a hold belongs to a turn, and answering it away from the reasoning
+that produced the question is answering half a question. It links back instead.
 
-**F4 is the largest untouched capability in the system.** The service calls its PR gate "the line
-that makes machine-written knowledge safe". `ProposalDetail` carries the literal file content and
-its dependencies so a GxP reviewer can see what would be committed, plus the `correlation_id` that
-joins it to the audit trail; a rejection requires a reason or the route 422s. In this UI, a
-proposal is one grey row in a collapsed trace panel reading _"Proposed note note-… for review"_,
-with no link, no content, and no way to decide it.
+**F4 was the largest untouched capability in the system.** **Built.** The queue lists what is
+waiting; opening one shows the literal file content and every file that would land beside it, as
+the file it is rather than as rendered markdown — the front matter, the wikilinks and the
+confidence field are exactly what a reviewer is checking, and rendering would hide all three. The
+Reject control stays disabled until a reason is written, because the service 422s a blank one and
+because a note refused without a stated reason tells the next reviewer, and the agent, nothing.
 
-**F5.** `AuthAccount.roles` is parsed from the token and used nowhere, so a non-reviewer would be
-offered a proposal decision and a job cancel that both come back 403.
+**F5.** ~~`AuthAccount.roles` is parsed from the token and used nowhere.~~ **Built**, as
+`useIsReviewer`. The role names cannot be hardcoded — they are a deployment's own — so they come
+through `/config.js` as `REVIEWER_ROLES`, alongside the API scope. Controls are hidden rather than
+disabled, and the screen says a reviewer role is needed, so nobody forms a judgement they then
+cannot record. It is not enforcement and says so: the service decides, and will 403 regardless.
 
 ---
 
@@ -289,6 +295,10 @@ way.
 | `answer.verified_by` surfaced beside the confidence, because a judge's 0.82 is not a citation gate's 0.82                                                                                                                                                                                                     | A1 (partly)      |
 | `GET /sessions/{id}/tool-results/{ref}` whitelisted; a "See the full result" control on any stored result; typed renderers for the hazard screen, the ICH lookup and the charge table, a generic table for anything record-shaped, raw text otherwise — with the `verdict` always above the data it qualifies | A3, D1, D2       |
 | `GET /notes/{id}` whitelisted; a citation chip resolves to the note with its provenance, its validity window and its neighbours, and falls back to asking the agent when the reference is not a readable note                                                                                                 | A2               |
+| `GET/POST /proposals[...]` whitelisted; a `/review` screen showing the exact bytes a proposal would commit, its dependency files and its correlation id, with a rejection that cannot go out without a reason                                                                                                 | F4               |
+| `GET /approvals` given the inbox it always had a client method for, on the same screen                                                                                                                                                                                                                        | F3               |
+| `GET/DELETE /jobs[...]` whitelisted; a `/jobs` registry that leads with the recorded rationale rather than the id, searchable over it, with a cancellation that is requested rather than claimed                                                                                                              | C2, C3           |
+| The `roles` claim finally used, through `useIsReviewer` and a `REVIEWER_ROLES` runtime setting, to hide what would 403 instead of offering it                                                                                                                                                                 | F5               |
 
 One thing fell out of the work rather than being planned, and is worth recording because it was
 invisible until a realistic payload went through it: the trace panel's `<pre>` blocks and the new

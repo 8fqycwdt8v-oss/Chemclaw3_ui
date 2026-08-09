@@ -9,6 +9,7 @@ import { api } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { streamTurn } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
+import { useEntityStore } from '../chem/entities.ts';
 import { useChatStore } from './chatStore.ts';
 
 export interface SendOptions {
@@ -91,6 +92,10 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         }
         batcher.flush();
         useChatStore.getState().applyEvent(conversationId, messageId, event);
+        // Fire-and-forget: ingestion canonicalises through RDKit, so it is asynchronous, and the
+        // transcript must never wait on the entity rail. A structure that arrives in the rail a
+        // moment after the trace row is fine; a stalled token stream is not.
+        void useEntityStore.getState().ingest(messageId, event);
       },
     });
     batcher.flush();

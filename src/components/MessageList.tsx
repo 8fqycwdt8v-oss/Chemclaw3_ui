@@ -7,8 +7,9 @@
  * between "code block" and "prose" as the closing backticks arrive.
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import type { AssistantMessage, ChatMessage, Conversation } from '../state/types.ts';
+import { messagesFor, useEntityStore } from '../chem/entities.ts';
 import { Markdown } from './Markdown.tsx';
 import { TracePanel } from './TracePanel.tsx';
 import { AnswerFooter, CapabilityDegradedPill, ReviewRequiredPill } from './AnswerBadges.tsx';
@@ -143,6 +144,22 @@ export function MessageList({
     return () => el.removeEventListener('scroll', onScroll);
   }, []);
 
+  // Selecting an entity in the rail narrows the transcript to the turns that mention it. The user
+  // message that *prompted* a matching assistant turn comes along with it: an answer shown without
+  // the question it answers reads as the agent volunteering something.
+  const selected = useEntityStore((s) => s.selected);
+  const selectedEntity = useEntityStore((s) => (s.selected ? s.entities[s.selected] : undefined));
+
+  const filtered = useMemo(() => {
+    if (!selected) return conversation.messages;
+    const hits = messagesFor(selectedEntity);
+    return conversation.messages.filter((message, i) => {
+      if (hits.has(message.id)) return true;
+      const next = conversation.messages[i + 1];
+      return message.role === 'user' && next?.role === 'assistant' && hits.has(next.id);
+    });
+  }, [conversation.messages, selected, selectedEntity]);
+
   const lastMessage = conversation.messages.at(-1);
   const streamedLength =
     lastMessage?.role === 'assistant'
@@ -175,7 +192,13 @@ export function MessageList({
           </div>
         )}
 
-        {conversation.messages.map((message) => (
+        {filtered.length === 0 && conversation.messages.length > 0 && (
+          <p className="py-8 text-center text-sm text-ink-muted">
+            No turn in this conversation mentions that yet.
+          </p>
+        )}
+
+        {filtered.map((message) => (
           <Bubble key={message.id} message={message} sessionId={conversation.sessionId} />
         ))}
         <div ref={endRef} />

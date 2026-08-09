@@ -58,7 +58,9 @@ export default tseslint.config(
   // Build and dev scripts. These were included in tsconfig without `allowJs`, so nothing checked
   // them at all — a `.mjs` file could reference an undefined variable and no command would say so.
   {
-    files: ['scripts/**/*.mjs', '*.config.{js,ts}'],
+    // Node-side tooling: build scripts, config files, and the E2E harness (its mock backend is a
+    // real Node server, and its specs run under Playwright rather than in the browser).
+    files: ['scripts/**/*.mjs', 'e2e/**/*.{mjs,ts}', '*.config.{js,ts}'],
     languageOptions: { globals: { ...globals.node } },
     rules: {
       // Scripts legitimately talk to the operator.

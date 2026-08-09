@@ -22,9 +22,10 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test",
+    "test:e2e": "npm run build:e2e && playwright test",
     "check:contract": "node --experimental-strip-types scripts/check-contract.mjs",
-    "gen:contract": "python3 scripts/gen_backend_contract.py"
+    "gen:contract": "python3 scripts/gen_backend_contract.py",
+    "build:e2e": "ALLOW_DEV_AUTH=true npm run build"
   },
   "dependencies": {
     "@azure/msal-browser": "^5.17.1",

@@ -4,67 +4,74 @@ File these at: https://github.com/8fqycwdt8v-oss/Chemclaw3_ui/issues/new
 
 ---
 
-## Issue 1: happy-dom@^16.0.0 blocked by Replit security policy — prevents full devDependency install
+## Resolved, and why this file was rewritten
 
-**Repo:** Chemclaw3_ui
+The three issues previously listed here were all closed or wrong, and two of them were
+actively misleading:
 
-When running `npm install` on Replit, `happy-dom@16.8.1` (resolved from `^16.0.0`) is blocked by
-the platform's package security policy:
+- **happy-dom blocked by Replit's package policy.** Resolved: `happy-dom` is pinned to `^15.x`
+  in `package.json` and the suite runs.
+- **`GET /sessions` and `GET /sessions/{id}/messages` missing from the backend.** No longer true.
+  Both exist (`api/routes/sessions.py`). The transcript route additionally gained `index` and
+  `tool_calls`, which the frontend now reads.
+- **`GET /approvals` and the decision route missing from the backend.** No longer true either
+  (`api/routes/approvals.py`). The Approve/Reject buttons reach a real endpoint.
 
-```
-npm error 403 Forbidden - GET http://package-firewall.replit.local/npm/happy-dom/-/happy-dom-16.8.1.tgz - Blocked by Security Policy
-```
-
-This prevents installing any devDependencies (including `vite`, `@vitejs/plugin-react`, etc.) because
-npm resolves the full dependency tree before installing.
-
-**Workaround applied on Replit:** Removed `happy-dom` and `vitest` from `package.json`
-devDependencies so `vite build` can run. Tests currently cannot be run on Replit.
-
-**Fix options:**
-
-1. Pin `happy-dom` to an older version not flagged by the CVE scanner (e.g. `^15.x`)
-2. Replace `happy-dom` with `jsdom` as the vitest environment
-3. Use `npm overrides` to pin to a non-flagged patch release
-
-**Impact:** `npm test` (vitest) cannot run on Replit without this fix. Build and server are fine.
+Stale "the backend does not have this yet" notes are worse than no notes: they justify defensive
+code that then hides real failures. `client.ts` swallowed 404s on both session routes for exactly
+this reason. The guard against a repeat is now mechanical rather than documentary —
+`shared/backend-contract.json` is generated from the running service and
+`scripts/check-contract.mjs` fails the build when this repo drifts from it.
 
 ---
 
-## Issue 2: GET /api/sessions and GET /api/sessions/{id}/messages whitelisted in BFF but missing from backend
+## Known limitations
 
-The BFF route whitelist (`server/routes.ts`) includes:
+### 1. `GET /jobs` is not owner-scoped, so "Everyone's" is the honest default
 
-- `GET /api/sessions` → `/sessions` (list sessions)
-- `GET /api/sessions/{sid}/messages` → `/sessions/{sid}/messages` (read transcript)
+This is the backend's stated position rather than a bug: `find_past_jobs`, the agent tool over the
+same table, is deliberately unscoped so knowledge crosses projects. The Runs panel therefore offers
+a client-side "Mine" filter on `requested_by` and labels the unfiltered view as everyone's. If the
+deployment ever wants a genuinely private job list, that has to be a backend change; filtering here
+would only _look_ like privacy.
 
-Both return `404`/`405` from the Chemclaw3 FastAPI backend (only `POST /sessions` and
-`POST /sessions/{id}/messages` exist).
+### 2. Cancelling a durable run needs a privileged role
 
-**Impact:** Sidebar conversation list is local-only; transcripts fall back to `localStorage`.
+`DELETE /jobs/{id}` answers 403 for most callers, and the UI says so plainly. A job's workflow id
+hashes its inputs and excludes the requester, so two chemists asking for the same campaign join one
+run and neither is entitled to end it for the other. A chemist cannot stop their own runaway run
+without an operator. Stated rather than hidden behind a scope check that would read as ownership.
 
-**Fix:** Add to `service/app.py` in Chemclaw3:
+### 3. A rehydrated transcript cannot show verification signals
 
-- `GET /sessions` — list sessions for current principal (needs `CHEMCLAW_SESSION_STORE=postgres`)
-- `GET /sessions/{session_id}/messages` — return stored transcript
+The backend persists messages and tool calls, not `confidence`, `review_required`, plan snapshots
+or attachment references. A conversation restored after a reload therefore renders without those
+badges — deliberately blank rather than defaulted to "clean", which would assert something the
+stored data cannot support.
 
----
+### 4. `approval_request` with an empty `approval_id` is not answerable
 
-## Issue 3: GET /approvals and POST /approvals/{id}/decision missing from backend
+That shape is a MAF request with no durable hold behind it, and no endpoint exists that could
+answer it. It renders read-only. Making it actionable needs a backend change.
 
-The BFF whitelists:
+### 5. The plan-approval fallback is unaudited
 
-- `GET /api/approvals` → `/approvals`
-- `GET /api/approvals/{id}` → `/approvals/{id}`
-- `POST /api/approvals/{id}/decision` → `/approvals/{id}/decision`
+When `GET /sessions/{id}/plan` is unavailable, the UI falls back to answering the gate with an
+ordinary chat message ("Approved — go ahead."). That is one tap and it leaves no
+`plan_approvals` row. It is labelled as the degraded path, but a deployment that cares about the
+audit trail should ensure the plan routes are reachable rather than relying on it.
 
-All return `404`. The `InteractionApprovalWorkflow` exists in the backend but has no HTTP surface.
+### 6. Browser-held access tokens
 
-**Impact:** Approve/Reject buttons in the UI 404 when clicked; approval holds cannot be completed
-via the browser.
+MSAL runs in the browser with `cacheLocation: 'sessionStorage'`, and the BFF forwards the bearer
+token without inspecting it. This is a proxy, not a token-custody BFF, so an XSS in the SPA could
+exfiltrate an access token; the strict CSP (`script-src 'self'`, no inline scripts, no
+`rehype-raw`) is what stands between the two. Moving custody into the BFF would close that, at the
+cost of session cookies and the CSRF surface this design currently has none of. Recorded as a
+deliberate trade-off, not an oversight.
 
-**Fix:** Implement the REST surface in `service/app.py`:
+### 7. Verification against a live agent is partial
 
-- `GET /approvals` — list pending holds
-- `GET /approvals/{hold_id}` — describe one hold
-- `POST /approvals/{hold_id}/decision` — signal the Temporal workflow
+`npm run test:e2e` drives the real BFF and the real built bundle, but against a mock backend: a
+genuine turn needs a model credential. The mock speaks the generated contract, so its shapes cannot
+drift silently — but "the agent answered sensibly" is not something this suite can assert.

@@ -20,6 +20,14 @@ interface Props {
   /** Rendered instead of the children after a throw. `reset` clears the boundary. */
   fallback: (error: Error, reset: () => void) => ReactNode;
   /**
+   * Called once per caught error, from `componentDidCatch`.
+   *
+   * A commit-phase lifecycle, deliberately: a side effect in a fallback's render body is
+   * double-invoked by StrictMode and can be discarded and replayed by a concurrent render, so a
+   * counter incremented there counts one crash as two.
+   */
+  onError?: (error: Error) => void;
+  /**
    * Values that should clear a caught error when they change.
    *
    * Without this a boundary never recovers: a message that throws mid-stream because its markdown
@@ -42,6 +50,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   override componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error('render error contained by a boundary:', error, info.componentStack);
+    this.props.onError?.(error);
   }
 
   override componentDidUpdate(prev: Props): void {

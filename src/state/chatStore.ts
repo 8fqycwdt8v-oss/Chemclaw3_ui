@@ -223,19 +223,60 @@ const updateAssistant = (
   };
 };
 
-/** The live storage key. Versioned by `version`, not by the key — see the store config below. */
-export const STORAGE_KEY = 'chemclaw3.chat';
+/**
+ * The live storage key.
+ *
+ * `chemclaw3.chat.v2`, and it stays there. A previous attempt at this "fixed" the orphaned-blob
+ * problem by renaming the key to `chemclaw3.chat` — which is the same mistake one hop along, and a
+ * worse one: zustand's `hydrate()` reads `storage.getItem(options.name)` and nothing else, so
+ * renaming the key does not migrate anything, it hides it. Every existing conversation would have
+ * vanished from the sidebar while still occupying the origin's quota.
+ *
+ * Schema evolution belongs in `version`, which is what it is for. The key is an address.
+ */
+export const STORAGE_KEY = 'chemclaw3.chat.v2';
 
 /**
- * Keys this app has ever persisted under.
+ * Keys this app has written under previously, newest first.
  *
- * Both legacy names are removed rather than migrated. The v1 blob was abandoned precisely because
- * it was poisoned (`d7e85d8`), and v2 exists only because that abandonment was done by renaming
- * the key; carrying either forward would reintroduce the state the rename was trying to escape.
- * They are deleted rather than left, because a user who resets to clear their work should not
- * still have it on disk.
+ * `chemclaw3.chat` is the short-lived name introduced and reverted on this branch; `.v1` predates
+ * it. `adoptLegacyBlob()` promotes the newest of these into `STORAGE_KEY` when the live key is
+ * empty, so a user who ran any build gets their history back exactly once. After that they are
+ * removed — a migration that leaves the source in place is how the quota filled up the first time.
  */
-export const LEGACY_KEYS = ['chemclaw3.chat.v1', 'chemclaw3.chat.v2'] as const;
+export const LEGACY_KEYS = ['chemclaw3.chat', 'chemclaw3.chat.v1'] as const;
+
+/**
+ * localStorage, with a one-time read-through to whatever key this app used to write.
+ *
+ * The adoption happens on READ rather than at import, and that is the whole design. zustand's
+ * `hydrate()` calls `storage.getItem(options.name)` and consults nothing else, so a blob under any
+ * other name is invisible to it — which is exactly how the previous key rename lost everyone's
+ * history. Answering that single `getItem` with the legacy blob is the only place a rename can be
+ * repaired, and it means adoption cannot be defeated by module-evaluation order.
+ *
+ * The legacy entry is removed as it is adopted: a migration that leaves its source behind is what
+ * filled the origin's quota the first time.
+ */
+const chatStorage = createJSONStorage(() => ({
+  getItem: (name: string): string | null => {
+    const live = localStorage.getItem(name);
+    if (live !== null) {
+      // The live key wins; anything under an old name is now dead weight.
+      for (const key of LEGACY_KEYS) localStorage.removeItem(key);
+      return live;
+    }
+    for (const key of LEGACY_KEYS) {
+      const blob = localStorage.getItem(key);
+      if (blob === null) continue;
+      localStorage.removeItem(key);
+      return blob;
+    }
+    return null;
+  },
+  setItem: (name: string, value: string): void => localStorage.setItem(name, value),
+  removeItem: (name: string): void => localStorage.removeItem(name),
+}));
 
 interface PersistedChat {
   conversations: Record<string, unknown>;
@@ -243,7 +284,14 @@ interface PersistedChat {
   activeId: string | null;
 }
 
-/** Remove every key this app has ever written. Safe to call when storage is unavailable. */
+/**
+ * Remove every key this app has ever written. Safe to call when storage is unavailable.
+ *
+ * Note what this cannot do on its own: the persist middleware writes the store back on the very
+ * next `set`, so calling this and then mutating state re-creates the live key. Callers that need
+ * the data gone for good reload immediately afterwards (`main.tsx`), and callers that only need
+ * the OLD data gone rely on the subsequent write being a fresh slate (`clearAll`).
+ */
 export function clearPersisted(): void {
   try {
     localStorage.removeItem(STORAGE_KEY);
@@ -322,6 +370,43 @@ function coerceConversation(raw: unknown): Conversation | null {
   };
 }
 
+/**
+ * Keep `order` within `MAX_CONVERSATIONS`, dropping the oldest — but never one that is busy.
+ *
+ * Two things this has to get right, both learned the hard way.
+ *
+ * A bare `order.slice(0, MAX)` in `createConversation` looked like a fix and was a worse bug:
+ * `Sidebar` appends server-listed sessions to the tail unbounded, so `order` routinely exceeds the
+ * cap, and the next "New conversation" click deleted the tail *immediately* — mid-session, with no
+ * warning. Losing a conversation on reload is bad; losing one while the user is looking at the
+ * list is worse.
+ *
+ * And the dropped ids must leave `conversations` too. Truncating only `order` left the objects
+ * unreachable but resident, so a long session grew monotonically while the sidebar showed nothing.
+ *
+ * A conversation with a live turn is never dropped. Its stream writes into the store by id, so
+ * evicting it would leave a turn spending budget on something nothing can render.
+ */
+function trimOrder(
+  order: string[],
+  conversations: Record<string, Conversation>,
+  streamingId: string | null,
+): { order: string[]; conversations: Record<string, Conversation> } {
+  if (order.length <= MAX_CONVERSATIONS) return { order, conversations };
+
+  const kept: string[] = [];
+  const dropped: string[] = [];
+  for (const id of order) {
+    if (kept.length < MAX_CONVERSATIONS || id === streamingId) kept.push(id);
+    else dropped.push(id);
+  }
+  if (dropped.length === 0) return { order: kept, conversations };
+
+  const next = { ...conversations };
+  for (const id of dropped) delete next[id];
+  return { order: kept, conversations: next };
+}
+
 export const useChatStore = create<ChatState>()(
   persist(
     (set, get) => ({
@@ -335,16 +420,20 @@ export const useChatStore = create<ChatState>()(
 
       createConversation(profile = null) {
         const conversation = { ...newConversation(), profile };
-        set((s) => ({
-          conversations: { ...s.conversations, [conversation.id]: conversation },
-          // Trimmed in memory too, not only when persisting. `MAX_CONVERSATIONS` was enforced
-          // solely in `partialize`, so conversation 31 was shown in the sidebar, worked in, and
-          // then silently gone on reload — with no warning at any point.
-          order: [conversation.id, ...s.order].slice(0, MAX_CONVERSATIONS),
-          activeId: conversation.id,
-          composerLock: s.composerLock === 'budget_exhausted' ? s.composerLock : false,
-          banner: s.composerLock === 'budget_exhausted' ? s.banner : null,
-        }));
+        set((s) => {
+          const { order, conversations } = trimOrder(
+            [conversation.id, ...s.order],
+            { ...s.conversations, [conversation.id]: conversation },
+            s.streaming?.conversationId ?? null,
+          );
+          return {
+            conversations,
+            order,
+            activeId: conversation.id,
+            composerLock: s.composerLock === 'budget_exhausted' ? s.composerLock : false,
+            banner: s.composerLock === 'budget_exhausted' ? s.banner : null,
+          };
+        });
         return conversation.id;
       },
 
@@ -400,7 +489,9 @@ export const useChatStore = create<ChatState>()(
         // kept holding the session's turn lock — and `stopStreaming` could no longer reach it, so
         // there was no way to stop it short of closing the tab.
         get().streaming?.abort.abort();
-        // Removes the legacy keys too, so a reset actually clears what is on disk.
+        // The persist middleware writes on the `set` below, so this cannot leave the live key
+        // empty — what it does is remove the legacy keys and guarantee the next write is a fresh
+        // slate rather than the old transcripts.
         clearPersisted();
         set(() => {
           const fresh = newConversation();
@@ -646,7 +737,7 @@ export const useChatStore = create<ChatState>()(
        */
       name: STORAGE_KEY,
       version: 2,
-      storage: createJSONStorage(() => localStorage),
+      storage: chatStorage,
 
       /**
        * Cheap: a slice and a record of existing references, O(conversations) rather than
@@ -657,9 +748,10 @@ export const useChatStore = create<ChatState>()(
        * and tokens flush once per animation frame — so that walk ran ~60 times a second over the
        * whole history, ahead of a synchronous `localStorage.setItem` of the same.
        *
-       * The demotion moved to `migrate`, where it is also more correct: it belongs at load time.
-       * Writing 'aborted' at save time meant the persisted copy briefly lied about a turn that was
-       * still running, and then got rewritten a frame later.
+       * The demotion moved to `merge`, which runs on every load — and it belongs at load time
+       * anyway: writing 'aborted' at save time meant the persisted copy briefly lied about a turn
+       * that was still running, and then got rewritten a frame later. (It was first moved to
+       * `migrate`, which zustand only calls on a version mismatch, so it ran on no loads at all.)
        */
       partialize: (state) => ({
         conversations: Object.fromEntries(
@@ -675,29 +767,47 @@ export const useChatStore = create<ChatState>()(
       }),
 
       /**
-       * Bring a stored blob up to the current shape.
+       * Bring a stored blob into the current shape — on EVERY load.
        *
-       * Every conversation goes through `coerceConversation`, which fills defaults for anything
-       * missing. That is what makes adding a field to `AssistantMessage` a non-event for stored
-       * data — no version bump, no second migration — and it is also where a message left marked
-       * 'streaming' by a reload is retired, since there is no resume endpoint and it would
-       * otherwise hang forever.
+       * `merge` rather than `migrate`, and the distinction is the bug that made this necessary.
+       * zustand calls `migrate` only when the stored version differs from the configured one, so a
+       * per-load invariant placed there runs on exactly zero normal loads. The demotion below is
+       * such an invariant: a message left marked `streaming` by a reload must be retired every
+       * time it is read, not once when a version number happens to change.
+       *
+       * `merge` is called on every hydration with whatever `migrate` produced (or the raw state),
+       * which makes it the correct home for both the shape-tolerance and the demotion.
        */
-      migrate: (persisted) => {
+      merge: (persisted, current) => {
         const state = persisted as Partial<PersistedChat> | undefined;
-        if (!state) return { conversations: {}, order: [], activeId: null };
+        if (!state) return current;
+
         const conversations: Record<string, Conversation> = {};
         for (const [id, raw] of Object.entries(state.conversations ?? {})) {
           const conversation = coerceConversation(raw);
           if (conversation) conversations[id] = conversation;
         }
+        // An id in `order` naming no surviving conversation would render as a blank row.
         const order = (state.order ?? []).filter((id) => conversations[id] !== undefined);
+
         return {
+          ...current,
           conversations,
           order,
           activeId: state.activeId && conversations[state.activeId] ? state.activeId : null,
         };
       },
+
+      /**
+       * Version steps.
+       *
+       * Deliberately thin: `merge` above already normalises every field on every load, so a new
+       * optional field on `AssistantMessage` needs no version bump and no step here. This exists
+       * for changes `coerceConversation` cannot express as a default — a renamed field, a
+       * restructured shape — and must still be present, because zustand logs an error and drops
+       * the state entirely if a version mismatch finds no `migrate`.
+       */
+      migrate: (persisted) => persisted,
     },
   ),
 );

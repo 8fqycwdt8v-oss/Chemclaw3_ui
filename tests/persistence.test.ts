@@ -119,3 +119,31 @@ describe('composer lock scoping', () => {
     expect(useChatStore.getState().composerLock).toBe(false);
   });
 });
+
+describe('the conversation cap', () => {
+  it('never evicts the conversation a turn is streaming into', () => {
+    // Its stream writes into the store by id, so evicting it would leave a turn spending budget
+    // on something nothing can render.
+    const streamingId = useChatStore.getState().createConversation();
+    useChatStore.getState().setStreaming({
+      conversationId: streamingId,
+      messageId: 'm1',
+      abort: new AbortController(),
+    });
+    for (let i = 0; i < 40; i += 1) useChatStore.getState().createConversation();
+
+    expect(useChatStore.getState().order).toContain(streamingId);
+    expect(useChatStore.getState().conversations[streamingId]).toBeDefined();
+  });
+
+  it('removes an evicted conversation from the record, not only from the order', () => {
+    const first = useChatStore.getState().createConversation();
+    for (let i = 0; i < 40; i += 1) useChatStore.getState().createConversation();
+
+    const state = useChatStore.getState();
+    expect(state.order).not.toContain(first);
+    // Truncating only `order` left the object resident but unreachable, so a long session grew
+    // without bound while the sidebar showed nothing.
+    expect(state.conversations[first]).toBeUndefined();
+  });
+});

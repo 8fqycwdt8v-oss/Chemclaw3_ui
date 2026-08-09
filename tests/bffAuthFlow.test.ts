@@ -250,9 +250,16 @@ beforeAll(async () => {
 
   // Wait for the process to say it is listening, rather than polling the port: a connection
   // refused during startup is indistinguishable from one refused because the process died.
+  let buffered = '';
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('BFF did not start')), 15_000);
-    let buffered = '';
+    // Comfortably inside the hook's own budget below, and deliberately so: this rejection carries
+    // the process's buffered output, which is the only thing that says WHY it did not start. If
+    // the hook timed out first that diagnostic would be lost. Generous because a loaded machine
+    // has been observed taking several times the usual few hundred milliseconds here.
+    const timer = setTimeout(
+      () => reject(new Error(`BFF did not start within 25s. Output:\n${buffered}`)),
+      25_000,
+    );
     const onData = (chunk: Buffer): void => {
       buffered += chunk.toString();
       if (buffered.includes('listening on')) {
@@ -264,7 +271,7 @@ beforeAll(async () => {
     bff.stderr?.on('data', onData);
     bff.on('exit', (code) => reject(new Error(`BFF exited with ${code}: ${buffered}`)));
   });
-}, 30_000);
+}, 45_000);
 
 afterAll(async () => {
   bff.kill('SIGKILL');

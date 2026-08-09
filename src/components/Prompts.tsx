@@ -17,7 +17,8 @@
  * exists to draw.
  *
  * The prefill fallback survives for a service that predates the route (its GET 404s), because
- * the alternative is a card whose only buttons do nothing.
+ * the alternative is a card whose only buttons do nothing. It is reached from a 404 and from
+ * nothing else — see `PlanApprovalPrompt`, where the distinction is the entire point.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -118,11 +119,23 @@ function DecisionControls({
 function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.JSX.Element {
   const { auth } = useAuth();
   const [plan, setPlan] = useState<{ hash: string; todos: string[] } | null>(null);
-  // `unavailable` is the older-service path: no plan route, so the composer fallback stands in.
+  // `unavailable` is the older-service path and NOTHING else: no plan route, so the composer
+  // fallback stands in. `unreadable` is every other failure — see the effect below.
   const [state, setState] = useState<
-    'loading' | 'idle' | 'sending' | 'approved' | 'rejected' | 'failed' | 'unavailable'
+    | 'loading'
+    | 'idle'
+    | 'sending'
+    | 'approved'
+    | 'rejected'
+    | 'failed'
+    | 'unavailable'
+    | 'unreadable'
   >('loading');
   const [error, setError] = useState<string | null>(null);
+  /** Set when the chemist has explicitly accepted the unrecorded path. See `unavailable` below. */
+  const [acceptedUnrecorded, setAcceptedUnrecorded] = useState(false);
+  /** Bumped to re-run the read after a failure the user chose to retry. */
+  const [attempt, setAttempt] = useState(0);
 
   // Through a ref, so the read below depends on the session alone. `useAuth()` hands back a fresh
   // object on every render, and an effect that listed it as a dependency re-read the plan on each
@@ -148,17 +161,28 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
         if (!live) return;
         setPlan({ hash: status.plan_hash, todos: status.plan });
         setState(status.approved ? 'approved' : 'idle');
-      } catch {
-        // Any failure here — a service without the route, an expired token, an unreachable pod —
-        // leaves the chemist with a card they can still act on rather than one that cannot be
-        // answered at all.
-        if (live) setState('unavailable');
+      } catch (err) {
+        if (!live) return;
+        // This branch used to swallow EVERY failure into `unavailable`, whose fallback lets one
+        // tap send "Approved — go ahead." with no `plan_approvals` row behind it. So an expired
+        // token, a restarting pod or a network blip silently downgraded a GxP gate to an
+        // unaudited path — and looked identical to the ordinary Approve/Decline pair while doing
+        // it. That is the single worst failure mode in this component.
+        //
+        // Only a 404 means what the fallback was written for: a service whose route table does
+        // not contain the plan endpoint. `errorFromStatus` maps 404 to `session_not_found`, and
+        // the BFF's own route whitelist answers 404 the same way for a path it does not proxy.
+        // (A dead session lands here too, which is fine — a session with no plan and a service
+        // with no plan route are equally unanswerable on that route.)
+        const noSuchRoute = err instanceof ApiError && err.kind === 'session_not_found';
+        setError(err instanceof Error ? err.message : 'Could not read the plan.');
+        setState(noSuchRoute ? 'unavailable' : 'unreadable');
       }
     })();
     return () => {
       live = false;
     };
-  }, [sessionId, token]);
+  }, [sessionId, token, attempt]);
 
   const decide = async (approved: boolean): Promise<void> => {
     if (!sessionId || !plan) return;
@@ -195,29 +219,92 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
     return <p className="text-xs text-ink-muted">Reading the plan…</p>;
   }
 
-  if (effectiveState === 'unavailable') {
+  /**
+   * The plan could not be read, and we do not know that the route is missing.
+   *
+   * No fallback is offered here, deliberately. The unrecorded path is only defensible when the
+   * service genuinely cannot record a decision; offering it for a token that expired thirty
+   * seconds ago would turn a transient failure into a permanent hole in the audit trail, and the
+   * chemist would have no way to tell which they were looking at.
+   */
+  if (effectiveState === 'unreadable') {
     return (
-      <>
+      <div role="alert" className="rounded border border-danger/40 bg-danger-soft p-2">
+        <p className="text-sm text-danger">
+          <span className="font-semibold">
+            The plan could not be read, so it cannot be approved.{' '}
+          </span>
+          {error}
+        </p>
+        <p className="mt-1 text-xs text-ink-muted">
+          This is a failure to reach the plan gate, not a service without one — so there is no
+          unrecorded shortcut on offer. Sign in again if your session has expired, then retry.
+        </p>
+        <button
+          type="button"
+          onClick={() => {
+            setError(null);
+            setState('loading');
+            setAttempt((n) => n + 1);
+          }}
+          className="mt-2 rounded border border-danger/40 px-2 py-0.5 text-xs text-danger"
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
+
+  /**
+   * The service has no plan route, so a decision here cannot be recorded anywhere.
+   *
+   * Gated behind an explicit acknowledgement, and rendered as degraded rather than as an ordinary
+   * Approve/Decline pair. What the fallback actually does is send a sentence into the transcript
+   * that the agent then reads as text and interprets for itself — no `plan_approvals` row, no
+   * plan hash, nothing recording who approved what. Presenting that as an equivalent button is
+   * the thing that makes it dangerous; presenting it as a documented downgrade is what makes it
+   * survivable.
+   */
+  if (effectiveState === 'unavailable') {
+    if (!acceptedUnrecorded) {
+      return (
+        <div className="rounded border border-warn/50 bg-surface-raised p-2">
+          <p className="text-sm">
+            <span className="font-semibold">This service cannot record a plan decision. </span>
+            Approving or declining here sends a sentence into the conversation instead. The agent
+            reads it as text and decides for itself — no approval is written, so nothing in the
+            audit trail will show who agreed to what.
+          </p>
+          <button
+            type="button"
+            onClick={() => setAcceptedUnrecorded(true)}
+            className="mt-2 rounded border border-warn/60 px-2.5 py-1 text-xs font-medium"
+          >
+            Answer in the conversation anyway
+          </button>
+        </div>
+      );
+    }
+    return (
+      <div className="rounded border border-dashed border-warn/60 p-2">
+        <p className="mb-2 text-xs font-medium text-warn">Unrecorded — answered as a message</p>
         <div className="flex gap-2">
           <button
             type="button"
             onClick={() => prefillAndSend('Approved — go ahead.')}
             className="rounded border border-border-subtle bg-surface-raised px-3 py-1 text-sm"
           >
-            Approve
+            Approve (not recorded)
           </button>
           <button
             type="button"
             onClick={() => prefillAndSend('Do not proceed.')}
             className="rounded border border-border-subtle bg-surface-raised px-3 py-1 text-sm"
           >
-            Decline
+            Decline (not recorded)
           </button>
         </div>
-        <p className="mt-1.5 text-xs text-ink-muted">
-          This service cannot record a plan decision, so this answers in the conversation instead.
-        </p>
-      </>
+      </div>
     );
   }
 

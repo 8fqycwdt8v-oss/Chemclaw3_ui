@@ -7,7 +7,41 @@
  * and each error status.
  */
 
-import type { ChemclawEvent } from '../shared/events.ts';
+import type { AnswerEvent, ChemclawEvent, ErrorEvent, ToolResultEvent } from '../shared/events.ts';
+
+/**
+ * Builders for the two events with enough fields that spelling them out at every call site is
+ * noise — and, more usefully, makes adding a field to the contract a one-line change here instead
+ * of a compile error in a dozen unrelated tests. A test that cares about a field passes it; a test
+ * that does not gets the backend's own default.
+ */
+export const answerEvent = (over: Partial<AnswerEvent> = {}): AnswerEvent => ({
+  type: 'answer',
+  text: '',
+  confidence: null,
+  unsupported_claims: [],
+  review_required: false,
+  verified_by: null,
+  ...over,
+});
+
+export const toolResultEvent = (over: Partial<ToolResultEvent> = {}): ToolResultEvent => ({
+  type: 'tool_result',
+  tool: 'unknown',
+  preview: '',
+  note_ids: [],
+  numbers: [],
+  ...over,
+});
+
+export const errorEvent = (over: Partial<ErrorEvent> = {}): ErrorEvent => ({
+  type: 'error',
+  message: 'The turn failed.',
+  code: 'internal',
+  retryable: false,
+  correlation_id: '',
+  ...over,
+});
 
 /** Serialise events the way sse-starlette does: both the `event:` name and the JSON `type`. */
 export function sseFrames(events: ChemclawEvent[]): string {

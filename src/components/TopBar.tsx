@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { paths } from '../api/endpoints.ts';
 import { config } from '../env.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore } from '../state/chatStore.ts';
@@ -130,7 +131,7 @@ export function TopBar(): React.JSX.Element {
 /** Kept local so the health poll cannot accidentally acquire a token on every tick. */
 async function api_health(): Promise<boolean> {
   try {
-    const res = await fetch(`${config.apiBase}/healthz`, { cache: 'no-store' });
+    const res = await fetch(`${config.apiBase}${paths.readyz()}`, { cache: 'no-store' });
     return res.ok;
   } catch {
     return false;

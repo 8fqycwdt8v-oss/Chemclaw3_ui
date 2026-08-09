@@ -212,8 +212,8 @@
     "tool_result": {
       "model": "ToolResultEvent",
       "fields": {
-        "note_ids": "list[str] = PydanticUndefined",
-        "numbers": "list[float] = PydanticUndefined",
+        "note_ids": "list[str] = []",
+        "numbers": "list[float] = []",
         "preview": "str = ''",
         "tool": "str",
         "type": "Literal['tool_result'] = 'tool_result'"
@@ -270,7 +270,7 @@
       "correlation_id": "str",
       "decided_at": "datetime | None",
       "decided_by": "str",
-      "dependencies": "list[ProposalFile] = PydanticUndefined",
+      "dependencies": "list[ProposalFile] = []",
       "id": "int",
       "note_id": "str",
       "note_type": "str",

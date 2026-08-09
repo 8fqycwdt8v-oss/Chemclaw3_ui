@@ -35,27 +35,58 @@ export function App(): React.JSX.Element {
         auth.getAccessToken(),
       );
       if (cancelled || remote.length === 0) return;
+      // Namespaced by conversation and stamped with the message's own time. Ids were `h0..hN`,
+      // which collide across conversations, and `at` was `Date.now()` — so every restored message
+      // claimed to have been sent at page load.
+      const restoredAt = (m: { created_at?: string }, fallback: number): number => {
+        const parsed = m.created_at ? Date.parse(m.created_at) : NaN;
+        return Number.isFinite(parsed) ? parsed : fallback;
+      };
+      const base = Date.now();
       const messages: ChatMessage[] = remote
         .filter((m) => m.text?.trim())
         .map((m, i) =>
           m.role === 'user'
-            ? { id: `h${i}`, role: 'user' as const, text: m.text, at: Date.now() }
+            ? {
+                id: `${conversation.id}:h${i}`,
+                role: 'user' as const,
+                text: m.text,
+                at: restoredAt(m, base),
+              }
             : {
-                id: `h${i}`,
+                id: `${conversation.id}:h${i}`,
                 role: 'assistant' as const,
-                at: Date.now(),
+                at: restoredAt(m, base),
                 status: 'done' as const,
                 streamedText: '',
                 finalText: m.text,
                 confidence: null,
                 unsupportedClaims: [],
                 reviewRequired: false,
+                // The backend does not persist which check scored a stored answer, so a restored
+                // message states that it does not know rather than implying it was verified.
+                verifiedBy: null,
+                notice: null,
                 // Empty on a rehydrated transcript, and honestly so: the backend persists the
                 // messages, not which connectors happened to be down when each was produced.
                 degradedConnectors: [],
                 // Same reason: a rehydrated message is finished, so it is not waiting on anything.
                 queued: false,
-                trace: [],
+                // Rebuilt from the stored tool calls, so a reloaded conversation shows the work
+                // that produced each answer instead of a bare paragraph. `result: null` on the
+                // wire means the call raised or its return was not recorded — rendered as failed
+                // rather than as still-running, which is what an absent result would otherwise
+                // read as in `TracePanel`.
+                trace: (m.tool_calls ?? []).map((call, j) => ({
+                  id: `${conversation.id}:h${i}:t${j}`,
+                  at: restoredAt(m, base),
+                  kind: 'tool_call' as const,
+                  toolCall: {
+                    tool: call.tool,
+                    arguments: call.arguments ?? '',
+                    ...(call.result == null ? { failed: true as const } : { result: call.result }),
+                  },
+                })),
                 latestPlan: null,
                 error: null,
               },

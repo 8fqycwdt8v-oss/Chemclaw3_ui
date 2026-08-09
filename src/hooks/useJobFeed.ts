@@ -14,6 +14,7 @@
 import { useEffect } from 'react';
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import { normalizeEvent } from '../../shared/events.ts';
+import { paths } from '../api/endpoints.ts';
 import { config } from '../env.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from '../state/chatStore.ts';
@@ -30,7 +31,7 @@ export function useJobFeed(sessionId: string | null, auth: AuthProvider): void {
       while (!stopped) {
         try {
           const token = await auth.getAccessToken();
-          const res = await fetch(`${config.apiBase}/sessions/${sessionId}/events`, {
+          const res = await fetch(`${config.apiBase}${paths.events(sessionId)}`, {
             signal: controller.signal,
             cache: 'no-store',
             headers: {
@@ -64,8 +65,12 @@ export function useJobFeed(sessionId: string | null, auth: AuthProvider): void {
               if (!value.data) continue;
               try {
                 const event = normalizeEvent(JSON.parse(value.data), value.event);
-                if (event?.type === 'job_completed') {
-                  useChatStore.getState().pushJobCompleted(event);
+                // Both outcomes, not just the happy one. The stream claims kinds
+                // ("job_completed", "job_failed") and this matched only the first, so a job that
+                // was announced as running and then failed produced nothing at all here — the
+                // card stayed "running" indefinitely with no way to learn otherwise.
+                if (event?.type === 'job_completed' || event?.type === 'job_failed') {
+                  useChatStore.getState().pushJobEvent(event);
                 }
               } catch {
                 // one bad frame is not worth dropping the stream

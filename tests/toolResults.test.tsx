@@ -1,3 +1,4 @@
+import { toolResultEvent } from './helpers.ts';
 /**
  * A tool call and what it returned are one step, not two.
  *
@@ -48,18 +49,18 @@ beforeEach(() => {
 
 describe('normalizeEvent', () => {
   it('accepts tool_result', () => {
-    expect(
-      normalizeEvent({ type: 'tool_result', tool: 'predict_pka', preview: 'pKa 9.2' }),
-    ).toEqual({ type: 'tool_result', tool: 'predict_pka', preview: 'pKa 9.2' });
+    expect(normalizeEvent(toolResultEvent({ tool: 'predict_pka', preview: 'pKa 9.2' }))).toEqual(
+      toolResultEvent({ tool: 'predict_pka', preview: 'pKa 9.2' }),
+    );
   });
 
   it('coerces a malformed frame rather than dropping the event', () => {
     // The preview crosses a process boundary; a bad field should cost the value, not the event.
-    expect(normalizeEvent({ type: 'tool_result', tool: 7, preview: null })).toEqual({
-      type: 'tool_result',
-      tool: 'unknown',
-      preview: '',
-    });
+    // Raw, deliberately ill-typed input — the point is what arrives off the wire, not what a
+    // well-behaved producer would send, so this one cannot go through the typed builder.
+    expect(normalizeEvent({ type: 'tool_result', tool: 7, preview: null })).toEqual(
+      toolResultEvent({ tool: 'unknown', preview: '' }),
+    );
   });
 });
 
@@ -72,7 +73,7 @@ describe('tool_result in the trace', () => {
       tool: 'predict_pka',
       arguments: '{"s":"CCO"}',
     });
-    store.applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'pKa 15.9' });
+    store.applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'pKa 15.9' }));
 
     const trace = assistantOf(cid, mid).trace;
     expect(trace).toHaveLength(1);
@@ -80,6 +81,8 @@ describe('tool_result in the trace', () => {
       tool: 'predict_pka',
       arguments: '{"s":"CCO"}',
       result: 'pKa 15.9',
+      noteIds: [],
+      numbers: [],
     });
   });
 
@@ -97,8 +100,8 @@ describe('tool_result in the trace', () => {
     const store = useChatStore.getState();
     store.applyEvent(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: 'first' });
     store.applyEvent(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: 'second' });
-    store.applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'A' });
-    store.applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'B' });
+    store.applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'A' }));
+    store.applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'B' }));
 
     const trace = assistantOf(cid, mid).trace;
     expect(trace.map((e) => e.toolCall?.result)).toEqual(['A', 'B']);
@@ -108,7 +111,7 @@ describe('tool_result in the trace', () => {
     const { cid, mid } = startTurn();
     useChatStore
       .getState()
-      .applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'orphan' });
+      .applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'orphan' }));
 
     expect(assistantOf(cid, mid).trace).toHaveLength(0);
   });
@@ -175,5 +178,45 @@ describe('TracePanel', () => {
   it('no longer disclaims showing results, now that it shows them', () => {
     open([call({ tool: 'predict_pka', arguments: '', result: 'pKa 15.9' })]);
     expect(screen.queryByText(/invocations only/)).toBeNull();
+  });
+});
+
+describe('the untruncated halves of a tool result', () => {
+  it('keeps note ids and numbers, which the 200-char preview cannot carry', () => {
+    // The backend sends these beside `preview` precisely because scoring a citation against the
+    // first 200 characters of a large sweep marked real notes as fabricated. Dropping them here
+    // put the frontend back on the wrong side of that.
+    const store = useChatStore.getState();
+    const cid = store.createConversation();
+    const mid = store.startAssistantMessage(cid);
+    store.applyEvent(cid, mid, {
+      type: 'tool_call',
+      tool: 'gather_evidence',
+      arguments: '{"q":"suzuki"}',
+    });
+    store.applyEvent(
+      cid,
+      mid,
+      toolResultEvent({
+        tool: 'gather_evidence',
+        preview: 'Found 3 notes about the Suzuki coupling…',
+        note_ids: ['note-1', 'note-2', 'note-3'],
+        numbers: [4.76, 15.9],
+      }),
+    );
+
+    const call = assistantOf(cid, mid).trace[0]?.toolCall;
+    expect(call?.noteIds).toEqual(['note-1', 'note-2', 'note-3']);
+    expect(call?.numbers).toEqual([4.76, 15.9]);
+  });
+
+  it('drops a non-numeric entry rather than letting NaN render', () => {
+    expect(
+      normalizeEvent({
+        type: 'tool_result',
+        tool: 't',
+        numbers: [1, 'x', null, 2.5],
+      }),
+    ).toMatchObject({ numbers: [1, 2.5] });
   });
 });

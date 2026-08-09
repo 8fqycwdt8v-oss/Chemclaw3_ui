@@ -86,11 +86,13 @@ def render_fields(model: type[BaseModel]) -> dict[str, str]:
     for name, field in sorted(model.model_fields.items()):
         sig = render_annotation(field.annotation)
         if not field.is_required():
-            default = field.default
-            # A default_factory has no stable repr; name the shape instead of the object.
-            if default is None and field.default_factory is not None:
-                produced = field.default_factory()  # type: ignore[call-arg]
-                default = produced
+            # A field with a `default_factory` has `default is PydanticUndefined`, not `None` —
+            # rendering it naively printed the sentinel into the fixture. Call the factory to get
+            # the value the backend would actually produce.
+            if field.default_factory is not None:
+                default = field.default_factory()  # type: ignore[call-arg]
+            else:
+                default = field.default
             sig += f" = {default!r}"
         out[name] = sig
     return out

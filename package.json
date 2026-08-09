@@ -23,6 +23,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "check:contract": "node --experimental-strip-types scripts/check-contract.mjs",
     "gen:contract": "python3 scripts/gen_backend_contract.py"
   },
   "dependencies": {

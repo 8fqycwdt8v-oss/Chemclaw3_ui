@@ -1,3 +1,4 @@
+import { answerEvent } from './helpers.ts';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useChatStore } from '../src/state/chatStore.ts';
 import type { AssistantMessage } from '../src/state/types.ts';
@@ -44,13 +45,18 @@ describe('chatStore', () => {
 
     useChatStore.getState().applyEvent(cid, mid, { type: 'token', text: 'Acetic ' });
     useChatStore.getState().applyEvent(cid, mid, { type: 'token', text: 'acid.' });
-    useChatStore.getState().applyEvent(cid, mid, {
-      type: 'answer',
-      text: 'Acetic acid.',
-      confidence: 0.9,
-      unsupported_claims: [],
-      review_required: false,
-    });
+    useChatStore
+      .getState()
+      .applyEvent(
+        cid,
+        mid,
+        answerEvent({
+          text: 'Acetic acid.',
+          confidence: 0.9,
+          unsupported_claims: [],
+          review_required: false,
+        }),
+      );
 
     const message = assistantOf(cid, mid);
     expect(message.streamedText).toBe('Acetic acid.');
@@ -63,13 +69,18 @@ describe('chatStore', () => {
   it('records verifier signals from the answer', () => {
     const cid = useChatStore.getState().createConversation();
     const mid = useChatStore.getState().startAssistantMessage(cid);
-    useChatStore.getState().applyEvent(cid, mid, {
-      type: 'answer',
-      text: 'maybe',
-      confidence: 0.31,
-      unsupported_claims: ['yield was 92%'],
-      review_required: true,
-    });
+    useChatStore
+      .getState()
+      .applyEvent(
+        cid,
+        mid,
+        answerEvent({
+          text: 'maybe',
+          confidence: 0.31,
+          unsupported_claims: ['yield was 92%'],
+          review_required: true,
+        }),
+      );
 
     const message = assistantOf(cid, mid);
     expect(message.reviewRequired).toBe(true);
@@ -97,13 +108,18 @@ describe('chatStore', () => {
     const cid = useChatStore.getState().createConversation();
     const mid = useChatStore.getState().startAssistantMessage(cid);
     useChatStore.getState().applyEvent(cid, mid, { type: 'token', text: 'x' });
-    useChatStore.getState().applyEvent(cid, mid, {
-      type: 'answer',
-      text: 'x',
-      confidence: null,
-      unsupported_claims: [],
-      review_required: false,
-    });
+    useChatStore
+      .getState()
+      .applyEvent(
+        cid,
+        mid,
+        answerEvent({
+          text: 'x',
+          confidence: null,
+          unsupported_claims: [],
+          review_required: false,
+        }),
+      );
     expect(assistantOf(cid, mid).trace).toHaveLength(0);
   });
 
@@ -130,11 +146,33 @@ describe('chatStore', () => {
   });
 
   it('keeps a job completion in the cross-turn feed', () => {
-    useChatStore.getState().pushJobCompleted({
+    useChatStore.getState().pushJobEvent({
       type: 'job_completed',
       job_id: 'qm-1',
       summary: { molecule_smiles: 'CCO', total_energy_hartree: -154.09, converged: true },
     });
-    expect(useChatStore.getState().jobFeed[0]?.summary.molecule_smiles).toBe('CCO');
+    const entry = useChatStore.getState().jobFeed[0];
+    expect(entry?.type).toBe('job_completed');
+    expect(entry?.type === 'job_completed' && entry.summary.molecule_smiles).toBe('CCO');
+  });
+
+  it('keeps a job FAILURE in the same feed', () => {
+    // The case that produced nothing at all before: the turn stream promised a running job and
+    // there was no channel that could ever retract it.
+    useChatStore.getState().pushJobEvent({
+      type: 'job_failed',
+      job_id: 'qm-2',
+      reason: 'xtb exited with status 1',
+    });
+    const entry = useChatStore.getState().jobFeed[0];
+    expect(entry?.type).toBe('job_failed');
+    expect(entry?.type === 'job_failed' && entry.reason).toBe('xtb exited with status 1');
+  });
+
+  it('lets a failure replace the completion card for the same job id', () => {
+    useChatStore.getState().pushJobEvent({ type: 'job_completed', job_id: 'qm-3', summary: {} });
+    useChatStore.getState().pushJobEvent({ type: 'job_failed', job_id: 'qm-3', reason: 'timeout' });
+    expect(useChatStore.getState().jobFeed).toHaveLength(1);
+    expect(useChatStore.getState().jobFeed[0]?.type).toBe('job_failed');
   });
 });

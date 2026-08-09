@@ -9,6 +9,7 @@
 
 import { config } from '../env.ts';
 import { ApiError, errorFromStatus, readDetail } from './errors.ts';
+import { paths } from './endpoints.ts';
 
 export type TokenGetter = () => Promise<string | null>;
 
@@ -43,9 +44,31 @@ export interface SessionSummary {
   title?: string;
 }
 
+/** One tool call as the backend persisted it. `arguments`/`result` are truncated to 400 chars. */
+export interface TranscriptToolCall {
+  tool: string;
+  arguments?: string;
+  /** `null` when the call raised, or when the result was not recorded. */
+  result?: string | null;
+}
+
 export interface TranscriptMessage {
+  /** Position in the stored transcript. The backend orders by this, not by timestamp. */
+  index?: number;
   role: string;
   text: string;
+  /**
+   * The tool activity that produced this message.
+   *
+   * The backend added this specifically to unblock this repo — it calls the absence "the largest
+   * single blocker for the frontend repo" — and it was still unmodelled here, so reloading a
+   * conversation silently dropped every tool call and rendered a bare answer.
+   *
+   * Note what the backend does NOT persist: `confidence`, `review_required`, plan snapshots and
+   * attachment references. A rehydrated message therefore cannot claim to have been verified, and
+   * must not render as though it was.
+   */
+  tool_calls?: TranscriptToolCall[];
   created_at?: string;
 }
 
@@ -77,7 +100,7 @@ export interface PlanStatus {
 export const api = {
   async health(): Promise<boolean> {
     try {
-      await request<{ status: string }>('/healthz', async () => null);
+      await request<{ status: string }>(paths.healthz(), async () => null);
       return true;
     } catch {
       return false;
@@ -85,14 +108,14 @@ export const api = {
   },
 
   createSession(getToken: TokenGetter): Promise<{ session_id: string }> {
-    return request<{ session_id: string }>('/sessions', getToken, { method: 'POST' });
+    return request<{ session_id: string }>(paths.sessions(), getToken, { method: 'POST' });
   },
 
   /** The caller's sessions. Returns `[]` if the backend predates this endpoint (404) or has
    *  nothing durable to list, so the sidebar simply stays local-only. */
   async listSessions(getToken: TokenGetter): Promise<SessionSummary[]> {
     try {
-      return await request<SessionSummary[]>('/sessions', getToken);
+      return await request<SessionSummary[]>(paths.sessions(), getToken);
     } catch (err) {
       if (err instanceof ApiError && err.kind === 'session_not_found') return [];
       throw err;
@@ -103,7 +126,7 @@ export const api = {
    *  route, or a session whose history is gone, yields an empty transcript rather than an error. */
   async getMessages(sessionId: string, getToken: TokenGetter): Promise<TranscriptMessage[]> {
     try {
-      return await request<TranscriptMessage[]>(`/sessions/${sessionId}/messages`, getToken);
+      return await request<TranscriptMessage[]>(paths.messages(sessionId), getToken);
     } catch (err) {
       if (err instanceof ApiError && err.kind === 'session_not_found') return [];
       throw err;
@@ -117,20 +140,20 @@ export const api = {
   ): Promise<AttachmentSummary> {
     const form = new FormData();
     form.append('file', file);
-    return request<AttachmentSummary>(`/sessions/${sessionId}/attachments`, getToken, {
+    return request<AttachmentSummary>(paths.attachments(sessionId), getToken, {
       method: 'POST',
       body: form,
     });
   },
 
   listApprovals(getToken: TokenGetter): Promise<PendingApproval[]> {
-    return request<PendingApproval[]>('/approvals', getToken);
+    return request<PendingApproval[]>(paths.approvals(), getToken);
   },
 
   /** Deliver the human Yes/No to a durable approval hold. Deliberately an HTTP route on the
    *  backend and not an agent tool — the agent proposes, a human signs off. */
   decideApproval(approvalId: string, approved: boolean, getToken: TokenGetter): Promise<void> {
-    return request<void>(`/approvals/${encodeURIComponent(approvalId)}/decision`, getToken, {
+    return request<void>(paths.approvalDecision(approvalId), getToken, {
       method: 'POST',
       body: JSON.stringify({ approved }),
     });
@@ -138,7 +161,7 @@ export const api = {
 
   /** The plan a session is proposing, read for the hash that binds a decision to it. */
   getPlan(sessionId: string, getToken: TokenGetter): Promise<PlanStatus> {
-    return request<PlanStatus>(`/sessions/${sessionId}/plan`, getToken);
+    return request<PlanStatus>(paths.plan(sessionId), getToken);
   },
 
   /**
@@ -157,7 +180,7 @@ export const api = {
     getToken: TokenGetter,
   ): Promise<void> {
     try {
-      await request<void>(`/sessions/${sessionId}/plan/decision`, getToken, {
+      await request<void>(paths.planDecision(sessionId), getToken, {
         method: 'POST',
         body: JSON.stringify({ approved, plan_hash: planHash }),
       });

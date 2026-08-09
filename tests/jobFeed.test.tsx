@@ -36,23 +36,23 @@ beforeEach(() => {
 
 describe('jobFeed store', () => {
   it('keeps completions newest-first', () => {
-    useChatStore.getState().pushJobCompleted(completion('qm-1'));
-    useChatStore.getState().pushJobCompleted(completion('qm-2'));
+    useChatStore.getState().pushJobEvent(completion('qm-1'));
+    useChatStore.getState().pushJobEvent(completion('qm-2'));
     expect(useChatStore.getState().jobFeed.map((j) => j.job_id)).toEqual(['qm-2', 'qm-1']);
   });
 
   it('does not stack a redelivered completion twice', () => {
     // The push-back stream reconnects with backoff and delivery is at-least-once, so the same
     // completion can legitimately arrive again. Two identical cards would read as two jobs.
-    useChatStore.getState().pushJobCompleted(completion('qm-1'));
-    useChatStore.getState().pushJobCompleted(completion('qm-1'));
+    useChatStore.getState().pushJobEvent(completion('qm-1'));
+    useChatStore.getState().pushJobEvent(completion('qm-1'));
     expect(useChatStore.getState().jobFeed).toHaveLength(1);
   });
 
   it('dismisses only the named job', () => {
-    useChatStore.getState().pushJobCompleted(completion('qm-1'));
-    useChatStore.getState().pushJobCompleted(completion('qm-2'));
-    useChatStore.getState().dismissJobCompleted('qm-1');
+    useChatStore.getState().pushJobEvent(completion('qm-1'));
+    useChatStore.getState().pushJobEvent(completion('qm-2'));
+    useChatStore.getState().dismissJobEvent('qm-1');
     expect(useChatStore.getState().jobFeed.map((j) => j.job_id)).toEqual(['qm-2']);
   });
 });
@@ -64,14 +64,14 @@ describe('JobFeed', () => {
   });
 
   it('shows a finished job with its id and result', () => {
-    useChatStore.getState().pushJobCompleted(completion('qm-abc123'));
+    useChatStore.getState().pushJobEvent(completion('qm-abc123'));
     render(<JobFeed />);
     expect(screen.getByText('qm-abc123')).toBeTruthy();
     expect(screen.getByText('converged')).toBeTruthy();
   });
 
   it('marks a non-converged run rather than presenting it as a result', () => {
-    useChatStore.getState().pushJobCompleted(completion('qm-bad', { converged: false }));
+    useChatStore.getState().pushJobEvent(completion('qm-bad', { converged: false }));
     render(<JobFeed />);
     expect(screen.getByText('not converged')).toBeTruthy();
   });
@@ -87,7 +87,7 @@ describe('JobFeed', () => {
   });
 
   it('dismissing a card removes it from the screen', () => {
-    useChatStore.getState().pushJobCompleted(completion('qm-abc123'));
+    useChatStore.getState().pushJobEvent(completion('qm-abc123'));
     render(<JobFeed />);
     fireEvent.click(screen.getByLabelText('Dismiss job qm-abc123'));
     expect(screen.queryByText('qm-abc123')).toBeNull();

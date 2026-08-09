@@ -87,6 +87,22 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
               <pre className="mt-1 overflow-x-auto rounded bg-surface-sunken p-2 font-mono text-xs">
                 {entry.toolCall.result}
               </pre>
+              {/* The untruncated halves, shown beside the preview rather than inside it. The
+                  preview is cut at 200 characters and these are not, which is the whole reason
+                  the backend sends them separately: they are what an answer's citations and
+                  figures can actually be checked against. */}
+              {entry.toolCall.noteIds !== undefined && entry.toolCall.noteIds.length > 0 && (
+                <p className="mt-1 text-xs text-ink-muted">
+                  notes:{' '}
+                  <span className="font-mono break-all">{entry.toolCall.noteIds.join(', ')}</span>
+                </p>
+              )}
+              {entry.toolCall.numbers !== undefined && entry.toolCall.numbers.length > 0 && (
+                <p className="mt-1 text-xs text-ink-muted">
+                  values:{' '}
+                  <span className="font-mono break-all">{entry.toolCall.numbers.join(', ')}</span>
+                </p>
+              )}
             </div>
           )}
           {/* Still open: not "we are hiding the result" but "the call has not come back". The
@@ -123,6 +139,14 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
 
     case 'job_completed':
       return <JobCard entry={entry} />;
+
+    case 'job_failed':
+      return (
+        <p className="text-sm text-danger">
+          Job <span className="font-mono text-xs">{entry.job?.jobId}</span> failed
+          {entry.job?.reason && <span className="ml-1 text-ink-muted">— {entry.job.reason}</span>}
+        </p>
+      );
 
     case 'note_proposed':
       return (

@@ -21,13 +21,59 @@ export function ReviewRequiredPill({
   message: AssistantMessage;
 }): React.JSX.Element | null {
   if (!message.reviewRequired) return null;
+  // Three independent conditions raise `reviewRequired`, and they do not mean the same thing, so
+  // the copy no longer asserts the verifier scored it low. `verified_by === 'citation-gate'` in
+  // particular means the LLM judge did not run at all — this answer was scored by the weaker
+  // deterministic check — which a reader must be able to tell apart from a genuine low score.
+  const judgeMissing = message.verifiedBy === 'citation-gate';
   return (
     <div className="mb-2 flex items-start gap-2 rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
       <span aria-hidden>⚠️</span>
       <p className="text-sm text-warn">
-        <span className="font-semibold">Needs expert review.</span> The verifier could not fully
-        support this answer from the cited evidence.
+        <span className="font-semibold">Needs expert review.</span>{' '}
+        {judgeMissing
+          ? 'The reviewing model did not run, so this answer was checked only by the weaker citation gate.'
+          : 'This answer was not fully supported by the evidence gathered for it.'}
       </p>
+    </div>
+  );
+}
+
+/**
+ * A guard cut the turn short, but it still produced an answer.
+ *
+ * `loop_cap_reached` and `empty_answer` arrive BEFORE the answer they describe — the same "mark
+ * it partial while it is still arriving" ordering `CapabilityDegradedPill` uses — so this renders
+ * above the body for the same reason. It is not an error card: the turn did not fail, and the text
+ * below it is real.
+ */
+export function TurnNoticePill({
+  message,
+}: {
+  message: AssistantMessage;
+}): React.JSX.Element | null {
+  const notice = message.notice;
+  // A failed turn renders its own error card; showing both would say it twice and disagree.
+  if (!notice || message.status === 'error') return null;
+
+  const copy =
+    notice.code === 'loop_cap_reached'
+      ? 'This answer is partial — the turn reached its step limit with work still open.'
+      : notice.code === 'empty_answer'
+        ? 'The turn finished without producing an answer. Try asking something narrower.'
+        : notice.message;
+
+  return (
+    <div className="mb-2 rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
+      <p className="flex items-start gap-2 text-sm text-warn">
+        <span aria-hidden>⏱️</span>
+        <span>{copy}</span>
+      </p>
+      {notice.correlationId && (
+        <p className="mt-1 font-mono text-[0.7rem] text-ink-muted">
+          Reference: {notice.correlationId}
+        </p>
+      )}
     </div>
   );
 }

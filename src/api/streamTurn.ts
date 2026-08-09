@@ -13,8 +13,14 @@
  */
 
 import { EventSourceParserStream } from 'eventsource-parser/stream';
-import { normalizeEvent, type AnswerEvent, type ChemclawEvent } from '../../shared/events.ts';
-import { ApiError, errorFromStatus, readDetail } from './errors.ts';
+import {
+  normalizeEvent,
+  type AnswerEvent,
+  type ChemclawEvent,
+  type ErrorEvent,
+} from '../../shared/events.ts';
+import { ApiError, errorFromEvent, errorFromStatus, readDetail } from './errors.ts';
+import { paths } from './endpoints.ts';
 import { config } from '../env.ts';
 
 export interface StreamTurnOptions {
@@ -38,7 +44,7 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
 
   let res: Response;
   try {
-    res = await fetch(`${config.apiBase}/sessions/${encodeURIComponent(opts.sessionId)}/messages`, {
+    res = await fetch(`${config.apiBase}${paths.messages(opts.sessionId)}`, {
       method: 'POST',
       signal: opts.signal,
       cache: 'no-store',
@@ -69,6 +75,7 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
     .getReader();
 
   let answer: AnswerEvent | null = null;
+  let lastError: ErrorEvent | null = null;
 
   try {
     for (;;) {
@@ -89,9 +96,21 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       // an older frontend must degrade rather than break.
       if (!event) continue;
 
-      if (event.type === 'error') {
-        throw new ApiError('agent', event.message);
-      }
+      // An `error` frame is recorded, not thrown.
+      //
+      // This used to `throw` immediately, on the assumption that an error ends a turn. It does
+      // not always: `loop_cap_reached` is emitted by the runaway guard on a turn that has been
+      // streaming text all along, and `empty_answer` on a turn that completed and wrote nothing —
+      // both are followed by the `answer` event they qualify. Throwing here discarded that answer
+      // entirely, so a chemist whose turn hit the iteration cap saw an error instead of the
+      // complete, real answer the backend had already sent.
+      //
+      // Terminality is a property of the *stream*, not of the event: every terminal error is
+      // followed by the stream ending, and every non-terminal one is followed by an answer. So we
+      // let the loop decide, below. That is also forward-compatible in a way an explicit
+      // non-terminal-code list is not — a new code of either kind behaves correctly with no
+      // change here.
+      if (event.type === 'error') lastError = event;
 
       opts.onEvent(event);
 
@@ -112,7 +131,10 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
   }
 
   if (!answer) {
-    throw new ApiError('stream', 'The stream ended before an answer arrived.');
+    // The stream ended without an answer, so whatever error we saw last is what ended it.
+    throw lastError
+      ? errorFromEvent(lastError)
+      : new ApiError('stream', 'The stream ended before an answer arrived.');
   }
   return answer;
 }

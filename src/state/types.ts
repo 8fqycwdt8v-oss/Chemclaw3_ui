@@ -10,6 +10,7 @@
 
 import type { ApiErrorKind } from '../api/errors.ts';
 import type { JobSummary } from '../../shared/events.ts';
+import type { ChemclawErrorCode } from '../../shared/events.ts';
 
 export type TurnStatus = 'streaming' | 'done' | 'error' | 'aborted';
 
@@ -19,6 +20,7 @@ export type TraceKind =
   | 'tool_failed'
   | 'job_started'
   | 'job_completed'
+  | 'job_failed'
   | 'question'
   | 'note_proposed'
   | 'approval_request';
@@ -48,9 +50,23 @@ export interface TraceEntry {
    * no message: the `tool_failed` row that follows is where the reason belongs, and saying it
    * twice in adjacent rows is not saying it better.
    */
-  toolCall?: { tool: string; arguments: string; result?: string; failed?: boolean };
+  toolCall?: {
+    tool: string;
+    arguments: string;
+    result?: string;
+    failed?: boolean;
+    /**
+     * The untruncated halves of the result, which `preview` is not.
+     *
+     * The backend split these out because scoring a grounding claim against the first 200
+     * characters of a forty-chunk sweep graded real citations as fabrications. `preview` is prose
+     * for a human; these are the values a reader can actually check an answer against.
+     */
+    noteIds?: string[];
+    numbers?: number[];
+  };
   toolFailure?: { tool: string; message: string };
-  job?: { jobId: string; kind?: string; summary?: JobSummary };
+  job?: { jobId: string; kind?: string; summary?: JobSummary; reason?: string };
   question?: { question: string; options: string[] };
   note?: { noteId: string; reference: string };
   approval?: { prompt: string; approvalId: string };
@@ -82,6 +98,12 @@ export interface AssistantMessage {
   unsupportedClaims: string[];
   reviewRequired: boolean;
   /**
+   * Which check produced `confidence`. `'citation-gate'` means the LLM judge did not run and the
+   * weaker deterministic check scored this answer — a materially different claim from a genuinely
+   * low score, and one `reviewRequired` alone cannot express.
+   */
+  verifiedBy: 'judge' | 'citation-gate' | null;
+  /**
    * Connectors that were unreachable for this turn, so their tools were absent from it.
    *
    * On the message rather than in `trace`, because it qualifies the whole answer rather than
@@ -103,7 +125,29 @@ export interface AssistantMessage {
   trace: TraceEntry[];
   /** Newest `plan` snapshot, for the header checklist. Full history stays in `trace`. */
   latestPlan: string[] | null;
-  error: { kind: ApiErrorKind; message: string } | null;
+  /**
+   * A non-terminal `error` event: the turn produced an answer, but a guard qualified it.
+   *
+   * Separate from `error` below, which means the turn *failed*. `loop_cap_reached` and
+   * `empty_answer` arrive before the `answer` they describe, so the message has both a body and a
+   * reason the body is not the whole story. Rendering them as the same thing would either hide the
+   * answer or hide the caveat.
+   *
+   * Singular and last-wins: a turn emits at most one.
+   */
+  notice: {
+    code: ChemclawErrorCode;
+    message: string;
+    retryable: boolean;
+    correlationId: string;
+  } | null;
+  error: {
+    kind: ApiErrorKind;
+    message: string;
+    /** The backend's code and audit id, when the failure came from the stream. */
+    code?: ChemclawErrorCode;
+    correlationId?: string;
+  } | null;
 }
 
 export type ChatMessage = UserMessage | AssistantMessage;

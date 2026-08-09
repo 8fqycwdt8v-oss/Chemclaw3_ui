@@ -10,7 +10,7 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import type { ChemclawEvent, JobCompletedEvent } from '../../shared/events.ts';
+import type { ChemclawEvent, JobCompletedEvent, JobFailedEvent } from '../../shared/events.ts';
 import type { ApiErrorKind } from '../api/errors.ts';
 import type {
   AssistantMessage,
@@ -61,10 +61,12 @@ function newAssistantMessage(): AssistantMessage {
     confidence: null,
     unsupportedClaims: [],
     reviewRequired: false,
+    verifiedBy: null,
     degradedConnectors: [],
     queued: false,
     trace: [],
     latestPlan: null,
+    notice: null,
     error: null,
   };
 }
@@ -85,7 +87,7 @@ function newAssistantMessage(): AssistantMessage {
 function closeToolCall(
   trace: TraceEntry[],
   tool: string,
-  ending: { result: string } | { failed: true },
+  ending: { result: string; noteIds?: string[]; numbers?: number[] } | { failed: true },
 ): TraceEntry[] {
   const index = trace.findIndex(
     (entry) =>
@@ -126,6 +128,12 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
         kind: 'job_completed',
         job: { jobId: event.job_id, summary: event.summary },
       };
+    case 'job_failed':
+      return {
+        ...base,
+        kind: 'job_failed',
+        job: { jobId: event.job_id, reason: event.reason },
+      };
     case 'question':
       return {
         ...base,
@@ -155,8 +163,13 @@ export interface ChatState {
   activeId: string | null;
   composerLock: ComposerLock;
   banner: Banner | null;
-  /** Cross-turn job completions from `GET /sessions/{id}/events`. Not persisted. */
-  jobFeed: JobCompletedEvent[];
+  /**
+   * Cross-turn job outcomes from `GET /sessions/{id}/events`. Not persisted.
+   *
+   * Both outcomes, not just completions — a failed job is exactly the case a chemist cannot
+   * discover any other way, since the promise "job started" was already made on the turn stream.
+   */
+  jobFeed: (JobCompletedEvent | JobFailedEvent)[];
   streaming: { conversationId: string; messageId: string; abort: AbortController } | null;
 
   createConversation: () => string;
@@ -180,8 +193,8 @@ export interface ChatState {
   setComposerLock: (lock: ComposerLock) => void;
   setBanner: (banner: Banner | null) => void;
   setStreaming: (s: ChatState['streaming']) => void;
-  pushJobCompleted: (event: JobCompletedEvent) => void;
-  dismissJobCompleted: (jobId: string) => void;
+  pushJobEvent: (event: JobCompletedEvent | JobFailedEvent) => void;
+  dismissJobEvent: (jobId: string) => void;
 }
 
 /** Apply `fn` to the assistant message with `messageId`, leaving all other state untouched. */
@@ -359,6 +372,7 @@ export const useChatStore = create<ChatState>()(
               confidence: event.confidence,
               unsupportedClaims: event.unsupported_claims,
               reviewRequired: event.review_required,
+              verifiedBy: event.verified_by,
             })),
           );
           return;
@@ -384,12 +398,36 @@ export const useChatStore = create<ChatState>()(
           return;
         }
 
+        if (event.type === 'error') {
+          // Recorded, never a trace row. `streamTurn` no longer throws on an error frame — a
+          // non-terminal one (`loop_cap_reached`, `empty_answer`) is followed by the answer it
+          // qualifies — so this is where that qualification lands. A terminal error also passes
+          // through here and is then overwritten by `failTurn`, which is the right precedence:
+          // a turn that failed should read as failed, not as an answer with a caveat.
+          set((s) =>
+            updateAssistant(s, conversationId, messageId, (m) => ({
+              ...m,
+              notice: {
+                code: event.code,
+                message: event.message,
+                retryable: event.retryable,
+                correlationId: event.correlation_id,
+              },
+            })),
+          );
+          return;
+        }
+
         if (event.type === 'tool_result') {
           // Not its own row: it closes the `tool_call` row already in the trace.
           set((s) =>
             updateAssistant(s, conversationId, messageId, (m) => ({
               ...m,
-              trace: closeToolCall(m.trace, event.tool, { result: event.preview }),
+              trace: closeToolCall(m.trace, event.tool, {
+                result: event.preview,
+                noteIds: event.note_ids,
+                numbers: event.numbers,
+              }),
             })),
           );
           return;
@@ -438,7 +476,7 @@ export const useChatStore = create<ChatState>()(
       setStreaming(streaming) {
         set({ streaming });
       },
-      pushJobCompleted(event) {
+      pushJobEvent(event) {
         // Newest first, and deduplicated by job id: the push-back stream reconnects with backoff
         // and an at-least-once delivery can repeat a completion, which would otherwise stack up as
         // two identical cards.
@@ -446,7 +484,7 @@ export const useChatStore = create<ChatState>()(
           jobFeed: [event, ...s.jobFeed.filter((j) => j.job_id !== event.job_id)].slice(0, 50),
         }));
       },
-      dismissJobCompleted(jobId) {
+      dismissJobEvent(jobId) {
         set((s) => ({ jobFeed: s.jobFeed.filter((j) => j.job_id !== jobId) }));
       },
     }),

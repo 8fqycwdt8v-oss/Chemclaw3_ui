@@ -8,7 +8,13 @@ RUN npm ci --no-audit --no-fund
 FROM deps AS build
 WORKDIR /app
 COPY . .
-# vite build -> dist/client ; esbuild --bundle -> dist/server.js
+# Whether the built bundle may fall back to the no-token dev auth provider. Defaults to false, so
+# an image built without thinking about it cannot serve unauthenticated access. This is a BUILD
+# arg and not a runtime env var because Vite bakes it into the bundle as a literal — a runtime
+# value could not remove the code path.
+ARG ALLOW_DEV_AUTH=false
+ENV ALLOW_DEV_AUTH=${ALLOW_DEV_AUTH}
+# vite build -> dist/client ; esbuild --bundle -> dist/server.mjs
 RUN npm run build
 
 # The runtime stage carries NO node_modules: esbuild inlines sirv into dist/server.js, and

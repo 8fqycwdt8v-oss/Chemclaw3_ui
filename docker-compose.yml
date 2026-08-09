@@ -113,6 +113,9 @@ services:
   ui:
     build:
       context: .
+      args:
+        # The local stack is unauthenticated by design; the bundle has to be built to permit it.
+        ALLOW_DEV_AUTH: ${ALLOW_DEV_AUTH:-true}
     depends_on:
       chemclaw:
         condition: service_healthy
@@ -122,6 +125,12 @@ services:
       # Service-to-service. This is the only thing that talks to the backend.
       CHEMCLAW_API_URL: http://chemclaw:8080
       AUTH_MODE: ${AUTH_MODE:-dev}
+      # The local stack runs unauthenticated on a published port, so it must opt out explicitly —
+      # the BFF otherwise refuses to boot in this combination, mirroring the backend's own
+      # CHEMCLAW_SERVICE_ALLOW_INSECURE (which is set for the same reason a few lines up).
+      # Set AUTH_MODE=msal and drop both of these for anything shared.
+      ALLOW_INSECURE_AUTH: ${ALLOW_INSECURE_AUTH:-true}
+      ALLOW_DEV_AUTH: ${ALLOW_DEV_AUTH:-true}
       ENTRA_TENANT_ID: ${ENTRA_TENANT_ID:-}
       ENTRA_CLIENT_ID: ${ENTRA_CLIENT_ID:-}
       API_SCOPE: ${API_SCOPE:-}

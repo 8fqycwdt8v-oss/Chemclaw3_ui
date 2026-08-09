@@ -1,5 +1,4 @@
 import { useEffect } from 'react';
-import { configProblems } from './env.ts';
 import { useAuth } from './auth/AuthContext.tsx';
 import { useChatStore } from './state/chatStore.ts';
 import { api } from './api/client.ts';
@@ -10,24 +9,6 @@ import { MessageList } from './components/MessageList.tsx';
 import { JobFeed } from './components/JobFeed.tsx';
 import { Composer } from './components/Composer.tsx';
 import type { ChatMessage } from './state/types.ts';
-
-function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
-  return (
-    <div className="flex h-full items-center justify-center p-8">
-      <div className="max-w-lg rounded-lg border border-danger/40 bg-danger-soft p-5">
-        <h1 className="mb-2 font-semibold text-danger">Configuration error</h1>
-        <ul className="list-disc space-y-1 pl-5 text-sm">
-          {problems.map((problem) => (
-            <li key={problem}>{problem}</li>
-          ))}
-        </ul>
-        <p className="mt-3 text-xs text-ink-muted">
-          These come from the UI server’s environment and are served at <code>/config.js</code>.
-        </p>
-      </div>
-    </div>
-  );
-}
 
 export function App(): React.JSX.Element {
   const { auth } = useAuth();
@@ -87,9 +68,6 @@ export function App(): React.JSX.Element {
   }, [conversation?.id, conversation?.sessionId, conversation?.messages.length, auth]);
 
   useJobFeed(conversation?.sessionId ?? null, auth);
-
-  const problems = configProblems();
-  if (problems.length > 0) return <ConfigError problems={problems} />;
 
   return (
     <div className="flex h-full">

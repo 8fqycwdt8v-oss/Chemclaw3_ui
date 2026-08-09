@@ -10,7 +10,7 @@
 import http from 'node:http';
 import { existsSync } from 'node:fs';
 import sirv from 'sirv';
-import { cfg, validateConfig } from './config.ts';
+import { cfg, isLoopbackHost, validateConfig } from './config.ts';
 import { resolveRoute } from './routes.ts';
 import { proxy } from './proxy.ts';
 import { serveConfigJs } from './runtimeConfig.ts';
@@ -36,31 +36,75 @@ const assets = sirv(cfg.clientDir, {
   gzip: true,
   brotli: true,
   setHeaders(res, pathname) {
-    res.setHeader('content-security-policy', cfg.csp);
-    res.setHeader('x-content-type-options', 'nosniff');
-    res.setHeader('referrer-policy', 'same-origin');
-    // Omit X-Frame-Options in dev mode so the Replit preview iframe can load the page.
-    // Production (msal auth) keeps the strict DENY.
-    if (cfg.authMode !== 'dev') res.setHeader('x-frame-options', 'DENY');
-    // Hashed assets are immutable; index.html must never be cached or a deploy won't take.
-    if (pathname === '/index.html' || pathname === '/') {
-      res.setHeader('cache-control', 'no-cache');
-    }
+    setSecurityHeaders(res);
+    // Hashed assets are immutable; HTML must never be cached or a deploy won't take.
+    //
+    // The test used to be `pathname === '/index.html' || pathname === '/'`, and sirv passes the
+    // REQUESTED pathname rather than the resolved file — so every SPA-fallback route (`/chat/…`,
+    // `/auth/callback`) served index.html with no `Cache-Control` at all and picked up heuristic
+    // freshness from `Last-Modified`. That is exactly the stale-bundle-after-deploy failure this
+    // header exists to prevent. Anything without a file extension resolves to index.html under
+    // `single: true`, so that is the condition to test.
+    if (isHtmlRequest(pathname)) res.setHeader('cache-control', 'no-cache');
   },
 });
+
+/** Paths sirv's `single: true` fallback answers with index.html: no extension, or index.html itself. */
+function isHtmlRequest(pathname: string): boolean {
+  if (pathname === '/' || pathname === '/index.html') return true;
+  const last = pathname.slice(pathname.lastIndexOf('/') + 1);
+  return !last.includes('.');
+}
+
+/**
+ * The browser security headers, applied to EVERY response this process writes.
+ *
+ * Previously only sirv-served responses got them, so `/healthz`, `/config.js`, both 404 bodies and
+ * every proxied `/api/*` response carried no CSP, no `nosniff` and no framing protection.
+ *
+ * `X-Frame-Options` is no longer dropped in dev mode. It was omitted so the Replit preview iframe
+ * could load the page — but `buildCsp` already handles that with `frame-ancestors *`, which is the
+ * modern directive and the one browsers prefer when both are present. Omitting the legacy header
+ * as well bought nothing and left dev deployments clickjackable in older browsers that ignore
+ * `frame-ancestors`. `SAMEORIGIN` keeps the preview working where `frame-ancestors` is honoured
+ * while still refusing a cross-origin frame everywhere else.
+ */
+function setSecurityHeaders(res: http.ServerResponse): void {
+  res.setHeader('content-security-policy', cfg.csp);
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('referrer-policy', 'same-origin');
+  res.setHeader('x-frame-options', cfg.authMode === 'dev' ? 'SAMEORIGIN' : 'DENY');
+  res.setHeader('cross-origin-opener-policy', 'same-origin');
+  res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+}
+
+function methodNotAllowed(res: http.ServerResponse, allow: string): void {
+  res.writeHead(405, { 'content-type': 'application/json', allow });
+  res.end('{"detail":"method not allowed"}');
+}
+
+export { setSecurityHeaders };
 
 const server = http.createServer((req, res) => {
   const rawUrl = req.url ?? '/';
   const path = rawUrl.split('?', 1)[0] ?? '/';
   const method = req.method ?? 'GET';
 
+  setSecurityHeaders(res);
+
+  // GET/HEAD only on the two locally-answered endpoints. They dispatched on path alone, so
+  // `DELETE /healthz` returned 200 and `PUT /config.js` served the config script.
+  const isRead = method === 'GET' || method === 'HEAD';
+
   if (path === '/healthz') {
+    if (!isRead) return methodNotAllowed(res, 'GET, HEAD');
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end('{"status":"ok"}');
+    res.end(method === 'HEAD' ? undefined : '{"status":"ok"}');
     return;
   }
 
   if (path === '/config.js') {
+    if (!isRead) return methodNotAllowed(res, 'GET, HEAD');
     serveConfigJs(res);
     return;
   }
@@ -100,14 +144,15 @@ server.listen(cfg.port, cfg.bindHost, () => {
   log.info(`proxying /api -> ${cfg.apiUrl}`);
   log.info(`auth mode: ${cfg.authMode}`);
 
-  if (cfg.authMode === 'dev' && cfg.bindHost !== '127.0.0.1' && cfg.bindHost !== 'localhost') {
-    // Mirrors the backend's own fail-closed warning. With CHEMCLAW_ENTRA_REQUIRED=false every
-    // request upstream runs as a shared dev principal with all authorization gates open, so a
-    // network-reachable UI in that mode is an open door to the agent and its tools.
+  // The refusal itself now lives in `validateConfig` and has already run above, so reaching here
+  // in this combination means someone set ALLOW_INSECURE_AUTH deliberately. Say so anyway — the
+  // backend keeps the same warning on the same opt-out, for the same reason: an accepted risk
+  // should still be visible in the log of the thing that accepted it.
+  if (cfg.authMode === 'dev' && !isLoopbackHost(cfg.bindHost)) {
     log.warn(
-      'SECURITY: AUTH_MODE=dev on a non-loopback bind. No sign-in is required and the backend ' +
-        'is almost certainly running with CHEMCLAW_ENTRA_REQUIRED=false, meaning every request ' +
-        'is a shared principal with all authorization gates open. Do not expose this beyond a ' +
+      `SECURITY: AUTH_MODE=dev on a non-loopback bind (${cfg.bindHost}) with ` +
+        'ALLOW_INSECURE_AUTH=true. No sign-in is required, so every visitor drives the agent as ' +
+        'a shared principal with all authorization gates open. Do not expose this beyond a ' +
         'trusted dev network.',
     );
   }

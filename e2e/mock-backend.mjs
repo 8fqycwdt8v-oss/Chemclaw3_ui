@@ -102,10 +102,13 @@ const server = http.createServer(async (req, res) => {
     if (message.includes('SCENARIO:degraded')) {
       frame(res, { type: 'capability_degraded', connectors: ['eln', 'durable-jobs (Temporal)'] });
       await sleep(50);
-      frame(res, { type: 'token', text: 'Answered with fewer tools.' });
+      // Deliberately NOT the badge's own wording: an answer body that repeats the pill copy makes
+      // every assertion about the pill ambiguous, and the test would then be asserting the fixture
+      // rather than the UI.
+      frame(res, { type: 'token', text: 'The batch record is silent on that.' });
       frame(res, {
         type: 'answer',
-        text: 'Answered with fewer tools.',
+        text: 'The batch record is silent on that.',
         confidence: 0.4,
         unsupported_claims: ['the yield figure'],
         review_required: true,

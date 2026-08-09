@@ -59,7 +59,10 @@ test('says an answer was assembled with fewer tools, and scored by the weaker ch
   await page.goto('/');
   await send(page, 'SCENARIO:degraded');
 
-  await expect(page.getByText(/fewer tools/i)).toBeVisible();
+  await expect(page.getByText('The batch record is silent on that.')).toBeVisible();
+  // The pill names what was down, so "the ELN says nothing" and "the ELN was unreachable" are
+  // distinguishable — which is the entire reason the event exists.
+  await expect(page.getByText(/were unreachable for this turn/i)).toBeVisible();
   await expect(page.getByText(/eln/i)).toBeVisible();
   // `verified_by: 'citation-gate'` means the judge did not run — materially different from a low
   // score, and the badge must not imply the latter.

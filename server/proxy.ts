@@ -8,16 +8,31 @@
  * the same edge. `http.request` has no body idle timeout, hands back a `Readable` on both sides so
  * `.pipe()` gives us backpressure for free, and needs no dependency.
  *
- * Authorization headers are forwarded verbatim and never inspected. The backend already performs
- * full RS256 signature + audience + issuer validation on every request; a second copy of that
- * logic here would be one more thing to misconfigure and would make the origin of a 401 ambiguous.
+ * Authorization is never *inspected* here in either mode. The backend already performs full RS256
+ * signature + audience + issuer validation on every request; a second copy of that logic here
+ * would be one more thing to misconfigure and would make the origin of a 401 ambiguous. What
+ * differs by mode is where the header comes from: under `msal-spa` the browser's own header is
+ * forwarded verbatim, and under `bff` it is discarded and replaced with the token this process
+ * holds on the user's behalf. See `InjectedAuth`.
  */
 
 import http from 'node:http';
 import https from 'node:https';
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 import { cfg } from './config.ts';
+import { clientProto, firstHeader, normaliseAddress } from './httpUtil.ts';
 import { log } from './log.ts';
+
+/**
+ * A token to present upstream on the caller's behalf.
+ *
+ * Present only in `bff` mode. `accessToken` may be an empty string — an anonymous request under
+ * BFF custody — and that still means "strip whatever the browser sent", which is why this is an
+ * object rather than a bare `string | null`.
+ */
+export interface InjectedAuth {
+  accessToken: string;
+}
 
 /**
  * Parsed lazily, not at module scope.
@@ -154,9 +169,13 @@ const FORWARDED_REQUEST_HEADERS = new Set([
  *
  * Also an allow-list, for the mirror-image reason. The old code copied everything non-hop-by-hop,
  * which forwarded `set-cookie` from the backend onto this app's origin — while the request leg
- * stripped `cookie`, so the cookie could be set and would then never come back. That asymmetry
- * quietly contradicted the invariant the request leg asserts ("no cookies at all, so there is no
- * CSRF surface to reason about"). It also relayed `server:`/`x-powered-by` banners.
+ * stripped `cookie`, so the cookie could be set and would then never come back.
+ *
+ * Keeping `set-cookie` out matters more now than it did then, not less. This origin *does* carry
+ * cookies since BFF custody landed, and they are the session — so a backend (or anything able to
+ * answer as one) that emitted a `Set-Cookie` would be writing into the same namespace as the
+ * sealed session and the CSRF token. The allow-list is what makes that impossible rather than
+ * merely unlikely. It also keeps `server:`/`x-powered-by` banners off the wire.
  */
 const FORWARDED_RESPONSE_HEADERS = new Set([
   'content-type',
@@ -185,38 +204,29 @@ const FORWARDED_RESPONSE_HEADERS = new Set([
   'content-range',
 ]);
 
-/** The first value of a header that may arrive repeated. */
-function firstHeader(value: string | string[] | undefined): string | undefined {
-  if (Array.isArray(value)) return value[0];
-  return value;
-}
-
-/** Strip the IPv4-mapped IPv6 prefix, which most log pipelines do not normalise. */
-function normaliseAddress(address: string | undefined): string | undefined {
-  if (!address) return undefined;
-  return address.startsWith('::ffff:') ? address.slice('::ffff:'.length) : address;
-}
-
 /**
- * The scheme the client used to reach THIS proxy.
+ * Copy the allowed request headers to the upstream and set the ones we own authoritatively.
  *
- * Trusts an inbound `x-forwarded-proto` when present, because in the deployments that set it we
- * are not the edge; falls back to whether our own socket is TLS.
+ * `injected` is the BFF-custody path: when it is non-`null` the browser's own `Authorization` is
+ * discarded unconditionally and replaced with the token held server-side. Discarding it even when
+ * there is nothing to inject is the point — in `bff` mode a bearer token arriving from the browser
+ * is by definition not one this deployment issued, and forwarding it would let a caller bypass the
+ * cookie session entirely and hand the backend a token of their own choosing.
  */
-function clientProto(req: IncomingMessage): string {
-  const forwarded = firstHeader(req.headers['x-forwarded-proto']);
-  if (forwarded) return forwarded.split(',')[0]!.trim();
-  return 'encrypted' in req.socket && req.socket.encrypted ? 'https' : 'http';
-}
-
-/** Copy the allowed request headers to the upstream and set the ones we own authoritatively. */
-function buildUpstreamHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
+function buildUpstreamHeaders(
+  req: IncomingMessage,
+  injected: InjectedAuth | null,
+): http.OutgoingHttpHeaders {
   const headers: http.OutgoingHttpHeaders = {};
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === undefined) continue;
     if (HOP_BY_HOP.has(key)) continue;
     if (!FORWARDED_REQUEST_HEADERS.has(key)) continue;
     headers[key] = value;
+  }
+  if (injected !== null) {
+    delete headers['authorization'];
+    if (injected.accessToken) headers['authorization'] = `Bearer ${injected.accessToken}`;
   }
   // Never let the upstream compress an event stream: a compressor buffers until its window
   // fills, so tokens would arrive in clumps or, on a short answer, not until the very end.
@@ -273,6 +283,8 @@ export function proxy(
   res: ServerResponse,
   upstreamPath: string,
   expectSse: boolean,
+  /** BFF custody: the token to present upstream, and the signal to drop the browser's own. */
+  injected: InjectedAuth | null = null,
   /** Internal: set when this call is already the one retry a request gets. */
   isRetry = false,
 ): void {
@@ -283,7 +295,7 @@ export function proxy(
       port: upstream().port || (upstream().protocol === 'https:' ? 443 : 80),
       method: req.method,
       path: upstreamPath,
-      headers: buildUpstreamHeaders(req),
+      headers: buildUpstreamHeaders(req, injected),
       agent: agent(),
     },
     (upstreamRes) => {
@@ -370,7 +382,7 @@ export function proxy(
       !res.writableEnded;
     if (replayable) {
       log.debug(`retrying ${method} ${upstreamPath} once after ${err.code}`);
-      proxy(req, res, upstreamPath, expectSse, true);
+      proxy(req, res, upstreamPath, expectSse, injected, true);
       return;
     }
 

@@ -8,10 +8,10 @@
  */
 
 import type { ServerResponse } from 'node:http';
-import { cfg } from './config.ts';
+import { cfg, type AuthMode } from './config.ts';
 
 export interface RuntimeConfig {
-  authMode: 'dev' | 'msal';
+  authMode: AuthMode;
   entraTenantId: string;
   entraClientId: string;
   apiScope: string;
@@ -19,12 +19,24 @@ export interface RuntimeConfig {
   appVersion: string;
 }
 
+/**
+ * Note what is emitted and what is not.
+ *
+ * The tenant, client id and scope are only of any use to browser-MSAL, and they are public values
+ * — the client id is in every authorize URL, the scope in every token request. They are still
+ * omitted in `bff` mode, because in that mode nothing in the browser talks to Entra and shipping
+ * configuration a page cannot use is how a page ends up using it.
+ *
+ * `ENTRA_CLIENT_SECRET` and `SESSION_SECRET` are of course absent, and the type makes that
+ * structural rather than a matter of remembering: `RuntimeConfig` has no field for either.
+ */
 export function runtimeConfig(): RuntimeConfig {
+  const browserMsal = cfg.authMode === 'msal-spa';
   return {
     authMode: cfg.authMode,
-    entraTenantId: cfg.entraTenantId,
-    entraClientId: cfg.entraClientId,
-    apiScope: cfg.apiScope,
+    entraTenantId: browserMsal ? cfg.entraTenantId : '',
+    entraClientId: browserMsal ? cfg.entraClientId : '',
+    apiScope: browserMsal ? cfg.apiScope : '',
     apiBase: '/api',
     appVersion: cfg.appVersion,
   };

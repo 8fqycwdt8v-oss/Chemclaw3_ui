@@ -18,7 +18,11 @@ const base: BffConfig = {
   authMode: 'dev',
   entraTenantId: '',
   entraClientId: '',
+  entraClientSecret: '',
   apiScope: '',
+  sessionSecret: '',
+  publicOrigin: '',
+  entraAuthorityHost: 'https://login.microsoftonline.com',
   appVersion: 'test',
   sseHeartbeatMs: 15_000,
   upstreamConnectTimeoutMs: 10_000,
@@ -49,11 +53,11 @@ describe('unauthenticated exposure', () => {
     expect(validateConfig(cfg({ bindHost: host }))).toEqual([]);
   });
 
-  it('does not fire for msal, which is authenticated whatever it binds', () => {
+  it('does not fire for msal-spa, which is authenticated whatever it binds', () => {
     const c = cfg({
       bindHost: '0.0.0.0',
-      authMode: 'msal',
-      rawAuthMode: 'msal',
+      authMode: 'msal-spa',
+      rawAuthMode: 'msal-spa',
       entraTenantId: 't',
       entraClientId: 'c',
       apiScope: 'api://x/y',
@@ -79,10 +83,85 @@ describe('AUTH_MODE parsing', () => {
   });
 });
 
-describe('msal completeness', () => {
+describe('msal-spa completeness', () => {
   it('requires tenant, client id and scope', () => {
-    const problems = validateConfig(cfg({ authMode: 'msal', rawAuthMode: 'msal' }));
+    const problems = validateConfig(cfg({ authMode: 'msal-spa', rawAuthMode: 'msal-spa' }));
     expect(problems).toHaveLength(3);
+  });
+
+  it('needs no client or session secret — the browser holds the token in that mode', () => {
+    const c = cfg({
+      authMode: 'msal-spa',
+      rawAuthMode: 'msal-spa',
+      entraTenantId: 't',
+      entraClientId: 'c',
+      apiScope: 'api://x/y',
+    });
+    expect(validateConfig(c)).toEqual([]);
+  });
+});
+
+describe('bff completeness', () => {
+  const bff = (over: Partial<BffConfig> = {}): BffConfig =>
+    cfg({
+      authMode: 'bff',
+      rawAuthMode: 'bff',
+      entraTenantId: 't',
+      entraClientId: 'c',
+      apiScope: 'api://x/y',
+      entraClientSecret: 'a-secret',
+      sessionSecret: 'a-session-secret-of-at-least-32-chars',
+      ...over,
+    });
+
+  it('accepts a complete configuration', () => {
+    expect(validateConfig(bff())).toEqual([]);
+  });
+
+  it('requires a client secret, because this is a confidential client', () => {
+    expect(joined(bff({ entraClientSecret: '' }))).toMatch(/ENTRA_CLIENT_SECRET/);
+  });
+
+  it('requires a session secret and refuses a short one', () => {
+    expect(joined(bff({ sessionSecret: '' }))).toMatch(/SESSION_SECRET is required/);
+    // A guessable key means anyone can forge a session for any user, so the seal must not be
+    // allowed to become decorative.
+    expect(joined(bff({ sessionSecret: 'changeme' }))).toMatch(/too short/);
+  });
+
+  it('names msal-spa when an AUTH_MODE=msal deployment lands here unchanged', () => {
+    // This is the whole migration story. An existing deployment sets nothing new, fails to boot,
+    // and the refusal has to be enough to choose between adopting BFF custody and staying put.
+    const problems = joined(bff({ rawAuthMode: 'msal', entraClientSecret: '', sessionSecret: '' }));
+    expect(problems).toMatch(/AUTH_MODE=msal now resolves to BFF token custody/);
+    expect(problems).toMatch(/AUTH_MODE=msal-spa/);
+  });
+
+  it('does not mention msal-spa for a deployment that asked for bff by name', () => {
+    // Someone who wrote `AUTH_MODE=bff` chose it; suggesting they revert is noise.
+    expect(joined(bff({ entraClientSecret: '' }))).not.toMatch(/msal-spa/);
+  });
+
+  it('refuses a plain-HTTP identity provider that is not loopback', () => {
+    // The client secret and the authorization code both cross that connection.
+    expect(joined(bff({ entraAuthorityHost: 'http://login.evil.test' }))).toMatch(
+      /ENTRA_AUTHORITY_HOST must be https/,
+    );
+    // Loopback is exempt, which is what lets the flow be exercised against a mock provider.
+    expect(validateConfig(bff({ entraAuthorityHost: 'http://127.0.0.1:8792' }))).toEqual([]);
+  });
+
+  it('accepts a sovereign-cloud authority', () => {
+    expect(validateConfig(bff({ entraAuthorityHost: 'https://login.microsoftonline.us' }))).toEqual(
+      [],
+    );
+  });
+
+  it('refuses a PUBLIC_ORIGIN with a path, which Entra compares literally', () => {
+    expect(joined(bff({ publicOrigin: 'https://x.test/app' }))).toMatch(/PUBLIC_ORIGIN/);
+    // Unset is permitted — it falls back to the Host header, and is warned about at boot rather
+    // than blocking local development.
+    expect(validateConfig(bff({ publicOrigin: '' }))).toEqual([]);
   });
 });
 

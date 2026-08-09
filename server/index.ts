@@ -14,6 +14,8 @@ import { cfg, isLoopbackHost, validateConfig } from './config.ts';
 import { resolveRoute } from './routes.ts';
 import { proxy } from './proxy.ts';
 import { serveConfigJs } from './runtimeConfig.ts';
+import { currentSession, handleAuthRoute } from './auth/handlers.ts';
+import { checkCsrf } from './auth/csrf.ts';
 import { log } from './log.ts';
 
 const problems = validateConfig();
@@ -84,12 +86,71 @@ function setSecurityHeaders(res: http.ServerResponse): void {
   res.setHeader('permissions-policy', 'camera=(), microphone=(), geolocation=(), payment=()');
 }
 
+/**
+ * The last resort for an async handler that rejected.
+ *
+ * Without this, a rejected promise off `http.createServer`'s synchronous callback becomes an
+ * unhandled rejection — which under Node's default `--unhandled-rejections=throw` takes the whole
+ * process down and hangs every open SSE stream with it. One bad request must not do that.
+ */
+function failRequest(res: http.ServerResponse, what: string, err: unknown): void {
+  log.error(`unhandled error in ${what}: ${err instanceof Error ? err.stack : String(err)}`);
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+  res.writeHead(500, { 'content-type': 'application/json' });
+  res.end('{"detail":"internal error"}');
+}
+
 function methodNotAllowed(res: http.ServerResponse, allow: string): void {
   res.writeHead(405, { 'content-type': 'application/json', allow });
   res.end('{"detail":"method not allowed"}');
 }
 
 export { setSecurityHeaders };
+
+/**
+ * Everything a request needs before it can be proxied, which in `bff` mode means the session.
+ *
+ * Split out because it is the one asynchronous step in an otherwise synchronous dispatcher: the
+ * session may need refreshing at the identity provider before the request can carry a token.
+ */
+async function handleApi(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  method: string,
+  path: string,
+  query: string,
+): Promise<void> {
+  const route = resolveRoute(method, path);
+  if (!route) {
+    // Not whitelisted: answered here, upstream never contacted.
+    log.debug(`blocked un-whitelisted ${method} ${path}`);
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end('{"detail":"not found"}');
+    return;
+  }
+
+  if (cfg.authMode !== 'bff') {
+    // `msal-spa` and `dev`: no cookies on this origin, so no CSRF surface, and the browser's own
+    // Authorization header (or its absence) is forwarded verbatim as it always was.
+    proxy(req, res, route.path + query, route.sse);
+    return;
+  }
+
+  const session = await currentSession(req, res);
+  const verdict = checkCsrf(req, session);
+  if (!verdict.ok) {
+    log.warn(`refused ${method} ${path}: ${verdict.reason}`);
+    res.writeHead(403, { 'content-type': 'application/json' });
+    res.end('{"detail":"This request could not be verified."}');
+    return;
+  }
+  // Non-null even when there is no session: it is what tells the proxy to discard whatever
+  // `Authorization` the browser sent, which under BFF custody is by definition not ours.
+  proxy(req, res, route.path + query, route.sse, { accessToken: session?.accessToken ?? '' });
+}
 
 const server = http.createServer((req, res) => {
   const rawUrl = req.url ?? '/';
@@ -115,19 +176,28 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // In `bff` mode these are answered here. In the other two they fall through to the SPA, so
+  // browser-MSAL's `/auth/callback` still resolves to index.html exactly as before.
+  if (path.startsWith('/auth/')) {
+    handleAuthRoute(req, res, path, rawUrl)
+      .then((handled) => {
+        if (handled) return;
+        assets(req, res, () => {
+          res.writeHead(404, { 'content-type': 'text/plain' });
+          res.end('Not Found');
+        });
+      })
+      .catch((err: unknown) => failRequest(res, `auth ${method} ${path}`, err));
+    return;
+  }
+
   if (path.startsWith('/api/')) {
-    const route = resolveRoute(method, path);
-    if (!route) {
-      // Not whitelisted: answered here, upstream never contacted.
-      log.debug(`blocked un-whitelisted ${method} ${path}`);
-      res.writeHead(404, { 'content-type': 'application/json' });
-      res.end('{"detail":"not found"}');
-      return;
-    }
     // Preserve the query string — the backend takes none today, but dropping it silently
     // would be a confusing bug the day it does.
     const query = rawUrl.slice(path.length);
-    proxy(req, res, route.path + query, route.sse);
+    handleApi(req, res, method, path, query).catch((err: unknown) =>
+      failRequest(res, `${method} ${path}`, err),
+    );
     return;
   }
 
@@ -154,6 +224,15 @@ server.listen(cfg.port, cfg.bindHost, () => {
   // in this combination means someone set ALLOW_INSECURE_AUTH deliberately. Say so anyway — the
   // backend keeps the same warning on the same opt-out, for the same reason: an accepted risk
   // should still be visible in the log of the thing that accepted it.
+  if (cfg.authMode === 'bff' && !cfg.publicOrigin) {
+    log.warn(
+      'PUBLIC_ORIGIN is not set, so the OAuth redirect URI and the CSRF origin check are both ' +
+        'derived from the client-supplied Host header. Both have an independent check behind ' +
+        'them, but a mismatch presents as an unexplained AADSTS50011 — set PUBLIC_ORIGIN to this ' +
+        "deployment's browser-facing origin.",
+    );
+  }
+
   if (cfg.authMode === 'dev' && !isLoopbackHost(cfg.bindHost)) {
     log.warn(
       `SECURITY: AUTH_MODE=dev on a non-loopback bind (${cfg.bindHost}) with ` +

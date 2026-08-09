@@ -6,7 +6,17 @@
  * at BUILD time, which is exactly what we are working around).
  */
 
-export type AuthMode = 'dev' | 'msal';
+/**
+ * How the app authenticates, and — the part that actually differs — who holds the token.
+ *
+ * - `bff`      — this process completes the OIDC flow and keeps the tokens in a sealed cookie. The
+ *                browser never sees a bearer token, so an XSS in the SPA cannot exfiltrate one.
+ * - `msal-spa` — the previous behaviour: MSAL runs in the browser and holds tokens in
+ *                `sessionStorage`, and this process forwards the `Authorization` header verbatim.
+ * - `dev`      — no sign-in at all. Fail-closed: refused on a non-loopback bind without an explicit
+ *                opt-out, and refused by the built bundle unless it was built to permit it.
+ */
+export type AuthMode = 'dev' | 'bff' | 'msal-spa';
 
 const str = (name: string, fallback = ''): string => process.env[name]?.trim() || fallback;
 const num = (name: string, fallback: number): number => {
@@ -30,22 +40,47 @@ const bool = (name: string, fallback = false): boolean => {
  * *`, and no `X-Frame-Options`. A mode nobody named is a configuration error, not a default.
  */
 const rawAuthMode = str('AUTH_MODE', 'dev');
-const authMode: AuthMode = rawAuthMode === 'msal' ? 'msal' : 'dev';
-const authModeIsValid = rawAuthMode === 'msal' || rawAuthMode === 'dev';
+
+/**
+ * `msal` is kept as an alias and now resolves to `bff`, not to browser-MSAL.
+ *
+ * That is a deliberate behaviour change for existing deployments and it is the reason this alias
+ * exists at all rather than being dropped: the safer custody model has to be what an unchanged
+ * configuration gets. It cannot happen silently — `bff` requires a client secret and a session
+ * secret that a `msal` deployment does not have, so `validateConfig` refuses to boot and names
+ * `msal-spa` as the way to keep the previous flow. A loud failure at deploy time is the point.
+ */
+const MODES: Record<string, AuthMode> = {
+  dev: 'dev',
+  bff: 'bff',
+  'msal-spa': 'msal-spa',
+  msal: 'bff',
+};
+const authMode: AuthMode = MODES[rawAuthMode] ?? 'dev';
+const authModeIsValid = rawAuthMode in MODES;
+
+/** 32 characters is `openssl rand -base64 24`. Below that the seal is decorative. */
+const MIN_SESSION_SECRET_LENGTH = 32;
 
 /** Loopback names, for the unauthenticated-exposure check. Mirrors the backend's `_LOOPBACK_HOSTS`. */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
-/** Entra's login host, needed in the CSP when MSAL is on — see `csp` below. */
+/** Entra's login host, needed in the CSP when browser-MSAL is on — see `csp` below. */
 const ENTRA_HOST = 'https://login.microsoftonline.com';
 
 /**
  * Content-Security-Policy for the SPA.
  *
- * Built conditionally on auth mode because MSAL refreshes tokens silently through a hidden
+ * Built conditionally on auth mode because browser-MSAL refreshes tokens silently through a hidden
  * IFRAME to login.microsoftonline.com. Copying the backend's `connect-src 'self'` verbatim
  * would break that refresh roughly an hour after login — a failure that looks like a random
  * logout and is miserable to trace back to a header.
+ *
+ * `bff` mode needs **none** of those relaxations, and that is a real security gain rather than an
+ * incidental one. The BFF talks to Entra from the server, so the browser makes no cross-origin
+ * request, loads no cross-origin frame, and submits no cross-origin form — sign-in is a plain
+ * top-level navigation, which CSP does not govern. So `bff` gets the same strict policy as `dev`
+ * minus the framing relaxation: no third-party origin is reachable from the page at all.
  */
 function buildCsp(mode: AuthMode): string {
   const directives: Record<string, string[]> = {
@@ -67,7 +102,7 @@ function buildCsp(mode: AuthMode): string {
     'object-src': ["'none'"],
   };
 
-  if (mode === 'msal') {
+  if (mode === 'msal-spa') {
     directives['connect-src'] = ["'self'", ENTRA_HOST];
     directives['frame-src'] = [ENTRA_HOST];
     directives['form-action'] = ["'self'", ENTRA_HOST];
@@ -86,7 +121,15 @@ export interface BffConfig {
   authMode: AuthMode;
   entraTenantId: string;
   entraClientId: string;
+  /** Required in `bff` mode only: this is a confidential client. Never leaves the server. */
+  entraClientSecret: string;
   apiScope: string;
+  /** Required in `bff` mode: the key the session cookie is sealed under. Never leaves the server. */
+  sessionSecret: string;
+  /** How this deployment is reachable from a browser, e.g. `https://chem.example.com`. */
+  publicOrigin: string;
+  /** The identity provider's origin. Non-default for a sovereign cloud, or for a test. */
+  entraAuthorityHost: string;
   appVersion: string;
   sseHeartbeatMs: number;
   upstreamConnectTimeoutMs: number;
@@ -113,9 +156,22 @@ export const cfg: BffConfig = {
   // CHEMCLAW_ENTRA_CLIENT_ID setting at all — its Settings model is extra="forbid", so
   // exporting one there aborts its startup. The SPA client id is purely a frontend concern.
   entraClientId: str('ENTRA_CLIENT_ID'),
+  // Only `bff` mode has one, and only `bff` mode can: a SPA cannot hold a secret, which is the
+  // whole reason browser-MSAL uses PKCE with a public client. Moving custody to the server is what
+  // makes a confidential client possible, and a confidential client is materially harder to abuse
+  // with a stolen authorization code.
+  entraClientSecret: str('ENTRA_CLIENT_SECRET'),
   // Must be an API scope: api://<api-client-id>/<scope>. Requesting only openid/profile yields
   // an ID token whose `aud` is the SPA client id, which the backend's audience check rejects.
   apiScope: str('API_SCOPE'),
+  sessionSecret: str('SESSION_SECRET'),
+  // Sovereign clouds are at login.microsoftonline.us / .partner.microsoftonline.cn, and a tenant
+  // in one is unreachable at the commercial endpoint. Constrained to HTTPS below.
+  entraAuthorityHost: str('ENTRA_AUTHORITY_HOST', ENTRA_HOST).replace(/\/+$/, ''),
+  // Optional; `httpUtil.selfOrigin` falls back to the Host header and explains what that costs.
+  // Strip a trailing slash so `${origin}/auth/callback` cannot become a double slash, which Entra
+  // compares literally against the registration and rejects.
+  publicOrigin: str('PUBLIC_ORIGIN').replace(/\/+$/, ''),
   appVersion: str('APP_VERSION', 'dev'),
   sseHeartbeatMs: num('SSE_HEARTBEAT_MS', 15_000),
   upstreamConnectTimeoutMs: num('UPSTREAM_CONNECT_TIMEOUT_MS', 10_000),
@@ -159,15 +215,80 @@ export function validateConfig(c: BffConfig = cfg): string[] {
 
   if (!c.authModeIsValid) {
     problems.push(
-      `AUTH_MODE ${JSON.stringify(c.rawAuthMode)} is not a valid mode (expected "msal" or ` +
-        '"dev"). Refusing to start rather than falling back to unauthenticated access.',
+      `AUTH_MODE ${JSON.stringify(c.rawAuthMode)} is not a valid mode (expected "bff", ` +
+        '"msal-spa" or "dev"). Refusing to start rather than falling back to unauthenticated ' +
+        'access.',
     );
   }
 
-  if (c.authMode === 'msal') {
-    if (!c.entraTenantId) problems.push('ENTRA_TENANT_ID is required when AUTH_MODE=msal');
-    if (!c.entraClientId) problems.push('ENTRA_CLIENT_ID is required when AUTH_MODE=msal');
-    if (!c.apiScope) problems.push('API_SCOPE is required when AUTH_MODE=msal');
+  // Common to both authenticated modes: the same tenant, the same app registration, the same scope.
+  if (c.authMode === 'bff' || c.authMode === 'msal-spa') {
+    const mode = c.authMode;
+    if (!c.entraTenantId) problems.push(`ENTRA_TENANT_ID is required when AUTH_MODE=${mode}`);
+    if (!c.entraClientId) problems.push(`ENTRA_CLIENT_ID is required when AUTH_MODE=${mode}`);
+    if (!c.apiScope) problems.push(`API_SCOPE is required when AUTH_MODE=${mode}`);
+  }
+
+  if (c.authMode === 'bff') {
+    // Named together, with the upgrade path spelled out, because the deployment most likely to hit
+    // this is an existing `AUTH_MODE=msal` one that changed nothing and now will not start. The
+    // message has to be enough to decide between "adopt BFF custody" and "stay where I was".
+    const upgrading = c.rawAuthMode === 'msal';
+    const context = upgrading
+      ? ' AUTH_MODE=msal now resolves to BFF token custody, where this server holds the tokens ' +
+        'and the browser never sees one. To keep the previous browser-MSAL behaviour unchanged, ' +
+        'set AUTH_MODE=msal-spa.'
+      : '';
+    if (!c.entraClientSecret) {
+      problems.push(
+        'ENTRA_CLIENT_SECRET is required when AUTH_MODE=bff — the BFF is a confidential client, ' +
+          'so the app registration needs a Web platform with a client secret and ' +
+          `<PUBLIC_ORIGIN>/auth/callback as a redirect URI.${context}`,
+      );
+    }
+    if (!c.sessionSecret) {
+      problems.push(
+        'SESSION_SECRET is required when AUTH_MODE=bff — it is the key the session cookie is ' +
+          `sealed under. Generate one with \`openssl rand -base64 48\`.${upgrading ? context : ''}`,
+      );
+    } else if (c.sessionSecret.length < MIN_SESSION_SECRET_LENGTH) {
+      // Length, not entropy — entropy is unmeasurable from here. The floor exists to catch
+      // "changeme" and a copied placeholder, both of which make the whole seal decorative.
+      problems.push(
+        `SESSION_SECRET is too short (${c.sessionSecret.length} characters, minimum ` +
+          `${MIN_SESSION_SECRET_LENGTH}). Anything a person could type is guessable, and a ` +
+          'guessable key means anyone can forge a session for any user.',
+      );
+    }
+    // An unset PUBLIC_ORIGIN is deliberately NOT fatal — `selfOrigin` falls back to the Host
+    // header, and both users of that value have an independent check behind them (see its
+    // docstring). It is warned about at boot instead, so local development is not blocked. A
+    // malformed one is fatal, because it produces a redirect URI Entra will simply reject.
+    // The client secret and the code both cross this connection, so plain HTTP to anywhere but
+    // this machine would put them on the wire in the clear. Loopback is exempt so the flow can be
+    // exercised against a mock provider in a test.
+    if (!/^https:\/\//.test(c.entraAuthorityHost)) {
+      const host = (() => {
+        try {
+          return new URL(c.entraAuthorityHost).hostname;
+        } catch {
+          return '';
+        }
+      })();
+      if (!isLoopbackHost(host)) {
+        problems.push(
+          'ENTRA_AUTHORITY_HOST must be https — the client secret and the authorization code are ' +
+            `both sent to it. Got ${JSON.stringify(c.entraAuthorityHost)}.`,
+        );
+      }
+    }
+
+    if (c.publicOrigin && !/^https?:\/\/[^/]+$/.test(c.publicOrigin)) {
+      problems.push(
+        'PUBLIC_ORIGIN must be a bare scheme+host, e.g. https://chem.example.com — got ' +
+          JSON.stringify(c.publicOrigin),
+      );
+    }
   }
 
   if (c.authMode === 'dev' && !isLoopbackHost(c.bindHost) && !c.allowInsecure) {
@@ -175,7 +296,7 @@ export function validateConfig(c: BffConfig = cfg): string[] {
       `SECURITY: AUTH_MODE=dev but the UI binds a non-loopback interface (${c.bindHost}) — ` +
         'every visitor would drive the agent as the shared dev principal with all authorization ' +
         'gates OPEN, from any origin (dev mode also serves frame-ancestors * and no ' +
-        'X-Frame-Options). Set AUTH_MODE=msal for any shared/exposed deployment, bind ' +
+        'X-Frame-Options). Set AUTH_MODE=bff for any shared/exposed deployment, bind ' +
         '127.0.0.1 for local dev, or set ALLOW_INSECURE_AUTH=true to explicitly accept an ' +
         'unauthenticated, network-exposed UI.',
     );

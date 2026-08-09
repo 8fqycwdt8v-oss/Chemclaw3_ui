@@ -60,3 +60,24 @@ test('the trace panel reports its own expanded state', async ({ page }) => {
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   await expect(page.getByText('Screen hazards')).toBeVisible();
 });
+
+test('the full result is reachable from the trace, as data rather than a preview', async ({
+  page,
+}) => {
+  // The turn streams a 200-character preview and a content-addressed ref. This is the path that
+  // turns the ref into the hazard table the chemist has to act on — the severity, the rule that
+  // fired, and the citation behind it, none of which survive the truncation.
+  await page.goto('/');
+  await page.getByPlaceholder(/Ask about a reaction/).fill('Screen this azide before I order it.');
+  await page.getByRole('button', { name: 'Send' }).click();
+
+  await page.getByRole('button', { name: /Show the agent’s work/ }).click();
+  await page.getByRole('button', { name: 'See the full result' }).click();
+
+  const panel = page.getByRole('dialog', { name: /full result/ });
+  await expect(panel.getByText('organic-azide')).toBeVisible();
+  await expect(panel.getByText('Bretherick’s Handbook, 7th ed.')).toBeVisible();
+  // The caveat that does not survive a paraphrase, and the one the panel exists to keep. Read off
+  // the panel's own note rather than by text, so it still passes when the service stops saying it.
+  await expect(panel.getByRole('note')).toContainText('not a clearance');
+});

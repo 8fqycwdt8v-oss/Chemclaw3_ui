@@ -1,10 +1,14 @@
 /**
  * Non-streaming calls to the Chemclaw service, through the BFF.
  *
- * Endpoints verified against 8fqycwdt8v-oss/Chemclaw3 @ d5ed9e3 (service/app.py). Two of them —
- * `GET /sessions` and `GET /sessions/{id}/messages` — are added by the companion backend change;
- * both degrade to an empty result rather than throwing, so this UI runs against a service that
- * does not have them yet.
+ * Endpoints verified against 8fqycwdt8v-oss/Chemclaw3 (`src/chemclaw/api/routes/`).
+ *
+ * Two policies live here and are worth telling apart, because the difference is not stylistic.
+ * The *list* routes — sessions, transcripts, approvals — swallow a 404 into an empty result, so
+ * this UI runs against an older service with a smaller sidebar rather than a banner. The *fetch*
+ * routes — one tool result, one note — do not, because nothing calls them speculatively: the
+ * affordance only exists when the turn said the thing exists, so a 404 there is a real fault and
+ * hiding it would leave a control that does nothing when clicked.
  */
 
 import { config } from '../env.ts';
@@ -86,6 +90,45 @@ export interface AttachmentSummary {
 export interface PendingApproval {
   approval_id?: string;
   [key: string]: unknown;
+}
+
+/**
+ * The untruncated text of one tool result, as `GET /sessions/{id}/tool-results/{ref}` returns it.
+ *
+ * `text` is deliberately not typed as parsed JSON, upstream and here. A tool result is whatever
+ * the framework handed back, and a store that promised JSON would have to fail or lie about the
+ * ones that are not — so the parsing, and the decision about what to do when it fails, belongs to
+ * the renderer that wants a shape.
+ */
+export interface StoredToolResult {
+  ref: string;
+  tool: string;
+  /** Joins this result to the audit trail and the logs of the turn that produced it. */
+  correlation_id: string;
+  byte_size: number;
+  text: string;
+}
+
+/** A note's identity and provenance, without its body. Also what a neighbour is. */
+export interface NoteRef {
+  id: string;
+  type: string;
+  compound_smiles: string;
+  tags: string[];
+  created_by: string;
+  source: string;
+  confidence: number;
+  /** Bi-temporal validity. A note outside its window is excluded from retrieval but still
+   *  readable here, which is the point of showing the dates rather than a boolean. */
+  valid_from: string | null;
+  valid_to: string | null;
+}
+
+/** One note as `GET /notes/{id}` returns it: itself, its body, and its neighbourhood. */
+export interface NoteView {
+  note: NoteRef;
+  body: string;
+  neighbors: NoteRef[];
 }
 
 /** The plan a session is proposing, and the hash a decision on it must be bound to. */
@@ -183,8 +226,42 @@ export const api = {
     });
   },
 
-  /** Pending approvals. Degrades to `[]` like `listSessions` — the backend's approval workflow
-   *  has no HTTP surface yet (see ISSUES.md), so a 404 here is the expected answer, not a fault. */
+  /**
+   * The full text of one tool result.
+   *
+   * Called only when a reader asks for one — that is the whole design of the ref/payload split,
+   * and prefetching every result of every turn would re-open exactly the question the 200-character
+   * preview closed.
+   *
+   * Nothing is swallowed here. Unlike the list routes, there is no "the backend might not have
+   * this yet" case worth papering over: the affordance that calls this is only rendered when the
+   * turn carried a `result_ref`, and a service that emits a ref it will not serve is a fault the
+   * caller should see.
+   */
+  getToolResult(sessionId: string, ref: string, getToken: TokenGetter): Promise<StoredToolResult> {
+    return request<StoredToolResult>(`/sessions/${sessionId}/tool-results/${ref}`, getToken);
+  },
+
+  /**
+   * One knowledge note, with its neighbourhood.
+   *
+   * `hops` is clamped upstream; 1 is the service's own default and the depth a citation chip
+   * wants — the note plus what it is directly linked to.
+   *
+   * The id is encoded rather than interpolated raw: unlike a session id, a note id is
+   * `note-{slug}` built from what the note is about, so it can carry characters that would
+   * otherwise change the shape of the path. The BFF's pattern accepts exactly what
+   * `encodeURIComponent` emits.
+   */
+  getNote(noteId: string, getToken: TokenGetter, hops = 1): Promise<NoteView> {
+    return request<NoteView>(
+      `/notes/${encodeURIComponent(noteId)}?hops=${encodeURIComponent(String(hops))}`,
+      getToken,
+    );
+  },
+
+  /** Pending approvals. Degrades to `[]` like `listSessions` — a service whose approval routes
+   *  are missing answers 404, and an empty inbox is the honest reading of that. */
   async listApprovals(getToken: TokenGetter): Promise<PendingApproval[]> {
     try {
       return await request<PendingApproval[]>('/approvals', getToken);

@@ -60,18 +60,16 @@ describe('chatStore', () => {
   it('records verifier signals from the answer', () => {
     const cid = useChatStore.getState().createConversation();
     const mid = useChatStore.getState().startAssistantMessage(cid);
-    useChatStore
-      .getState()
-      .applyEvent(
-        cid,
-        mid,
-        answerEvent({
-          text: 'maybe',
-          confidence: 0.31,
-          unsupported_claims: ['yield was 92%'],
-          review_required: true,
-        }),
-      );
+    useChatStore.getState().applyEvent(
+      cid,
+      mid,
+      answerEvent({
+        text: 'maybe',
+        confidence: 0.31,
+        unsupported_claims: ['yield was 92%'],
+        review_required: true,
+      }),
+    );
 
     const message = assistantOf(cid, mid);
     expect(message.reviewRequired).toBe(true);

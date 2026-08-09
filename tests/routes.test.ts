@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { resolveRoute } from '../server/routes.ts';
 
 const SID = 'a'.repeat(32);
+/** A stored result's ref is the SHA-256 hex digest of the result text: 64 lowercase hex chars. */
+const REF = 'b'.repeat(64);
 
 describe('proxy route whitelist', () => {
   it('resolves every route the UI actually calls', () => {
@@ -19,6 +21,8 @@ describe('proxy route whitelist', () => {
       ['GET', '/api/approvals', '/approvals'],
       ['GET', '/api/approvals/approval-q-42', '/approvals/approval-q-42'],
       ['POST', '/api/approvals/approval-q-42/decision', '/approvals/approval-q-42/decision'],
+      ['GET', `/api/sessions/${SID}/tool-results/${REF}`, `/sessions/${SID}/tool-results/${REF}`],
+      ['GET', '/api/notes/note-suzuki-42', '/notes/note-suzuki-42'],
     ];
     for (const [method, path, upstream] of cases) {
       expect(resolveRoute(method, path), `${method} ${path}`).toMatchObject({ path: upstream });
@@ -112,6 +116,52 @@ describe('proxy route whitelist', () => {
       // A raw (unencoded) slash would change the route's shape, not just its parameter.
       expect(resolveRoute('GET', '/api/approvals/approval-a/b')).toBeNull();
       expect(resolveRoute('GET', `/api/approvals/${'a'.repeat(129)}`)).toBeNull();
+    });
+  });
+
+  describe('tool-result refs', () => {
+    // Narrower than every other id here, and it can be: the ref is defined upstream as the
+    // SHA-256 of the result text, so the set is exactly 64 lowercase hex characters. That
+    // narrowness is the same structural traversal protection the session id gets.
+    it('refuses anything that is not a 64-char lowercase hex digest', () => {
+      for (const bad of [
+        'b'.repeat(63),
+        'b'.repeat(65),
+        'B'.repeat(64),
+        `${'b'.repeat(60)}../x`,
+        'not-a-digest',
+      ]) {
+        expect(resolveRoute('GET', `/api/sessions/${SID}/tool-results/${bad}`), bad).toBeNull();
+      }
+    });
+
+    it('is scoped to a session, so a bare ref is not a route at all', () => {
+      // Upstream, the session is the authorization: a ref names bytes, the link names whose
+      // conversation produced them. A `/tool-results/{ref}` with no session would have to invent
+      // an auth story, and does not exist on either side.
+      expect(resolveRoute('GET', `/api/tool-results/${REF}`)).toBeNull();
+    });
+  });
+
+  describe('note ids', () => {
+    // Same argument as approval ids, same cause: a note id is `note-{slug}` and the slug comes
+    // from whatever the note is about, which for a compound note is a name the model wrote.
+    it.each(['note-suzuki-42', 'note-2-MeTHF', "note-o'brien", 'note-Pd(OAc)2'])(
+      'passes through %s',
+      (id) => {
+        const encoded = encodeURIComponent(id);
+        expect(resolveRoute('GET', `/api/notes/${encoded}`)).toMatchObject({
+          path: `/notes/${encoded}`,
+        });
+      },
+    );
+
+    it('refuses a raw separator, an over-long id, and the wrong verb', () => {
+      expect(resolveRoute('GET', '/api/notes/note-a/b')).toBeNull();
+      expect(resolveRoute('GET', `/api/notes/${'n'.repeat(129)}`)).toBeNull();
+      // The graph is written through the PR gate, never by a client PUT.
+      expect(resolveRoute('POST', '/api/notes/note-1')).toBeNull();
+      expect(resolveRoute('DELETE', '/api/notes/note-1')).toBeNull();
     });
   });
 });

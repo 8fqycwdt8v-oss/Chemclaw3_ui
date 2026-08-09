@@ -143,7 +143,7 @@ const AssistantBubble = memo(function AssistantBubble({
       )}
 
       <AnswerFooter message={message} />
-      <TracePanel trace={message.trace} />
+      <TracePanel trace={message.trace} sessionId={sessionId} />
     </div>
   );
 });

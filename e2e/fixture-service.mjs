@@ -19,6 +19,23 @@ const port = Number(process.argv[2] ?? 4322);
 const SID = 'a'.repeat(32);
 /** A session a shared link can point at, with a transcript behind it. */
 const SHARED_SID = 'b'.repeat(32);
+/** The content address of the stored hazard screen below — 64 hex chars, as the service mints. */
+const RESULT_REF = 'c'.repeat(64);
+
+/** What `screen_hazards` actually returns, of which the streamed preview is the first 200 chars. */
+const HAZARD_RESULT = {
+  verdict: '1 hazard rule(s) matched (most serious: high). A clean screen is not a clearance.',
+  screened: ['CCN=[N+]=[N-]'],
+  flags: [
+    {
+      rule_id: 'organic-azide',
+      severity: 'high',
+      explanation: 'Low carbon-to-nitrogen ratio; shock and friction sensitive.',
+      citation: 'Bretherick’s Handbook, 7th ed.',
+      matched: 'CCN=[N+]=[N-]',
+    },
+  ],
+};
 
 const json = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json' });
@@ -49,7 +66,19 @@ async function streamTurn(req, res) {
   const frames = [
     ['plan', { type: 'plan', todos: ['Check the hazard profile', 'Estimate the pKa'] }],
     ['tool_call', { type: 'tool_call', tool: 'screen_hazards', arguments: '{"smiles":"CCO"}' }],
-    ['tool_result', { type: 'tool_result', tool: 'screen_hazards', result: 'No acute hazards.' }],
+    [
+      'tool_result',
+      {
+        type: 'tool_result',
+        tool: 'screen_hazards',
+        // `preview`, not `result` — the field is named for what it is, and it is truncated. The
+        // ref is how the browser reaches the rest.
+        preview: JSON.stringify(HAZARD_RESULT).slice(0, 200),
+        result_ref: RESULT_REF,
+        note_ids: [],
+        numbers: [],
+      },
+    ],
     ['token', { type: 'token', text: 'The pKa of acetic acid ' }],
     ['token', { type: 'token', text: 'is about 4.76 ' }],
     ['token', { type: 'token', text: 'in water at 25 °C.' }],
@@ -61,6 +90,7 @@ async function streamTurn(req, res) {
         confidence: 0.91,
         review_required: false,
         unsupported_claims: [],
+        verified_by: 'citation-gate',
       },
     ],
   ];
@@ -81,14 +111,60 @@ createServer(async (req, res) => {
   if (path === '/sessions' && req.method === 'POST') return json(res, 200, { session_id: SID });
   if (path === '/sessions' && req.method === 'GET') return json(res, 200, { sessions: [] });
   if (path.endsWith('/messages') && req.method === 'GET') {
-    // A shared-link session has a transcript to pull back; everything else is empty.
+    // A shared-link session has a transcript to pull back; everything else is empty. The shape
+    // is the service's: an index, and the tool calls behind each message.
     if (path.includes(SHARED_SID)) {
       return json(res, 200, [
-        { role: 'user', text: 'What did we decide about the ligand?' },
-        { role: 'assistant', text: 'BrettPhos, at 1.2 equiv base.' },
+        {
+          index: 0,
+          role: 'user',
+          text: 'What did we decide about the ligand?',
+          tool_calls: [],
+        },
+        {
+          index: 1,
+          role: 'assistant',
+          text: 'BrettPhos, at 1.2 equiv base.',
+          tool_calls: [
+            { tool: 'gather_evidence', arguments: '{"query":"ligand"}', result: '2 notes' },
+          ],
+        },
       ]);
     }
     return json(res, 200, []);
+  }
+
+  // The untruncated result behind the ref the turn streamed.
+  if (path.includes('/tool-results/') && req.method === 'GET') {
+    const ref = path.split('/tool-results/')[1];
+    if (ref !== RESULT_REF) return json(res, 404, { detail: 'unknown result' });
+    const text = JSON.stringify(HAZARD_RESULT);
+    return json(res, 200, {
+      ref,
+      tool: 'screen_hazards',
+      correlation_id: 'turn-e2e-1',
+      byte_size: text.length,
+      text,
+    });
+  }
+
+  // One knowledge note, so a citation chip resolves instead of prefilling a question.
+  if (path.startsWith('/notes/') && req.method === 'GET') {
+    return json(res, 200, {
+      note: {
+        id: decodeURIComponent(path.slice('/notes/'.length)),
+        type: 'reaction',
+        compound_smiles: '',
+        tags: ['suzuki'],
+        created_by: 'agent',
+        source: 'eln-ord',
+        confidence: 0.82,
+        valid_from: '2026-01-01T00:00:00Z',
+        valid_to: null,
+      },
+      body: 'Ran in 2-MeTHF at 70 °C; 92% isolated after aqueous workup.',
+      neighbors: [],
+    });
   }
 
   if (path.endsWith('/messages') && req.method === 'POST') {

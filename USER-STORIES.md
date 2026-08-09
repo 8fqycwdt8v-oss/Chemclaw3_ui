@@ -30,7 +30,10 @@ that they exist _for a UI_. `GET /notes/{id}`:
 That surface is this one. The UI's event contract and its BFF route whitelist both froze before
 those arrived.
 
-**Of 24 workflows: 2 `SERVED`, 13 `PROSE-ONLY`, 5 `NO-UI`, 2 `DEFECT`, 3 `BLOCKED-BACKEND`.**
+**As first written, of 24 workflows: 2 `SERVED`, 13 `PROSE-ONLY`, 5 `NO-UI`, 2 `DEFECT`,
+3 `BLOCKED-BACKEND`.** Seven have moved since — see [What has changed](#what-has-changed) at the
+end. The verdict columns below are kept current; the argument is not rewritten, because it is the
+reason the work was chosen in this order.
 
 Both `SERVED` stories are human-in-the-loop gates — answering a durable hold, approving a harness
 plan — and both are genuinely good: confirmed, attributable, hash-bound, honest when they degrade.
@@ -65,29 +68,31 @@ between a record and a recollection.
 | #      | Persona and story                                                   | Aim                                                                                                                                                      | Backend                                                                                                                               | Verdict      |
 | ------ | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
 | **A1** | Process chemist: _"how was a coupling like this run before?"_       | A starting point grounded in our own ELN, with every claim traceable to the record behind it                                                             | `gather_evidence` over graph + ELN + fingerprint sources; `answer.confidence`, `unsupported_claims`, `review_required`, `verified_by` | `PROSE-ONLY` |
-| **A2** | Reviewer: _"which note is that claim from, and is it still valid?"_ | Open the cited note with its provenance — `created_by`, `source`, `confidence`, `valid_from`/`valid_to` — and its neighbours, without leaving the thread | `GET /notes/{id}?hops=N` → `NoteView`                                                                                                 | `NO-UI`      |
-| **A3** | Chemist: _"show me what the tool returned, not the paraphrase"_     | Read the hazard table, the charge table, the solvent ranking as data — and check the model did not round it                                              | `tool_result.result_ref` + `GET /sessions/{id}/tool-results/{ref}`                                                                    | `PROSE-ONLY` |
-| **A4** | Chemist: _"why did that turn stop?"_                                | Tell a wall-clock timeout from a loop cap from an exhausted budget, and know whether retrying is safe                                                    | `error.code` (a closed 8-value `Literal`), `error.retryable`, `error.correlation_id`                                                  | `DEFECT`     |
+| **A2** | Reviewer: _"which note is that claim from, and is it still valid?"_ | Open the cited note with its provenance — `created_by`, `source`, `confidence`, `valid_from`/`valid_to` — and its neighbours, without leaving the thread | `GET /notes/{id}?hops=N` → `NoteView`                                                                                                 | **`SERVED`** |
+| **A3** | Chemist: _"show me what the tool returned, not the paraphrase"_     | Read the hazard table, the charge table, the solvent ranking as data — and check the model did not round it                                              | `tool_result.result_ref` + `GET /sessions/{id}/tool-results/{ref}`                                                                    | **`SERVED`** |
+| **A4** | Chemist: _"why did that turn stop?"_                                | Tell a wall-clock timeout from a loop cap from an exhausted budget, and know whether retrying is safe                                                    | `error.code` (a closed 8-value `Literal`), `error.retryable`, `error.correlation_id`                                                  | **`SERVED`** |
 
 **A1.** The verifier surfacing is one of the better things here — `ReviewRequiredPill` sits _above_
-the answer, not below it, and `unsupported_claims` are listed. But `verified_by` distinguishes an
-LLM judge from the deterministic citation gate, and the UI does not read it; a `confidence` of 1.0
-means very different things under the two backends.
+the answer, not below it, and `unsupported_claims` are listed, and the score now says which verifier
+produced it. Still `PROSE-ONLY` because the evidence behind the answer is a step away rather than in
+it: the citations resolve (A2) and the tool results open (A3), but the answer itself is prose.
 
-**A2.** `CitationChip` cannot resolve anything. Clicking one prefills the composer with
-`Expand note-123 — what are the conditions, outcomes, and caveats?` and makes the chemist send
-another turn. That was the right call when there was no read route. There is one now.
+**A2.** ~~`CitationChip` cannot resolve anything.~~ **Built.** A chip opens the note, with its
+provenance, its validity window and its neighbours, and warns when the window has closed — a
+citation in an old answer can resolve to a note the graph no longer retrieves, and that is not
+something a reader can infer. The old prefill survives as the failure path, because a `qm-…`
+reference names a job whose note may never have been written.
 
-**A3.** This is the single biggest ceiling in the product. `ToolResultEvent.preview` is capped at
-200 characters _on purpose_ — "never a whole evidence sweep streamed to a browser" — and the
-untruncated payload is content-addressed behind a route built to serve exactly this. The UI reads
-neither `result_ref` nor `note_ids` nor `numbers`.
+**A3.** ~~The single biggest ceiling in the product.~~ **Built.** A trace row whose result was
+stored offers "See the full result", which fetches it once and renders it: typed for the hazard
+screen, the ICH lookup and the charge table, a generic table for anything shaped like records, and
+the raw text otherwise. The preview stays — it is what makes the row scannable — and the panel is
+what makes its numbers checkable.
 
-**A4.** `ErrorEvent` in `shared/events.ts` carries only `message`, so every in-stream error becomes
-`ApiErrorKind` `agent` with no action offered. A `budget_exhausted` arriving as an event rather
-than a 429 does not lock the composer; a `turn_timeout` is indistinguishable from a
-`loop_cap_reached`; `correlation_id` — the one field that joins a complaint to the audit trail —
-never reaches the user.
+**A4.** ~~`ErrorEvent` carries only `message`.~~ **Fixed.** `code`, `retryable` and
+`correlation_id` are read: a `budget_exhausted` arriving as an event now locks the composer exactly
+as the 429 does, a failure the service marked retryable is offered a Retry, and the correlation id
+is in the banner where it can be copied into a ticket.
 
 ---
 
@@ -121,16 +126,18 @@ one thing `similar_reactions` returns cannot be drawn.
 
 | #      | Persona and story                                                 | Aim                                                                                | Backend                                                                       | Verdict           |
 | ------ | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ----------------- |
-| **C1** | Chemist: submit a DFT or conformer job and get on with the day    | Know it landed, be told when it finishes — **and be told when it fails**           | `job_started` / `job_completed` / `job_failed` on `GET /sessions/{id}/events` | `DEFECT`          |
+| **C1** | Chemist: submit a DFT or conformer job and get on with the day    | Know it landed, be told when it finishes — **and be told when it fails**           | `job_started` / `job_completed` / `job_failed` on `GET /sessions/{id}/events` | **`SERVED`**      |
 | **C2** | Chemist: _"what is running, and can I stop it?"_                  | Kill a mis-launched HPC job before it burns a queue slot                           | `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` (reviewer role)            | `NO-UI`           |
 | **C3** | Chemist: _"what did we run three months ago, and why?"_           | Reuse a result instead of re-running it — `job_records` keeps the launch rationale | `find_past_jobs`, `GET /jobs?text=&connector=`                                | `NO-UI`           |
 | **C4** | Computational chemist: download the optimized geometry or Hessian | Take it into another package                                                       | `list_artifacts` / `fetch_artifact` — text only, refuses binaries             | `BLOCKED-BACKEND` |
 
-**C1 is a live defect and the sharpest one in this document.** `job_failed` is absent from
-`EVENT_TYPES` in `shared/events.ts`, so `normalizeEvent` returns `null` for it and both consumers
-— the turn stream and `useJobStreams` — drop it silently. A durable job that fails renders as
-_"Started qm job-… · runs asynchronously"_ and stays that way forever. The chemist waits for a
-result that is never coming, and the trace panel tells them it is still running.
+**C1 was the sharpest defect in this document, and is fixed.** `job_failed` was absent from
+`EVENT_TYPES`, so `normalizeEvent` returned `null` and both consumers — the turn stream and
+`useJobStreams` — dropped it silently. A durable job that failed rendered as _"Started qm job-… ·
+runs asynchronously"_ and stayed that way forever: the chemist waited for a result that was never
+coming, and the trace panel told them it was still running. It now renders as a failure with the
+service's reason, in the trace and in the cross-turn feed, and the launch row's badge is retracted
+on either ending rather than on neither.
 
 **C2.** There is no way to see or cancel a durable job. The only escape from a wedged session is
 the banner's "Start a fresh session", which abandons the job rather than stopping it.
@@ -144,8 +151,8 @@ browser a file.
 
 | #      | Persona and story                                 | Aim                                                       | Backend                                                                                                                                               | Verdict      |
 | ------ | ------------------------------------------------- | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| **D1** | Process chemist: screen a mixture before ordering | A documented go/no-go, with the citation behind each flag | `screen_hazards` — 16 cited SMARTS rules across nine energetic classes plus pairwise incompatibilities, sorted by severity; `screen_genotoxic_alerts` | `PROSE-ONLY` |
-| **D2** | Analytical chemist: quote an ICH Q3C or Q3D limit | Put a limit in a document without fabricating it          | `ich_impurity_limit` — guideline, revision, table, and an explicit `limit: null` on a miss                                                            | `PROSE-ONLY` |
+| **D1** | Process chemist: screen a mixture before ordering | A documented go/no-go, with the citation behind each flag | `screen_hazards` — 16 cited SMARTS rules across nine energetic classes plus pairwise incompatibilities, sorted by severity; `screen_genotoxic_alerts` | **`SERVED`** |
+| **D2** | Analytical chemist: quote an ICH Q3C or Q3D limit | Put a limit in a document without fabricating it          | `ich_impurity_limit` — guideline, revision, table, and an explicit `limit: null` on a miss                                                            | **`SERVED`** |
 
 **D1.** The service's strongest single capability, delivered through the narrowest channel it has.
 And the caveat that carries the whole tool — _a clean screen is explicitly **not** a clearance_ —
@@ -231,7 +238,7 @@ is unreachable from the browser.
 | #      | Persona and story                                                  | Aim                                                                          | Backend                                                                                 | Verdict           |
 | ------ | ------------------------------------------------------------------ | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ----------------- |
 | **H1** | Chemist: use a cheap narrow agent for a lookup                     | Not pay for a full research loop to convert a pKa                            | `SessionIn.profile` + `GET /profiles`                                                   | `NO-UI`           |
-| **H2** | Chemist: reload and still see the agent's work                     | The trace survives a refresh from the _server_, not just from `localStorage` | `TranscriptMessage.tool_calls` — `tool`, `arguments`, `result`                          | `DEFECT`          |
+| **H2** | Chemist: reload and still see the agent's work                     | The trace survives a refresh from the _server_, not just from `localStorage` | `TranscriptMessage.tool_calls` — `tool`, `arguments`, `result`                          | **`SERVED`**      |
 | **H3** | Chemist: send a colleague a link to this conversation              | A link that still resolves next month                                        | The session id is a disposable handle                                                   | `BLOCKED-BACKEND` |
 | **H4** | Chemist: be told when new ELN data matches a question I care about | Standing queries instead of re-asking                                        | `watch_for` / `list_watches` / `stop_watching` + `DigestWorkflow`                       | `BLOCKED-BACKEND` |
 | **H5** | Operator: is the ELN sync actually running?                        | Catch a silently failing sync before the agent goes stale for weeks          | `GET /schedules` — `last_run`, `runs_total`, `skipped_overlap`, `running_now`, `paused` | `NO-UI`           |
@@ -265,6 +272,30 @@ then never listed or cancelled from the browser.
 - **Effort is not estimated.** But the shape is worth stating: seven of the nine non-`PROSE-ONLY`
   gaps are served by routes the service already has, and adding a route to `server/routes.ts` is a
   regex and a test. The expensive part is the rendering, not the plumbing.
+
+---
+
+## What has changed
+
+This document was written as an audit and is being worked. What has shipped, and what each move
+cost — kept as a record, because the argument for the next batch is that these were chosen the same
+way.
+
+| Shipped                                                                                                                                                                                                                                                                                                       | Stories it moved |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| `job_failed` added to `EVENT_TYPES` — the event existed on the wire and was dropped in `normalizeEvent` — with a `JobFailureCard` in both places a job can end, and a launch row that retracts its "runs asynchronously" badge on either ending                                                               | C1               |
+| `error.code` / `retryable` / `correlation_id` read, so a budget exhausted as an event locks the composer as the 429 does, a retryable failure is offered a Retry, and the reference is in the banner                                                                                                          | A4               |
+| `TranscriptMessage.tool_calls` declared and rebuilt into the trace; the phantom `created_at` removed                                                                                                                                                                                                          | H2               |
+| `answer.verified_by` surfaced beside the confidence, because a judge's 0.82 is not a citation gate's 0.82                                                                                                                                                                                                     | A1 (partly)      |
+| `GET /sessions/{id}/tool-results/{ref}` whitelisted; a "See the full result" control on any stored result; typed renderers for the hazard screen, the ICH lookup and the charge table, a generic table for anything record-shaped, raw text otherwise — with the `verdict` always above the data it qualifies | A3, D1, D2       |
+| `GET /notes/{id}` whitelisted; a citation chip resolves to the note with its provenance, its validity window and its neighbours, and falls back to asking the agent when the reference is not a readable note                                                                                                 | A2               |
+
+One thing fell out of the work rather than being planned, and is worth recording because it was
+invisible until a realistic payload went through it: the trace panel's `<pre>` blocks and the new
+tables scroll horizontally, and a scrollable region nothing inside it can focus is unreachable by
+keyboard — the content past the right edge does not exist for anyone not using a pointer. It went
+unnoticed for as long as the test fixtures were short enough not to overflow. `axe` caught it the
+first time a real 200-character tool result did.
 
 ---
 

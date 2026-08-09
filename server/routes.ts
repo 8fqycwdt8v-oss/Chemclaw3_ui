@@ -38,6 +38,29 @@ const SID = '([0-9a-f]{32})';
  */
 const APPROVAL = "([A-Za-z0-9._:~!*'()%-]{1,128})";
 
+/**
+ * Knowledge-note ids.
+ *
+ * The same argument as `APPROVAL`, from the same cause: a note id is `note-{slug}` where the slug
+ * comes from whatever the note is about, and for a compound note that is a name the model wrote.
+ * So the set is again exactly what `encodeURIComponent` can emit, and again a raw `/` fails to
+ * match because that changes the route's shape rather than its parameter.
+ *
+ * It gets its own constant rather than sharing `APPROVAL` because the two are the same set for
+ * different reasons, and the next time either service tightens or widens its id scheme, only one
+ * of these should move.
+ */
+const NOTE = "([A-Za-z0-9._:~!*'()%-]{1,128})";
+
+/**
+ * A stored tool result's ref.
+ *
+ * Narrower than every other id here, and it can be: the service defines the ref as the SHA-256
+ * hex digest of the result text, so 64 lowercase hex characters is the whole set — the same kind
+ * of structural traversal protection `SID` gets, for the same reason.
+ */
+const RESULT_REF = '([0-9a-f]{64})';
+
 export interface Route {
   method: string;
   pattern: RegExp;
@@ -80,6 +103,30 @@ export const ROUTES: readonly Route[] = [
     method: 'POST',
     pattern: new RegExp(`^/api/sessions/${SID}/attachments$`),
     target: (m) => `/sessions/${m[1]}/attachments`,
+    sse: false,
+  },
+
+  // The untruncated text of one tool result.
+  //
+  // `ToolResultEvent.preview` is 200 characters and the service says it will stay that way; this
+  // is the other half of that split. Session-scoped upstream, so the ownership check the turn
+  // stream already passed covers it too — a ref from someone else's session finds nothing.
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/tool-results/${RESULT_REF}$`),
+    target: (m) => `/sessions/${m[1]}/tool-results/${m[2]}`,
+    sse: false,
+  },
+
+  // One knowledge note, with its provenance and its neighbourhood.
+  //
+  // Whitelisted so a `note-…` citation resolves to the note it cites instead of prefilling a
+  // question about it. `hops` rides through as a query parameter; the proxy forwards the query
+  // string, and the service clamps it.
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/notes/${NOTE}$`),
+    target: (m) => `/notes/${m[1]}`,
     sse: false,
   },
 

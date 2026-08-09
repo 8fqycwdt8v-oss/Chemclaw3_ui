@@ -44,6 +44,15 @@ export default tseslint.config(
       // icon-only control now carries an aria-label; keep it that way.
       'jsx-a11y/control-has-associated-label': 'off', // too many false positives on Radix asChild
       'jsx-a11y/no-autofocus': 'error',
+
+      // Two checkers disagree here and both are right, so the rule is widened rather than
+      // silenced. `axe` fails a scrollable region that nothing inside it can focus — the content
+      // past the edge is unreachable without a pointer — and the fix is `tabindex="0"` on the
+      // scroller. This rule's default then objects that a `<pre>` or a `<div>` is not
+      // interactive. The markup that satisfies both is a *named* `role="region"`, which is also
+      // what WAI-ARIA recommends for a focusable scroll container, so `region` joins the allowed
+      // roles. A bare `tabIndex` on an unnamed, unroled element is still an error.
+      'jsx-a11y/no-noninteractive-tabindex': ['error', { roles: ['tabpanel', 'region'] }],
     },
   },
 

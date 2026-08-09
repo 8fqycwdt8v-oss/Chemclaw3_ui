@@ -6,6 +6,7 @@
  */
 
 import { api } from '../api/client.ts';
+import { config } from '../env.ts';
 import { prefetchMarkdown } from '../components/LazyMarkdown.tsx';
 import { ApiError } from '../api/errors.ts';
 import { streamTurn } from '../api/streamTurn.ts';
@@ -20,15 +21,56 @@ export interface SendOptions {
   auth: AuthProvider;
 }
 
-/** Ensure the conversation has a live server session, creating one if needed. */
+/**
+ * Sessions being minted right now, keyed by conversation.
+ *
+ * Module scope, not the store (a Promise is not serialisable, and `clearAll` would drop it
+ * mid-flight) and not a ref (the composer's keystroke and the send path are different callers that
+ * must share). It also survives StrictMode's double-invoke, which is the bug this defends.
+ */
+const sessionsInFlight = new Map<string, Promise<string>>();
+
+/**
+ * Ensure the conversation has a live server session, creating one if needed.
+ *
+ * Shared by the send path and by `warmSession`, so a warm already in flight is awaited rather than
+ * raced. Two concurrent creates would otherwise mint two backend sessions and leave the store
+ * pointing at the one the in-flight turn is NOT using — context lost with nothing to flag it.
+ */
 async function ensureSession(conversationId: string, auth: AuthProvider): Promise<string> {
-  const store = useChatStore.getState();
-  const existing = store.conversations[conversationId]?.sessionId;
+  const existing = useChatStore.getState().conversations[conversationId]?.sessionId;
   if (existing) return existing;
 
-  const { session_id } = await api.createSession(() => auth.getAccessToken());
-  useChatStore.getState().setSessionId(conversationId, session_id);
-  return session_id;
+  const pending = sessionsInFlight.get(conversationId);
+  if (pending) return pending;
+
+  const creating = api
+    .createSession(() => auth.getAccessToken())
+    // Compare-and-set: whoever gets there first wins, and both callers are told the winner. A
+    // loser's session is an orphan that ages out of the backend's LRU.
+    .then(({ session_id }) =>
+      useChatStore.getState().setSessionIdIfAbsent(conversationId, session_id),
+    )
+    .finally(() => sessionsInFlight.delete(conversationId));
+
+  sessionsInFlight.set(conversationId, creating);
+  return creating;
+}
+
+/**
+ * Mint the session ahead of the first send.
+ *
+ * The first message otherwise costs two sequential round-trips — `POST /sessions`, then
+ * `POST /messages` — with the user's bubble and a spinner already on screen for both. Doing the
+ * first one while they are still typing hides it entirely.
+ *
+ * Failure is deliberately silent: this is speculative, and `ensureSession` will try again for
+ * real when they actually send.
+ */
+export function warmSession(conversationId: string, auth: AuthProvider): void {
+  if (!config.warmSessions) return;
+  if (useChatStore.getState().conversations[conversationId]?.sessionId) return;
+  void ensureSession(conversationId, auth).catch(() => undefined);
 }
 
 /**

@@ -21,15 +21,120 @@ import type {
   TraceEntry,
 } from './types.ts';
 
+/**
+ * One completion, plus what the wire event does not carry.
+ *
+ * `JobCompletedEvent` has a job id and a summary and nothing else — no session, no timestamp. The
+ * consumer knows which stream it opened, so the association is attached at that boundary rather
+ * than by inventing fields on the shared contract.
+ */
+export interface JobFeedItem {
+  event: JobCompletedEvent;
+  sessionId: string;
+  conversationId: string | null;
+  /** When WE saw it. The backend sends no completion time, so the UI must not imply one. */
+  receivedAt: number;
+  seen: boolean;
+  dismissed: boolean;
+}
+
 /** Exactly the slice `partialize` writes to localStorage, and what `migrate` must return. */
 interface PersistedState {
   conversations: Record<string, Conversation>;
   order: string[];
   activeId: string | null;
+  jobFeed: JobFeedItem[];
+  notifyOnJobComplete: boolean;
+}
+
+/**
+ * One migration step. Each takes the shape the previous version wrote and returns the next, so
+ * `migrate` can compose however many the reader has skipped. See the note on `migrate` below.
+ */
+function migrateV1toV2(state: Partial<PersistedState>): Partial<PersistedState> {
+  const conversations: Record<string, Conversation> = {};
+  for (const [id, conversation] of Object.entries(state.conversations ?? {})) {
+    if (!conversation) continue;
+    conversations[id] = {
+      ...conversation,
+      messages: (conversation.messages ?? []).map((m) =>
+        m.role === 'assistant' && m.status === 'streaming'
+          ? { ...m, status: 'aborted' as const }
+          : m,
+      ),
+    };
+  }
+  const order = (state.order ?? []).filter((id) => conversations[id]);
+  return {
+    ...state,
+    conversations,
+    order,
+    activeId: state.activeId && conversations[state.activeId] ? state.activeId : (order[0] ?? null),
+  };
+}
+
+function migrateV2toV3(state: Partial<PersistedState>): Partial<PersistedState> {
+  const conversations: Record<string, Conversation> = {};
+  for (const [id, conversation] of Object.entries(state.conversations ?? {})) {
+    if (!conversation) continue;
+    // The field did not exist in v2, whatever the current type says the shape is.
+    const origin = (conversation as Partial<Conversation>).sessionOrigin ?? 'local';
+    conversations[id] = { ...conversation, sessionOrigin: origin };
+  }
+  return {
+    ...state,
+    conversations,
+    // Empty, not reconstructed: a completion is an event we were told about, and inventing cards
+    // for jobs nobody reported would be worse than starting the feed clean.
+    jobFeed: state.jobFeed ?? [],
+    notifyOnJobComplete: state.notifyOnJobComplete ?? false,
+  };
+}
+
+/**
+ * Bring whatever is on disk up to the current shape.
+ *
+ * A chain of steps rather than one function with an early return, so each bump only has to
+ * describe its own delta and the next one composes on top. The shape this replaced —
+ * `if (version >= 2) return persisted` — quietly stopped applying to anything once v2 was the
+ * floor, which is exactly the bug you get the first time you add a field afterwards.
+ *
+ * Unknown or older-than-v1 state falls back to a clean slate rather than guessing.
+ *
+ *  v1 -> v2  no new fields. Repairs state the old code could persist but the new code assumes
+ *            away: a message left mid-stream would rehydrate as 'streaming' and spin forever,
+ *            because there is no resume endpoint.
+ *  v2 -> v3  adds the durable job feed and the notification preference, and makes
+ *            `sessionOrigin` explicit. Everything already on disk was created locally, so 'local'
+ *            is the honest default — 'server' would send the transcript rehydrate off to
+ *            GET /messages for conversations that never had a remote copy.
+ *
+ * Exported because it is the only part of the persist config that can be wrong in a way nobody
+ * notices until an upgrade lands on a real machine.
+ */
+export function migratePersisted(persisted: unknown, version: number): PersistedState {
+  const steps: ((s: Partial<PersistedState>) => Partial<PersistedState>)[] = [];
+  if (version < 2) steps.push(migrateV1toV2);
+  if (version < 3) steps.push(migrateV2toV3);
+
+  const state = persisted as Partial<PersistedState> | undefined;
+  if (!state?.conversations || !state.order)
+    return {
+      conversations: {},
+      order: [],
+      activeId: null,
+      jobFeed: [],
+      notifyOnJobComplete: false,
+    };
+
+  return steps.reduce<Partial<PersistedState>>((acc, step) => step(acc), state) as PersistedState;
 }
 
 /** Keep persisted state bounded — see `partialize` below. */
 const MAX_CONVERSATIONS = 30;
+const MAX_JOB_FEED = 50;
+/** A completion older than this is history, not news. Bounds the persisted feed's size too. */
+const JOB_FEED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_TRACE_ENTRIES = 200;
 const TITLE_MAX = 60;
 
@@ -54,6 +159,9 @@ export function newConversation(): Conversation {
     updatedAt: now,
     messages: [],
     contextLost: false,
+    // Locally minted until something says otherwise; the server merge and the shared-link
+    // resolver both override this explicitly.
+    sessionOrigin: 'local',
   };
 }
 
@@ -166,8 +274,13 @@ export interface ChatState {
    *  the composer does not unmount when `conversationId` changes, so a draft typed in one could
    *  be sent into another. */
   drafts: Record<string, string>;
-  /** Cross-turn job completions from `GET /sessions/{id}/events`. Not persisted. */
-  jobFeed: JobCompletedEvent[];
+  /** Cross-turn job completions from `GET /sessions/{id}/events`. Persisted since v3. */
+  jobFeed: JobFeedItem[];
+  /** True once the backend has told us twice that we are over its stream cap. */
+  jobStreamsThrottled: boolean;
+  /** Opt-in, and deliberately separate from `Notification.permission` — a browser-level
+   *  revocation must read as "blocked", not as "off". */
+  notifyOnJobComplete: boolean;
   streaming: { conversationId: string; messageId: string; abort: AbortController } | null;
 
   createConversation: () => string;
@@ -192,8 +305,14 @@ export interface ChatState {
   setBanner: (banner: Banner | null) => void;
   setDraft: (conversationId: string, text: string) => void;
   setStreaming: (s: ChatState['streaming']) => void;
-  pushJobCompleted: (event: JobCompletedEvent) => void;
+  pushJobCompleted: (event: JobCompletedEvent, sessionId: string) => void;
   dismissJobCompleted: (jobId: string) => void;
+  restoreJobCompleted: (jobId: string) => void;
+  markJobsSeen: () => void;
+  setJobStreamsThrottled: (throttled: boolean) => void;
+  setNotifyOnJobComplete: (enabled: boolean) => void;
+  /** Set the session id only if there is not one already, returning whichever id now wins. */
+  setSessionIdIfAbsent: (conversationId: string, sessionId: string) => string;
 }
 
 /** Apply `fn` to the assistant message with `messageId`, leaving all other state untouched. */
@@ -229,6 +348,8 @@ export const useChatStore = create<ChatState>()(
       banner: null,
       drafts: {},
       jobFeed: [],
+      jobStreamsThrottled: false,
+      notifyOnJobComplete: false,
       streaming: null,
 
       createConversation() {
@@ -286,6 +407,7 @@ export const useChatStore = create<ChatState>()(
             order: [fresh.id],
             activeId: fresh.id,
             drafts: {},
+            jobStreamsThrottled: false,
             composerLock: false,
             banner: null,
             jobFeed: [],
@@ -474,16 +596,71 @@ export const useChatStore = create<ChatState>()(
       setStreaming(streaming) {
         set({ streaming });
       },
-      pushJobCompleted(event) {
-        // Newest first, and deduplicated by job id: the push-back stream reconnects with backoff
-        // and an at-least-once delivery can repeat a completion, which would otherwise stack up as
-        // two identical cards.
+      pushJobCompleted(event, sessionId) {
+        set((s) => {
+          const existing = s.jobFeed.find((j) => j.event.job_id === event.job_id);
+          // Re-delivery is expected: the stream reconnects with backoff and delivery is
+          // at-least-once. Keep the ORIGINAL item — replacing it would move a three-day-old card
+          // to the front of a persisted feed on every reconnect.
+          if (existing) return {};
+          const conversation = Object.values(s.conversations).find(
+            (c) => c.sessionId === sessionId,
+          );
+          const item: JobFeedItem = {
+            event,
+            sessionId,
+            conversationId: conversation?.id ?? null,
+            receivedAt: Date.now(),
+            seen: false,
+            dismissed: false,
+          };
+          return { jobFeed: [item, ...s.jobFeed].slice(0, MAX_JOB_FEED) };
+        });
+      },
+
+      restoreJobCompleted(jobId) {
         set((s) => ({
-          jobFeed: [event, ...s.jobFeed.filter((j) => j.job_id !== event.job_id)].slice(0, 50),
+          jobFeed: s.jobFeed.map((j) =>
+            j.event.job_id === jobId ? { ...j, dismissed: false } : j,
+          ),
         }));
       },
+
+      markJobsSeen() {
+        set((s) => {
+          if (s.jobFeed.every((j) => j.seen)) return {};
+          return { jobFeed: s.jobFeed.map((j) => (j.seen ? j : { ...j, seen: true })) };
+        });
+      },
+
+      setJobStreamsThrottled(throttled) {
+        if (get().jobStreamsThrottled === throttled) return;
+        set({ jobStreamsThrottled: throttled });
+      },
+
+      setNotifyOnJobComplete(enabled) {
+        set({ notifyOnJobComplete: enabled });
+      },
+
+      setSessionIdIfAbsent(conversationId, sessionId) {
+        // Compare-and-set, returning the winner. Two warms racing would otherwise mint two backend
+        // sessions and leave the store pointing at the one the in-flight turn is NOT using —
+        // silent context loss with nothing to flag it. The loser is an orphan that ages out of the
+        // backend's LRU.
+        const existing = get().conversations[conversationId]?.sessionId;
+        if (existing) return existing;
+        get().setSessionId(conversationId, sessionId);
+        return get().conversations[conversationId]?.sessionId ?? sessionId;
+      },
+
       dismissJobCompleted(jobId) {
-        set((s) => ({ jobFeed: s.jobFeed.filter((j) => j.job_id !== jobId) }));
+        // A flag, not a delete. The feed is durable now, so an unguarded click on a 24px control
+        // would otherwise be a permanent deletion of the only copy — the backend's is consumed.
+        set((s) => ({
+          jobFeed: s.jobFeed.map((j) =>
+            j.event.job_id === jobId ? { ...j, dismissed: true, seen: true } : j,
+          ),
+        }));
       },
     }),
     {
@@ -494,42 +671,10 @@ export const useChatStore = create<ChatState>()(
       // bumping the key again is a silent wipe of everyone's local history, which is only ever
       // acceptable as the emergency it was the first time.
       name: 'chemclaw3.chat.v2',
-      version: 2,
+      version: 3,
       storage: createJSONStorage(() => localStorage),
 
-      /**
-       * v1 -> v2 adds no fields; it exists to establish the upgrade path and to repair state the
-       * old code could persist but the new code assumes away. Unknown/older versions fall back to
-       * a clean slate rather than guessing.
-       */
-      migrate: (persisted, version) => {
-        if (version >= 2) return persisted as PersistedState;
-        const state = persisted as Partial<PersistedState> | undefined;
-        if (!state?.conversations || !state.order)
-          return { conversations: {}, order: [], activeId: null };
-
-        // A message left mid-stream by a build that predates the partialize guard would otherwise
-        // rehydrate as 'streaming' and spin forever — there is no resume endpoint.
-        const conversations: Record<string, Conversation> = {};
-        for (const [id, conversation] of Object.entries(state.conversations)) {
-          if (!conversation) continue;
-          conversations[id] = {
-            ...conversation,
-            messages: (conversation.messages ?? []).map((m) =>
-              m.role === 'assistant' && m.status === 'streaming'
-                ? { ...m, status: 'aborted' as const }
-                : m,
-            ),
-          };
-        }
-        const order = state.order.filter((id) => conversations[id]);
-        return {
-          conversations,
-          order,
-          activeId:
-            state.activeId && conversations[state.activeId] ? state.activeId : (order[0] ?? null),
-        };
-      },
+      migrate: migratePersisted,
 
       partialize: (state) => {
         // Keep only the newest conversations, and never persist a message still marked
@@ -555,9 +700,25 @@ export const useChatStore = create<ChatState>()(
             ),
           };
         }
+
+        // The feed is durable now, but bounded twice: dropped with the conversation it belongs to
+        // (so `MAX_CONVERSATIONS` trimming cannot leave orphan cards), and aged out, without which
+        // it would only ever grow.
+        const cutoff = Date.now() - JOB_FEED_MAX_AGE_MS;
+        const jobFeed = state.jobFeed.filter(
+          (j) =>
+            j.receivedAt > cutoff && (j.conversationId === null || conversations[j.conversationId]),
+        );
+
         // sessionId IS persisted: it may well still be alive after a reload, and if it is not,
         // the 404 path recreates it transparently.
-        return { conversations, order, activeId: state.activeId };
+        return {
+          conversations,
+          order,
+          activeId: state.activeId,
+          jobFeed,
+          notifyOnJobComplete: state.notifyOnJobComplete,
+        };
       },
     },
   ),

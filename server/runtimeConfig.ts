@@ -17,6 +17,8 @@ export interface RuntimeConfig {
   apiScope: string;
   apiBase: string;
   appVersion: string;
+  /** See `warmSessions` in src/env.ts — a kill switch for pre-creating backend sessions. */
+  warmSessions: boolean;
 }
 
 export function runtimeConfig(): RuntimeConfig {
@@ -27,6 +29,7 @@ export function runtimeConfig(): RuntimeConfig {
     apiScope: cfg.apiScope,
     apiBase: '/api',
     appVersion: cfg.appVersion,
+    warmSessions: cfg.warmSessions,
   };
 }
 

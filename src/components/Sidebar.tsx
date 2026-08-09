@@ -14,7 +14,8 @@
  */
 
 import { useEffect, useState } from 'react';
-import { MoreHorizontal, Plus, Trash2, TriangleAlert } from 'lucide-react';
+import { useNavigate } from 'react-router';
+import { MoreHorizontal, Plus, Search, Trash2, TriangleAlert } from 'lucide-react';
 import { api } from '../api/client.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore, newConversation } from '../state/chatStore.ts';
@@ -30,19 +31,27 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { ConfirmDialog } from '@/components/chem/ConfirmDialog';
 import { StatusDot } from '@/components/chem/StatusDot';
+import { NotifyToggle } from '@/components/chem/NotifyToggle';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 /** Pull server-side sessions once. Anything not known locally is added as a stub. */
 function useServerSessions(): 'idle' | 'degraded' {
-  const { auth } = useAuth();
+  const { auth, ready } = useAuth();
   const [health, setHealth] = useState<'idle' | 'degraded'>('idle');
 
   useEffect(() => {
+    // The placeholder provider throws rather than sending an unauthenticated request, so running
+    // this before auth resolves would set `degraded` on every single boot.
+    if (!ready) return;
     let cancelled = false;
     void (async () => {
       try {
         const remote = await api.listSessions(() => auth.getAccessToken());
-        if (cancelled || remote.length === 0) return;
+        if (cancelled) return;
+        // Reset on success: without this a single failure latched the warning permanently, so a
+        // transient hiccup left "showing local conversations only" on screen for the session.
+        setHealth('idle');
+        if (remote.length === 0) return;
         const state = useChatStore.getState();
         const known = new Set(
           Object.values(state.conversations)
@@ -65,6 +74,8 @@ function useServerSessions(): 'idle' | 'degraded' {
               // Was left at Date.now() from newConversation(), so every conversation restored
               // from the server read "just now" — the one thing a timestamp exists to deny.
               updatedAt: created,
+              // The backend has a transcript for this one, so the rehydrate effect should read it.
+              sessionOrigin: 'server' as const,
             };
             next[conversation.id] = conversation;
             ids.push(conversation.id);
@@ -81,7 +92,7 @@ function useServerSessions(): 'idle' | 'degraded' {
     return () => {
       cancelled = true;
     };
-  }, [auth]);
+  }, [auth, ready]);
 
   return health;
 }
@@ -163,16 +174,35 @@ function ConversationRow({
 
 /** The panel body, shared by the persistent column and the mobile Sheet. */
 export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.JSX.Element {
+  const navigate = useNavigate();
   const order = useChatStore((s) => s.order);
   const activeId = useChatStore((s) => s.activeId);
   const conversations = useChatStore((s) => s.conversations);
   const degraded = useServerSessions();
+  const throttled = useChatStore((s) => s.jobStreamsThrottled);
+  const [query, setQuery] = useState('');
 
   // The store prepends on create but server-merged stubs were appended, so a conversation used
   // ten minutes ago could sit below one from last month.
   const sorted = [...order].sort(
     (a, b) => (conversations[b]?.updatedAt ?? 0) - (conversations[a]?.updatedAt ?? 0),
   );
+
+  // Titles are derived from the first message, so searching them alone would miss anything said
+  // later — which is most of what a chemist wants to find again (a batch number, a ligand).
+  const needle = query.trim().toLowerCase();
+  const matches = needle
+    ? sorted.filter((id) => {
+        const c = conversations[id];
+        if (!c) return false;
+        if (c.title.toLowerCase().includes(needle)) return true;
+        return c.messages.some((m) =>
+          (m.role === 'user' ? m.text : (m.finalText ?? m.streamedText))
+            .toLowerCase()
+            .includes(needle),
+        );
+      })
+    : sorted;
 
   return (
     <>
@@ -181,7 +211,8 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           variant="outline"
           className="w-full justify-start"
           onClick={() => {
-            useChatStore.getState().createConversation();
+            // Push, so Back returns to where they were. The URL-sync effect only ever replaces.
+            navigate(`/c/${useChatStore.getState().createConversation()}`);
             onNavigate?.();
           }}
         >
@@ -190,9 +221,32 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
         </Button>
       </div>
 
+      <div className="px-3 pb-2">
+        <label htmlFor="conversation-search" className="sr-only-live">
+          Search conversations
+        </label>
+        <div className="flex items-center gap-2 rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 focus-within:border-brand focus-within:ring-2 focus-within:ring-ring/25">
+          <Search aria-hidden className="size-3.5 shrink-0 text-ink-subtle" />
+          <input
+            id="conversation-search"
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search conversations"
+            className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-ink-subtle"
+          />
+        </div>
+      </div>
+
       <nav aria-label="Conversations" className="flex-1 overflow-y-auto px-2 pb-3">
+        {needle && matches.length === 0 && (
+          <p className="px-2.5 py-2 text-xs text-ink-muted">
+            Nothing matches “{query.trim()}”. Only conversations stored in this browser are
+            searched.
+          </p>
+        )}
         <ul className="space-y-1">
-          {sorted.map((id) => (
+          {matches.map((id) => (
             <ConversationRow
               key={id}
               id={id}
@@ -200,7 +254,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
               onSelect={() => {
                 const title = conversations[id]?.title ?? 'conversation';
                 const count = conversations[id]?.messages.length ?? 0;
-                useChatStore.getState().selectConversation(id);
+                navigate(`/c/${id}`);
                 onNavigate?.();
                 // Land the reader in the transcript rather than leaving focus on a list item
                 // whose content just changed underneath it, and say what they landed in — the
@@ -213,7 +267,17 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
         </ul>
       </nav>
 
-      <div className="space-y-2 border-t border-border-subtle p-3">
+      <div className="space-y-3 border-t border-border-subtle p-3">
+        <NotifyToggle />
+
+        {throttled && (
+          <StatusDot
+            status="warn"
+            label="Watching fewer conversations for finished jobs — the service limited concurrent streams."
+            className="items-start text-2xs leading-snug"
+          />
+        )}
+
         {degraded === 'degraded' && (
           <StatusDot
             status="warn"

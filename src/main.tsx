@@ -1,8 +1,12 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { BrowserRouter } from 'react-router';
 import { AuthGate } from './auth/AuthContext.tsx';
 import { ErrorBoundary } from './components/ErrorBoundary.tsx';
-import { App } from './App.tsx';
+import { AppRoutes } from './routes.tsx';
+import { Announcer } from '@/components/chem/Announcer';
+import { SkipLinks } from '@/components/chem/SkipLinks';
+import { TooltipProvider } from '@/components/ui/tooltip';
 // Before index.css so the @font-face rules are registered by the time the token that names
 // them is used. Vite rewrites these to hashed same-origin assets.
 import '@fontsource-variable/inter';
@@ -29,9 +33,18 @@ createRoot(container).render(
         </div>
       )}
     >
-      <AuthGate>
-        <App />
-      </AuthGate>
+      {/* Router above auth: `/auth/callback` has to be a route, and nothing about routing
+          depends on being signed in. TooltipProvider above the routes rather than inside the
+          shell, or it remounts on every navigation and drops its delay-group timer. */}
+      <BrowserRouter>
+        <TooltipProvider>
+          <AuthGate>
+            <SkipLinks />
+            <Announcer />
+            <AppRoutes />
+          </AuthGate>
+        </TooltipProvider>
+      </BrowserRouter>
     </ErrorBoundary>
   </StrictMode>,
 );

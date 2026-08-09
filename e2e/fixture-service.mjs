@@ -17,6 +17,8 @@ import { createServer } from 'node:http';
 
 const port = Number(process.argv[2] ?? 4322);
 const SID = 'a'.repeat(32);
+/** A session a shared link can point at, with a transcript behind it. */
+const SHARED_SID = 'b'.repeat(32);
 
 const json = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json' });
@@ -78,7 +80,16 @@ createServer(async (req, res) => {
   if (path === '/healthz' || path === '/readyz') return json(res, 200, { ok: true });
   if (path === '/sessions' && req.method === 'POST') return json(res, 200, { session_id: SID });
   if (path === '/sessions' && req.method === 'GET') return json(res, 200, { sessions: [] });
-  if (path.endsWith('/messages') && req.method === 'GET') return json(res, 200, { messages: [] });
+  if (path.endsWith('/messages') && req.method === 'GET') {
+    // A shared-link session has a transcript to pull back; everything else is empty.
+    if (path.includes(SHARED_SID)) {
+      return json(res, 200, [
+        { role: 'user', text: 'What did we decide about the ligand?' },
+        { role: 'assistant', text: 'BrettPhos, at 1.2 equiv base.' },
+      ]);
+    }
+    return json(res, 200, []);
+  }
 
   if (path.endsWith('/messages') && req.method === 'POST') {
     // Drain the request body before replying, as the real service does.

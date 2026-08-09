@@ -24,7 +24,7 @@ import { MAX_MESSAGE_CHARS } from '../../shared/events.ts';
 import { api } from '../api/client.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore } from '../state/chatStore.ts';
-import { sendMessage, stopStreaming } from '../state/sendMessage.ts';
+import { sendMessage, stopStreaming, warmSession } from '../state/sendMessage.ts';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Label, Switch } from '@/components/ui/misc';
@@ -33,10 +33,13 @@ import { Loading } from '@/components/chem/Feedback';
 
 const MAX_TEXTAREA_PX = 200;
 
-type Upload = { state: 'busy' | 'ok' | 'failed'; text: string } | null;
+type Upload =
+  | { state: 'busy'; text: string; progress: number; abort: AbortController }
+  | { state: 'ok' | 'failed'; text: string }
+  | null;
 
 export function Composer({ conversationId }: { conversationId: string }): React.JSX.Element {
-  const { auth } = useAuth();
+  const { auth, ready } = useAuth();
   const [dryRun, setDryRun] = useState(false);
   const [upload, setUpload] = useState<Upload>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -44,7 +47,12 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   const hintId = useId();
 
   const composerLock = useChatStore((s) => s.composerLock);
-  const streaming = useChatStore((s) => s.streaming);
+  // Scoped to THIS conversation. A global check locked the composer in every conversation while
+  // one of them streamed — invisible before the router, routine once Back can switch in a
+  // keypress.
+  const streaming = useChatStore((s) =>
+    s.streaming?.conversationId === conversationId ? s.streaming : null,
+  );
   const sessionId = useChatStore((s) => s.conversations[conversationId]?.sessionId ?? null);
   const text = useChatStore((s) => s.drafts[conversationId] ?? '');
   const setDraft = useChatStore((s) => s.setDraft);
@@ -100,6 +108,15 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     return () => window.removeEventListener('chemclaw:prefill', onPrefill);
   }, [conversationId, setDraft]);
 
+  // Mint the backend session while they type, so the first send is one round-trip rather than
+  // two. Debounced, so a stray keypress in a conversation they abandon does not cost a session;
+  // gated on `ready`, because under Entra a pre-token POST /sessions is just a 401.
+  useEffect(() => {
+    if (!ready || !text.trim() || sessionId) return;
+    const timer = setTimeout(() => warmSession(conversationId, auth), 300);
+    return () => clearTimeout(timer);
+  }, [text, ready, sessionId, conversationId, auth]);
+
   // Auto-grow, driven from the value rather than the change event so it also shrinks back after a
   // send. Previously the inline height survived clearing the text, leaving a tall empty box.
   useEffect(() => {
@@ -112,7 +129,9 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   const tooLong = text.length > MAX_MESSAGE_CHARS;
   const isStreaming = streaming !== null;
   const blocked = composerLock !== false || isStreaming;
-  const canSend = !blocked && !tooLong && text.trim().length > 0;
+  // Typing stays open while auth resolves — that is the point of painting the shell early, and
+  // `warmSession` needs the keystrokes. Only the two things that need a token are held back.
+  const canSend = ready && !blocked && !tooLong && text.trim().length > 0;
 
   const submit = (): void => {
     if (!canSend) return;
@@ -123,21 +142,32 @@ export function Composer({ conversationId }: { conversationId: string }): React.
 
   const onUpload = async (file: File): Promise<void> => {
     if (!sessionId) {
+      // Reachable only when warming is switched off or has not landed yet — typing one character
+      // is normally enough to create the session this needs.
       setUpload({
         state: 'failed',
-        text: 'Send a message first so the conversation has a session.',
+        text: 'Type a message first so the conversation has a session to attach to.',
       });
       return;
     }
-    setUpload({ state: 'busy', text: `Uploading ${file.name}…` });
+    const abort = new AbortController();
+    setUpload({ state: 'busy', text: `Uploading ${file.name}…`, progress: 0, abort });
     try {
-      const summary = await api.uploadAttachment(sessionId, file, () => auth.getAccessToken());
+      const summary = await api.uploadAttachment(sessionId, file, () => auth.getAccessToken(), {
+        signal: abort.signal,
+        onProgress: (fraction) =>
+          setUpload((u) => (u?.state === 'busy' ? { ...u, progress: fraction } : u)),
+      });
       // rows is 0 for a non-tabular format, so only mention it when there is a table.
       setUpload({
         state: 'ok',
         text: `Attached ${summary.name}${summary.rows > 0 ? ` (${summary.rows} rows)` : ''}.`,
       });
     } catch (err) {
+      if (abort.signal.aborted) {
+        setUpload(null);
+        return;
+      }
       setUpload({ state: 'failed', text: err instanceof Error ? err.message : 'Upload failed.' });
     }
   };
@@ -167,7 +197,25 @@ export function Composer({ conversationId }: { conversationId: string }): React.
         {upload && (
           <div className="mb-2 flex items-center gap-2">
             {upload.state === 'busy' ? (
-              <Loading size="xs">{upload.text}</Loading>
+              <>
+                <Loading size="xs">{upload.text}</Loading>
+                <div
+                  role="progressbar"
+                  aria-label="Upload progress"
+                  aria-valuenow={Math.round(upload.progress * 100)}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  className="h-1 w-24 overflow-hidden rounded-full bg-surface-sunken"
+                >
+                  <div
+                    className="h-full rounded-full bg-brand transition-[width] duration-150"
+                    style={{ width: `${Math.round(upload.progress * 100)}%` }}
+                  />
+                </div>
+                <Button variant="ghost" size="xs" onClick={() => upload.abort.abort()}>
+                  Cancel
+                </Button>
+              </>
             ) : (
               <p
                 // A failed upload used to look exactly like a successful one — same muted grey, in
@@ -251,6 +299,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
                 size="icon-sm"
                 aria-label="Attach a working file"
                 className="tap-target"
+                disabled={!ready}
                 onClick={() => fileRef.current?.click()}
               >
                 <Paperclip />

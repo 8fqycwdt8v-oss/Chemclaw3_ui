@@ -20,8 +20,9 @@
  * announcements in `Announcer` say the same thing once each.
  */
 
-import { memo, useEffect, useLayoutEffect, useRef } from 'react';
-import { FlaskConical } from 'lucide-react';
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { ChevronUp, FlaskConical } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import type { AssistantMessage, ChatMessage } from '../state/types.ts';
 import { Markdown } from './LazyMarkdown.tsx';
 import { TracePanel } from './TracePanel.tsx';
@@ -154,6 +155,32 @@ const Bubble = memo(function Bubble({
   message: ChatMessage;
   sessionId: string | null;
 }): React.JSX.Element {
+  const streaming = message.role === 'assistant' && message.status === 'streaming';
+  return (
+    <div
+      // Skip layout and paint for bubbles scrolled out of view. `auto` on the intrinsic size makes
+      // the browser remember each one's real height, so the scrollbar does not jump as they
+      // realise — a fixed guess would also fight the trace panel, whose expanded height is many
+      // times its collapsed one.
+      //
+      // The streaming bubble is exempt: the pin below reads `scrollHeight` every frame, and
+      // skipping the layout of the element that is actually growing would make it wrong.
+      style={
+        streaming ? undefined : { contentVisibility: 'auto', containIntrinsicSize: 'auto 220px' }
+      }
+    >
+      <BubbleBody message={message} sessionId={sessionId} />
+    </div>
+  );
+});
+
+function BubbleBody({
+  message,
+  sessionId,
+}: {
+  message: ChatMessage;
+  sessionId: string | null;
+}): React.JSX.Element {
   if (message.role === 'user') {
     return (
       <div className="flex justify-end">
@@ -177,7 +204,7 @@ const Bubble = memo(function Bubble({
       <AssistantBubble message={message} sessionId={sessionId} />
     </article>
   );
-});
+}
 
 /**
  * Takes an id, not a conversation.
@@ -187,6 +214,10 @@ const Bubble = memo(function Bubble({
  * job feed, the composer — with it. Subscribing to the two fields this actually needs keeps that
  * churn inside the transcript, where `memo(Bubble)` already absorbs it.
  */
+/** How many messages to render before "Load earlier". A long chemistry transcript is otherwise
+ *  hundreds of markdown trees the reader is not looking at. */
+const WINDOW_STEP = 60;
+
 export function MessageList({ conversationId }: { conversationId: string }): React.JSX.Element {
   const messages = useChatStore((s) => s.conversations[conversationId]?.messages);
   const sessionId = useChatStore((s) => s.conversations[conversationId]?.sessionId ?? null);
@@ -195,6 +226,38 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
   const endRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+  /** Set by "Load earlier" so the layout effect below can put the reader back where they were. */
+  const anchorRef = useRef<number | null>(null);
+
+  const [windowSize, setWindowSize] = useState(WINDOW_STEP);
+
+  const total = messages?.length ?? 0;
+  // Sliced here rather than in the selector: a selector returning a fresh array would notify on
+  // every store write and, with no implicit shallow compare in zustand v5, loop forever.
+  const shown = useMemo(
+    () => (messages ? messages.slice(Math.max(0, messages.length - windowSize)) : []),
+    [messages, windowSize],
+  );
+  const hidden = total - shown.length;
+
+  const loadEarlier = (): void => {
+    const el = scrollerRef.current;
+    // Synchronously, before React can re-render: the pin effect below would otherwise still see a
+    // stale `true` and slam the reader back to the bottom of a list they just expanded upwards.
+    pinnedRef.current = false;
+    anchorRef.current = el ? el.scrollHeight - el.scrollTop : null;
+    setWindowSize((n) => n + WINDOW_STEP);
+  };
+
+  // Declared ABOVE the pin effect on purpose — layout effects run in source order, and this one
+  // has to restore the offset before anything else touches scrollTop. Prepending content leaves
+  // scrollTop numerically unchanged, which throws the reader forward by the inserted height.
+  useLayoutEffect(() => {
+    const el = scrollerRef.current;
+    if (!el || anchorRef.current === null) return;
+    el.scrollTop = el.scrollHeight - anchorRef.current;
+    anchorRef.current = null;
+  }, [shown]);
 
   // Keep the view pinned to the bottom while streaming, but stop fighting the user the moment they
   // scroll up to read something earlier. An IntersectionObserver on the sentinel rather than a
@@ -219,7 +282,7 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
   useLayoutEffect(() => {
     const el = scrollerRef.current;
     if (el && pinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  }, [shown]);
 
   return (
     <div
@@ -240,14 +303,23 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
           </div>
         )}
 
-        {messages?.length === 0 && (
+        {hidden > 0 && (
+          <div className="flex justify-center">
+            <Button variant="outline" size="sm" onClick={loadEarlier}>
+              <ChevronUp />
+              Load earlier ({hidden} {hidden === 1 ? 'message' : 'messages'})
+            </Button>
+          </div>
+        )}
+
+        {total === 0 && (
           <EmptyState icon={<FlaskConical className="size-5" />} title="Chemclaw">
             Process &amp; analytical development assistant. Ask about a reaction, a property, or
             what to run next.
           </EmptyState>
         )}
 
-        {messages?.map((message) => (
+        {shown.map((message) => (
           <Bubble key={message.id} message={message} sessionId={sessionId} />
         ))}
         <div ref={endRef} className="h-px" />

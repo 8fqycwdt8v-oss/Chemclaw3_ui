@@ -71,32 +71,67 @@ via the browser.
 
 ---
 
+## Issue 4: a shared conversation link cannot survive the backend rotating its session
+
+`/s/:sessionId` adopts a server session into a local conversation, which makes a link portable
+between devices. That is the most this data model can back, and it is less than it sounds.
+
+The session id is a **disposable handle**, not a conversation identity. The client replaces it in
+three places — `session_not_found` recovery, `resetSession`, and a fresh conversation — and the
+backend is free to evict it from its live-session store. So a shared link:
+
+- **dies** once the backend rotates or evicts that session, with no way to tell the recipient what
+  it used to point at; and
+- **changes under the sharer mid-conversation**, because the id they copied is not the id their
+  conversation will be using after the next recovery.
+
+The local conversation id, which is stable, is meaningless to any other device — it names a row in
+one browser's `localStorage`.
+
+**Fix:** a stable server-side conversation id, distinct from the session handle, with the session
+as a child of it. `GET /conversations/{cid}/messages` would then be resolvable by anyone
+authorised, whatever session is current. Until that exists, `/s/:sessionId` is a best-effort
+convenience and the UI says so when the link no longer resolves.
+
+---
+
+## Issue 5: the backend's live-session budget is unknown, and the client now spends it faster
+
+`warmSession` creates the backend session on the first keystroke so the first message costs one
+round-trip instead of two. It also changes what a session _means_ in aggregate: the population went
+from "conversations someone sent a message in" to "conversations someone typed a character into",
+which is strictly larger and includes abandoned drafts.
+
+This repo does not know the service's live-session LRU size, its per-principal cap, or what it does
+when either is exceeded — the 429 path in `useJobStreams` exists because the same question applies
+to concurrent event streams and had no answer either.
+
+**Mitigation already in place:** `warmSessions` is a `/config.js` flag (`server/runtimeConfig.ts`,
+`src/env.ts`), default on, switchable without a client rebuild.
+
+**Question for the service:** what is the live-session cap per principal, what is the eviction
+policy, and is a session created and never used cheaper than one that streamed a turn?
+
+---
+
 ## Known gaps in the UI rebuild (`claude/frontend-optimization-design-2agt1q`)
 
-The rebuild's commit messages describe what was built. This records what was not, because the
-commits do not, and the omissions are all in one area.
+The rebuild's commit messages describe what was built. This records what was not.
 
-**Long-transcript performance is not addressed.** Memoising the message bubbles and the trace panel
-fixed the per-frame cost of streaming into an _existing_ transcript. The separate problem — that a
-long transcript is expensive to render at all — is untouched: there is no `content-visibility` on
-message wrappers, no cap on how many messages render, and no "load earlier" control. A conversation
-with several hundred messages is no better off than before the rebuild.
+Closed since the first version of this section, and listed only because it was written down as
+missing: long-transcript windowing with `content-visibility` and a Load earlier control; the boot
+sequence painting before auth resolves; `warmSession`; a durable, cross-conversation job feed with
+a title badge and opt-in notifications; path routing with a working Back button; conversation
+search; upload progress and cancellation; `@axe-core/playwright` in the e2e suite.
 
-**The boot sequence still blocks on auth.** `AuthGate` renders the whole app only once
-`createAuthProvider()` resolves, so in `msal` mode the first paint waits on an MSAL round-trip and
-shows the word "Starting…". The transcript lives in `localStorage` and needs no token, so the shell
-could paint first and gate only the composer. `TranscriptSkeleton` was written for that change and
-deleted when the change was not made.
+**Still not done:**
 
-**First send still costs two sequential round-trips** — `POST /sessions` then `POST /messages` —
-where warming the session on the first keystroke would hide one.
-
-Also not done, and lower value: conversation search; a pending-approvals inbox (`api.listApprovals`
-is implemented and has no caller); `@axe-core/playwright` and screenshot baselines in the e2e suite;
-upload progress and cancellation.
-
-**Unchanged from the pre-rebuild state, and still true:** job completions arrive only for the
-conversation that is currently open, are not persisted across a reload, and never notify a user who
-has tabbed away — see the note in `JobFeed.tsx` about the push-back path dying one step from the
-chemist. It now renders, which it did not before; the cross-conversation and durability halves are
-still missing. Nothing in the app is deep-linkable, and the browser Back button does nothing.
+- **A pending-approvals inbox.** `api.listApprovals` now degrades to `[]` on a 404 like its
+  siblings, but there is no UI. Issue 3 above is why: the endpoint does not exist on the backend,
+  so an inbox would be built against nothing.
+- **Screenshot baselines.** The axe pass covers the mechanical half of the visual contract; nothing
+  guards against a layout regression that is still accessible.
+- **Durable sharing** — Issue 4.
+- **A real MSAL redirect has not been exercised against this router.** The `/auth/callback` route
+  is structured so nothing writes the URL until `handleRedirectPromise()` has consumed the
+  fragment, and the e2e suite runs in `dev` auth mode, which cannot prove it.

@@ -1,19 +1,24 @@
+/**
+ * The application shell.
+ *
+ * Rendered by a route rather than mounted directly, so it takes the conversation to show rather
+ * than reading `activeId` for itself. `children` is the escape hatch the not-found panel uses to
+ * appear inside the normal chrome instead of replacing it.
+ */
+
 import { useCallback, useEffect, useState } from 'react';
 import { configProblems } from './env.ts';
 import { useAuth } from './auth/AuthContext.tsx';
 import { useChatStore } from './state/chatStore.ts';
 import { api } from './api/client.ts';
-import { useJobFeed } from './hooks/useJobFeed.ts';
+import { useJobStreams } from './hooks/useJobStreams.ts';
+import { useJobNotifications } from './hooks/useJobNotifications.ts';
 import { useVisualViewport } from './hooks/useVisualViewport.ts';
 import { Sidebar } from './components/Sidebar.tsx';
 import { TopBar } from './components/TopBar.tsx';
 import { MessageList } from './components/MessageList.tsx';
 import { JobFeed } from './components/JobFeed.tsx';
 import { Composer } from './components/Composer.tsx';
-import { Announcer } from '@/components/chem/Announcer';
-import { SkipLinks } from '@/components/chem/SkipLinks';
-import { TooltipProvider } from '@/components/ui/tooltip';
-import { Loading } from '@/components/chem/Feedback';
 import type { ChatMessage } from './state/types.ts';
 
 function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
@@ -34,38 +39,28 @@ function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
   );
 }
 
-export function App(): React.JSX.Element {
-  const { auth } = useAuth();
-  // Narrow selectors, deliberately. `updateAssistant` replaces the conversation object on every
-  // animation frame, so selecting the object here re-rendered App — and with it the header, the
-  // job feed and the composer — at the token rate. These three change only when they mean
-  // something, and zustand v5 has no implicit shallow compare to fall back on.
-  const activeId = useChatStore((s) => s.activeId);
-  const exists = useChatStore((s) => Boolean(s.activeId && s.conversations[s.activeId]));
+/**
+ * Pull a transcript the server has but this browser does not.
+ *
+ * Guarded on `sessionOrigin === 'server'`. A session id alone is not enough: `warmSession` gives a
+ * brand-new local conversation a session before its first message, which is exactly this guard's
+ * other conditions, and reading `/messages` for it would be a wasted round-trip that raises a warn
+ * banner if it fails.
+ */
+function useRemoteTranscript(conversationId: string | undefined, nonce: number): void {
+  const { auth, ready } = useAuth();
   const sessionId = useChatStore((s) =>
-    s.activeId ? (s.conversations[s.activeId]?.sessionId ?? null) : null,
+    conversationId ? (s.conversations[conversationId]?.sessionId ?? null) : null,
   );
   const messageCount = useChatStore((s) =>
-    s.activeId ? (s.conversations[s.activeId]?.messages.length ?? 0) : 0,
+    conversationId ? (s.conversations[conversationId]?.messages.length ?? 0) : 0,
   );
-  const [rehydrateNonce, setRehydrateNonce] = useState(0);
+  const fromServer = useChatStore((s) =>
+    conversationId ? s.conversations[conversationId]?.sessionOrigin === 'server' : false,
+  );
 
-  useVisualViewport();
-
-  // Always have a conversation to type into.
   useEffect(() => {
-    const state = useChatStore.getState();
-    if (!state.activeId || !state.conversations[state.activeId]) {
-      const [first] = state.order;
-      if (first && state.conversations[first]) state.selectConversation(first);
-      else state.createConversation();
-    }
-  }, [activeId]);
-
-  // Restore the transcript for a conversation whose session survived but whose messages were not
-  // in localStorage — a different browser, or a cleared cache.
-  useEffect(() => {
-    if (!activeId || !sessionId || messageCount > 0) return;
+    if (!ready || !conversationId || !sessionId || messageCount > 0 || !fromServer) return;
     let cancelled = false;
     void (async () => {
       // `getMessages` swallows only `session_not_found`; a 401, a 500 or a dropped connection all
@@ -113,18 +108,34 @@ export function App(): React.JSX.Element {
                 error: null,
               },
         );
-      useChatStore.getState().hydrateTranscript(activeId, messages);
+      useChatStore.getState().hydrateTranscript(conversationId, messages);
     })();
     return () => {
       cancelled = true;
     };
-  }, [activeId, sessionId, messageCount, auth, rehydrateNonce]);
+  }, [conversationId, sessionId, messageCount, fromServer, auth, ready, nonce]);
+}
 
-  useJobFeed(sessionId, auth);
+export function AppShell({
+  conversationId,
+  children,
+}: {
+  conversationId?: string;
+  /** Rendered in place of the transcript — the not-found panel, inside the normal chrome. */
+  children?: React.ReactNode;
+}): React.JSX.Element {
+  const [rehydrateNonce, setRehydrateNonce] = useState(0);
 
-  // What the banner's Retry does. The retryable failures reachable from here are the transcript
-  // read and, once the store carries one, the last turn — both are re-driven by clearing the
-  // banner and letting the effect above run again.
+  useVisualViewport();
+  useRemoteTranscript(conversationId, rehydrateNonce);
+  // Watches several conversations, not just this one: a job launched in one and completing while
+  // the chemist reads another is the case the feature exists for.
+  useJobStreams();
+  // Title badge, and a notification if they opted in. A completion that lands while the tab is
+  // backgrounded is the case this whole path exists for.
+  useJobNotifications();
+
+  // What the banner's Retry does: clear it and let the transcript read run again.
   const onRetry = useCallback(() => {
     useChatStore.getState().setBanner(null);
     setRehydrateNonce((n) => n + 1);
@@ -134,29 +145,23 @@ export function App(): React.JSX.Element {
   if (problems.length > 0) return <ConfigError problems={problems} />;
 
   return (
-    <TooltipProvider>
-      <SkipLinks />
-      <Announcer />
-
-      <div className="flex h-full">
-        <Sidebar />
-        <div className="flex min-w-0 flex-1 flex-col">
-          <TopBar onRetry={onRetry} />
-          <main className="flex min-h-0 flex-1 flex-col">
-            {activeId && exists ? (
+    <div className="flex h-full">
+      <Sidebar />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <TopBar onRetry={onRetry} />
+        <main className="flex min-h-0 flex-1 flex-col">
+          {children ??
+            (conversationId && (
               <>
-                <MessageList conversationId={activeId} />
+                {/* Keyed so switching conversations resets the window, the scroll pin and the
+                    scroll position together, rather than three effects racing to do it. */}
+                <MessageList key={conversationId} conversationId={conversationId} />
                 <JobFeed />
-                <Composer conversationId={activeId} />
+                <Composer conversationId={conversationId} />
               </>
-            ) : (
-              <div className="flex flex-1 items-center justify-center">
-                <Loading>Starting a conversation…</Loading>
-              </div>
-            )}
-          </main>
-        </div>
+            ))}
+        </main>
       </div>
-    </TooltipProvider>
+    </div>
   );
 }

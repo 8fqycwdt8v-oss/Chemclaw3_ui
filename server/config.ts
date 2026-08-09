@@ -9,6 +9,11 @@
 export type AuthMode = 'dev' | 'msal';
 
 const str = (name: string, fallback = ''): string => process.env[name]?.trim() || fallback;
+const bool = (name: string, fallback: boolean): boolean => {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === 'true' || raw === '1' || raw === 'yes';
+};
 const num = (name: string, fallback: number): number => {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -71,6 +76,7 @@ export interface BffConfig {
   appVersion: string;
   sseHeartbeatMs: number;
   upstreamConnectTimeoutMs: number;
+  warmSessions: boolean;
   csp: string;
   logLevel: string;
 }
@@ -91,6 +97,9 @@ export const cfg: BffConfig = {
   // an ID token whose `aud` is the SPA client id, which the backend's audience check rejects.
   apiScope: str('API_SCOPE'),
   appVersion: str('APP_VERSION', 'dev'),
+  // Pre-creating a session while the user types costs the service one live-session slot per
+  // conversation typed into, sent or not. Default on; switchable without a client rebuild.
+  warmSessions: bool('WARM_SESSIONS', true),
   sseHeartbeatMs: num('SSE_HEARTBEAT_MS', 15_000),
   upstreamConnectTimeoutMs: num('UPSTREAM_CONNECT_TIMEOUT_MS', 10_000),
   csp: buildCsp(authMode),

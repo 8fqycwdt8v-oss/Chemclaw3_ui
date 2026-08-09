@@ -130,12 +130,15 @@ describe('chatStore', () => {
   });
 
   it('keeps a job completion in the cross-turn feed', () => {
-    useChatStore.getState().pushJobCompleted({
-      type: 'job_completed',
-      job_id: 'qm-1',
-      summary: { molecule_smiles: 'CCO', total_energy_hartree: -154.09, converged: true },
-    });
-    expect(useChatStore.getState().jobFeed[0]?.summary.molecule_smiles).toBe('CCO');
+    useChatStore.getState().pushJobCompleted(
+      {
+        type: 'job_completed',
+        job_id: 'qm-1',
+        summary: { molecule_smiles: 'CCO', total_energy_hartree: -154.09, converged: true },
+      },
+      'a'.repeat(32),
+    );
+    expect(useChatStore.getState().jobFeed[0]?.event.summary.molecule_smiles).toBe('CCO');
   });
 });
 

@@ -49,6 +49,7 @@ beforeEach(() => {
         updatedAt: 0,
         messages: [],
         contextLost: false,
+        sessionOrigin: 'local' as const,
       },
     },
     order: [CONVERSATION],

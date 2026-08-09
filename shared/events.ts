@@ -161,7 +161,7 @@ export type ChemclawEvent =
 
 export type ChemclawEventType = ChemclawEvent['type'];
 
-const EVENT_TYPES = new Set<string>([
+export const EVENT_TYPES = new Set<string>([
   'queued',
   'plan',
   'tool_call',

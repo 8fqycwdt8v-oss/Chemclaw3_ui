@@ -128,14 +128,19 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
   // object on every render, and an effect that listed it as a dependency re-read the plan on each
   // state change — five GETs for one card, and each state update triggered another.
   const authRef = useRef(auth);
-  authRef.current = auth;
+  // In an effect rather than during render — see the same change in `Composer.tsx`. The read below
+  // happens inside an async callback after commit, so it always sees the current value.
+  useEffect(() => {
+    authRef.current = auth;
+  });
   const token = useCallback((): Promise<string | null> => authRef.current.getAccessToken(), []);
 
   useEffect(() => {
-    if (!sessionId) {
-      setState('unavailable');
-      return;
-    }
+    // No session means there is nothing to read a plan from, which is a *derived* fact rather
+    // than a fetch outcome — so it is computed below at `effectiveState` instead of being written
+    // into state from inside this effect. Writing it here scheduled an extra render pass on every
+    // mount of a card that has no session yet, which is the common case.
+    if (!sessionId) return;
     let live = true;
     void (async () => {
       try {
@@ -182,9 +187,15 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
     }
   };
 
-  if (state === 'loading') return <p className="text-xs text-ink-muted">Reading the plan…</p>;
+  // A card with no session can never resolve a plan, so it is `unavailable` by construction —
+  // derived here rather than written into state by the effect above.
+  const effectiveState = sessionId ? state : 'unavailable';
 
-  if (state === 'unavailable') {
+  if (effectiveState === 'loading') {
+    return <p className="text-xs text-ink-muted">Reading the plan…</p>;
+  }
+
+  if (effectiveState === 'unavailable') {
     return (
       <>
         <div className="flex gap-2">
@@ -223,7 +234,7 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
         </ul>
       )}
       <DecisionControls
-        state={state}
+        state={effectiveState}
         error={error}
         labels={['Approve plan', 'Decline']}
         onDecide={(approved) => void decide(approved)}

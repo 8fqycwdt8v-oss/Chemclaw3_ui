@@ -74,12 +74,20 @@ export function Molecule({
   className,
 }: MoleculeProps): React.JSX.Element {
   const svgRef = useRef<SVGSVGElement | null>(null);
-  const [failed, setFailed] = useState(false);
+  /**
+   * The SMILES that failed to render, rather than a boolean plus a reset.
+   *
+   * As a boolean this needed `setFailed(false)` at the top of the effect to clear the previous
+   * input's failure — a synchronous setState in an effect body, which schedules a second render
+   * pass on every single redraw. Keying the failure to the input makes the reset fall out of the
+   * comparison: a new `smiles` is simply not the one that failed.
+   */
+  const [failedFor, setFailedFor] = useState<string | null>(null);
+  const failed = failedFor === smiles;
   const domId = useId().replace(/:/g, '_');
 
   useEffect(() => {
     let cancelled = false;
-    setFailed(false);
 
     loadDrawer(width, height)
       .then(({ parse, drawer }) => {
@@ -90,7 +98,7 @@ export function Molecule({
       .catch(() => {
         // An invalid or exotic SMILES must never leave a blank box — the caller renders the raw
         // string as a fallback so the chemist can still read and copy it.
-        if (!cancelled) setFailed(true);
+        if (!cancelled) setFailedFor(smiles);
       });
 
     return () => {

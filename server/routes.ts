@@ -45,22 +45,33 @@ export interface Route {
   target: (m: RegExpMatchArray) => string;
   /** True when the upstream responds with `text/event-stream` and must not be buffered. */
   sse: boolean;
+  /**
+   * The backend route this proxies to, in the service's own path-template spelling.
+   *
+   * Declared rather than derived. `SID` and `APPROVAL` are lossy encodings of `{session_id}` and
+   * `{approval_id}` — a checker that tried to reverse a regex back into a template would be
+   * guessing, and would break the first time one of these patterns was tightened. Stating the
+   * identity makes `scripts/check-contract.mjs` able to verify that every route this BFF exposes
+   * still exists upstream, and doubles as documentation of what the regex is for.
+   */
+  spec: string;
 }
 
 export const ROUTES: readonly Route[] = [
-  { method: 'GET', pattern: /^\/api\/healthz$/, target: () => '/healthz', sse: false },
-  { method: 'GET', pattern: /^\/api\/readyz$/, target: () => '/readyz', sse: false },
+  { method: 'GET', pattern: /^\/api\/healthz$/, target: () => '/healthz', sse: false, spec: '/healthz' },
+  { method: 'GET', pattern: /^\/api\/readyz$/, target: () => '/readyz', sse: false, spec: '/readyz' },
 
   // Sessions.
-  { method: 'POST', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false },
+  { method: 'POST', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false, spec: '/sessions' },
   // Added by the companion backend change: list the caller's sessions.
-  { method: 'GET', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false },
+  { method: 'GET', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false, spec: '/sessions' },
   // Added by the companion backend change: read a transcript back after a reload.
   {
     method: 'GET',
     pattern: new RegExp(`^/api/sessions/${SID}/messages$`),
     target: (m) => `/sessions/${m[1]}/messages`,
     sse: false,
+    spec: '/sessions/{session_id}/messages',
   },
   // The turn stream: SSE over POST, which is why native EventSource is unusable.
   {
@@ -68,6 +79,7 @@ export const ROUTES: readonly Route[] = [
     pattern: new RegExp(`^/api/sessions/${SID}/messages$`),
     target: (m) => `/sessions/${m[1]}/messages`,
     sse: true,
+    spec: '/sessions/{session_id}/messages',
   },
   // Async job push-back. Long-lived and legitimately silent for minutes at a time.
   {
@@ -75,12 +87,14 @@ export const ROUTES: readonly Route[] = [
     pattern: new RegExp(`^/api/sessions/${SID}/events$`),
     target: (m) => `/sessions/${m[1]}/events`,
     sse: true,
+    spec: '/sessions/{session_id}/events',
   },
   {
     method: 'POST',
     pattern: new RegExp(`^/api/sessions/${SID}/attachments$`),
     target: (m) => `/sessions/${m[1]}/attachments`,
     sse: false,
+    spec: '/sessions/{session_id}/attachments',
   },
 
   // The harness plan gate: read the plan awaiting a decision — with the hash that binds it — then
@@ -92,27 +106,31 @@ export const ROUTES: readonly Route[] = [
     pattern: new RegExp(`^/api/sessions/${SID}/plan$`),
     target: (m) => `/sessions/${m[1]}/plan`,
     sse: false,
+    spec: '/sessions/{session_id}/plan',
   },
   {
     method: 'POST',
     pattern: new RegExp(`^/api/sessions/${SID}/plan/decision$`),
     target: (m) => `/sessions/${m[1]}/plan/decision`,
     sse: false,
+    spec: '/sessions/{session_id}/plan/decision',
   },
 
   // Durable approval holds (the PR-gate's human sign-off).
-  { method: 'GET', pattern: /^\/api\/approvals$/, target: () => '/approvals', sse: false },
+  { method: 'GET', pattern: /^\/api\/approvals$/, target: () => '/approvals', sse: false, spec: '/approvals' },
   {
     method: 'GET',
     pattern: new RegExp(`^/api/approvals/${APPROVAL}$`),
     target: (m) => `/approvals/${m[1]}`,
     sse: false,
+    spec: '/approvals/{approval_id}',
   },
   {
     method: 'POST',
     pattern: new RegExp(`^/api/approvals/${APPROVAL}/decision$`),
     target: (m) => `/approvals/${m[1]}/decision`,
     sse: false,
+    spec: '/approvals/{approval_id}/decision',
   },
 ] as const;
 

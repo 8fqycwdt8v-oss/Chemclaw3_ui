@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch makes an in-flight run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the Dockerfile's runtime (node:22-alpine) rather than "latest": CI should fail
+          # on the version production runs, not on one nothing ships.
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format
+        run: npm run format:check
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # The regression test for the build output. `npm start` and start.sh both load the server
+      # under conditions the container does not reproduce, so this runs the bundle from a bare
+      # dist/ — no package.json above it — exactly as the runtime image does.
+      - name: Server bundle boots
+        run: npm run smoke:boot
+
+      # The whole point of the assertion is that it runs on the artefact, not on the source: dead
+      # code elimination is a bundler optimisation, not a contract.
+      - name: No dev auth in a production bundle
+        run: node scripts/assert-no-dev-auth.mjs

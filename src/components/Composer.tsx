@@ -36,14 +36,22 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   // buttons — skips the "type and press Send" step so the user gets one-tap approve/decline).
   // We use a ref so the handler always sees the current blocked/dryRun/conversationId values
   // without being recreated on every render.
+  // Assigned in an effect, not during render. A render-phase `ref.current = …` is a side effect in
+  // a function React is allowed to call speculatively, discard, and call again — it happens to work
+  // today and is exactly the kind of thing that stops working under StrictMode double-rendering or
+  // a concurrent re-render. The listener below only ever reads this from an event callback, which
+  // is after commit, so the effect assignment is always in place by the time it can be reached.
   const autoSendRef = useRef<((message: string) => void) | null>(null);
-  autoSendRef.current = (message: string) => {
-    const isBlocked = useChatStore.getState().composerLock !== false ||
-      useChatStore.getState().streaming !== null;
-    if (isBlocked || message.length > MAX_MESSAGE_CHARS || !message.trim()) return;
-    setText('');
-    void sendMessage({ conversationId, text: message, dryRun, auth });
-  };
+  useEffect(() => {
+    autoSendRef.current = (message: string) => {
+      const isBlocked =
+        useChatStore.getState().composerLock !== false ||
+        useChatStore.getState().streaming !== null;
+      if (isBlocked || message.length > MAX_MESSAGE_CHARS || !message.trim()) return;
+      setText('');
+      void sendMessage({ conversationId, text: message, dryRun, auth });
+    };
+  });
 
   useEffect(() => {
     const onPrefill = (event: Event): void => {

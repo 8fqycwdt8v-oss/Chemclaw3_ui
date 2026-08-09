@@ -14,7 +14,6 @@
  * the format instead of relying on Node to infer it.
  */
 
-import { rm } from 'node:fs/promises';
 import { build } from 'esbuild';
 
 await build({

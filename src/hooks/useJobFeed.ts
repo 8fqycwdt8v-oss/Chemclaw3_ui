@@ -6,9 +6,9 @@
  *
  *  - The backend caps concurrent event streams per user (429 past the cap), so we keep at most
  *    one open per session and close it when the session changes or the tab goes away.
- *  - Its claim is destructive and scoped to `job_completed` in SQL. We are one of two consumers
- *    racing for those rows (the agent's own mid-turn resume is the other), so a missed event is
- *    expected and must never be treated as an error.
+ *  - Its claim is destructive and scoped to the two job-outcome kinds in SQL. We are one of two
+ *    consumers racing for those rows (the agent's own mid-turn resume is the other), so a missed
+ *    event is expected and must never be treated as an error.
  */
 
 import { useEffect } from 'react';
@@ -64,8 +64,13 @@ export function useJobFeed(sessionId: string | null, auth: AuthProvider): void {
               if (!value.data) continue;
               try {
                 const event = normalizeEvent(JSON.parse(value.data), value.event);
-                if (event?.type === 'job_completed') {
-                  useChatStore.getState().pushJobCompleted(event);
+                // Both endings, because a job that failed has exactly the same claim on the
+                // asker's attention as one that succeeded — and only one of the two used to have
+                // a way to reach them. The backend claims both kinds off the mailbox in one
+                // destructive read, so dropping `job_failed` here did not leave it for another
+                // consumer; it destroyed it.
+                if (event?.type === 'job_completed' || event?.type === 'job_failed') {
+                  useChatStore.getState().pushJobOutcome(event);
                 }
               } catch {
                 // one bad frame is not worth dropping the stream

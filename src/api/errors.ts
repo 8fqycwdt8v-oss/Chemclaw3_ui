@@ -6,6 +6,8 @@
  * call site. Statuses verified against service/app.py @ d5ed9e3.
  */
 
+import type { ErrorCode } from '../../shared/events.ts';
+
 export type ApiErrorKind =
   /** 401 — missing or invalid bearer token. Re-authenticate. */
   | 'unauthorized'
@@ -38,18 +40,38 @@ export type ApiErrorKind =
    *  reports as a final SSE event rather than an HTTP status. */
   | 'agent';
 
+/**
+ * What the service itself said about a failure, when the failure got far enough for it to say.
+ *
+ * Only ever set on an `agent` error, because that is the only kind that came from the service's own
+ * `error` event rather than from a status code or a dead socket. Everything else is this client
+ * classifying a failure the service never saw.
+ */
+export interface AgentFailure {
+  code: ErrorCode;
+  retryable: boolean;
+  /** The id the audit trail is keyed on. Empty from a backend that predates the field. */
+  correlationId: string;
+}
+
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
   readonly status: number | undefined;
   /** Whether a bare retry of the same request could plausibly succeed. */
   readonly retryable: boolean;
+  /** Present only for `agent`: the service's own classification of what went wrong. */
+  readonly agent: AgentFailure | undefined;
 
-  constructor(kind: ApiErrorKind, message: string, status?: number) {
+  constructor(kind: ApiErrorKind, message: string, status?: number, agent?: AgentFailure) {
     super(message);
     this.name = 'ApiError';
     this.kind = kind;
     this.status = status;
-    this.retryable = kind === 'capacity' || kind === 'network';
+    this.agent = agent;
+    // The service's own verdict wins where there is one. It knows things this mapping cannot
+    // infer: a `turn_timeout` may be worth retrying and a `bad_tool_arguments` never is, and both
+    // arrive as the same in-stream `error` frame.
+    this.retryable = agent ? agent.retryable : kind === 'capacity' || kind === 'network';
   }
 }
 

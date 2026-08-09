@@ -149,9 +149,19 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       return;
     }
 
-    useChatStore
-      .getState()
-      .failTurn(conversationId, messageId, { kind: apiError.kind, message: apiError.message });
+    useChatStore.getState().failTurn(conversationId, messageId, {
+      kind: apiError.kind,
+      message: apiError.message,
+      // Spread only when the service classified it: a transport failure has no correlation id, and
+      // stamping an empty one would send an operator looking for a turn nothing recorded.
+      ...(apiError.agent
+        ? {
+            code: apiError.agent.code,
+            retryable: apiError.agent.retryable,
+            correlationId: apiError.agent.correlationId,
+          }
+        : {}),
+    });
 
     // 429 is terminal — the budget does not replenish on a retry, so leave the composer locked
     // and say so. Everything else releases the composer and surfaces a banner.

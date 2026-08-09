@@ -23,13 +23,15 @@ import { JobResultCard } from './JobResultCard.tsx';
 
 export function JobFeed(): React.JSX.Element | null {
   const jobFeed = useChatStore((s) => s.jobFeed);
-  const dismiss = useChatStore((s) => s.dismissJobCompleted);
+  const dismiss = useChatStore((s) => s.dismissJobOutcome);
 
   if (jobFeed.length === 0) return null;
 
   return (
     <section
-      aria-label="Completed background jobs"
+      // "Finished", not "completed": a job that failed is finished too, and this band is where
+      // both endings land.
+      aria-label="Finished background jobs"
       className="border-t border-border-subtle bg-surface-sunken px-4 py-3"
     >
       <h2 className="mb-2 text-xs font-medium tracking-wide text-ink-muted uppercase">
@@ -49,7 +51,11 @@ export function JobFeed(): React.JSX.Element | null {
             >
               ×
             </button>
-            <JobResultCard jobId={job.job_id} summary={job.summary} />
+            {job.type === 'job_failed' ? (
+              <JobResultCard jobId={job.job_id} reason={job.reason} />
+            ) : (
+              <JobResultCard jobId={job.job_id} summary={job.summary} />
+            )}
           </li>
         ))}
       </ul>

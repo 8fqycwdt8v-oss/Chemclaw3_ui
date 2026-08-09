@@ -10,7 +10,7 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import type { ChemclawEvent, JobCompletedEvent } from '../../shared/events.ts';
+import type { ChemclawEvent } from '../../shared/events.ts';
 import type { ApiErrorKind } from '../api/errors.ts';
 import type {
   AssistantMessage,
@@ -18,7 +18,9 @@ import type {
   ChatMessage,
   ComposerLock,
   Conversation,
+  JobOutcome,
   TraceEntry,
+  TurnError,
 } from './types.ts';
 
 /** Keep persisted state bounded — see `partialize` below. */
@@ -61,6 +63,7 @@ function newAssistantMessage(): AssistantMessage {
     confidence: null,
     unsupportedClaims: [],
     reviewRequired: false,
+    verifiedBy: null,
     degradedConnectors: [],
     queued: false,
     trace: [],
@@ -126,6 +129,12 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
         kind: 'job_completed',
         job: { jobId: event.job_id, summary: event.summary },
       };
+    case 'job_failed':
+      return {
+        ...base,
+        kind: 'job_failed',
+        job: { jobId: event.job_id, reason: event.reason },
+      };
     case 'question':
       return {
         ...base,
@@ -155,8 +164,9 @@ export interface ChatState {
   activeId: string | null;
   composerLock: ComposerLock;
   banner: Banner | null;
-  /** Cross-turn job completions from `GET /sessions/{id}/events`. Not persisted. */
-  jobFeed: JobCompletedEvent[];
+  /** Cross-turn job outcomes — completions *and* failures — from `GET /sessions/{id}/events`.
+   *  Not persisted. */
+  jobFeed: JobOutcome[];
   streaming: { conversationId: string; messageId: string; abort: AbortController } | null;
 
   createConversation: () => string;
@@ -171,17 +181,13 @@ export interface ChatState {
   appendTokens: (conversationId: string, messageId: string, text: string) => void;
   applyEvent: (conversationId: string, messageId: string, event: ChemclawEvent) => void;
   finishTurn: (conversationId: string, messageId: string, status: 'done' | 'aborted') => void;
-  failTurn: (
-    conversationId: string,
-    messageId: string,
-    error: { kind: ApiErrorKind; message: string },
-  ) => void;
+  failTurn: (conversationId: string, messageId: string, error: TurnError) => void;
 
   setComposerLock: (lock: ComposerLock) => void;
   setBanner: (banner: Banner | null) => void;
   setStreaming: (s: ChatState['streaming']) => void;
-  pushJobCompleted: (event: JobCompletedEvent) => void;
-  dismissJobCompleted: (jobId: string) => void;
+  pushJobOutcome: (event: JobOutcome) => void;
+  dismissJobOutcome: (jobId: string) => void;
 }
 
 /** Apply `fn` to the assistant message with `messageId`, leaving all other state untouched. */
@@ -359,10 +365,15 @@ export const useChatStore = create<ChatState>()(
               confidence: event.confidence,
               unsupportedClaims: event.unsupported_claims,
               reviewRequired: event.review_required,
+              verifiedBy: event.verified_by,
             })),
           );
           return;
         }
+
+        // No `error` branch: `streamTurn` throws on that frame before it reaches here, and
+        // `sendMessage`'s catch is the single place a turn is failed. The service's `code`,
+        // `retryable` and `correlation_id` ride along on the thrown `ApiError`.
 
         if (event.type === 'queued') {
           // Not a trace row: the turn has not done anything yet — that is the whole message.
@@ -438,15 +449,20 @@ export const useChatStore = create<ChatState>()(
       setStreaming(streaming) {
         set({ streaming });
       },
-      pushJobCompleted(event) {
+      pushJobOutcome(event) {
         // Newest first, and deduplicated by job id: the push-back stream reconnects with backoff
-        // and an at-least-once delivery can repeat a completion, which would otherwise stack up as
+        // and an at-least-once delivery can repeat an outcome, which would otherwise stack up as
         // two identical cards.
+        //
+        // The dedupe key is the job id alone, not (id, type). A job has exactly one ending, so two
+        // rows for one id could only ever be a redelivery — and keying on the pair would render a
+        // job as both finished and failed if the stream ever contradicted itself, which is the one
+        // outcome worse than showing the wrong one of the two.
         set((s) => ({
           jobFeed: [event, ...s.jobFeed.filter((j) => j.job_id !== event.job_id)].slice(0, 50),
         }));
       },
-      dismissJobCompleted(jobId) {
+      dismissJobOutcome(jobId) {
         set((s) => ({ jobFeed: s.jobFeed.filter((j) => j.job_id !== jobId) }));
       },
     }),

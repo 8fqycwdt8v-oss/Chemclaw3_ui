@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { streamTurn } from '../src/api/streamTurn.ts';
 import { ApiError } from '../src/api/errors.ts';
 import type { ChemclawEvent } from '../shared/events.ts';
-import { jsonError, sseFrames, sseResponse, stubFetch } from './helpers.ts';
+import {
+  answerEvent,
+  errorEvent,
+  jsonError,
+  sseFrames,
+  sseResponse,
+  stubFetch,
+} from './helpers.ts';
 
 const SESSION = 'a'.repeat(32);
 
@@ -35,13 +42,7 @@ const HAPPY: ChemclawEvent[] = [
   { type: 'tool_call', tool: 'gather_evidence', arguments: '{"query": "acetic acid pKa"' },
   { type: 'token', text: 'acid has a pKa of 4.76.' },
   { type: 'job_started', job_id: 'qm-abc123', kind: 'qm' },
-  {
-    type: 'answer',
-    text: 'Acetic acid has a pKa of 4.76.',
-    confidence: 0.91,
-    unsupported_claims: [],
-    review_required: false,
-  },
+  answerEvent({ text: 'Acetic acid has a pKa of 4.76.', confidence: 0.91 }),
 ];
 
 describe('streamTurn', () => {
@@ -77,7 +78,10 @@ describe('streamTurn', () => {
     // This is also how a turn that blew the 600s wall clock arrives — as SSE, not an HTTP status.
     const body = sseFrames([
       { type: 'token', text: 'partial' },
-      { type: 'error', message: 'The turn exceeded the 600s time limit and was cancelled.' },
+      errorEvent({
+        message: 'The turn exceeded the 600s time limit and was cancelled.',
+        code: 'turn_timeout',
+      }),
     ]);
     const stub = stubFetch(() => sseResponse(body));
     restore = stub.restore;
@@ -112,13 +116,7 @@ describe('streamTurn', () => {
       'event: token\ndata: {not json\n\n' +
       sseFrames([
         { type: 'token', text: 'ok' },
-        {
-          type: 'answer',
-          text: 'ok',
-          confidence: null,
-          unsupported_claims: [],
-          review_required: false,
-        },
+        answerEvent({ text: 'ok' }),
       ]);
     const { events, answerText } = await collect(body);
     expect(events.map((e) => e.type)).toEqual(['token', 'answer']);
@@ -129,13 +127,7 @@ describe('streamTurn', () => {
     const body =
       'event: telemetry\ndata: {"type":"telemetry","v":1}\n\n' +
       sseFrames([
-        {
-          type: 'answer',
-          text: 'done',
-          confidence: null,
-          unsupported_claims: [],
-          review_required: false,
-        },
+        answerEvent({ text: 'done' }),
       ]);
     const { events } = await collect(body);
     expect(events.map((e) => e.type)).toEqual(['answer']);
@@ -185,13 +177,7 @@ describe('streamTurn', () => {
     const withToken = stubFetch(() =>
       sseResponse(
         sseFrames([
-          {
-            type: 'answer',
-            text: '',
-            confidence: null,
-            unsupported_claims: [],
-            review_required: false,
-          },
+          answerEvent({ text: '' }),
         ]),
       ),
     );
@@ -212,13 +198,7 @@ describe('streamTurn', () => {
     const devMode = stubFetch(() =>
       sseResponse(
         sseFrames([
-          {
-            type: 'answer',
-            text: '',
-            confidence: null,
-            unsupported_claims: [],
-            review_required: false,
-          },
+          answerEvent({ text: '' }),
         ]),
       ),
     );
@@ -238,13 +218,7 @@ describe('streamTurn', () => {
     const stub = stubFetch(() =>
       sseResponse(
         sseFrames([
-          {
-            type: 'answer',
-            text: '',
-            confidence: null,
-            unsupported_claims: [],
-            review_required: false,
-          },
+          answerEvent({ text: '' }),
         ]),
       ),
     );

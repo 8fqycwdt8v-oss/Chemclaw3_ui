@@ -90,7 +90,14 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       if (!event) continue;
 
       if (event.type === 'error') {
-        throw new ApiError('agent', event.message);
+        // Carry the service's own classification rather than re-deriving one: `code` says what the
+        // user should do next, and `correlation_id` is the only handle an operator has on this
+        // turn in the audit trail.
+        throw new ApiError('agent', event.message, undefined, {
+          code: event.code,
+          retryable: event.retryable,
+          correlationId: event.correlation_id,
+        });
       }
 
       opts.onEvent(event);

@@ -9,7 +9,16 @@
  */
 
 import type { ApiErrorKind } from '../api/errors.ts';
-import type { JobSummary } from '../../shared/events.ts';
+import type { ErrorCode, JobCompletedEvent, JobFailedEvent, JobSummary } from '../../shared/events.ts';
+
+/**
+ * One durable job's ending, as the push-back stream reports it.
+ *
+ * A union rather than two feeds: they are two outcomes of one thing, they arrive on one stream,
+ * they dedupe against the same key, and a chemist watching for their calculation wants one place
+ * to look. Discriminate on `type`.
+ */
+export type JobOutcome = JobCompletedEvent | JobFailedEvent;
 
 export type TurnStatus = 'streaming' | 'done' | 'error' | 'aborted';
 
@@ -19,6 +28,7 @@ export type TraceKind =
   | 'tool_failed'
   | 'job_started'
   | 'job_completed'
+  | 'job_failed'
   | 'question'
   | 'note_proposed'
   | 'approval_request';
@@ -47,10 +57,29 @@ export interface TraceEntry {
    * without it a failed call would read "running…" for the rest of the conversation. It carries
    * no message: the `tool_failed` row that follows is where the reason belongs, and saying it
    * twice in adjacent rows is not saying it better.
+   *
+   * `unresolved` is the fourth state, and it exists only on a **rehydrated** transcript. Live, an
+   * open row means the call is still running; read back from storage, the turn is long over and
+   * "running…" would be a lie — the honest reading of a stored call with no result is that it ran
+   * and the outcome was not recorded (a turn that died mid-call, or a pruned result row).
    */
-  toolCall?: { tool: string; arguments: string; result?: string; failed?: boolean };
+  toolCall?: {
+    tool: string;
+    arguments: string;
+    result?: string;
+    failed?: boolean;
+    unresolved?: boolean;
+  };
   toolFailure?: { tool: string; message: string };
-  job?: { jobId: string; kind?: string; summary?: JobSummary };
+  /**
+   * A durable job, at whichever point in its life this row records.
+   *
+   * `summary` and `reason` are the two endings and are mutually exclusive — a job completes or it
+   * fails. Neither set means the row is a `job_started` and the run is still going, which is the
+   * state that used to be indistinguishable from a failure, because a failure produced no row at
+   * all.
+   */
+  job?: { jobId: string; kind?: string; summary?: JobSummary; reason?: string };
   question?: { question: string; options: string[] };
   note?: { noteId: string; reference: string };
   approval?: { prompt: string; approvalId: string };
@@ -82,6 +111,14 @@ export interface AssistantMessage {
   unsupportedClaims: string[];
   reviewRequired: boolean;
   /**
+   * Which check produced `confidence`.
+   *
+   * Separate from `confidence` because the two answer different questions and only one of them is
+   * about the answer's quality: `'citation-gate'` means the judge never ran, so a reviewer is
+   * looking at a turn nobody scored rather than a turn scored badly.
+   */
+  verifiedBy: 'judge' | 'citation-gate' | null;
+  /**
    * Connectors that were unreachable for this turn, so their tools were absent from it.
    *
    * On the message rather than in `trace`, because it qualifies the whole answer rather than
@@ -103,7 +140,28 @@ export interface AssistantMessage {
   trace: TraceEntry[];
   /** Newest `plan` snapshot, for the header checklist. Full history stays in `trace`. */
   latestPlan: string[] | null;
-  error: { kind: ApiErrorKind; message: string } | null;
+  error: TurnError | null;
+}
+
+/**
+ * How a turn failed.
+ *
+ * `kind` is this client's transport-level classification and is always present, because a turn can
+ * fail without ever reaching the agent. The three optional fields come from the service's own
+ * `error` event and are therefore absent for a failure that never got that far — a dropped socket
+ * has no correlation id, and pretending otherwise would send an operator looking for a turn that
+ * was never recorded.
+ */
+export interface TurnError {
+  kind: ApiErrorKind;
+  message: string;
+  /** The service's closed taxonomy: what the *user* should do next, not where the traceback came
+   *  from. Absent when the failure never reached the service. */
+  code?: ErrorCode;
+  /** Whether asking again unchanged could plausibly succeed. */
+  retryable?: boolean;
+  /** The id the audit trail is keyed on — what an operator needs to find this turn. */
+  correlationId?: string;
 }
 
 export type ChatMessage = UserMessage | AssistantMessage;

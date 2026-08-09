@@ -20,28 +20,86 @@ import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
 import { JobResultCard } from './JobResultCard.tsx';
 
+/**
+ * Icon per tool. An unknown tool falls back to a neutral wrench, so a gap here is cosmetic.
+ *
+ * It had gone stale in the one direction that is not cosmetic, though: it named `submit_qm_job` and
+ * `get_qm_job_status`, which the backend replaced with `compute_dft_energy` and
+ * `get_durable_job_status` — so the two rows a chemist watching a long QM run stares at were the
+ * two guaranteed to miss. Grouped by capability, which is also how the backend's manifests are
+ * organised, so a new bundle's tools have an obvious home.
+ */
 const TOOL_ICON: Record<string, string> = {
-  gather_evidence: '🔍',
-  expand_note: '📄',
-  find_notes: '🗂️',
+  // chem — bench chemistry
+  resolve_compound: '🔤',
+  stoichiometry_table: '⚖️',
+  green_metrics: '♻️',
+  render_structure: '🖼️',
+  // calc — fast calculators
   compute_xtb_energy: '⚛️',
+  compute_electronic_properties: '🔬',
+  predict_site_reactivity: '🎯',
+  optimize_geometry: '📐',
+  compute_thermochemistry: '🌡️',
   predict_pka: '📈',
   predict_solubility: '💧',
-  submit_qm_job: '🖥️',
-  get_qm_job_status: '⏱️',
+  predict_logd: '🧫',
+  predict_developability_profile: '💊',
+  calculator_trust: '🎚️',
+  calculator_outliers: '📉',
+  find_calculations: '🗄️',
+  list_artifacts: '📎',
+  fetch_artifact: '📥',
+  report_measurement: '🧾',
+  // calc — durable
+  compute_reaction_energy: '🔥',
+  compare_solvents: '🧴',
+  scan_coordinate: '〰️',
+  sample_conformers: '🌀',
+  compute_interaction_energy: '🧲',
+  // qm
+  compute_dft_energy: '🖥️',
+  // bo — experiment design
   suggest_next_experiment: '🧪',
+  resume_campaign: '▶️',
+  generate_screening_design: '🗓️',
+  campaign_progress: '📊',
+  predict_outcome: '🔮',
+  start_optimization_campaign: '🚀',
+  // safety
   screen_hazards: '⚠️',
-  propose_knowledge_note: '📝',
-  record_confirmed_answer: '✅',
-  similar_reactions: '🔗',
+  screen_genotoxic_alerts: '☣️',
+  ich_impurity_limit: '📋',
+  // fingerprints
   similar_molecules: '🧬',
   substructure_matches: '🔎',
+  similar_reactions: '🔗',
+  // in-process
+  gather_evidence: '🔍',
+  find_notes: '🗂️',
+  expand_note: '📄',
+  find_knowledge_gaps: '🕳️',
+  propose_knowledge_note: '📝',
+  record_failure: '🚫',
+  record_confirmed_answer: '✅',
+  recall_observations: '💭',
+  request_development_report: '📑',
+  get_durable_job_status: '⏱️',
+  find_past_jobs: '🕰️',
+  ask_clarifying_question: '❓',
+  list_attachments: '📁',
+  read_attachment: '📖',
 };
 
 function JobCard({ entry }: { entry: TraceEntry }): React.JSX.Element {
+  const failed = entry.kind === 'job_failed';
   return (
     <div className="rounded-md border border-border-subtle bg-surface-raised p-3">
-      <JobResultCard jobId={entry.job?.jobId ?? ''} summary={entry.job?.summary} />
+      {failed ? (
+        <JobResultCard jobId={entry.job?.jobId ?? ''} reason={entry.job?.reason ?? ''} />
+      ) : (
+        <JobResultCard jobId={entry.job?.jobId ?? ''} summary={entry.job?.summary} />
+      )}
     </div>
   );
 }
@@ -91,8 +149,13 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
           )}
           {/* Still open: not "we are hiding the result" but "the call has not come back". The
               row that follows says which of the two endings arrived. */}
-          {entry.toolCall?.result === undefined && !entry.toolCall?.failed && (
-            <p className="mt-1 text-xs text-ink-muted">running…</p>
+          {entry.toolCall?.result === undefined &&
+            !entry.toolCall?.failed &&
+            !entry.toolCall?.unresolved && <p className="mt-1 text-xs text-ink-muted">running…</p>}
+          {/* Read back from storage with no result. The turn is over, so "running…" would be a
+              lie — and so would "returned" with nothing beside it. */}
+          {entry.toolCall?.unresolved && (
+            <p className="mt-1 text-xs text-ink-muted">outcome not recorded</p>
           )}
         </div>
       );
@@ -122,6 +185,7 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
       );
 
     case 'job_completed':
+    case 'job_failed':
       return <JobCard entry={entry} />;
 
     case 'note_proposed':

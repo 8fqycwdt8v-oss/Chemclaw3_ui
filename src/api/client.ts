@@ -47,10 +47,28 @@ export interface SessionSummary {
   title?: string;
 }
 
+/** One tool the agent invoked during a stored turn — the same pair the live stream reports as
+ *  `tool_call` + `tool_result`, recovered from storage. */
+export interface TranscriptToolCall {
+  tool: string;
+  arguments: string;
+  /**
+   * `null` while the pairing is incomplete — a turn that failed mid-call, or a call whose result
+   * row was pruned. That is a real state and a distinct one: it means "this ran and we do not know
+   * how it ended", which must not render as a success with an empty answer.
+   */
+  result: string | null;
+}
+
 export interface TranscriptMessage {
+  /** Position in the transcript, so a client has a stable key without the contract exposing a
+   *  database row id. */
+  index?: number;
   role: string;
   text: string;
-  created_at?: string;
+  /** What the agent did during this turn. Absent from a backend that predates the field, which is
+   *  why rehydration degrades to a message with an empty trace rather than failing. */
+  tool_calls?: TranscriptToolCall[];
 }
 
 export interface AttachmentSummary {

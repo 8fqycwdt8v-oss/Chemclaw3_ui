@@ -5,7 +5,7 @@
  * and setting BOTH the SSE `event:` name and the JSON `type` field to the same discriminator.
  * We prefer the JSON field and fall back to the SSE name.
  *
- * Verified against 8fqycwdt8v-oss/Chemclaw3 @ a1bc379 (src/chemclaw/api/events.py). Fourteen
+ * Verified against 8fqycwdt8v-oss/Chemclaw3 @ 261b166 (src/chemclaw/api/events.py). Fifteen
  * members — `question` and `note_proposed` are easy to miss, and `job_started` carries `kind`.
  *
  * It said ten for a while, and the two it was missing were the two that report trouble:
@@ -13,6 +13,12 @@
  * `EVENT_TYPES`, an answer assembled without the ELN connector rendered as a confident, ordinary
  * answer. Forward-compatibility is the right default for an unknown event; it is the wrong
  * outcome for one that exists to qualify what the agent just said.
+ *
+ * Then it said fourteen, and the missing one was `job_failed` — the same failure a third time, and
+ * the worst of the three, because this event exists *specifically* to close a promise this UI had
+ * already made. A durable job announced as running and then failed produced nothing on the wire we
+ * kept, so the card said "runs asynchronously" for the rest of the conversation. Three misses with
+ * one shape between them is what `scripts/check-openapi.mjs` is for.
  *
  * This file is imported by both the SPA (bundled by Vite) and the mock backend (bundled by
  * esbuild). Keep it dependency-free.
@@ -68,6 +74,25 @@ export interface JobCompletedEvent {
   summary: JobSummary;
 }
 
+/**
+ * A durable job failed after the turn that launched it had already ended.
+ *
+ * The counterpart to `job_completed`, and the one that closes the promise. `job_started` says a job
+ * is running and the surface renders that; without this event the only ending on the wire was the
+ * happy one, so a failed job kept its "runs asynchronously" label indefinitely and the failure was
+ * reachable only by polling with an id the chemist would have had to keep.
+ *
+ * Arrives on `GET /sessions/{id}/events` (the push-back stream), not on the turn stream — by
+ * definition, since a job that failed *during* its turn is reported inside it.
+ */
+export interface JobFailedEvent {
+  type: 'job_failed';
+  job_id: string;
+  /** The innermost message in Temporal's failure chain: the outer ones say "Child Workflow
+   *  execution failed" and this one says what actually went wrong. May be empty. */
+  reason: string;
+}
+
 export interface QuestionEvent {
   type: 'question';
   question: string;
@@ -104,16 +129,65 @@ export interface AnswerEvent {
   /** Verifier citation-faithfulness score in [0,1]. `null` unless the verifier is enabled. */
   confidence: number | null;
   unsupported_claims: string[];
-  /** True exactly when `confidence < verifier_confidence_threshold`. The routing signal for a
-   *  "needs expert review" affordance. */
+  /**
+   * The routing signal for a "needs expert review" affordance.
+   *
+   * NOT a function of `confidence` alone, which is why it is its own field: the deterministic
+   * answer-shape gate can raise it while leaving `confidence` at `null` — it found a
+   * method-parameter shape no tool produced, and that is not a score. So `review_required` can be
+   * true with no number beside it.
+   */
   review_required: boolean;
+  /**
+   * Which check produced `confidence`, when one did. `null` means verification was off.
+   *
+   * The flag above cannot carry this. A turn routed to review because the judge was unreachable
+   * and a turn routed there because the judge scored it badly both arrive as
+   * `review_required: true`, and a reviewer needs to know which — `"citation-gate"` means the
+   * check that earns confidence did not run. The flag is the safety property; this is the
+   * transparency, and rendering them as one thing loses the second.
+   */
+  verified_by: 'judge' | 'citation-gate' | null;
 }
+
+/**
+ * The closed taxonomy of turn failures.
+ *
+ * Each member is a *different thing for the user to do* — retry, wait, narrow the question, fix the
+ * input, ask an operator — not a different place the traceback came from, which is why it is this
+ * short. `empty_answer` is the odd one and the most useful: the turn ran to completion and wrote
+ * nothing, so a surface should offer "ask something narrower" rather than "an internal error
+ * occurred".
+ */
+export const ERROR_CODES = [
+  'internal',
+  'storage_unavailable',
+  'llm_timeout',
+  'turn_timeout',
+  'budget_exhausted',
+  'loop_cap_reached',
+  'bad_tool_arguments',
+  'empty_answer',
+] as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[number];
+
+const ERROR_CODE_SET = new Set<string>(ERROR_CODES);
 
 export interface ErrorEvent {
   type: 'error';
   /** Safe to show the user — the backend never puts stack traces here. Also how a turn that
    *  blew the 600s wall-clock limit is reported: as a final SSE event, not an HTTP error. */
   message: string;
+  /** `internal` is the honest default for an unclassified failure — and is what an older backend,
+   *  which sends no code at all, is read as. */
+  code: ErrorCode;
+  /** Whether asking again, unchanged, could plausibly succeed. Telling a user to retry a malformed
+   *  tool argument wastes their time and the deployment's tokens. */
+  retryable: boolean;
+  /** The id the **audit trail** is keyed on — not the session id, which the user already has.
+   *  Quoting it is what lets an operator find the turn. Not sensitive: random per-turn hex. */
+  correlation_id: string;
 }
 
 export interface CapabilityDegradedEvent {
@@ -138,9 +212,39 @@ export interface ToolResultEvent {
    *  a call that raised arrives as `tool_failed` instead, and the two are exhaustive — which is
    *  why there is no `ok` flag to check. */
   tool: string;
-  /** Truncated by the backend exactly as `tool_call.arguments` is — a preview of the value, not
-   *  the whole return. Raw; never `JSON.parse` it unguarded. */
+  /**
+   * Truncated by the backend exactly as `tool_call.arguments` is — a preview of the value, not
+   * the whole return. Raw; never `JSON.parse` it unguarded.
+   *
+   * **And never render chemistry from it.** A 200-char cut lands anywhere, including the middle of
+   * a SMILES string — and a truncated SMILES frequently still *parses*, as a different, smaller
+   * molecule. Prose cut short reads as cut short; a structure cut short reads as a structure. The
+   * two fields below exist precisely so a consumer never has to mine this string for data.
+   */
   preview: string;
+  /**
+   * The note ids the call returned, in full — **not** truncated, because it answers a different
+   * question from `preview`.
+   *
+   * A grounding check asks "was this id in front of the model this turn?", and scoring that against
+   * the preview means scoring 40 retrieved chunks against the first 200 characters of them. A live
+   * backend run graded 19 of 36 answers as fabrication that way, and nine of nine verdicts checked
+   * were false — every one an id the tool really had returned.
+   */
+  note_ids: string[];
+  /**
+   * The distinct numeric values the call returned, in full and deduplicated.
+   *
+   * The same split as `note_ids`, one step further on: prose for a human, values for a scorer. It
+   * is the only structured chemistry data currently on the wire, so it is what a provenance
+   * overlay can honestly check an answer's figures against.
+   *
+   * Bounded by the producer (`stream_max_result_numbers`, default 512) and far out of reach in
+   * real traffic — 5 values for an ICH lookup, 27 for a charge table, 49 for a full
+   * electronic-properties run. The backend logs when it does bound it, because a silent truncation
+   * reads as completeness.
+   */
+  numbers: number[];
 }
 
 export type ChemclawEvent =
@@ -150,6 +254,7 @@ export type ChemclawEvent =
   | TokenEvent
   | JobStartedEvent
   | JobCompletedEvent
+  | JobFailedEvent
   | CapabilityDegradedEvent
   | ToolFailedEvent
   | ToolResultEvent
@@ -168,6 +273,7 @@ const EVENT_TYPES = new Set<string>([
   'token',
   'job_started',
   'job_completed',
+  'job_failed',
   'capability_degraded',
   'tool_failed',
   'tool_result',
@@ -178,30 +284,105 @@ const EVENT_TYPES = new Set<string>([
   'error',
 ]);
 
-/** Tools the agent advertises, used only to pick an icon/label in the trace panel. An unknown
- *  tool renders with a neutral fallback, so this list going stale is cosmetic. */
-export const KNOWN_TOOLS = [
-  'gather_evidence',
-  'expand_note',
-  'find_notes',
+/**
+ * Tools the agent advertises, used only to pick an icon/label in the trace panel. An unknown tool
+ * renders with a neutral fallback, so this list going stale is cosmetic — but it had gone stale in
+ * the direction that is not: it named `submit_qm_job` and `get_qm_job_status`, which the backend
+ * deleted (they are `compute_dft_energy` and `get_durable_job_status` now), so the two entries most
+ * likely to be hit by a chemist watching a long QM run were the two that could never match.
+ *
+ * Two sources, kept apart because they are discovered differently and a reader looking for a name
+ * needs to know which half to search: the seven connector bundles declare theirs in
+ * `connector.yaml` (`tools:` plus each `jobs: - name:`), and the in-process ones declare themselves
+ * with a `@tool` decorator at their definition site.
+ */
+const CONNECTOR_TOOLS = [
+  // chem — RDKit, pure and synchronous
+  'resolve_compound',
+  'stoichiometry_table',
+  'green_metrics',
+  'render_structure',
+  // calc — the fast cached calculators, and the calibration ledger over them
   'compute_xtb_energy',
+  'compute_electronic_properties',
+  'predict_site_reactivity',
+  'optimize_geometry',
+  'compute_thermochemistry',
   'predict_pka',
   'predict_solubility',
-  'submit_qm_job',
-  'get_qm_job_status',
+  'predict_logd',
+  'predict_developability_profile',
+  'calculator_trust',
+  'calculator_outliers',
+  'find_calculations',
+  'list_artifacts',
+  'fetch_artifact',
+  'report_measurement',
+  // calc — the durable half: same capability, minutes rather than seconds
+  'compute_reaction_energy',
+  'compare_solvents',
+  'scan_coordinate',
+  'sample_conformers',
+  'compute_interaction_energy',
+  // qm — jobs only; there is no sub-second DFT tool to serve
+  'compute_dft_energy',
+  // bo — experiment design, inline and durable
   'suggest_next_experiment',
+  'resume_campaign',
+  'generate_screening_design',
+  'campaign_progress',
+  'predict_outcome',
+  'start_optimization_campaign',
+  // safety — three separately-governed cited tables
   'screen_hazards',
-  'propose_knowledge_note',
-  'record_confirmed_answer',
-  'similar_reactions',
+  'screen_genotoxic_alerts',
+  'ich_impurity_limit',
+  // molfp / rxnfp — search over the fingerprint indexes
   'similar_molecules',
   'substructure_matches',
+  'similar_reactions',
 ] as const;
+
+const IN_PROCESS_TOOLS = [
+  'gather_evidence',
+  'find_notes',
+  'expand_note',
+  'find_knowledge_gaps',
+  'propose_knowledge_note',
+  'record_failure',
+  'record_confirmed_answer',
+  'recall_observations',
+  'request_development_report',
+  'get_durable_job_status',
+  'find_past_jobs',
+  'ask_clarifying_question',
+  'list_attachments',
+  'read_attachment',
+  'remember_preference',
+  'recall_preferences',
+  'forget_preference',
+  'watch_for',
+  'list_watches',
+  'stop_watching',
+] as const;
+
+export const KNOWN_TOOLS = [...CONNECTOR_TOOLS, ...IN_PROCESS_TOOLS] as const;
 
 export type KnownTool = (typeof KNOWN_TOOLS)[number];
 
 const asString = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
 const asStringArray = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => String(x)) : []);
+
+/**
+ * Numbers only, and finite ones.
+ *
+ * Not `Number(x)`: JSON gives us `null` for a non-finite float and `Number(null)` is 0 — which
+ * would invent a value the tool never returned and hand it to a grounding check as evidence. A
+ * value we cannot read is dropped, because this list's whole contract is that everything in it was
+ * really returned.
+ */
+const asNumberArray = (v: unknown): number[] =>
+  Array.isArray(v) ? v.filter((x): x is number => typeof x === 'number' && Number.isFinite(x)) : [];
 
 /**
  * Coerce one decoded SSE frame into a `ChemclawEvent`, or `null` if it is not one we know.
@@ -234,6 +415,8 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
       return { type: 'token', text: asString(o.text) };
     case 'job_started':
       return { type: 'job_started', job_id: asString(o.job_id), kind: asString(o.kind, 'job') };
+    case 'job_failed':
+      return { type: 'job_failed', job_id: asString(o.job_id), reason: asString(o.reason) };
     case 'job_completed':
       return {
         type: 'job_completed',
@@ -254,6 +437,8 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         type: 'tool_result',
         tool: asString(o.tool, 'unknown'),
         preview: asString(o.preview),
+        note_ids: asStringArray(o.note_ids),
+        numbers: asNumberArray(o.numbers),
       };
     case 'question':
       return {
@@ -280,9 +465,21 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         confidence: typeof o.confidence === 'number' ? o.confidence : null,
         unsupported_claims: asStringArray(o.unsupported_claims),
         review_required: o.review_required === true,
+        // Anything we do not recognise reads as "verification was off" rather than as a verdict
+        // we cannot name — the same direction the flag above already errs in.
+        verified_by:
+          o.verified_by === 'judge' || o.verified_by === 'citation-gate' ? o.verified_by : null,
       };
     case 'error':
-      return { type: 'error', message: asString(o.message, 'The turn failed.') };
+      return {
+        type: 'error',
+        message: asString(o.message, 'The turn failed.'),
+        // A backend that predates these fields sends none of them, and `internal` + not-retryable
+        // is exactly how such a failure was treated before they existed.
+        code: ERROR_CODE_SET.has(asString(o.code)) ? (o.code as ErrorCode) : 'internal',
+        retryable: o.retryable === true,
+        correlation_id: asString(o.correlation_id),
+      };
     default:
       return null;
   }

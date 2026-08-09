@@ -7,7 +7,52 @@
  * and each error status.
  */
 
-import type { ChemclawEvent } from '../shared/events.ts';
+import type {
+  AnswerEvent,
+  ChemclawEvent,
+  ErrorEvent,
+  ToolResultEvent,
+} from '../shared/events.ts';
+
+/**
+ * Builders for the three events that carry optional-on-the-backend fields.
+ *
+ * Every field below is one the service defaults, so a test that cares about `text` should not have
+ * to restate `verified_by` to compile. That is not just ergonomics: these three events have grown
+ * six fields between them since this suite was written, and each addition previously meant editing
+ * fifteen unrelated call sites — the kind of churn that makes the easy fix "make the field
+ * optional", which is how a consumer stops handling it at all.
+ *
+ * The defaults are the service's own, so a builder with no arguments is what a minimally-configured
+ * deployment actually sends: verification off, no error classification.
+ */
+export const answerEvent = (over: Partial<AnswerEvent> = {}): AnswerEvent => ({
+  type: 'answer',
+  text: '',
+  confidence: null,
+  unsupported_claims: [],
+  review_required: false,
+  verified_by: null,
+  ...over,
+});
+
+export const toolResultEvent = (over: Partial<ToolResultEvent> = {}): ToolResultEvent => ({
+  type: 'tool_result',
+  tool: 'unknown',
+  preview: '',
+  note_ids: [],
+  numbers: [],
+  ...over,
+});
+
+export const errorEvent = (over: Partial<ErrorEvent> = {}): ErrorEvent => ({
+  type: 'error',
+  message: 'The turn failed.',
+  code: 'internal',
+  retryable: false,
+  correlation_id: '',
+  ...over,
+});
 
 /** Serialise events the way sse-starlette does: both the `event:` name and the JSON `type`. */
 export function sseFrames(events: ChemclawEvent[]): string {

@@ -17,6 +17,7 @@ import { normalizeEvent } from '../shared/events.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { TracePanel } from '../src/components/TracePanel.tsx';
 import type { AssistantMessage, TraceEntry } from '../src/state/types.ts';
+import { toolResultEvent } from './helpers.ts';
 
 const assistantOf = (conversationId: string, messageId: string): AssistantMessage => {
   const message = useChatStore
@@ -48,8 +49,29 @@ beforeEach(() => {
 
 describe('normalizeEvent', () => {
   it('accepts tool_result', () => {
+    expect(
+      normalizeEvent({
+        type: 'tool_result',
+        tool: 'predict_pka',
+        preview: 'pKa 9.2',
+        note_ids: ['compound-acetic-acid'],
+        numbers: [9.2],
+      }),
+    ).toEqual({
+      type: 'tool_result',
+      tool: 'predict_pka',
+      preview: 'pKa 9.2',
+      note_ids: ['compound-acetic-acid'],
+      numbers: [9.2],
+    });
+  });
+
+  it('reads a backend that predates note_ids and numbers as having returned neither', () => {
+    // Empty, not absent. Every consumer of these two lists asks "was this in front of the model?",
+    // and the answer for a service that cannot say is no — an absent field must not read as a
+    // wildcard that silently passes a grounding check.
     expect(normalizeEvent({ type: 'tool_result', tool: 'predict_pka', preview: 'pKa 9.2' })).toEqual(
-      { type: 'tool_result', tool: 'predict_pka', preview: 'pKa 9.2' },
+      { type: 'tool_result', tool: 'predict_pka', preview: 'pKa 9.2', note_ids: [], numbers: [] },
     );
   });
 
@@ -59,6 +81,27 @@ describe('normalizeEvent', () => {
       type: 'tool_result',
       tool: 'unknown',
       preview: '',
+      note_ids: [],
+      numbers: [],
+    });
+  });
+
+  it('drops an unreadable number rather than coercing it to zero', () => {
+    // `Number(null)` is 0, and a 0 nothing returned is worse than a missing value: it is a figure
+    // a grounding check would then confirm the answer was entitled to use.
+    expect(
+      normalizeEvent({
+        type: 'tool_result',
+        tool: 'ich_impurity_limit',
+        preview: '',
+        numbers: [5000, null, 'n/a', 890],
+      }),
+    ).toEqual({
+      type: 'tool_result',
+      tool: 'ich_impurity_limit',
+      preview: '',
+      note_ids: [],
+      numbers: [5000, 890],
     });
   });
 });
@@ -68,7 +111,7 @@ describe('tool_result in the trace', () => {
     const { cid, mid } = startTurn();
     const store = useChatStore.getState();
     store.applyEvent(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: '{"s":"CCO"}' });
-    store.applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'pKa 15.9' });
+    store.applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'pKa 15.9' }));
 
     const trace = assistantOf(cid, mid).trace;
     expect(trace).toHaveLength(1);
@@ -83,7 +126,7 @@ describe('tool_result in the trace', () => {
     const { cid, mid } = startTurn();
     useChatStore
       .getState()
-      .applyEvent(cid, mid, { type: 'tool_call', tool: 'submit_qm_job', arguments: '' });
+      .applyEvent(cid, mid, { type: 'tool_call', tool: 'compute_dft_energy', arguments: '' });
 
     expect(assistantOf(cid, mid).trace[0]?.toolCall?.result).toBeUndefined();
   });
@@ -93,8 +136,8 @@ describe('tool_result in the trace', () => {
     const store = useChatStore.getState();
     store.applyEvent(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: 'first' });
     store.applyEvent(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: 'second' });
-    store.applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'A' });
-    store.applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'B' });
+    store.applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'A' }));
+    store.applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'B' }));
 
     const trace = assistantOf(cid, mid).trace;
     expect(trace.map((e) => e.toolCall?.result)).toEqual(['A', 'B']);
@@ -104,7 +147,7 @@ describe('tool_result in the trace', () => {
     const { cid, mid } = startTurn();
     useChatStore
       .getState()
-      .applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'orphan' });
+      .applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'orphan' }));
 
     expect(assistantOf(cid, mid).trace).toHaveLength(0);
   });
@@ -131,7 +174,7 @@ describe('tool_failed', () => {
   it('does not close a different tool that is still running', () => {
     const { cid, mid } = startTurn();
     const store = useChatStore.getState();
-    store.applyEvent(cid, mid, { type: 'tool_call', tool: 'submit_qm_job', arguments: '' });
+    store.applyEvent(cid, mid, { type: 'tool_call', tool: 'compute_dft_energy', arguments: '' });
     store.applyEvent(cid, mid, { type: 'tool_failed', tool: 'predict_pka', message: 'nope' });
 
     expect(assistantOf(cid, mid).trace[0]?.toolCall?.failed).toBeUndefined();
@@ -159,7 +202,7 @@ describe('TracePanel', () => {
   });
 
   it('says a call with no result yet is running', () => {
-    open([call({ tool: 'submit_qm_job', arguments: '' })]);
+    open([call({ tool: 'compute_dft_energy', arguments: '' })]);
     expect(screen.getByText(/running/)).toBeTruthy();
   });
 

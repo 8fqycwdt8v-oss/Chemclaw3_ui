@@ -87,6 +87,10 @@ export const ROUTES: readonly Route[] = [
 
   // Sessions.
   { method: 'POST', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false },
+  // The agent profiles `POST /sessions` will accept. Whitelisted because the alternative is a
+  // picker with hardcoded names: the service 400s an unknown profile, and the set is a
+  // deployment's own, so guessing is how the picker breaks in the tenant nobody tested in.
+  { method: 'GET', pattern: /^\/api\/profiles$/, target: () => '/profiles', sse: false },
   // Added by the companion backend change: list the caller's sessions.
   { method: 'GET', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false },
   // Added by the companion backend change: read a transcript back after a reload.

@@ -11,7 +11,7 @@
  * nothing to flag it. These tests are about that.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { sendMessage, warmSession } from '../src/state/sendMessage.ts';
 import type { AuthProvider } from '../src/auth/types.ts';
@@ -27,6 +27,7 @@ const devAuth: AuthProvider = {
 };
 
 const ANSWER = sseFrames([answerEvent({ text: 'ok' })]);
+const SESSION = 'c'.repeat(32);
 
 let restore: (() => void) | null = null;
 
@@ -160,5 +161,52 @@ describe('warmSession', () => {
 
     expect(useChatStore.getState().banner).toBeNull();
     expect(useChatStore.getState().conversations[cid]?.sessionId).toBeNull();
+  });
+});
+
+describe('agent profile', () => {
+  it('mints the session on the chosen profile', async () => {
+    // The service 400s an unknown profile, so the picker reads `GET /profiles` rather than
+    // carrying a list of its own — and the chosen name has to actually reach POST /sessions.
+    const stub = stubFetch((url) =>
+      url.endsWith('/sessions')
+        ? new Response(JSON.stringify({ session_id: SESSION }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        : sseResponse(ANSWER),
+    );
+    restore = stub.restore;
+
+    const cid = useChatStore.getState().createConversation();
+    useChatStore.getState().setSessionProfile(cid, 'property-lookup');
+    warmSession(cid, devAuth);
+    await vi.waitFor(() =>
+      expect(useChatStore.getState().conversations[cid]?.sessionId).toBe(SESSION),
+    );
+
+    const create = stub.calls.find((c) => c.url.endsWith('/sessions'));
+    expect(JSON.parse(String(create?.init?.body))).toEqual({ profile: 'property-lookup' });
+  });
+
+  it('sends no body at all when no profile was chosen', async () => {
+    // `SessionIn` is optional in full upstream, and an explicit null is a different thing from
+    // an absent field.
+    const stub = stubFetch(
+      () =>
+        new Response(JSON.stringify({ session_id: SESSION }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    restore = stub.restore;
+
+    const cid = useChatStore.getState().createConversation();
+    warmSession(cid, devAuth);
+    await vi.waitFor(() =>
+      expect(useChatStore.getState().conversations[cid]?.sessionId).toBe(SESSION),
+    );
+
+    expect(stub.calls.find((c) => c.url.endsWith('/sessions'))?.init?.body).toBeUndefined();
   });
 });

@@ -13,7 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ResultSheet } from '../src/components/ResultSheet.tsx';
 import { stubFetch } from './helpers.ts';
 
@@ -156,6 +156,40 @@ describe('ResultSheet', () => {
 
     expect(await screen.findByText('xtb-1')).toBeTruthy();
     expect(screen.getByText('calc_ref')).toBeTruthy();
+    // A table that cannot leave the browser gets retyped into a spreadsheet by hand, which is
+    // where a transcription error enters a campaign.
+    expect(screen.getByRole('button', { name: /Download CSV/ })).toBeTruthy();
+  });
+
+  it('quotes a CSV field that would otherwise break the file', async () => {
+    // RFC 4180: a comma, a quote or a newline forces quoting, and an embedded quote is doubled.
+    // Getting this wrong silently shifts every column after it, which a reader discovers in a
+    // spreadsheet rather than here.
+    open(
+      'find_calculations',
+      JSON.stringify([{ note: 'ran hot, then cooled', quote: 'he said "no"' }]),
+    );
+    await screen.findByRole('button', { name: /Download CSV/ });
+
+    let captured = '';
+    const createObjectURL = URL.createObjectURL;
+    const revokeObjectURL = URL.revokeObjectURL;
+    URL.createObjectURL = ((blob: Blob) => {
+      void blob.text().then((text) => {
+        captured = text;
+      });
+      return 'blob:stub';
+    }) as typeof URL.createObjectURL;
+    URL.revokeObjectURL = (() => undefined) as typeof URL.revokeObjectURL;
+
+    try {
+      fireEvent.click(screen.getByRole('button', { name: /Download CSV/ }));
+      await waitFor(() => expect(captured).toContain('"ran hot, then cooled"'));
+      expect(captured).toContain('"he said ""no"""');
+    } finally {
+      URL.createObjectURL = createObjectURL;
+      URL.revokeObjectURL = revokeObjectURL;
+    }
   });
 
   it('shows the raw text when the result is not JSON at all', async () => {

@@ -25,11 +25,13 @@
  */
 
 import { useState } from 'react';
+import { Download } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { api, type StoredToolResult } from '../api/client.ts';
 import { toolLabel } from '../lib/format.ts';
 import { Molecule } from './Molecule.tsx';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { EmptyState, Loading } from '@/components/chem/Feedback';
 
@@ -55,6 +57,53 @@ const SEVERITY_TONE: Record<string, 'danger' | 'warn' | 'neutral'> = {
   low: 'neutral',
   info: 'neutral',
 };
+
+/**
+ * Turn records into a CSV a spreadsheet will open without argument.
+ *
+ * RFC 4180 quoting, which is three rules and worth doing properly: a field containing a comma, a
+ * quote or a newline is quoted, and an embedded quote is doubled. A run sheet retyped into Excel
+ * by hand is where the transcription error enters a campaign, and a chemist handed a markdown
+ * table has no other option.
+ */
+function toCsv(headers: string[], records: Json[]): string {
+  const cell = (value: unknown): string => {
+    if (value === null || value === undefined) return '';
+    const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  return [headers.join(','), ...records.map((r) => headers.map((h) => cell(r[h])).join(','))].join(
+    '\r\n',
+  );
+}
+
+function DownloadCsv({
+  headers,
+  records,
+  name,
+}: {
+  headers: string[];
+  records: Json[];
+  name: string;
+}): React.JSX.Element {
+  // An object URL rather than a data: URI — a large table exceeds what some browsers will accept
+  // in a URL — revoked as soon as the click has been dispatched.
+  const download = (): void => {
+    const blob = new Blob([toCsv(headers, records)], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${name}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <Button variant="outline" size="xs" onClick={download}>
+      <Download aria-hidden className="size-3.5" />
+      Download CSV
+    </Button>
+  );
+}
 
 function Table({
   headers,
@@ -269,35 +318,40 @@ function ChargeTable({ data }: { data: Json }): React.JSX.Element {
  * Nested values are not flattened: they are shown as JSON in the cell, which is worse than a real
  * renderer and much better than hiding them.
  */
-function AutoTable({ records }: { records: Json[] }): React.JSX.Element {
+function AutoTable({ records, tool }: { records: Json[]; tool: string }): React.JSX.Element {
   const headers = [...new Set(records.flatMap((r) => Object.keys(r)))];
   return (
-    <Table
-      label="The tool's result, as a table"
-      headers={headers}
-      body={records.map((record, i) => (
-        <tr key={i}>
-          {headers.map((key) => {
-            const value = record[key];
-            const asNumber = num(value);
-            if (asNumber !== null)
+    <>
+      <div className="flex justify-end">
+        <DownloadCsv headers={headers} records={records} name={tool} />
+      </div>
+      <Table
+        label="The tool's result, as a table"
+        headers={headers}
+        body={records.map((record, i) => (
+          <tr key={i}>
+            {headers.map((key) => {
+              const value = record[key];
+              const asNumber = num(value);
+              if (asNumber !== null)
+                return (
+                  <Cell key={key} numeric>
+                    {asNumber.toLocaleString()}
+                  </Cell>
+                );
+              if (typeof value === 'string' || typeof value === 'boolean')
+                return <Cell key={key}>{String(value)}</Cell>;
+              if (value === undefined || value === null) return <Cell key={key}>—</Cell>;
               return (
-                <Cell key={key} numeric>
-                  {asNumber.toLocaleString()}
+                <Cell key={key}>
+                  <span className="font-mono text-2xs">{JSON.stringify(value)}</span>
                 </Cell>
               );
-            if (typeof value === 'string' || typeof value === 'boolean')
-              return <Cell key={key}>{String(value)}</Cell>;
-            if (value === undefined || value === null) return <Cell key={key}>—</Cell>;
-            return (
-              <Cell key={key}>
-                <span className="font-mono text-2xs">{JSON.stringify(value)}</span>
-              </Cell>
-            );
-          })}
-        </tr>
-      ))}
-    />
+            })}
+          </tr>
+        ))}
+      />
+    </>
   );
 }
 
@@ -334,7 +388,7 @@ function Body({ result }: { result: StoredToolResult }): React.JSX.Element {
   if (Array.isArray(parsed)) {
     const records = rows(parsed);
     return records.length === parsed.length && records.length > 0 ? (
-      <AutoTable records={records} />
+      <AutoTable records={records} tool={result.tool} />
     ) : (
       <RawText text={result.text} />
     );
@@ -366,7 +420,7 @@ function Body({ result }: { result: StoredToolResult }): React.JSX.Element {
   return (
     <>
       <Verdict data={parsed} />
-      {listKey && <AutoTable records={rows(parsed[listKey])} />}
+      {listKey && <AutoTable records={rows(parsed[listKey])} tool={result.tool} />}
       <details className="group">
         <summary className="tap-target cursor-pointer list-none rounded-sm text-2xs text-ink-muted hover:text-ink focus-ring">
           Everything the tool returned

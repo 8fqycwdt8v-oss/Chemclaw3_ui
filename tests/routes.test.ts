@@ -23,6 +23,7 @@ describe('proxy route whitelist', () => {
       ['POST', '/api/approvals/approval-q-42/decision', '/approvals/approval-q-42/decision'],
       ['GET', `/api/sessions/${SID}/tool-results/${REF}`, `/sessions/${SID}/tool-results/${REF}`],
       ['GET', '/api/notes/note-suzuki-42', '/notes/note-suzuki-42'],
+      ['GET', '/api/profiles', '/profiles'],
       ['GET', '/api/proposals', '/proposals'],
       ['GET', '/api/proposals/42', '/proposals/42'],
       ['POST', '/api/proposals/42/decision', '/proposals/42/decision'],

@@ -77,7 +77,60 @@ export interface MoleculeProps {
   maxWidth?: number;
 }
 
-export function Molecule({ smiles, className, maxWidth = 320 }: MoleculeProps): React.JSX.Element {
+/**
+ * A reaction SMILES — `reactants>agents>products`, or the two-part `A>>B`.
+ *
+ * smiles-drawer parses molecules and nothing else, so every reaction reaching this component fell
+ * through to the raw-string fallback. That is most of what `similar_reactions` returns and every
+ * `reaction` note's structure, so the one search built around reactions was the one search whose
+ * hits could not be drawn.
+ *
+ * Each component is drawn as the molecule it is and the arrow is laid out here, rather than asking
+ * a molecule drawer to understand reactions. `>` cannot occur inside a molecule SMILES, so the
+ * split is unambiguous.
+ */
+function Reaction({ smiles, className, maxWidth }: Required<MoleculeProps>): React.JSX.Element {
+  const [reactants = '', agents = '', products = ''] = smiles.split('>');
+  // A plain function, not a nested component: a component declared in a render body is a new type
+  // on every render, so React unmounts and remounts its whole subtree — here, re-running every
+  // structure's async draw on each parent render.
+  const side = (part: string): React.ReactNode =>
+    part
+      .split('.')
+      .filter(Boolean)
+      .map((component, i) => (
+        <span key={`${component}-${i}`} className="flex items-center gap-1">
+          {i > 0 && (
+            <span aria-hidden className="text-ink-subtle">
+              +
+            </span>
+          )}
+          <SingleMolecule smiles={component} maxWidth={maxWidth} />
+        </span>
+      ));
+
+  return (
+    <div
+      className={cn('flex flex-wrap items-center gap-2', className)}
+      role="img"
+      // One name for the whole reaction: read component by component, a screen reader would
+      // announce a list of structures with no indication of which side each is on.
+      aria-label={`Reaction ${smiles}`}
+    >
+      {side(reactants)}
+      <span className="flex flex-col items-center px-1 text-ink-muted">
+        {/* The agents sit over the arrow, which is where a chemist reads them. */}
+        {agents && <span className="font-mono text-2xs">{agents}</span>}
+        <span aria-hidden className="text-lg leading-none">
+          →
+        </span>
+      </span>
+      {side(products)}
+    </div>
+  );
+}
+
+function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): React.JSX.Element {
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [failed, setFailed] = useState(false);
   const domId = useId().replace(/:/g, '_');
@@ -141,6 +194,30 @@ export function Molecule({ smiles, className, maxWidth = 320 }: MoleculeProps): 
       </svg>
     </span>
   );
+}
+
+/**
+ * A structure: one molecule, or a reaction.
+ *
+ * The dispatch lives here rather than at each call site because every existing caller — the job
+ * card, the note panel, the hazard screen's `screened` list — can be handed either, and none of
+ * them has any reason to know the difference. `>` is not a character a molecule SMILES can
+ * contain, so the test is exact rather than heuristic.
+ */
+export function Molecule(props: MoleculeProps): React.JSX.Element {
+  if (props.smiles.includes('>')) {
+    return (
+      <Reaction
+        smiles={props.smiles}
+        className={props.className ?? ''}
+        // Reaction components share the row, so each is drawn smaller than a lone structure would
+        // be. Halved rather than divided by the number of components: a five-component reaction
+        // should scroll, not shrink to nothing.
+        maxWidth={Math.round((props.maxWidth ?? 320) / 2)}
+      />
+    );
+  }
+  return <SingleMolecule {...props} />;
 }
 
 /** An inline code span that parsed as a plausible SMILES: shown as text with a toggle, never

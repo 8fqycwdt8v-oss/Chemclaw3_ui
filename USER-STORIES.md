@@ -31,7 +31,7 @@ That surface is this one. The UI's event contract and its BFF route whitelist bo
 those arrived.
 
 **As first written, of 24 workflows: 2 `SERVED`, 13 `PROSE-ONLY`, 5 `NO-UI`, 2 `DEFECT`,
-3 `BLOCKED-BACKEND`.** Twelve have moved since — see [What has changed](#what-has-changed) at the
+3 `BLOCKED-BACKEND`.** Fifteen have moved since — see [What has changed](#what-has-changed) at the
 end. The verdict columns below are kept current; the argument is not rewritten, because it is the
 reason the work was chosen in this order.
 
@@ -103,7 +103,7 @@ is in the banner where it can be copied into a ticket.
 | **B1** | Process chemist: twelve candidate substrates, capacity for four | A defensible shortlist before booking lab time      | `compute_electronic_properties` (HOMO/LUMO, Mulliken charges, Wiberg bond orders), `predict_site_reactivity` (ranked atoms by Fukui index)                       | `PROSE-ONLY` |
 | **B2** | Process chemist: pick a wash or extraction pH                   | Get the product into the right phase the first time | `predict_pka` (with `site` = acid or base), `predict_logd(smiles, ph)`                                                                                           | `PROSE-ONLY` |
 | **B3** | Computational chemist: _"do we already know this molecule?"_    | Not pay for a calculation we ran in March           | `find_calculations`, `calculator_trust` (bias/MAE/RMSE/coverage), `calculator_outliers` (per-molecule residuals)                                                 | `PROSE-ONLY` |
-| **B4** | Chemist: search precedent by structure, not by name             | Find the analogue whose name nobody remembers       | `similar_molecules` (ECFP4 Tanimoto), `substructure_matches` (SMARTS), `similar_reactions` (DRFP), `render_structure` (SVG for molecules _and_ `A>>B` reactions) | `PROSE-ONLY` |
+| **B4** | Chemist: search precedent by structure, not by name             | Find the analogue whose name nobody remembers       | `similar_molecules` (ECFP4 Tanimoto), `substructure_matches` (SMARTS), `similar_reactions` (DRFP), `render_structure` (SVG for molecules _and_ `A>>B` reactions) | `PARTIAL`    |
 
 **B1** wants a sortable table with a depiction per row. It gets a markdown list.
 
@@ -116,9 +116,10 @@ applies across this whole section: several of these results carry a load-bearing
 `summary` string, and an empty list means _"the index is empty"_ or _"the ledger is off"_ — never
 _"no finding"_. Any renderer must put that string above the data.
 
-**B4.** There is no structure input of any kind: a SMARTS query has to be typed into a chat box.
-`Molecule.tsx` draws molecules but a reaction SMILES (`A>>B`) falls through to raw text, so the
-one thing `similar_reactions` returns cannot be drawn.
+**B4.** ~~A reaction SMILES falls through to raw text.~~ **Half built.** `Molecule` now draws a
+reaction as its components with the agents over the arrow, so a `similar_reactions` hit and every
+`reaction` note is legible. What is still missing is the input side: there is no structure editor,
+so a SMARTS query is still typed into a chat box.
 
 ---
 
@@ -174,12 +175,15 @@ the hole the table was built to close.
 | **E1** | Chemist: _"what should I run next?"_        | Four conditions with an explore/exploit rationale defensible at a review | `suggest_next_experiment` — `predicted_value`, `predicted_sd`, the Pareto `front`, `campaign_id`, and `calc_refs` for the descriptors behind the search space | `PROSE-ONLY` |
 | **E2** | Chemist: _"have we plateaued?"_             | Decide to stop spending on this campaign                                 | `campaign_progress` — best-so-far, running-best-per-evaluation series, evaluations since a real gain, plateau verdict; `assay_noise` required with no default | `PROSE-ONLY` |
 | **E3** | Chemist: pick the campaign up next week     | Continuity across sessions and devices                                   | `resume_campaign(campaign_id)`                                                                                                                                | `PROSE-ONLY` |
-| **E4** | Chemist: hand a screening design to the lab | A run sheet in run order, with what is confounded stated plainly         | `generate_screening_design` — full or fractional factorial, `resolution`, centre points, seeded run-order randomisation                                       | `PROSE-ONLY` |
+| **E4** | Chemist: hand a screening design to the lab | A run sheet in run order, with what is confounded stated plainly         | `generate_screening_design` — full or fractional factorial, `resolution`, centre points, seeded run-order randomisation                                       | `PARTIAL`    |
 
 A Pareto front is not a paragraph. A plateau is a series with a noise band. `campaign_id` is a
 content hash the chemist currently has to select out of a chat bubble and paste back next week.
-And a run sheet that cannot be exported gets retyped into Excel, which is where the transcription
-error enters the campaign.
+
+E4 has moved half-way: a design's run sheet renders as a table with a CSV download, so it stops
+being retyped into Excel — which is where the transcription error enters a campaign. The
+confounding banner, and the charts E1 and E2 want, are the obvious next batch: the panel and its
+dispatch already exist, so each is a renderer rather than a feature.
 
 ---
 
@@ -241,16 +245,20 @@ is unreachable from the browser.
 
 ## H — Continuity and platform
 
-| #      | Persona and story                                                  | Aim                                                                          | Backend                                                                                 | Verdict           |
-| ------ | ------------------------------------------------------------------ | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ----------------- |
-| **H1** | Chemist: use a cheap narrow agent for a lookup                     | Not pay for a full research loop to convert a pKa                            | `SessionIn.profile` + `GET /profiles`                                                   | `NO-UI`           |
-| **H2** | Chemist: reload and still see the agent's work                     | The trace survives a refresh from the _server_, not just from `localStorage` | `TranscriptMessage.tool_calls` — `tool`, `arguments`, `result`                          | **`SERVED`**      |
-| **H3** | Chemist: send a colleague a link to this conversation              | A link that still resolves next month                                        | The session id is a disposable handle                                                   | `BLOCKED-BACKEND` |
-| **H4** | Chemist: be told when new ELN data matches a question I care about | Standing queries instead of re-asking                                        | `watch_for` / `list_watches` / `stop_watching` + `DigestWorkflow`                       | `BLOCKED-BACKEND` |
-| **H5** | Operator: is the ELN sync actually running?                        | Catch a silently failing sync before the agent goes stale for weeks          | `GET /schedules` — `last_run`, `runs_total`, `skipped_overlap`, `running_now`, `paused` | `NO-UI`           |
+| #      | Persona and story                                                  | Aim                                                                          | Backend                                                                                 | Verdict            |
+| ------ | ------------------------------------------------------------------ | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------ |
+| **H1** | Chemist: use a cheap narrow agent for a lookup                     | Not pay for a full research loop to convert a pKa                            | `SessionIn.profile` + `GET /profiles`                                                   | **`SERVED`**       |
+| **H2** | Chemist: reload and still see the agent's work                     | The trace survives a refresh from the _server_, not just from `localStorage` | `TranscriptMessage.tool_calls` — `tool`, `arguments`, `result`                          | **`SERVED`**       |
+| **H3** | Chemist: send a colleague a link to this conversation              | A link that still resolves next month                                        | The session id is a disposable handle                                                   | `BLOCKED-BACKEND`  |
+| **H4** | Chemist: be told when new ELN data matches a question I care about | Standing queries instead of re-asking                                        | `watch_for` / `list_watches` / `stop_watching` + `DigestWorkflow`                       | `BLOCKED-BACKEND`  |
+| **H5** | Operator: is the ELN sync actually running?                        | Catch a silently failing sync before the agent goes stale for weeks          | `GET /schedules` — `last_run`, `runs_total`, `skipped_overlap`, `running_now`, `paused` | `NO-UI`, by choice |
 
-**H1.** `POST /sessions` accepts a `profile` and 400s an unknown name; the UI never sends one, and
-`GET /profiles` is not whitelisted, so even a hardcoded picker would be guessing at the names.
+**H1.** ~~The UI never sends a profile.~~ **Built.** `GET /profiles` is whitelisted and the
+composer offers the choice — but only before the session exists and only when there is more than
+one, because the profile is fixed on the service at mint time and offering it afterwards would be a
+control that silently does nothing. The choice is re-applied on every later mint: a session is
+replaced on `session_not_found` recovery and on reset, and a replacement that quietly dropped it
+would move the conversation onto a different agent without saying so.
 
 **H2.** The UI's `TranscriptMessage` is `{ role, text, created_at? }`. The service sends
 `{ index, role, text, tool_calls }`. Two consequences: every tool call is dropped from a
@@ -260,6 +268,13 @@ why every server-side session in the sidebar reads "Earlier conversation".
 
 **H3** is `ISSUES.md` #4 and needs a stable server-side conversation id, distinct from the session
 handle.
+
+**H5 is left unbuilt on purpose**, and the reason is worth stating rather than leaving as a gap.
+`server/routes.ts` excludes `/metrics`, `/schedules` and `/events/knowledge-merged` as operator
+surfaces a chemist-facing BFF has no business proxying, and a test pins that exclusion. The story
+is real — a silently failing ELN sync surfaces weeks later as "the agent doesn't know about recent
+experiments" — but its audience is an operator with Prometheus and the service's logs, not a
+chemist in this app. Reversing a documented boundary wants a better argument than one story.
 
 **H4** exists only as agent tools. There is no HTTP route, so a watch can be created by asking and
 then never listed or cancelled from the browser.
@@ -299,6 +314,9 @@ way.
 | `GET /approvals` given the inbox it always had a client method for, on the same screen                                                                                                                                                                                                                        | F3               |
 | `GET/DELETE /jobs[...]` whitelisted; a `/jobs` registry that leads with the recorded rationale rather than the id, searchable over it, with a cancellation that is requested rather than claimed                                                                                                              | C2, C3           |
 | The `roles` claim finally used, through `useIsReviewer` and a `REVIEWER_ROLES` runtime setting, to hide what would 403 instead of offering it                                                                                                                                                                 | F5               |
+| `GET /profiles` whitelisted and a picker on a not-yet-started conversation, re-applied on every later mint so a recovered session does not silently change agent                                                                                                                                              | H1               |
+| `Molecule` draws a reaction as its components with the agents over the arrow, so a `similar_reactions` hit is legible                                                                                                                                                                                         | B4 (partly)      |
+| CSV download on any result the panel could table, quoted per RFC 4180                                                                                                                                                                                                                                         | E4 (partly)      |
 
 One thing fell out of the work rather than being planned, and is worth recording because it was
 invisible until a realistic payload went through it: the trace panel's `<pre>` blocks and the new

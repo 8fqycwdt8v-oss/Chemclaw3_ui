@@ -81,3 +81,21 @@ test('the full result is reachable from the trace, as data rather than a preview
   // the panel's own note rather than by text, so it still passes when the service stops saying it.
   await expect(panel.getByRole('note')).toContainText('not a clearance');
 });
+
+test('the agent profile is chosen before the session exists, and not after', async ({ page }) => {
+  // The profile is fixed on the service when the session is minted, so the control has to
+  // disappear once there is one — otherwise it is a control that silently does nothing.
+  await page.goto('/');
+  const picker = page.getByLabel('Agent profile');
+  await expect(picker).toBeVisible();
+  await picker.selectOption('property-lookup');
+
+  await page.getByPlaceholder(/Ask about a reaction/).fill('What is the pKa of acetic acid?');
+  await page.getByRole('button', { name: 'Send' }).click();
+  await expect(page.getByRole('article', { name: 'Assistant answer' }).last()).toContainText(
+    '4.76',
+    { timeout: 15_000 },
+  );
+
+  await expect(picker).toBeHidden();
+});

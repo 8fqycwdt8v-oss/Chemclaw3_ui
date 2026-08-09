@@ -225,8 +225,31 @@ export const api = {
     }
   },
 
-  createSession(getToken: TokenGetter): Promise<{ session_id: string }> {
-    return request<{ session_id: string }>('/sessions', getToken, { method: 'POST' });
+  /**
+   * Mint a backend session, optionally on a named agent profile.
+   *
+   * A profile narrows the agent — `property-lookup` is a cheap one that converts a pKa without
+   * running a research loop. The service 400s a name it does not know, which is why the picker
+   * that supplies this reads `listProfiles` rather than carrying a list of its own.
+   */
+  createSession(getToken: TokenGetter, profile?: string): Promise<{ session_id: string }> {
+    return request<{ session_id: string }>('/sessions', getToken, {
+      method: 'POST',
+      // Omitted rather than sent as null when there is no profile: the service's `SessionIn` is
+      // optional in full, and an explicit null is a different thing from an absent field.
+      ...(profile ? { body: JSON.stringify({ profile }) } : {}),
+    });
+  },
+
+  /** The profiles this deployment offers. Degrades to `[]`, which the picker reads as "do not
+   *  offer a choice" — a service without the route has exactly one profile. */
+  async listProfiles(getToken: TokenGetter): Promise<string[]> {
+    try {
+      return await request<string[]>('/profiles', getToken);
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'session_not_found') return [];
+      throw err;
+    }
   },
 
   /** The caller's sessions. Returns `[]` if the backend predates this endpoint (404) or has

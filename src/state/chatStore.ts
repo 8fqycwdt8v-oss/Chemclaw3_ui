@@ -309,6 +309,15 @@ export interface ChatState {
    *  the composer does not unmount when `conversationId` changes, so a draft typed in one could
    *  be sent into another. */
   drafts: Record<string, string>;
+  /**
+   * The agent profile a not-yet-created session should be minted on, keyed by conversation.
+   *
+   * Not persisted, and it does not need to be: it only has an effect until the session exists,
+   * and once it does the choice is fixed on the service side and the picker is gone. Keyed by
+   * conversation for the same reason `drafts` is — the composer does not unmount when the active
+   * conversation changes, so component state would leak the choice across a switch.
+   */
+  sessionProfiles: Record<string, string>;
   /** Cross-turn job endings — successes and failures — from `GET /sessions/{id}/events`.
    *  Persisted since v3. */
   jobFeed: JobFeedItem[];
@@ -340,6 +349,7 @@ export interface ChatState {
   setComposerLock: (lock: ComposerLock) => void;
   setBanner: (banner: Banner | null) => void;
   setDraft: (conversationId: string, text: string) => void;
+  setSessionProfile: (conversationId: string, profile: string) => void;
   setStreaming: (s: ChatState['streaming']) => void;
   pushJobFinished: (event: JobTerminalEvent, sessionId: string) => void;
   dismissJobItem: (jobId: string) => void;
@@ -383,6 +393,7 @@ export const useChatStore = create<ChatState>()(
       composerLock: false,
       banner: null,
       drafts: {},
+      sessionProfiles: {},
       jobFeed: [],
       jobStreamsThrottled: false,
       notifyOnJobComplete: false,
@@ -636,6 +647,9 @@ export const useChatStore = create<ChatState>()(
       },
       setDraft(conversationId, text) {
         set((s) => ({ drafts: { ...s.drafts, [conversationId]: text } }));
+      },
+      setSessionProfile(conversationId, profile) {
+        set((s) => ({ sessionProfiles: { ...s.sessionProfiles, [conversationId]: profile } }));
       },
 
       setBanner(banner) {

@@ -31,6 +31,16 @@ export interface SendOptions {
 const sessionsInFlight = new Map<string, Promise<string>>();
 
 /**
+ * The agent profile this conversation's session should be minted on, if one was chosen.
+ *
+ * Read at every mint rather than once, and that is the point: a session is replaced on
+ * `session_not_found` recovery and by `resetSession`, and a replacement that silently dropped
+ * the profile would move the conversation onto a different agent without saying so.
+ */
+const profileFor = (conversationId: string): string | undefined =>
+  useChatStore.getState().sessionProfiles[conversationId];
+
+/**
  * Ensure the conversation has a live server session, creating one if needed.
  *
  * Shared by the send path and by `warmSession`, so a warm already in flight is awaited rather than
@@ -45,7 +55,7 @@ async function ensureSession(conversationId: string, auth: AuthProvider): Promis
   if (pending) return pending;
 
   const creating = api
-    .createSession(() => auth.getAccessToken())
+    .createSession(() => auth.getAccessToken(), profileFor(conversationId))
     // Compare-and-set: whoever gets there first wins, and both callers are told the winner. A
     // loser's session is an orphan that ages out of the backend's LRU.
     .then(({ session_id }) =>
@@ -181,7 +191,10 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         // lost its context, and we mark that rather than pretending continuity.
         if (err.kind === 'session_not_found' && !recreatedSession) {
           recreatedSession = true;
-          const { session_id } = await api.createSession(() => auth.getAccessToken());
+          const { session_id } = await api.createSession(
+            () => auth.getAccessToken(),
+            profileFor(conversationId),
+          );
           useChatStore.getState().setSessionId(conversationId, session_id, true);
           continue;
         }
@@ -272,7 +285,10 @@ export function stopStreaming(): void {
  * server-side the only way forward is a new session. Marks the conversation context-lost.
  */
 export async function resetSession(conversationId: string, auth: AuthProvider): Promise<void> {
-  const { session_id } = await api.createSession(() => auth.getAccessToken());
+  const { session_id } = await api.createSession(
+    () => auth.getAccessToken(),
+    profileFor(conversationId),
+  );
   useChatStore.getState().setSessionId(conversationId, session_id, true);
   useChatStore.getState().setComposerLock(false);
   useChatStore.getState().setBanner(null);

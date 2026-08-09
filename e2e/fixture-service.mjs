@@ -110,6 +110,8 @@ createServer(async (req, res) => {
   if (path === '/healthz' || path === '/readyz') return json(res, 200, { ok: true });
   if (path === '/sessions' && req.method === 'POST') return json(res, 200, { session_id: SID });
   if (path === '/sessions' && req.method === 'GET') return json(res, 200, { sessions: [] });
+  // Two, so the picker has a choice to offer — with one it stays hidden.
+  if (path === '/profiles') return json(res, 200, ['default', 'property-lookup']);
   if (path.endsWith('/messages') && req.method === 'GET') {
     // A shared-link session has a transcript to pull back; everything else is empty. The shape
     // is the service's: an index, and the tool calls behind each message.

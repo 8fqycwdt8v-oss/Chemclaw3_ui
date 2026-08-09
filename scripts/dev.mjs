@@ -46,13 +46,20 @@ const shutdown = (code = 0) => {
 process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
-// Node 22 strips TypeScript types natively, so the BFF runs from source with no build step.
-start('bff', process.execPath, ['--watch', 'server/index.ts'], {
+// Node strips TypeScript types natively, so the BFF runs from source with no build step.
+//
+// `--experimental-strip-types` is passed explicitly even though it is unflagged from 22.18: this
+// package declares `node >=22.6` (package.json), and on 22.6–22.17 the flag is required — without
+// it `npm run dev` simply failed to start the BFF on a version the project claims to support.
+// The flag is accepted (as a no-op) on newer versions, so passing it costs nothing.
+start('bff', process.execPath, ['--experimental-strip-types', '--watch', 'server/index.ts'], {
   PORT: BFF_PORT,
   BIND_HOST: '127.0.0.1',
   CHEMCLAW_API_URL: API_URL,
   // The dev server serves the client; the BFF only proxies and serves /config.js.
   CLIENT_DIR: 'dist/client',
+  // Loopback bind, so the unauthenticated-exposure refusal does not apply.
+  AUTH_MODE: process.env.AUTH_MODE ?? 'dev',
 });
 
 start('vite', process.execPath, ['node_modules/vite/bin/vite.js'], { BFF_PORT });

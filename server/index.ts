@@ -31,8 +31,14 @@ const assets = sirv(cfg.clientDir, {
   // SPA fallback, so /auth/callback and any client route resolve to index.html.
   single: true,
   etag: true,
-  // Serve Vite's precompressed output rather than compressing at request time. This is both
-  // faster and keeps any compression middleware — which would break SSE — out of the process.
+  // Serve precompressed siblings when they exist, rather than compressing at request time —
+  // request-time compression would mean a compression middleware in this process, and the one
+  // everybody reaches for silently destroys Server-Sent Events.
+  //
+  // These are now actually produced: the comment used to claim it was serving "Vite's
+  // precompressed output", but nothing in the build generated a single `.gz` or `.br`, so both
+  // flags were inert and every asset shipped uncompressed. `scripts/compress-client.mjs` fills
+  // that in as a build step.
   gzip: true,
   brotli: true,
   setHeaders(res, pathname) {

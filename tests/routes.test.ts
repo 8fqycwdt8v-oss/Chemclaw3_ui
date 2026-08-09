@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { resolveRoute } from '../server/routes.ts';
 
 const SID = 'a'.repeat(32);
+/** The shape `job_workflow_id` mints: `{connector}-{job}-{16 hex}`. */
+const JOB = 'qm-compute_dft_energy-0123456789abcdef';
 
 describe('proxy route whitelist', () => {
   it('resolves every route the UI actually calls', () => {
@@ -19,6 +21,13 @@ describe('proxy route whitelist', () => {
       ['GET', '/api/approvals', '/approvals'],
       ['GET', '/api/approvals/approval-q-42', '/approvals/approval-q-42'],
       ['POST', '/api/approvals/approval-q-42/decision', '/approvals/approval-q-42/decision'],
+      ['GET', '/api/jobs', '/jobs'],
+      ['GET', `/api/jobs/${JOB}`, `/jobs/${JOB}`],
+      ['DELETE', `/api/jobs/${JOB}`, `/jobs/${JOB}`],
+      ['GET', '/api/proposals', '/proposals'],
+      ['GET', '/api/proposals/41', '/proposals/41'],
+      ['POST', '/api/proposals/41/decision', '/proposals/41/decision'],
+      ['GET', '/api/profiles', '/profiles'],
     ];
     for (const [method, path, upstream] of cases) {
       expect(resolveRoute(method, path), `${method} ${path}`).toMatchObject({ path: upstream });
@@ -32,6 +41,11 @@ describe('proxy route whitelist', () => {
     // stripped for no reason.
     expect(resolveRoute('GET', `/api/sessions/${SID}/messages`)?.sse).toBe(false);
     expect(resolveRoute('POST', '/api/sessions')?.sse).toBe(false);
+    // The workbench routes are all plain JSON. If one of them ever gained the SSE flag, the proxy
+    // would strip its content-length for nothing — and this spec's title would be wrong.
+    expect(resolveRoute('GET', '/api/jobs')?.sse).toBe(false);
+    expect(resolveRoute('GET', '/api/proposals')?.sse).toBe(false);
+    expect(resolveRoute('GET', '/api/profiles')?.sse).toBe(false);
   });
 
   it('refuses service routes the UI has no business reaching', () => {
@@ -60,6 +74,65 @@ describe('proxy route whitelist', () => {
     // Reading the plan and deciding on it are separate routes, not one path with two verbs.
     expect(resolveRoute('POST', `/api/sessions/${SID}/plan`)).toBeNull();
     expect(resolveRoute('GET', `/api/sessions/${SID}/plan/decision`)).toBeNull();
+    // A job is readable and cancellable; it is not writable, and the collection is not deletable.
+    expect(resolveRoute('POST', `/api/jobs/${JOB}`)).toBeNull();
+    expect(resolveRoute('DELETE', '/api/jobs')).toBeNull();
+    // A proposal is decided by POSTing to its decision route, never by deleting the row: a
+    // rejection IS the record, so there is nothing here that removes one.
+    expect(resolveRoute('DELETE', '/api/proposals/41')).toBeNull();
+    expect(resolveRoute('POST', '/api/proposals/41')).toBeNull();
+    expect(resolveRoute('GET', '/api/proposals/41/decision')).toBeNull();
+  });
+
+  describe('job ids', () => {
+    // Unlike an approval id, a job id is never model-written: `job_workflow_id` builds it from a
+    // connector name, a job name and a hex hash, and the orchestrator's children suffix that. So
+    // the pattern can stay narrow, and narrow is what makes traversal unreachable by shape.
+    it.each([
+      'qm-compute_dft_energy-0123456789abcdef',
+      'bo-start_optimization_campaign-fedcba9876543210',
+      'qm-compute_dft_energy-0123456789abcdef-round-3',
+    ])('passes through an id the workflow can mint: %s', (id) => {
+      expect(resolveRoute('GET', `/api/jobs/${id}`)).toMatchObject({ path: `/jobs/${id}` });
+      expect(resolveRoute('DELETE', `/api/jobs/${id}`)).toMatchObject({ path: `/jobs/${id}` });
+    });
+
+    it('refuses anything outside that alphabet, so no decode step is needed', () => {
+      for (const bad of [
+        '/api/jobs/../../etc/passwd',
+        '/api/jobs/qm..dft', // no `.` in the set at all, so `..` cannot be spelled
+        '/api/jobs/qm%2Fdft', // no `%` either: an encoded separator never matches
+        '/api/jobs/qm/dft',
+        `/api/jobs/${'a'.repeat(129)}`,
+      ]) {
+        expect(resolveRoute('GET', bad), bad).toBeNull();
+        expect(resolveRoute('DELETE', bad), bad).toBeNull();
+      }
+    });
+  });
+
+  describe('proposal ids', () => {
+    it.each(['1', '41', '9223372036854775807'])('passes through a row id: %s', (id) => {
+      expect(resolveRoute('GET', `/api/proposals/${id}`)).toMatchObject({
+        path: `/proposals/${id}`,
+      });
+    });
+
+    it('refuses a non-integer, which the route could only 422 on anyway', () => {
+      for (const bad of ['/api/proposals/abc', '/api/proposals/4.1', '/api/proposals/-1']) {
+        expect(resolveRoute('GET', bad), bad).toBeNull();
+      }
+      // Past a signed 64-bit row id — not a row any deployment holds, and the cap is what bounds
+      // the match.
+      expect(resolveRoute('GET', `/api/proposals/${'9'.repeat(20)}`)).toBeNull();
+    });
+
+    it('keeps the merge webhook unreachable even though it lives in the same backend module', () => {
+      // `POST /events/knowledge-merged` closes proposal rows on a signed git-host webhook. A
+      // browser is precisely the caller that must never reach it, so adding the proposal routes
+      // must not have dragged it along.
+      expect(resolveRoute('POST', '/api/events/knowledge-merged')).toBeNull();
+    });
   });
 
   describe('approval ids', () => {

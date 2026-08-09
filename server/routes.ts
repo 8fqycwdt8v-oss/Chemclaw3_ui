@@ -38,6 +38,38 @@ const SID = '([0-9a-f]{32})';
  */
 const APPROVAL = "([A-Za-z0-9._:~!*'()%-]{1,128})";
 
+/**
+ * Durable job ids.
+ *
+ * Deliberately narrow, and unlike `APPROVAL` it can afford to be: this id is never model-written.
+ * `job_workflow_id` mints it as `{connector}-{job}-{16 hex}` from two names declared in a
+ * connector's `connector.yaml`, and the orchestrator's child runs append `-{prefix}-{index}` to
+ * that. Every part of every one of those is `[A-Za-z0-9_]`, so the class below is already the
+ * whole alphabet the backend can produce — copying `APPROVAL`'s percent-escape allowance would
+ * buy nothing and give up something. With no `.` and no `%` in the set, a segment that matches
+ * this cannot spell `..` or smuggle an encoded separator, so traversal is refused by the shape of
+ * the id rather than by a decode step this proxy does not perform.
+ *
+ * Not `SID`: a job id is not a uuid4 hex and never was. Reusing it would 404 every job at the
+ * proxy — the failure mode the approval pattern was widened to fix, arrived at from the other
+ * direction.
+ */
+const JOB = '([A-Za-z0-9_-]{1,128})';
+
+/**
+ * Note proposal ids.
+ *
+ * A database row id: `proposal_id: int` on the handler, monotonic, and the same value
+ * `GET /proposals?before_id=` pages backwards through. Digits are the entire alphabet, so anything
+ * else is a 422 upstream that this proxy can refuse for free. Capped at 19 digits, where a signed
+ * 64-bit row id stops — a longer run of digits is not a row any deployment can hold, so the cap
+ * costs nothing and bounds the match.
+ *
+ * Also not `SID`, for the opposite reason to `JOB`: `SID` is far *wider* than this and would let
+ * a non-numeric segment through to a route whose only parameter is an integer.
+ */
+const PROPOSAL = '([0-9]{1,19})';
+
 export interface Route {
   method: string;
   pattern: RegExp;
@@ -114,6 +146,48 @@ export const ROUTES: readonly Route[] = [
     target: (m) => `/approvals/${m[1]}/decision`,
     sse: false,
   },
+
+  // Durable runs. `GET /jobs` takes `?text=`/`?connector=` and `GET /proposals` takes
+  // `?state=`/`?before_id=`; `index.ts` re-appends the query string after resolution, so neither
+  // needs anything here.
+  { method: 'GET', pattern: /^\/api\/jobs$/, target: () => '/jobs', sse: false },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/jobs/${JOB}$`),
+    target: (m) => `/jobs/${m[1]}`,
+    sse: false,
+  },
+  // Cancellation. Forwarded, not interpreted: upstream this is reviewer-gated (403 for anyone
+  // else, because `job_workflow_id` excludes the requester so a shared run has no owner) and
+  // answers 202 for "the cancel was delivered", not "the run stopped". Both are the client's to
+  // render honestly — a proxy that swallowed either would be inventing an outcome.
+  {
+    method: 'DELETE',
+    pattern: new RegExp(`^/api/jobs/${JOB}$`),
+    target: (m) => `/jobs/${m[1]}`,
+    sse: false,
+  },
+
+  // The PR-gate's review queue. `POST /events/knowledge-merged` lives in the same backend module
+  // and is deliberately NOT here: it is a signed git-host webhook that closes proposal rows, so a
+  // browser is the one caller that must never reach it.
+  { method: 'GET', pattern: /^\/api\/proposals$/, target: () => '/proposals', sse: false },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/proposals/${PROPOSAL}$`),
+    target: (m) => `/proposals/${m[1]}`,
+    sse: false,
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/proposals/${PROPOSAL}/decision$`),
+    target: (m) => `/proposals/${m[1]}/decision`,
+    sse: false,
+  },
+
+  // The narrowed agents a session may be started as, so the picker lists what the deployment
+  // actually has rather than hardcoding names from files it cannot see.
+  { method: 'GET', pattern: /^\/api\/profiles$/, target: () => '/profiles', sse: false },
 ] as const;
 
 export interface ResolvedRoute {

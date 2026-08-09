@@ -7,7 +7,9 @@
  */
 
 import { useEffect, useState } from 'react';
+import { NavLink } from 'react-router';
 import { config } from '../env.ts';
+import { cn } from '../lib/cn.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { resetSession } from '../state/sendMessage.ts';
@@ -40,6 +42,8 @@ export function TopBar(): React.JSX.Element {
     <header className="border-b border-border-subtle bg-surface-raised">
       <div className="flex items-center gap-3 px-4 py-2">
         <span className="font-semibold">Chemclaw</span>
+
+        <Nav />
 
         <span
           className="flex items-center gap-1.5 text-xs text-ink-muted"
@@ -128,6 +132,43 @@ export function TopBar(): React.JSX.Element {
         </div>
       )}
     </header>
+  );
+}
+
+/**
+ * The workbench's four surfaces.
+ *
+ * Chat is one of them rather than the frame the others hang off: a durable job outlives the
+ * conversation that launched it, and a reviewer signing off on proposed notes is not having a
+ * conversation at all. `end` on the chat link so it is not marked active for every route, since
+ * every path starts with `/`.
+ *
+ * Four is the whole list, deliberately. `/metrics` and `/schedules` are the backend routes a
+ * workbench would grow towards next and they are off the BFF whitelist on purpose — this nav is
+ * where that decision either holds or quietly stops holding.
+ */
+function Nav(): React.JSX.Element {
+  const link = ({ isActive }: { isActive: boolean }): string =>
+    cn(
+      'rounded px-2 py-0.5 text-sm transition-colors',
+      isActive ? 'bg-accent-soft text-accent' : 'text-ink-muted hover:text-ink',
+    );
+
+  return (
+    <nav className="flex items-center gap-0.5" aria-label="Workbench">
+      <NavLink to="/" end className={link}>
+        Chat
+      </NavLink>
+      <NavLink to="/jobs" className={link}>
+        Jobs
+      </NavLink>
+      <NavLink to="/review" className={link}>
+        Review
+      </NavLink>
+      <NavLink to="/approvals" className={link}>
+        Approvals
+      </NavLink>
+    </nav>
   );
 }
 

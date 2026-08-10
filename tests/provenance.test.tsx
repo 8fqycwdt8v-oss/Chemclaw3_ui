@@ -215,11 +215,16 @@ describe('rendering the marks', () => {
     // A remark plugin rather than a regex over HTML for exactly this: `C1CCOC1` is full of digits
     // that are not quantities, and a note id's digits are not a measurement either. A regex over
     // rendered HTML would rewrite both. It also pins the plugin ORDER: citations run first, so
-    // the grounding pass sees a link node rather than the digits inside `note-4821`.
-    const out = html('See note-4821 and `C1CCOC1` for the figure.', [1]);
+    // the grounding pass sees a link node rather than the digits inside the id.
+    //
+    // The id is a real one. This test used to say `note-4821`, and that fixture is why the chip
+    // patterns went unfixed for so long: nothing the backend writes is filed under `note-`, so the
+    // assertion passed against a shape the service never emits. A test can only disagree with the
+    // fixture it was handed.
+    const out = html('See rxn-suzuki-4821 and `C1CCOC1` for the figure.', [1]);
     expect(out).not.toContain('Not among the values');
     expect(out).not.toContain('matches a value a tool returned');
-    expect(screen.getByRole('button', { name: 'note-4821' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'rxn-suzuki-4821' })).toBeTruthy();
   });
 });
 

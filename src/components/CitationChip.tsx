@@ -20,10 +20,17 @@ import { useState } from 'react';
 import { cn } from '../lib/cn.ts';
 import { NoteSheet } from './NoteSheet.tsx';
 
+/**
+ * One tone per kind `remarkCitations` can emit, and no more.
+ *
+ * It carried `reaction` and `qm` rows that no producer could reach — the plugin never emitted those
+ * kinds once its prefixes were read off the corpus — while `job`, which it does emit, had no row and
+ * fell through to the note tone. So a job id and a note id looked identical, which is the one
+ * distinction a reader needs: a note resolves in the graph, a job may have no note at all.
+ */
 const PALETTE: Record<string, string> = {
-  reaction: 'border-brand/40 bg-brand-soft text-brand-ink',
   note: 'border-border-subtle bg-surface-sunken text-ink-muted',
-  qm: 'border-ok/40 bg-ok-soft text-ok-ink',
+  job: 'border-ok/40 bg-ok-soft text-ok-ink',
 };
 
 /** The pre-route behaviour: hand the composer a question about the reference. */

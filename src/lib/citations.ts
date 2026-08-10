@@ -24,12 +24,41 @@ interface LinkNode extends Node {
   children: Node[];
 }
 
-/** Identifier shapes the backend actually emits. Note stems come from the knowledge graph; QM
- *  job ids are minted by the Temporal workflow as `qm-<hash>`. */
+/**
+ * Identifier shapes the backend actually emits.
+ *
+ * **Read against the corpus, not against our own fixtures.** The list here was `reaction-`, `note-`
+ * and `qm-`, and the first two match nothing the service has ever written: every note id in
+ * `knowledge/` begins `compound-`, `rxn-`, `playbook-`, `campaign-`, `opt-`, `interaction-`,
+ * `report-`, `failure-`, `proposal-`, `bo-candidate-` or `job-result-`. A note of *type* `reaction`
+ * is filed under `rxn-`, and nothing at all is filed under `note-` — the only `note-` strings in the
+ * backend are Temporal workflow ids (`note-reindex-…`), which are not notes.
+ *
+ * So the chip that exists to make a citation checkable was firing on almost no real citation. It
+ * survived this long because a test can only disagree with the fixture it was given, and ours said
+ * `note-suzuki-42`.
+ *
+ * `qm-` stays, and gains its siblings: a durable job id is minted by the workflow as
+ * `<connector>-<hash>`, and a job's `job-result` note may never have been written — which is why
+ * `CitationChip` falls back to asking the agent rather than assuming the graph can answer.
+ */
+const NOTE_PREFIXES = [
+  'compound',
+  'rxn',
+  'playbook',
+  'campaign',
+  'opt',
+  'interaction',
+  'report',
+  'failure',
+  'proposal',
+  'bo-candidate',
+  'job-result',
+] as const;
+
 const PATTERNS: { kind: string; re: RegExp }[] = [
-  { kind: 'reaction', re: /\breaction-[A-Za-z0-9_-]{1,64}\b/g },
-  { kind: 'note', re: /\bnote-[A-Za-z0-9_-]{1,64}\b/g },
-  { kind: 'qm', re: /\bqm-[A-Za-z0-9]{4,64}\b/g },
+  { kind: 'note', re: new RegExp(`\\b(?:${NOTE_PREFIXES.join('|')})-[A-Za-z0-9][A-Za-z0-9_.-]*\\b`, 'g') },
+  { kind: 'job', re: /\b(?:qm|calc|bo|report)-[A-Za-z0-9]{4,64}\b/g },
 ];
 
 const combined = new RegExp(PATTERNS.map((p) => p.re.source).join('|'), 'g');

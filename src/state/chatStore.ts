@@ -531,6 +531,11 @@ export const useChatStore = create<ChatState>()(
         set((s) => {
           const conversation = s.conversations[conversationId];
           if (!conversation || messages.length === 0) return {};
+          // Re-check that the conversation is still empty. The caller checks before starting the
+          // read, but the read is a network round trip: a user who sends a message while it is in
+          // flight had their message and the streaming answer replaced by the server's older
+          // transcript when it landed. The caller's guard cannot see that; only this write can.
+          if (conversation.messages.length > 0) return {};
           return {
             conversations: {
               ...s.conversations,

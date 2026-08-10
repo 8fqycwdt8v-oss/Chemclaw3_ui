@@ -36,6 +36,10 @@ let drawerPromise: Promise<{ parse: (s: string) => unknown; drawer: DrawerLike }
 
 async function loadDrawer() {
   if (!drawerPromise) {
+    // The cache holds the promise, so a rejected one used to be cached too: one failed chunk
+    // fetch — a deploy mid-session, a flaky network — permanently broke every depiction on the
+    // page, and the failure surfaced as "could not draw this structure", blaming the SMILES.
+    // Clearing it on rejection lets the next mount try again.
     drawerPromise = import('smiles-drawer').then((mod) => {
       const SD = (mod as { default?: unknown }).default ?? mod;
       const lib = SD as {
@@ -65,6 +69,9 @@ async function loadDrawer() {
         return parsed;
       };
       return { parse, drawer };
+    });
+    drawerPromise.catch(() => {
+      drawerPromise = null;
     });
   }
   return drawerPromise;

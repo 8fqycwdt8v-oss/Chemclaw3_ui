@@ -46,6 +46,19 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   const fileRef = useRef<HTMLInputElement | null>(null);
   const hintId = useId();
 
+  // Upload state belongs to the conversation the file was chosen in, but this component never
+  // remounts across a conversation switch — so the banner, the progress bar, the Cancel button and
+  // the in-flight request all followed the reader into the next conversation, where "Attached
+  // spectra.pdf" is simply untrue. Switching aborts the request and clears the banner.
+  useEffect(() => {
+    return () => {
+      setUpload((current) => {
+        if (current?.state === 'busy') current.abort.abort();
+        return null;
+      });
+    };
+  }, [conversationId]);
+
   const composerLock = useChatStore((s) => s.composerLock);
   // Scoped to THIS conversation. A global check locked the composer in every conversation while
   // one of them streamed — invisible before the router, routine once Back can switch in a

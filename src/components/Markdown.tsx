@@ -28,7 +28,11 @@ const HEADING_LEVELS = { h1: 'h3', h2: 'h4', h3: 'h5', h4: 'h6', h5: 'h6', h6: '
 
 const heading = (from: keyof typeof HEADING_LEVELS) => {
   const Tag = HEADING_LEVELS[from];
-  return function Heading({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement>) {
+  return function Heading({
+    children,
+    node: _node,
+    ...props
+  }: React.HTMLAttributes<HTMLHeadingElement> & { node?: unknown }) {
     return (
       <Tag className={`md-${from}`} {...props}>
         {children}
@@ -45,7 +49,9 @@ const components: Components = {
   h5: heading('h5'),
   h6: heading('h6'),
 
-  a({ href, children, ...props }) {
+  // `node` is react-markdown's hast node and is not a DOM attribute; spreading it emitted
+  // node="[object Object]" on every link, heading and inline code span in every answer.
+  a({ href, children, node: _node, ...props }) {
     if (href?.startsWith('#cite/')) {
       // `remarkCitations` emits exactly `#cite/<kind>/<id>`, so after stripping the prefix this
       // splits into two segments. Destructuring past a leading hole put the id in `kind` and left
@@ -60,7 +66,7 @@ const components: Components = {
     );
   },
 
-  code({ className, children, ...props }) {
+  code({ className, children, node: _node, ...props }) {
     const text = String(children ?? '');
     const isBlock = Boolean(className?.startsWith('language-'));
     // An inline code span that looks like a molecule gets a render affordance. Block code is

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 /**
  * The URL is a projection of the store, and the store stays the source of truth.
@@ -56,4 +56,36 @@ test('a shared session link adopts the session and pulls its transcript', async 
 test('a malformed share link is explained, not redirected', async ({ page }) => {
   await page.goto('/s/nonsense');
   await expect(page.getByText(/32-character session id/)).toBeVisible();
+});
+
+/** Below `lg` the sidebar is a drawer, so every sidebar control needs opening first. */
+async function openSidebar(page: Page, isMobile: boolean | undefined): Promise<void> {
+  if (isMobile) await page.getByRole('button', { name: 'Conversations' }).click();
+}
+
+test('the review queue is reachable and shows what would be committed', async ({
+  page,
+  isMobile,
+}) => {
+  // The largest capability the service had and the UI did not touch. Reaching it from the shell
+  // is half the point — a queue nobody can navigate to is a queue nobody reviews.
+  await page.goto('/');
+  await openSidebar(page, isMobile);
+  await page.getByRole('button', { name: 'Review queue' }).click();
+
+  await expect(page).toHaveURL(/\/review$/);
+  await page.getByRole('button', { name: /note-suzuki-42/ }).click();
+  // The bytes, not a summary of them: a sign-off is on what lands in the tree.
+  await expect(page.getByText(/confidence: 0\.8/)).toBeVisible();
+});
+
+test('the durable-run registry leads with why a run happened', async ({ page, isMobile }) => {
+  await page.goto('/');
+  await openSidebar(page, isMobile);
+  await page.getByRole('button', { name: 'Durable runs' }).click();
+
+  await expect(page).toHaveURL(/\/jobs$/);
+  await expect(
+    page.getByText('Decide whether 2-MeTHF or CPME favours the coupling.'),
+  ).toBeVisible();
 });

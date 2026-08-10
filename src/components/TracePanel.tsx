@@ -11,7 +11,10 @@
  * failed.
  *
  * `arguments` and `result` are raw strings the backend truncates to 200 characters, so both are
- * displayed as-is rather than parsed as JSON.
+ * displayed as-is rather than parsed as JSON. The truncation is no longer the end of it: a row
+ * whose result was stored carries a ref, and `ResultSheet` fetches and renders the whole thing.
+ * The preview stays in place regardless — it is what makes the row scannable — and the control
+ * below it is what makes the row's numbers checkable.
  *
  * The disclosure is a Radix Collapsible so the trigger actually reports `aria-expanded` and
  * `aria-controls`; the hand-rolled toggle it replaces announced nothing about what it controlled.
@@ -19,26 +22,100 @@
  * and a second collapsed control would make that selection ambiguous.
  */
 
-import { memo } from 'react';
-import { ChevronRight, CircleX } from 'lucide-react';
+import { memo, useState } from 'react';
+import { ChevronRight, CircleX, Table2 } from 'lucide-react';
 import type { TraceEntry } from '../state/types.ts';
 import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
-import { JobResultCard } from './JobResultCard.tsx';
+import { JobFailureCard, JobResultCard } from './JobResultCard.tsx';
+import { ResultSheet } from './ResultSheet.tsx';
 import { ToolIcon } from '@/components/chem/toolIcons';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/misc';
 
-function Pre({ children }: { children: React.ReactNode }): React.JSX.Element {
+/**
+ * `tabIndex={0}` is load-bearing, not decoration.
+ *
+ * The block scrolls horizontally, and a scrollable region that nothing inside it can focus is
+ * unreachable by keyboard — the content past the right edge simply does not exist for anyone not
+ * using a pointer. It went unnoticed for as long as the previews here were short enough not to
+ * overflow; a real 200-character tool result is not.
+ */
+function Pre({
+  children,
+  label,
+}: {
+  children: React.ReactNode;
+  /** Names the region for a screen reader, which a focusable role="region" requires. */
+  label: string;
+}): React.JSX.Element {
   return (
-    <pre className="mt-1 overflow-x-auto rounded-md border border-border-subtle bg-surface-sunken p-2 font-mono text-2xs leading-relaxed">
+    <pre
+      tabIndex={0}
+      role="region"
+      aria-label={label}
+      className="mt-1 overflow-x-auto rounded-md border border-border-subtle bg-surface-sunken p-2 font-mono text-2xs leading-relaxed focus-ring"
+    >
       {children}
     </pre>
   );
 }
 
-function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
+/**
+ * The control that lifts the 200-character ceiling on one row.
+ *
+ * Rendered only when the service stored the result — an empty `resultRef` means "not stored", and
+ * the service guarantees that is its only meaning, so there is exactly one condition to check and
+ * no state in which this button leads nowhere.
+ *
+ * It needs the session id, which is why `TracePanel` takes one: the fetch route is session-scoped
+ * so that the ownership check the turn already passed covers the result too.
+ */
+function FullResult({
+  sessionId,
+  tool,
+  resultRef,
+}: {
+  sessionId: string | null;
+  tool: string;
+  resultRef: string;
+}): React.JSX.Element | null {
+  const [open, setOpen] = useState(false);
+  // A rehydrated transcript has calls but no session to fetch against. Offering the control there
+  // would be offering a 404.
+  if (!sessionId) return null;
+  return (
+    <>
+      <Button
+        variant="link"
+        size="xs"
+        className="mt-1 -ml-2 px-2 no-underline hover:underline"
+        onClick={() => setOpen(true)}
+      >
+        <Table2 aria-hidden className="size-3.5" />
+        See the full result
+      </Button>
+      {open && (
+        <ResultSheet
+          sessionId={sessionId}
+          resultRef={resultRef}
+          tool={tool}
+          open={open}
+          onOpenChange={setOpen}
+        />
+      )}
+    </>
+  );
+}
+
+function Row({
+  entry,
+  sessionId,
+}: {
+  entry: TraceEntry;
+  sessionId: string | null;
+}): React.JSX.Element | null {
   switch (entry.kind) {
     case 'plan':
       return (
@@ -77,7 +154,7 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
                 arguments
               </summary>
               {/* Raw, truncated to 200 chars server-side — never parsed as JSON. */}
-              <Pre>{entry.toolCall.arguments}</Pre>
+              <Pre label={`Arguments to ${entry.toolCall.tool}`}>{entry.toolCall.arguments}</Pre>
             </details>
           )}
           {entry.toolCall?.result !== undefined && (
@@ -85,7 +162,16 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
               {/* Exactly the word, on its own node: the panel's header sentence also contains it,
                   and the test that proves results render matches this exactly. */}
               <p className="text-2xs text-ink-muted">returned</p>
-              <Pre>{entry.toolCall.result}</Pre>
+              <Pre label={`Result preview from ${entry.toolCall.tool}`}>
+                {entry.toolCall.result}
+              </Pre>
+              {entry.toolCall.resultRef && (
+                <FullResult
+                  sessionId={sessionId}
+                  tool={entry.toolCall.tool}
+                  resultRef={entry.toolCall.resultRef}
+                />
+              )}
             </div>
           )}
           {/* Still open: not "we are hiding the result" but "the call has not come back". The
@@ -122,7 +208,9 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
             Started <span className="font-medium">{entry.job?.kind ?? 'job'}</span>
           </span>
           <span className="font-mono text-2xs text-ink-subtle">{entry.job?.jobId}</span>
-          <Badge tone="brand">runs asynchronously</Badge>
+          {/* Dropped once an ending arrived. The badge is a claim about the present tense, and a
+              job that finished — either way — is not still running. The row below says which. */}
+          {!entry.job?.settled && <Badge tone="brand">runs asynchronously</Badge>}
         </p>
       );
 
@@ -130,6 +218,16 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
       return (
         <div className="rounded-lg border border-border-subtle bg-surface-raised p-3">
           <JobResultCard jobId={entry.job?.jobId ?? ''} summary={entry.job?.summary} />
+        </div>
+      );
+
+    case 'job_failed':
+      return (
+        <div className="rounded-lg border border-danger/40 bg-danger-soft p-3">
+          <JobFailureCard
+            jobId={entry.jobFailure?.jobId ?? ''}
+            reason={entry.jobFailure?.reason ?? ''}
+          />
         </div>
       );
 
@@ -163,8 +261,12 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
  */
 export const TracePanel = memo(function TracePanel({
   trace,
+  /** Null for a transcript read back from the server, which has calls but nothing to fetch
+   *  against — the rows still render, without the full-result control. */
+  sessionId = null,
 }: {
   trace: TraceEntry[];
+  sessionId?: string | null;
 }): React.JSX.Element | null {
   const shown = trace.filter((e) => e.kind !== 'question' && e.kind !== 'approval_request');
   if (shown.length === 0) return null;
@@ -192,7 +294,7 @@ export const TracePanel = memo(function TracePanel({
         <div className="mt-2 rounded-lg border border-border-subtle bg-surface-sunken p-3">
           <p className="text-2xs text-ink-muted">
             Tool calls the agent made, each with what it returned. Previews are truncated by the
-            service, so a long result is shown in part.
+            service; where the full result was stored, you can open it.
           </p>
           {/* A left rail turns a list of events into a sequence you can follow down. */}
           <ol className="mt-3 space-y-3 border-l border-border-subtle pl-4">
@@ -202,7 +304,7 @@ export const TracePanel = memo(function TracePanel({
                   aria-hidden
                   className="absolute top-1.5 -left-[1.3125rem] size-1.5 rounded-full bg-border-strong ring-3 ring-surface-sunken"
                 />
-                <Row entry={entry} />
+                <Row entry={entry} sessionId={sessionId} />
               </li>
             ))}
           </ol>

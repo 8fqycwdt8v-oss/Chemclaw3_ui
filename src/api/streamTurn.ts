@@ -14,7 +14,7 @@
 
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import { normalizeEvent, type AnswerEvent, type ChemclawEvent } from '../../shared/events.ts';
-import { ApiError, errorFromStatus, readDetail } from './errors.ts';
+import { ApiError, errorFromEvent, errorFromStatus, readDetail } from './errors.ts';
 import { config } from '../env.ts';
 
 export interface StreamTurnOptions {
@@ -90,7 +90,7 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       if (!event) continue;
 
       if (event.type === 'error') {
-        throw new ApiError('agent', event.message);
+        throw errorFromEvent(event);
       }
 
       opts.onEvent(event);

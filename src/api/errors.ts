@@ -34,8 +34,8 @@ export type ApiErrorKind =
   | 'aborted'
   /** The stream was malformed, truncated, or never produced an answer. */
   | 'stream'
-  /** An `error` event arrived in-stream. Includes the 600s turn timeout, which the backend
-   *  reports as a final SSE event rather than an HTTP status. */
+  /** An `error` event arrived in-stream. Includes the turn timeout, which the backend reports as
+   *  a final SSE event rather than an HTTP status. */
   | 'agent';
 
 export class ApiError extends Error {
@@ -43,13 +43,31 @@ export class ApiError extends Error {
   readonly status: number | undefined;
   /** Whether a bare retry of the same request could plausibly succeed. */
   readonly retryable: boolean;
+  /**
+   * The service's own id for the turn that failed, when it sent one.
+   *
+   * Only in-stream errors carry it — an HTTP failure has no correlation id to give — so this is
+   * empty far more often than not. It is shown to the user rather than only logged, because the
+   * browser console is not somewhere a chemist looks and this string is the entire content of a
+   * useful support message.
+   */
+  readonly correlationId: string;
 
-  constructor(kind: ApiErrorKind, message: string, status?: number) {
+  constructor(
+    kind: ApiErrorKind,
+    message: string,
+    status?: number,
+    /** Overrides the kind-derived default. The service knows things about one specific failure
+     *  that its category does not — a `storage_unavailable` may or may not be worth retrying,
+     *  and it is the only party that can tell. */
+    options?: { retryable?: boolean; correlationId?: string },
+  ) {
     super(message);
     this.name = 'ApiError';
     this.kind = kind;
     this.status = status;
-    this.retryable = kind === 'capacity' || kind === 'network';
+    this.retryable = options?.retryable ?? (kind === 'capacity' || kind === 'network');
+    this.correlationId = options?.correlationId ?? '';
   }
 }
 
@@ -85,6 +103,45 @@ export function errorFromStatus(status: number, detail?: string): ApiError {
         detail || `The service returned an unexpected status (${status}).`,
         status,
       );
+  }
+}
+
+/**
+ * Map an in-stream `error` event onto a typed error.
+ *
+ * The event's `code` is a closed set the service maintains, and each member wants something
+ * different from the UI. Before this every one of them became `agent` with no action offered,
+ * which had two visible costs: a `budget_exhausted` that arrived as an event rather than as a 429
+ * left the composer unlocked, so the next message was sent into a budget that was already gone;
+ * and a `storage_unavailable` the service had marked retryable was presented as final.
+ *
+ * Only two codes change the *kind*, because only two change what the UI must do. The rest stay
+ * `agent` and are differentiated by the service's own message — which is already user-safe, and is
+ * better wording than a mapping table here would invent. `retryable` comes from the event in every
+ * case: it is the service's judgement, not a property of the category.
+ */
+export function errorFromEvent(event: {
+  message: string;
+  code: string;
+  retryable: boolean;
+  correlation_id: string;
+}): ApiError {
+  const options = { retryable: event.retryable, correlationId: event.correlation_id };
+  switch (event.code) {
+    case 'budget_exhausted':
+      // The one that must lock the composer — the same terminal state a 429 produces.
+      return new ApiError('budget_exhausted', event.message, undefined, {
+        ...options,
+        // Non-negotiable regardless of what the event says: the budget does not replenish
+        // because someone pressed a button, and offering Retry here is offering a dead end.
+        retryable: false,
+      });
+    case 'empty_answer':
+      // Not a service failure — the turn ran and produced nothing. `stream` already means "the
+      // stream ended without an answer", which is exactly what happened.
+      return new ApiError('stream', event.message, undefined, options);
+    default:
+      return new ApiError('agent', event.message, undefined, options);
   }
 }
 

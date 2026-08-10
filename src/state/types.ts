@@ -19,6 +19,7 @@ export type TraceKind =
   | 'tool_failed'
   | 'job_started'
   | 'job_completed'
+  | 'job_failed'
   | 'question'
   | 'note_proposed'
   | 'approval_request';
@@ -48,9 +49,31 @@ export interface TraceEntry {
    * no message: the `tool_failed` row that follows is where the reason belongs, and saying it
    * twice in adjacent rows is not saying it better.
    */
-  toolCall?: { tool: string; arguments: string; result?: string; failed?: boolean };
+  toolCall?: {
+    tool: string;
+    arguments: string;
+    result?: string;
+    failed?: boolean;
+    /**
+     * Content address of the untruncated result, when the service stored one.
+     *
+     * Carried on the trace rather than fetched eagerly: the point of the backend's split is that
+     * one result is pulled when a reader asks for it, not that every result of every turn is
+     * pulled because it exists. Absent or empty means there is nothing to offer.
+     */
+    resultRef?: string;
+  };
   toolFailure?: { tool: string; message: string };
-  job?: { jobId: string; kind?: string; summary?: JobSummary };
+  /**
+   * A durable job.
+   *
+   * `settled` is the `job_started` row's version of `toolCall.failed`, and exists for the same
+   * reason: a launch row that never learns its job ended goes on saying "runs asynchronously"
+   * for the life of the conversation. Both endings set it — the row that follows says which one.
+   */
+  job?: { jobId: string; kind?: string; summary?: JobSummary; settled?: boolean };
+  /** `reason` may legitimately be empty; the service does not always have one. */
+  jobFailure?: { jobId: string; reason: string };
   question?: { question: string; options: string[] };
   note?: { noteId: string; reference: string };
   approval?: { prompt: string; approvalId: string };
@@ -81,6 +104,15 @@ export interface AssistantMessage {
   confidence: number | null;
   unsupportedClaims: string[];
   reviewRequired: boolean;
+  /**
+   * Which verifier produced `confidence`, or null when none ran.
+   *
+   * Kept beside the score rather than folded into it, because the two backends measure different
+   * things: the citation gate is deterministic and scores against the turn's own tool results,
+   * the judge is a model scoring against the claims. Showing one number for both invites the
+   * reader to compare scores that are not comparable.
+   */
+  verifiedBy: 'judge' | 'citation-gate' | null;
   /**
    * Connectors that were unreachable for this turn, so their tools were absent from it.
    *

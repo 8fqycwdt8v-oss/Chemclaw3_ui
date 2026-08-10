@@ -123,10 +123,14 @@ async function openStream(
           if (!value.data) continue;
           try {
             const event = normalizeEvent(JSON.parse(value.data), value.event);
-            if (event?.type === 'job_completed') {
+            // Both endings, not just the happy one. This stream is scoped server-side to exactly
+            // `job_completed` and `job_failed`, and a job that died after the turn ended is the
+            // case the whole push-back path exists for — dropping it left the launch row saying
+            // "runs asynchronously" indefinitely.
+            if (event?.type === 'job_completed' || event?.type === 'job_failed') {
               // The event carries no session id — but we know which stream we opened, so the
               // association is attached here rather than by mutating the wire contract.
-              useChatStore.getState().pushJobCompleted(event, sessionId);
+              useChatStore.getState().pushJobFinished(event, sessionId);
             }
           } catch {
             // one bad frame is not worth dropping the stream

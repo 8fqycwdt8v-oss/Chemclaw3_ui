@@ -2,7 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { streamTurn } from '../src/api/streamTurn.ts';
 import { ApiError } from '../src/api/errors.ts';
 import type { ChemclawEvent } from '../shared/events.ts';
-import { jsonError, sseFrames, sseResponse, stubFetch } from './helpers.ts';
+import {
+  answerEvent,
+  errorEvent,
+  jsonError,
+  sseFrames,
+  sseResponse,
+  stubFetch,
+} from './helpers.ts';
 
 const SESSION = 'a'.repeat(32);
 
@@ -35,13 +42,7 @@ const HAPPY: ChemclawEvent[] = [
   { type: 'tool_call', tool: 'gather_evidence', arguments: '{"query": "acetic acid pKa"' },
   { type: 'token', text: 'acid has a pKa of 4.76.' },
   { type: 'job_started', job_id: 'qm-abc123', kind: 'qm' },
-  {
-    type: 'answer',
-    text: 'Acetic acid has a pKa of 4.76.',
-    confidence: 0.91,
-    unsupported_claims: [],
-    review_required: false,
-  },
+  answerEvent({ text: 'Acetic acid has a pKa of 4.76.', confidence: 0.91 }),
 ];
 
 describe('streamTurn', () => {
@@ -77,7 +78,7 @@ describe('streamTurn', () => {
     // This is also how a turn that blew the 600s wall clock arrives — as SSE, not an HTTP status.
     const body = sseFrames([
       { type: 'token', text: 'partial' },
-      { type: 'error', message: 'The turn exceeded the 600s time limit and was cancelled.' },
+      errorEvent({ message: 'The turn exceeded the 600s time limit and was cancelled.' }),
     ]);
     const stub = stubFetch(() => sseResponse(body));
     restore = stub.restore;
@@ -91,6 +92,59 @@ describe('streamTurn', () => {
         onEvent: () => undefined,
       }),
     ).rejects.toMatchObject({ kind: 'agent' });
+  });
+
+  describe('the error code decides what the UI can offer', () => {
+    /** Run a turn that ends in one `error` frame and hand back the thrown `ApiError`. */
+    const failWith = async (over: Parameters<typeof errorEvent>[0]): Promise<ApiError> => {
+      const stub = stubFetch(() => sseResponse(sseFrames([errorEvent(over)])));
+      restore = stub.restore;
+      try {
+        await streamTurn({
+          sessionId: SESSION,
+          message: 'x',
+          signal: new AbortController().signal,
+          getToken: async () => null,
+          onEvent: () => undefined,
+        });
+      } catch (err) {
+        return err as ApiError;
+      }
+      throw new Error('expected the turn to fail');
+    };
+
+    it('locks the composer on a budget exhausted that arrived as an event, not a 429', () => {
+      // The path that made this worth fixing: the same terminal condition reaches the client two
+      // ways, and only the HTTP one used to lock the composer. The other let the chemist send
+      // again into a budget that was already gone.
+      return failWith({ code: 'budget_exhausted', message: 'Budget exhausted.' }).then((err) => {
+        expect(err.kind).toBe('budget_exhausted');
+        // Never retryable, whatever the event claims: pressing a button does not refill a budget.
+        expect(err.retryable).toBe(false);
+      });
+    });
+
+    it('takes the service’s word on whether a retry is worth offering', async () => {
+      const err = await failWith({ code: 'storage_unavailable', retryable: true });
+      expect(err.kind).toBe('agent');
+      expect(err.retryable).toBe(true);
+    });
+
+    it('reports an answerless turn as a stream failure, not a service failure', async () => {
+      // `empty_answer` means the turn ran and produced nothing, which is what `stream` already
+      // means here. Calling it an agent error would imply something broke.
+      expect((await failWith({ code: 'empty_answer' })).kind).toBe('stream');
+    });
+
+    it('carries the correlation id, which is the only thing support can act on', async () => {
+      expect((await failWith({ correlation_id: 'turn-7f3a' })).correlationId).toBe('turn-7f3a');
+    });
+
+    it('degrades a code it has never seen rather than dropping the turn’s ending', async () => {
+      // Forward-compatibility, but only for the code — the event itself still has to end the turn.
+      const err = await failWith({ code: 'a_code_from_a_newer_service' as never });
+      expect(err.kind).toBe('agent');
+    });
   });
 
   it('fails cleanly when the stream ends without an answer', async () => {
@@ -110,16 +164,7 @@ describe('streamTurn', () => {
   it('skips a malformed frame rather than killing the turn', async () => {
     const body =
       'event: token\ndata: {not json\n\n' +
-      sseFrames([
-        { type: 'token', text: 'ok' },
-        {
-          type: 'answer',
-          text: 'ok',
-          confidence: null,
-          unsupported_claims: [],
-          review_required: false,
-        },
-      ]);
+      sseFrames([{ type: 'token', text: 'ok' }, answerEvent({ text: 'ok' })]);
     const { events, answerText } = await collect(body);
     expect(events.map((e) => e.type)).toEqual(['token', 'answer']);
     expect(answerText).toBe('ok');
@@ -128,15 +173,7 @@ describe('streamTurn', () => {
   it('ignores an unknown event type so a newer backend does not break an older UI', async () => {
     const body =
       'event: telemetry\ndata: {"type":"telemetry","v":1}\n\n' +
-      sseFrames([
-        {
-          type: 'answer',
-          text: 'done',
-          confidence: null,
-          unsupported_claims: [],
-          review_required: false,
-        },
-      ]);
+      sseFrames([answerEvent({ text: 'done' })]);
     const { events } = await collect(body);
     expect(events.map((e) => e.type)).toEqual(['answer']);
   });
@@ -182,19 +219,7 @@ describe('streamTurn', () => {
   });
 
   it('sends a bearer token when one is available, and none in dev mode', async () => {
-    const withToken = stubFetch(() =>
-      sseResponse(
-        sseFrames([
-          {
-            type: 'answer',
-            text: '',
-            confidence: null,
-            unsupported_claims: [],
-            review_required: false,
-          },
-        ]),
-      ),
-    );
+    const withToken = stubFetch(() => sseResponse(sseFrames([answerEvent()])));
     restore = withToken.restore;
 
     await streamTurn({
@@ -209,19 +234,7 @@ describe('streamTurn', () => {
 
     withToken.restore();
 
-    const devMode = stubFetch(() =>
-      sseResponse(
-        sseFrames([
-          {
-            type: 'answer',
-            text: '',
-            confidence: null,
-            unsupported_claims: [],
-            review_required: false,
-          },
-        ]),
-      ),
-    );
+    const devMode = stubFetch(() => sseResponse(sseFrames([answerEvent()])));
     restore = devMode.restore;
     await streamTurn({
       sessionId: SESSION,
@@ -235,19 +248,7 @@ describe('streamTurn', () => {
   });
 
   it('passes dry_run through to the service', async () => {
-    const stub = stubFetch(() =>
-      sseResponse(
-        sseFrames([
-          {
-            type: 'answer',
-            text: '',
-            confidence: null,
-            unsupported_claims: [],
-            review_required: false,
-          },
-        ]),
-      ),
-    );
+    const stub = stubFetch(() => sseResponse(sseFrames([answerEvent()])));
     restore = stub.restore;
     await streamTurn({
       sessionId: SESSION,

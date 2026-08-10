@@ -26,6 +26,8 @@ import { Navigate, Route, Routes, useNavigate, useParams } from 'react-router';
 import { useChatStore, newConversation } from './state/chatStore.ts';
 import { useAuth } from './auth/AuthContext.tsx';
 import { AppShell } from './App.tsx';
+import { ReviewQueue } from './components/ReviewQueue.tsx';
+import { JobsPanel } from './components/JobsPanel.tsx';
 import { Loading } from '@/components/chem/Feedback';
 import { Button } from '@/components/ui/button';
 
@@ -196,6 +198,25 @@ export function AppRoutes(): React.JSX.Element {
       <Route path="/" element={<Bootstrap />} />
       <Route path="/c/:conversationId" element={<ConversationRoute />} />
       <Route path="/s/:sessionId" element={<SessionResolver />} />
+      {/* Neither is a conversation, so both render inside the shell with no conversation: the
+          sidebar, the top bar and the banner stay where they are, and Back returns to the thread
+          the reader came from. */}
+      <Route
+        path="/review"
+        element={
+          <AppShell>
+            <ReviewQueue />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/jobs"
+        element={
+          <AppShell>
+            <JobsPanel />
+          </AppShell>
+        }
+      />
       <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

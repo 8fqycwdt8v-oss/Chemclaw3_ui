@@ -10,7 +10,7 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import type { ChemclawEvent, JobCompletedEvent } from '../../shared/events.ts';
+import type { ChemclawEvent, JobTerminalEvent } from '../../shared/events.ts';
 import type { ApiErrorKind } from '../api/errors.ts';
 import type {
   AssistantMessage,
@@ -22,14 +22,20 @@ import type {
 } from './types.ts';
 
 /**
- * One completion, plus what the wire event does not carry.
+ * One finished job, plus what the wire event does not carry.
  *
- * `JobCompletedEvent` has a job id and a summary and nothing else — no session, no timestamp. The
- * consumer knows which stream it opened, so the association is attached at that boundary rather
- * than by inventing fields on the shared contract.
+ * The event has a job id and an outcome and nothing else — no session, no timestamp. The consumer
+ * knows which stream it opened, so the association is attached at that boundary rather than by
+ * inventing fields on the shared contract.
+ *
+ * `event` is the terminal union, not just the completion: a job that fails after the turn ends is
+ * exactly as much news as one that succeeds, and it arrives on the same stream. Widening this
+ * needed no persist migration — every item already on disk is a `job_completed`, which is still a
+ * member of the union — but anything reading it must now branch on `event.type` rather than
+ * assuming a `summary`.
  */
 export interface JobFeedItem {
-  event: JobCompletedEvent;
+  event: JobTerminalEvent;
   sessionId: string;
   conversationId: string | null;
   /** When WE saw it. The backend sends no completion time, so the UI must not imply one. */
@@ -176,6 +182,7 @@ function newAssistantMessage(): AssistantMessage {
     confidence: null,
     unsupportedClaims: [],
     reviewRequired: false,
+    verifiedBy: null,
     degradedConnectors: [],
     queued: false,
     trace: [],
@@ -200,7 +207,7 @@ function newAssistantMessage(): AssistantMessage {
 function closeToolCall(
   trace: TraceEntry[],
   tool: string,
-  ending: { result: string } | { failed: true },
+  ending: { result: string; resultRef?: string } | { failed: true },
 ): TraceEntry[] {
   const index = trace.findIndex(
     (entry) =>
@@ -215,6 +222,28 @@ function closeToolCall(
   return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
 }
 
+/**
+ * Mark a `job_started` row as ended, whichever way it ended.
+ *
+ * The job-shaped sibling of `closeToolCall`, and it exists for the sharper version of the same
+ * problem. A launch row carries the badge "runs asynchronously"; before this, nothing ever took
+ * that badge off, so a job that failed an hour ago still read as in flight. Matched on the job id
+ * rather than on issue order — unlike a tool call, a job has an id on the wire, so there is no
+ * pairing to guess at.
+ *
+ * A launch row already dropped by `MAX_TRACE_ENTRIES`, or a completion for a job launched in a
+ * different turn, simply finds nothing and leaves the trace alone.
+ */
+function settleJob(trace: TraceEntry[], jobId: string): TraceEntry[] {
+  const index = trace.findIndex(
+    (entry) => entry.kind === 'job_started' && entry.job?.jobId === jobId && !entry.job.settled,
+  );
+  const target = trace[index];
+  if (index === -1 || !target?.job) return trace;
+  const updated: TraceEntry = { ...target, job: { ...target.job, settled: true } };
+  return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
+}
+
 /** Map one stream event onto a trace entry, or null for `token` (which is not trace). */
 function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
   const base = { id: uid(), at: Date.now() };
@@ -226,6 +255,12 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
         ...base,
         kind: 'tool_call',
         toolCall: { tool: event.tool, arguments: event.arguments },
+      };
+    case 'job_failed':
+      return {
+        ...base,
+        kind: 'job_failed',
+        jobFailure: { jobId: event.job_id, reason: event.reason },
       };
     case 'tool_failed':
       return {
@@ -274,7 +309,17 @@ export interface ChatState {
    *  the composer does not unmount when `conversationId` changes, so a draft typed in one could
    *  be sent into another. */
   drafts: Record<string, string>;
-  /** Cross-turn job completions from `GET /sessions/{id}/events`. Persisted since v3. */
+  /**
+   * The agent profile a not-yet-created session should be minted on, keyed by conversation.
+   *
+   * Not persisted, and it does not need to be: it only has an effect until the session exists,
+   * and once it does the choice is fixed on the service side and the picker is gone. Keyed by
+   * conversation for the same reason `drafts` is — the composer does not unmount when the active
+   * conversation changes, so component state would leak the choice across a switch.
+   */
+  sessionProfiles: Record<string, string>;
+  /** Cross-turn job endings — successes and failures — from `GET /sessions/{id}/events`.
+   *  Persisted since v3. */
   jobFeed: JobFeedItem[];
   /** True once the backend has told us twice that we are over its stream cap. */
   jobStreamsThrottled: boolean;
@@ -304,10 +349,11 @@ export interface ChatState {
   setComposerLock: (lock: ComposerLock) => void;
   setBanner: (banner: Banner | null) => void;
   setDraft: (conversationId: string, text: string) => void;
+  setSessionProfile: (conversationId: string, profile: string) => void;
   setStreaming: (s: ChatState['streaming']) => void;
-  pushJobCompleted: (event: JobCompletedEvent, sessionId: string) => void;
-  dismissJobCompleted: (jobId: string) => void;
-  restoreJobCompleted: (jobId: string) => void;
+  pushJobFinished: (event: JobTerminalEvent, sessionId: string) => void;
+  dismissJobItem: (jobId: string) => void;
+  restoreJobItem: (jobId: string) => void;
   markJobsSeen: () => void;
   setJobStreamsThrottled: (throttled: boolean) => void;
   setNotifyOnJobComplete: (enabled: boolean) => void;
@@ -347,6 +393,7 @@ export const useChatStore = create<ChatState>()(
       composerLock: false,
       banner: null,
       drafts: {},
+      sessionProfiles: {},
       jobFeed: [],
       jobStreamsThrottled: false,
       notifyOnJobComplete: false,
@@ -513,6 +560,7 @@ export const useChatStore = create<ChatState>()(
               confidence: event.confidence,
               unsupportedClaims: event.unsupported_claims,
               reviewRequired: event.review_required,
+              verifiedBy: event.verified_by,
             })),
           );
           return;
@@ -539,11 +587,19 @@ export const useChatStore = create<ChatState>()(
         }
 
         if (event.type === 'tool_result') {
-          // Not its own row: it closes the `tool_call` row already in the trace.
+          // Not its own row: it closes the `tool_call` row already in the trace. The result ref
+          // rides along on that row so the "see the full result" affordance sits next to the
+          // preview it completes, rather than in a second row saying the same thing.
           set((s) =>
             updateAssistant(s, conversationId, messageId, (m) => ({
               ...m,
-              trace: closeToolCall(m.trace, event.tool, { result: event.preview }),
+              // The ref is omitted rather than stored empty. The backend guarantees "" means
+              // "not stored" and nothing else, so collapsing it to absent leaves exactly one
+              // thing for a reader to check before offering to fetch it.
+              trace: closeToolCall(m.trace, event.tool, {
+                result: event.preview,
+                ...(event.result_ref ? { resultRef: event.result_ref } : {}),
+              }),
             })),
           );
           return;
@@ -555,11 +611,14 @@ export const useChatStore = create<ChatState>()(
         set((s) =>
           updateAssistant(s, conversationId, messageId, (m) => {
             // A failure closes its call's row *and* adds its own: the row stops claiming the
-            // call is running, the new row carries the reason.
-            const base =
-              event.type === 'tool_failed'
-                ? closeToolCall(m.trace, event.tool, { failed: true })
-                : m.trace;
+            // call is running, the new row carries the reason. Both job endings do the same to
+            // the launch row, which otherwise keeps its "runs asynchronously" badge forever.
+            let base = m.trace;
+            if (event.type === 'tool_failed') {
+              base = closeToolCall(base, event.tool, { failed: true });
+            } else if (event.type === 'job_completed' || event.type === 'job_failed') {
+              base = settleJob(base, event.job_id);
+            }
             return {
               ...m,
               trace: [...base, entry].slice(-MAX_TRACE_ENTRIES),
@@ -589,6 +648,9 @@ export const useChatStore = create<ChatState>()(
       setDraft(conversationId, text) {
         set((s) => ({ drafts: { ...s.drafts, [conversationId]: text } }));
       },
+      setSessionProfile(conversationId, profile) {
+        set((s) => ({ sessionProfiles: { ...s.sessionProfiles, [conversationId]: profile } }));
+      },
 
       setBanner(banner) {
         set({ banner });
@@ -596,7 +658,7 @@ export const useChatStore = create<ChatState>()(
       setStreaming(streaming) {
         set({ streaming });
       },
-      pushJobCompleted(event, sessionId) {
+      pushJobFinished(event, sessionId) {
         set((s) => {
           const existing = s.jobFeed.find((j) => j.event.job_id === event.job_id);
           // Re-delivery is expected: the stream reconnects with backoff and delivery is
@@ -618,7 +680,7 @@ export const useChatStore = create<ChatState>()(
         });
       },
 
-      restoreJobCompleted(jobId) {
+      restoreJobItem(jobId) {
         set((s) => ({
           jobFeed: s.jobFeed.map((j) =>
             j.event.job_id === jobId ? { ...j, dismissed: false } : j,
@@ -653,7 +715,7 @@ export const useChatStore = create<ChatState>()(
         return get().conversations[conversationId]?.sessionId ?? sessionId;
       },
 
-      dismissJobCompleted(jobId) {
+      dismissJobItem(jobId) {
         // A flag, not a delete. The feed is durable now, so an unguarded click on a 24px control
         // would otherwise be a permanent deletion of the only copy — the backend's is consumed.
         set((s) => ({

@@ -14,8 +14,16 @@
  */
 
 import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router';
-import { MoreHorizontal, Plus, Search, Trash2, TriangleAlert } from 'lucide-react';
+import { useLocation, useNavigate } from 'react-router';
+import {
+  FileCheck2,
+  MoreHorizontal,
+  Plus,
+  Search,
+  Server,
+  Trash2,
+  TriangleAlert,
+} from 'lucide-react';
 import { api } from '../api/client.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore, newConversation } from '../state/chatStore.ts';
@@ -173,6 +181,42 @@ function ConversationRow({
 }
 
 /** The panel body, shared by the persistent column and the mobile Sheet. */
+/** A footer link that reports where it leads and whether you are already there. */
+function SidebarLink({
+  to,
+  icon,
+  children,
+  onNavigate,
+}: {
+  to: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+  onNavigate?: () => void;
+}): React.JSX.Element {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const current = location.pathname === to;
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      // `aria-current` rather than a colour alone: "you are on this page" is information, and the
+      // conversation rows above already carry it for exactly the same reason.
+      aria-current={current ? 'page' : undefined}
+      className={cn('w-full justify-start', current && 'bg-surface-sunken')}
+      onClick={() => {
+        navigate(to);
+        onNavigate?.();
+      }}
+    >
+      <span aria-hidden className="[&>svg]:size-4">
+        {icon}
+      </span>
+      {children}
+    </Button>
+  );
+}
+
 export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.JSX.Element {
   const navigate = useNavigate();
   const order = useChatStore((s) => s.order);
@@ -268,6 +312,18 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
       </nav>
 
       <div className="space-y-3 border-t border-border-subtle p-3">
+        {/* The two screens that are not a conversation. In the footer rather than above the list
+            because they are where a chemist goes occasionally, and the list is where they go
+            every time. */}
+        <nav aria-label="Other views" className="flex flex-col gap-1">
+          <SidebarLink to="/review" icon={<FileCheck2 />} onNavigate={onNavigate}>
+            Review queue
+          </SidebarLink>
+          <SidebarLink to="/jobs" icon={<Server />} onNavigate={onNavigate}>
+            Durable runs
+          </SidebarLink>
+        </nav>
+
         <NotifyToggle />
 
         {throttled && (

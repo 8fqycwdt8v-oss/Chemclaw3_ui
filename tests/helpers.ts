@@ -7,7 +7,53 @@
  * and each error status.
  */
 
-import type { ChemclawEvent } from '../shared/events.ts';
+import type { AnswerEvent, ChemclawEvent, ErrorEvent, ToolResultEvent } from '../shared/events.ts';
+
+/**
+ * Builders for the three events whose contracts carry more fields than any one test cares about.
+ *
+ * The fields are required on the union rather than optional, deliberately: the last three times a
+ * field was added to this contract, the frontend went on compiling and quietly ignored it. Being
+ * forced to name the new field at every construction site is the mechanism that stops that, and a
+ * builder per event keeps the cost to the tests that genuinely do not care.
+ *
+ * Every default here matches what the service sends when nothing interesting happened — not what
+ * is convenient — so a test that overrides nothing is testing the ordinary case.
+ */
+export function answerEvent(over: Partial<AnswerEvent> = {}): AnswerEvent {
+  return {
+    type: 'answer',
+    text: '',
+    confidence: null,
+    unsupported_claims: [],
+    review_required: false,
+    verified_by: null,
+    ...over,
+  };
+}
+
+export function toolResultEvent(over: Partial<ToolResultEvent> = {}): ToolResultEvent {
+  return {
+    type: 'tool_result',
+    tool: 'gather_evidence',
+    preview: '',
+    result_ref: '',
+    note_ids: [],
+    numbers: [],
+    ...over,
+  };
+}
+
+export function errorEvent(over: Partial<ErrorEvent> = {}): ErrorEvent {
+  return {
+    type: 'error',
+    message: 'The turn failed.',
+    code: 'internal',
+    retryable: false,
+    correlation_id: '',
+    ...over,
+  };
+}
 
 /** Serialise events the way sse-starlette does: both the `event:` name and the JSON `type`. */
 export function sseFrames(events: ChemclawEvent[]): string {

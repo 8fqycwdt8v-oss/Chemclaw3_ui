@@ -17,6 +17,7 @@ import { normalizeEvent } from '../shared/events.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { TracePanel } from '../src/components/TracePanel.tsx';
 import type { AssistantMessage, TraceEntry } from '../src/state/types.ts';
+import { toolResultEvent } from './helpers.ts';
 
 const assistantOf = (conversationId: string, messageId: string): AssistantMessage => {
   const message = useChatStore
@@ -48,18 +49,41 @@ beforeEach(() => {
 
 describe('normalizeEvent', () => {
   it('accepts tool_result', () => {
-    expect(
-      normalizeEvent({ type: 'tool_result', tool: 'predict_pka', preview: 'pKa 9.2' }),
-    ).toEqual({ type: 'tool_result', tool: 'predict_pka', preview: 'pKa 9.2' });
+    expect(normalizeEvent(toolResultEvent({ tool: 'predict_pka', preview: 'pKa 9.2' }))).toEqual(
+      toolResultEvent({ tool: 'predict_pka', preview: 'pKa 9.2' }),
+    );
   });
 
   it('coerces a malformed frame rather than dropping the event', () => {
     // The preview crosses a process boundary; a bad field should cost the value, not the event.
-    expect(normalizeEvent({ type: 'tool_result', tool: 7, preview: null })).toEqual({
-      type: 'tool_result',
-      tool: 'unknown',
-      preview: '',
-    });
+    // A raw literal on purpose — the builder is typed, and these values are exactly the ones
+    // the type system says cannot happen and the wire produces anyway.
+    expect(
+      normalizeEvent({ type: 'tool_result', tool: 7, preview: null, numbers: [1, 'x', NaN] }),
+    ).toEqual(toolResultEvent({ tool: 'unknown', numbers: [1] }));
+  });
+
+  it('carries the result ref, the cited notes and the numbers', () => {
+    // These three are untruncated even when `preview` is not, which is the whole reason they are
+    // separate fields: a citation must survive the cut that loses the sentence around it.
+    expect(
+      normalizeEvent({
+        type: 'tool_result',
+        tool: 'gather_evidence',
+        preview: 'Suzuki coupling in 2-MeTHF, 92% …',
+        result_ref: 'a'.repeat(64),
+        note_ids: ['note-1', 'note-2'],
+        numbers: [92.0, 4.76],
+      }),
+    ).toEqual(
+      toolResultEvent({
+        tool: 'gather_evidence',
+        preview: 'Suzuki coupling in 2-MeTHF, 92% …',
+        result_ref: 'a'.repeat(64),
+        note_ids: ['note-1', 'note-2'],
+        numbers: [92.0, 4.76],
+      }),
+    );
   });
 });
 
@@ -72,7 +96,7 @@ describe('tool_result in the trace', () => {
       tool: 'predict_pka',
       arguments: '{"s":"CCO"}',
     });
-    store.applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'pKa 15.9' });
+    store.applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'pKa 15.9' }));
 
     const trace = assistantOf(cid, mid).trace;
     expect(trace).toHaveLength(1);
@@ -97,8 +121,8 @@ describe('tool_result in the trace', () => {
     const store = useChatStore.getState();
     store.applyEvent(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: 'first' });
     store.applyEvent(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: 'second' });
-    store.applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'A' });
-    store.applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'B' });
+    store.applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'A' }));
+    store.applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'B' }));
 
     const trace = assistantOf(cid, mid).trace;
     expect(trace.map((e) => e.toolCall?.result)).toEqual(['A', 'B']);
@@ -108,7 +132,7 @@ describe('tool_result in the trace', () => {
     const { cid, mid } = startTurn();
     useChatStore
       .getState()
-      .applyEvent(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'orphan' });
+      .applyEvent(cid, mid, toolResultEvent({ tool: 'predict_pka', preview: 'orphan' }));
 
     expect(assistantOf(cid, mid).trace).toHaveLength(0);
   });
@@ -175,5 +199,59 @@ describe('TracePanel', () => {
   it('no longer disclaims showing results, now that it shows them', () => {
     open([call({ tool: 'predict_pka', arguments: '', result: 'pKa 15.9' })]);
     expect(screen.queryByText(/invocations only/)).toBeNull();
+  });
+});
+
+describe('a durable job’s ending reaches the trace', () => {
+  // Its own opener rather than the one in the block above: `open` there is block-scoped, and the
+  // name resolves to `window.open` from here, which fails somewhere much less obvious.
+  const openTrace = (trace: TraceEntry[]): void => {
+    render(<TracePanel trace={trace} />);
+    fireEvent.click(screen.getByRole('button'));
+  };
+
+  const launch = (jobId: string, settled?: boolean): TraceEntry => ({
+    id: `s-${jobId}`,
+    at: 0,
+    kind: 'job_started',
+    job: { jobId, kind: 'qm', ...(settled ? { settled: true } : {}) },
+  });
+
+  it('takes the "runs asynchronously" badge off a job that has ended', () => {
+    const { cid, mid } = startTurn();
+    const store = useChatStore.getState();
+    store.applyEvent(cid, mid, { type: 'job_started', job_id: 'qm-1', kind: 'qm' });
+    store.applyEvent(cid, mid, { type: 'job_failed', job_id: 'qm-1', reason: 'cluster evicted' });
+
+    const trace = assistantOf(cid, mid).trace;
+    expect(trace[0]?.job?.settled).toBe(true);
+    expect(trace[1]?.jobFailure?.reason).toBe('cluster evicted');
+  });
+
+  it('leaves a different job’s launch row alone', () => {
+    const { cid, mid } = startTurn();
+    const store = useChatStore.getState();
+    store.applyEvent(cid, mid, { type: 'job_started', job_id: 'qm-1', kind: 'qm' });
+    store.applyEvent(cid, mid, { type: 'job_failed', job_id: 'qm-2', reason: 'other' });
+
+    expect(assistantOf(cid, mid).trace[0]?.job?.settled).toBeUndefined();
+  });
+
+  it('a completion settles the launch row too', () => {
+    // Both endings, not just the bad one: the badge is a claim in the present tense either way.
+    const { cid, mid } = startTurn();
+    const store = useChatStore.getState();
+    store.applyEvent(cid, mid, { type: 'job_started', job_id: 'qm-1', kind: 'qm' });
+    store.applyEvent(cid, mid, { type: 'job_completed', job_id: 'qm-1', summary: {} });
+
+    expect(assistantOf(cid, mid).trace[0]?.job?.settled).toBe(true);
+  });
+
+  it('renders the badge while a job is running and drops it once it is not', () => {
+    openTrace([launch('qm-1')]);
+    expect(screen.getByText('runs asynchronously')).toBeTruthy();
+    cleanup();
+    openTrace([launch('qm-1', true)]);
+    expect(screen.queryByText('runs asynchronously')).toBeNull();
   });
 });

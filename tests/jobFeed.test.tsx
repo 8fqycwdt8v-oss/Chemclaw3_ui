@@ -12,7 +12,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { JobFeed } from '../src/components/JobFeed.tsx';
-import type { JobCompletedEvent } from '../shared/events.ts';
+import type { JobCompletedEvent, JobFailedEvent } from '../shared/events.ts';
 
 const completion = (jobId: string, extra: Record<string, unknown> = {}): JobCompletedEvent => ({
   type: 'job_completed',
@@ -20,11 +20,17 @@ const completion = (jobId: string, extra: Record<string, unknown> = {}): JobComp
   summary: { molecule_smiles: 'CCO', total_energy_hartree: -154.5, converged: true, ...extra },
 });
 
+const failure = (jobId: string, reason = 'the solver did not converge'): JobFailedEvent => ({
+  type: 'job_failed',
+  job_id: jobId,
+  reason,
+});
+
 const SID = 'a'.repeat(32);
 
-/** Completions arrive on a stream we opened, so the session is part of the call now. */
-const push = (event: ReturnType<typeof completion>): void =>
-  useChatStore.getState().pushJobCompleted(event, SID);
+/** Endings arrive on a stream we opened, so the session is part of the call now. */
+const push = (event: JobCompletedEvent | JobFailedEvent): void =>
+  useChatStore.getState().pushJobFinished(event, SID);
 
 /** JobFeed links back to the conversation a job came from, so it needs a router. */
 const renderFeed = () =>
@@ -84,7 +90,7 @@ describe('jobFeed store', () => {
     // Otherwise the badge count climbs again on every reconnect for work already read, and a
     // dismissed card comes back.
     push(completion('qm-1'));
-    useChatStore.getState().dismissJobCompleted('qm-1');
+    useChatStore.getState().dismissJobItem('qm-1');
 
     push(completion('qm-1'));
 
@@ -95,7 +101,7 @@ describe('jobFeed store', () => {
   it('dismisses only the named job', () => {
     push(completion('qm-1'));
     push(completion('qm-2'));
-    useChatStore.getState().dismissJobCompleted('qm-1');
+    useChatStore.getState().dismissJobItem('qm-1');
     // Dismissal is a flag now, not a delete: the feed is durable, so destroying the only copy on
     // one click would be unrecoverable.
     expect(
@@ -124,6 +130,24 @@ describe('JobFeed', () => {
     push(completion('qm-bad', { converged: false }));
     renderFeed();
     expect(screen.getByText('not converged')).toBeTruthy();
+  });
+
+  it('shows a failed job as failed, with the reason the service gave', () => {
+    // The whole point of the `job_failed` fix: before it, this event was dropped in
+    // `normalizeEvent` and the chemist waited on a job that had already died.
+    push(failure('qm-dead', 'the SCF did not converge in 200 cycles'));
+    renderFeed();
+    expect(screen.getByText('failed')).toBeTruthy();
+    expect(screen.getByText('the SCF did not converge in 200 cycles')).toBeTruthy();
+  });
+
+  it('an empty reason still reads as a failure rather than as a blank card', () => {
+    // `reason` is documented as possibly empty. Saying nothing there would leave a card whose
+    // only content is a job id, which is indistinguishable from a success at a glance.
+    push(failure('qm-quiet', ''));
+    renderFeed();
+    expect(screen.getByText('failed')).toBeTruthy();
+    expect(screen.getByText(/is not still running/)).toBeTruthy();
   });
 
   it('survives a summary that carries none of the fields it looks for', () => {

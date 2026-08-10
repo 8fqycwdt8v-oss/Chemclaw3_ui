@@ -75,6 +75,31 @@ for (const theme of ['light', 'dark'] as const) {
       await scan(page);
     });
 
+    test('the full result panel', async ({ page }) => {
+      // Denser than anything else in the app: a modal panel holding a data table, which is where
+      // an unlabelled column header or an unreachable scroll region would go unnoticed. The
+      // scroll region is not hypothetical — a real tool result overflows it, and axe caught that
+      // the block had no keyboard access the first time a realistic one was put through it.
+      await page.goto('/');
+      await page.getByPlaceholder(/Ask about a reaction/).fill('Screen this azide.');
+      await page.getByRole('button', { name: 'Send' }).click();
+
+      await page.getByRole('button', { name: /Show the agent’s work/ }).click();
+      await page.getByRole('button', { name: 'See the full result' }).click();
+      await expect(page.getByRole('dialog', { name: /full result/ })).toBeVisible();
+      await scan(page);
+    });
+
+    test('the review queue, with a proposal open', async ({ page }) => {
+      // A modal panel over a list, holding a labelled textarea and two destructive-ish controls —
+      // and the panel is where a decision that cannot be undone is taken. Reached by URL rather
+      // than through the sidebar, because the drawer is already covered below.
+      await page.goto('/review');
+      await page.getByRole('button', { name: /note-suzuki-42/ }).click();
+      await expect(page.getByText(/confidence: 0\.8/)).toBeVisible();
+      await scan(page);
+    });
+
     test('the conversation that is not on this device', async ({ page }) => {
       // A new page, a new focus target, and the one state reached by a link rather than a click.
       await page.goto('/c/does-not-exist');

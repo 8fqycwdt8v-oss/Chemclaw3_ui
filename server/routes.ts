@@ -38,6 +38,40 @@ const SID = '([0-9a-f]{32})';
  */
 const APPROVAL = "([A-Za-z0-9._:~!*'()%-]{1,128})";
 
+/**
+ * Knowledge-note ids.
+ *
+ * The same argument as `APPROVAL`, from the same cause: a note id is `note-{slug}` where the slug
+ * comes from whatever the note is about, and for a compound note that is a name the model wrote.
+ * So the set is again exactly what `encodeURIComponent` can emit, and again a raw `/` fails to
+ * match because that changes the route's shape rather than its parameter.
+ *
+ * It gets its own constant rather than sharing `APPROVAL` because the two are the same set for
+ * different reasons, and the next time either service tightens or widens its id scheme, only one
+ * of these should move.
+ */
+const NOTE = "([A-Za-z0-9._:~!*'()%-]{1,128})";
+
+/**
+ * Durable job ids.
+ *
+ * Minted by the service and by Temporal rather than by the model, so unlike `APPROVAL` these are
+ * not arbitrary in principle — but a connector job's id embeds a workflow id whose shape this
+ * repo does not own, and pinning it to a guess is how the approval route spent a release
+ * 404-ing every id with a bracket in it. Same closed set, same length cap, same argument: the
+ * segment is forwarded still-encoded and the service uses it as a lookup key, never as a path.
+ */
+const JOB = "([A-Za-z0-9._:~!*'()%-]{1,128})";
+
+/**
+ * A stored tool result's ref.
+ *
+ * Narrower than every other id here, and it can be: the service defines the ref as the SHA-256
+ * hex digest of the result text, so 64 lowercase hex characters is the whole set — the same kind
+ * of structural traversal protection `SID` gets, for the same reason.
+ */
+const RESULT_REF = '([0-9a-f]{64})';
+
 export interface Route {
   method: string;
   pattern: RegExp;
@@ -53,6 +87,10 @@ export const ROUTES: readonly Route[] = [
 
   // Sessions.
   { method: 'POST', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false },
+  // The agent profiles `POST /sessions` will accept. Whitelisted because the alternative is a
+  // picker with hardcoded names: the service 400s an unknown profile, and the set is a
+  // deployment's own, so guessing is how the picker breaks in the tenant nobody tested in.
+  { method: 'GET', pattern: /^\/api\/profiles$/, target: () => '/profiles', sse: false },
   // Added by the companion backend change: list the caller's sessions.
   { method: 'GET', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false },
   // Added by the companion backend change: read a transcript back after a reload.
@@ -83,6 +121,30 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
+  // The untruncated text of one tool result.
+  //
+  // `ToolResultEvent.preview` is 200 characters and the service says it will stay that way; this
+  // is the other half of that split. Session-scoped upstream, so the ownership check the turn
+  // stream already passed covers it too — a ref from someone else's session finds nothing.
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/tool-results/${RESULT_REF}$`),
+    target: (m) => `/sessions/${m[1]}/tool-results/${m[2]}`,
+    sse: false,
+  },
+
+  // One knowledge note, with its provenance and its neighbourhood.
+  //
+  // Whitelisted so a `note-…` citation resolves to the note it cites instead of prefilling a
+  // question about it. `hops` rides through as a query parameter; the proxy forwards the query
+  // string, and the service clamps it.
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/notes/${NOTE}$`),
+    target: (m) => `/notes/${m[1]}`,
+    sse: false,
+  },
+
   // The harness plan gate: read the plan awaiting a decision — with the hash that binds it — then
   // answer it. Deliberately HTTP routes on the service and not agent tools: until they existed,
   // the agent moved itself out of plan mode through MAF's own `mode_set` and the audit trail
@@ -97,6 +159,47 @@ export const ROUTES: readonly Route[] = [
     method: 'POST',
     pattern: new RegExp(`^/api/sessions/${SID}/plan/decision$`),
     target: (m) => `/sessions/${m[1]}/plan/decision`,
+    sse: false,
+  },
+
+  // The PR-gate review queue.
+  //
+  // A different mechanism from `/approvals` below, despite the similar shape, and worth not
+  // confusing: an approval is a Temporal interaction hold answered mid-turn, a proposal is a
+  // knowledge note waiting to enter the graph. The service calls this "the line that makes
+  // machine-written knowledge safe". Listing is keyset-paginated (`before_id`) and state-filtered
+  // through the query string, which the proxy forwards untouched.
+  { method: 'GET', pattern: /^\/api\/proposals$/, target: () => '/proposals', sse: false },
+  {
+    method: 'GET',
+    pattern: /^\/api\/proposals\/([0-9]{1,19})$/,
+    target: (m) => `/proposals/${m[1]}`,
+    sse: false,
+  },
+  {
+    method: 'POST',
+    pattern: /^\/api\/proposals\/([0-9]{1,19})\/decision$/,
+    target: (m) => `/proposals/${m[1]}/decision`,
+    sse: false,
+  },
+
+  // The durable-run registry.
+  //
+  // Job ids are minted by the service and by Temporal, so they are constrained like an approval
+  // id rather than like a session id. `DELETE` is the operator cancel, role-gated upstream; it is
+  // whitelisted here anyway, because hiding a control the caller is entitled to use is the
+  // frontend's job and refusing to proxy it would break the caller who *is* entitled.
+  { method: 'GET', pattern: /^\/api\/jobs$/, target: () => '/jobs', sse: false },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/jobs/${JOB}$`),
+    target: (m) => `/jobs/${m[1]}`,
+    sse: false,
+  },
+  {
+    method: 'DELETE',
+    pattern: new RegExp(`^/api/jobs/${JOB}$`),
+    target: (m) => `/jobs/${m[1]}`,
     sse: false,
   },
 

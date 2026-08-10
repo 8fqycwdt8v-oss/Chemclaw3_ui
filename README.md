@@ -24,6 +24,15 @@ bearer token.
   opt-in toggle on inline SMILES in answers.
 - **Surfaces verifier signals** — a "needs expert review" pill at the _top_ of a low-confidence
   answer, plus the confidence score and any unsupported claims.
+- **Renders what a tool returned**, not only the model's paraphrase of it. The turn streams a
+  200-character preview and a content address; a trace row offers to fetch the rest, and renders it
+  as a hazard table, an ICH limit with its guideline, a charge table, or a generic table — with the
+  result's own `verdict` above the data, because an empty screen is explicitly not a clearance.
+- **Resolves citations.** A `note-…` chip opens the note with its provenance and its validity
+  window, so a citation in an old answer that points at a superseded note says so.
+- **Reviews machine-written knowledge.** `/review` is the PR gate in the browser: what a proposal
+  would commit, byte for byte, and a decision that needs a reason to reject. `/jobs` is the durable
+  run registry — searchable by _why_ each run was launched — with cancellation for those entitled.
 - **Answers approvals.** A durable hold gets real Approve/Reject buttons wired to
   `POST /approvals/{id}/decision`; a plan approval posts to `POST /sessions/{id}/plan/decision`,
   bound to the hash of the plan that was actually shown. Both go through a confirmation: the
@@ -87,6 +96,7 @@ same time, plus:
 | `ENTRA_TENANT_ID` | your tenant GUID                                                    |
 | `ENTRA_CLIENT_ID` | **this SPA's** app registration (platform: Single-page application) |
 | `API_SCOPE`       | `api://<api-client-id>/<scope>`, e.g. `.../Chat.Access`             |
+| `REVIEWER_ROLES`  | the backend's `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`, comma-separated    |
 
 Three things account for most "the token looks fine but the API returns 401" incidents:
 
@@ -110,7 +120,7 @@ server/     the BFF — route whitelist, streaming proxy, static host, /config.j
 src/        the SPA — api/ auth/ state/ components/
   components/ui/    primitives (button, sheet, alert-dialog, …) on Radix + cva
   components/chem/  composites built from them (StatusDot, ConfirmDialog, …)
-shared/     the event contract, mirrored from the service's service/events.py
+shared/     the event contract, mirrored from the service's api/events.py
 scripts/    dev launcher, server bundler, smoke test, contrast gate
 e2e/        Playwright specs and the SSE fixture service
 public/     theme boot script, favicon — served as-is by the BFF
@@ -167,11 +177,14 @@ Everything else is verified against the real service.
 
 ## Backend requirements
 
-`GET /sessions` and `GET /sessions/{id}/messages` (the conversation list and transcript read-back)
-were added to Chemclaw3 alongside this UI, together with the fix that populates
-`ApprovalRequestEvent.approval_id`. The UI degrades gracefully without them — the sidebar stays
-local-only and transcripts come from `localStorage` — but history will not follow you between
-devices.
+The UI reads more of the service than it used to, and the degradation is deliberately split in two.
+**List** routes — `GET /sessions`, `GET /sessions/{id}/messages`, `GET /approvals`,
+`GET /proposals`, `GET /jobs` — swallow a 404 into an empty result, so an older service yields a
+smaller app rather than a banner. **Fetch** routes — `GET /notes/{id}`,
+`GET /sessions/{id}/tool-results/{ref}` — do not, because nothing calls them speculatively: the
+control only exists when the turn said the thing exists, so a 404 there is a real fault.
+
+`USER-STORIES.md` records which chemist-facing workflows this reaches and which it does not.
 
 Conversation history also needs the service running with `CHEMCLAW_SESSION_STORE=postgres`. Under
 the in-memory store there is nothing durable to list or read back.

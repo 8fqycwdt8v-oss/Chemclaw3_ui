@@ -54,6 +54,9 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     s.streaming?.conversationId === conversationId ? s.streaming : null,
   );
   const sessionId = useChatStore((s) => s.conversations[conversationId]?.sessionId ?? null);
+  const profile = useChatStore((s) => s.sessionProfiles[conversationId] ?? '');
+  const setSessionProfile = useChatStore((s) => s.setSessionProfile);
+  const [profiles, setProfiles] = useState<string[]>([]);
   const text = useChatStore((s) => s.drafts[conversationId] ?? '');
   const setDraft = useChatStore((s) => s.setDraft);
 
@@ -107,6 +110,23 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     window.addEventListener('chemclaw:prefill', onPrefill);
     return () => window.removeEventListener('chemclaw:prefill', onPrefill);
   }, [conversationId, setDraft]);
+
+  // The profiles this deployment offers, if more than one. Fetched once and cached in component
+  // state rather than the store: it is a property of the service, not of a conversation, and the
+  // composer outlives every conversation switch.
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    void api
+      .listProfiles(() => auth.getAccessToken())
+      .then((list) => !cancelled && setProfiles(list))
+      // Silent: a service without the route has exactly one profile, and a banner about a
+      // picker nobody asked for would be noise.
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, auth]);
 
   // Mint the backend session while they type, so the first send is one round-trip rather than
   // two. Debounced, so a stray keypress in a conversation they abandon does not cost a session;
@@ -325,7 +345,30 @@ export function Composer({ conversationId }: { conversationId: string }): React.
 
         {/* min-h so the hint/counter swap does not shift the composer under the reader. */}
         <div className="mt-2 flex min-h-5 items-center justify-between gap-3 text-xs text-ink-muted">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Only before the session exists: the profile is fixed on the service when the
+                session is minted, so offering the choice afterwards would be offering a control
+                that silently does nothing. And only when there is a choice to make. */}
+            {!sessionId && profiles.length > 1 && (
+              <>
+                <label htmlFor="profile" className="sr-only-live">
+                  Agent profile
+                </label>
+                <select
+                  id="profile"
+                  value={profile}
+                  onChange={(e) => setSessionProfile(conversationId, e.target.value)}
+                  className="rounded-md border border-border-subtle bg-surface px-1.5 py-0.5 text-xs outline-none focus-ring"
+                >
+                  <option value="">Default agent</option>
+                  {profiles.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
             <Switch
               id="dry-run"
               checked={dryRun}

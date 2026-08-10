@@ -31,6 +31,16 @@ type QuotaListener = (message: string) => void;
 
 let onQuotaExceeded: QuotaListener | null = null;
 
+/**
+ * Whether the current out-of-space episode has already been reported.
+ *
+ * The listener raises a banner, and raising a banner is a `set()`, which persist answers with
+ * another write, which fails, which reports again. That is a self-feeding loop that never settles
+ * for as long as storage stays full — so the report fires once per episode and is re-armed only by
+ * a write that succeeds.
+ */
+let reportedQuota = false;
+
 /** Report an unrecoverable persist failure. Set by `chatStore`, which owns the banner. */
 export function setQuotaListener(listener: QuotaListener): void {
   onQuotaExceeded = listener;
@@ -64,25 +74,34 @@ function reclaim(raw: string): string | null {
 let timer: ReturnType<typeof setTimeout> | null = null;
 let pending: { key: string; value: string } | null = null;
 
+/** Report an unrecoverable write, at most once per episode. */
+function report(message: string): void {
+  if (reportedQuota) return;
+  reportedQuota = true;
+  onQuotaExceeded?.(message);
+}
+
 function write(key: string, value: string): void {
   try {
     localStorage.setItem(key, value);
+    reportedQuota = false;
     return;
   } catch (err) {
     if (!isQuotaError(err)) {
-      onQuotaExceeded?.('Could not save this conversation locally.');
+      report('Could not save this conversation locally.');
       return;
     }
     const reduced = reclaim(value);
     if (reduced) {
       try {
         localStorage.setItem(key, reduced);
+        reportedQuota = false;
         return;
       } catch {
         /* fall through to the report below */
       }
     }
-    onQuotaExceeded?.(
+    report(
       'This browser is out of local storage, so new messages are not being saved. Older conversations can be removed from the sidebar.',
     );
   }

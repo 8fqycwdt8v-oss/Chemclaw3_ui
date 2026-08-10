@@ -103,6 +103,49 @@ describe('quota', () => {
     expect(attempts[1]).toContain('"jobFeed":[]');
   });
 
+  it('reports once per episode, not on every failed write', async () => {
+    // The listener raises a banner, and raising a banner is a store `set()`, which persist answers
+    // with another write, which fails, which reports again. Left alone that is a self-feeding loop
+    // that runs for as long as storage stays full.
+    const { coalescedLocalStorage, flushPendingWrite, setQuotaListener } = await freshAdapter(
+      () => {
+        throw quotaError();
+      },
+    );
+    const reported: string[] = [];
+    setQuotaListener((m) => reported.push(m));
+
+    for (let i = 0; i < 5; i++) {
+      coalescedLocalStorage.setItem(KEY, '{"state":{}}');
+      flushPendingWrite();
+    }
+
+    expect(reported).toHaveLength(1);
+  });
+
+  it('re-arms the report once a write succeeds again', async () => {
+    let full = true;
+    const { coalescedLocalStorage, flushPendingWrite, setQuotaListener } = await freshAdapter(
+      () => {
+        if (full) throw quotaError();
+      },
+    );
+    const reported: string[] = [];
+    setQuotaListener((m) => reported.push(m));
+
+    coalescedLocalStorage.setItem(KEY, '{"state":{}}');
+    flushPendingWrite();
+    full = false;
+    coalescedLocalStorage.setItem(KEY, '{"state":{}}');
+    flushPendingWrite();
+    full = true;
+    coalescedLocalStorage.setItem(KEY, '{"state":{}}');
+    flushPendingWrite();
+
+    // A later, separate episode is worth telling the user about again.
+    expect(reported).toHaveLength(2);
+  });
+
   it('reports rather than throws when even that is not enough', async () => {
     const { coalescedLocalStorage, flushPendingWrite, setQuotaListener } = await freshAdapter(
       () => {

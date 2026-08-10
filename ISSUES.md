@@ -27,6 +27,25 @@ question with an eviction-dependent guess.
 `GET /approvals`, `GET /approvals/{id}` and `POST /approvals/{id}/decision` all exist in
 `routes/approvals.py`, every one gated by `owned_approval`. `ReviewQueue` is the surface.
 
+## Closed: three ways to serve an unauthenticated UI by accident
+
+Not filed before being fixed, and recorded because the shape is worth recognising again: all three
+were paths to "no sign-in required" that nobody chose, and each looked like a working deployment.
+
+- `AUTH_MODE` resolved every unrecognised value to `dev`. `AUTH_MODE=MSAL`, `entra`, or a value
+  carrying a trailing newline out of a secret manager booted with no sign-in, `frame-ancestors *`
+  and no `X-Frame-Options`. Now refused at startup, naming the value it was given.
+- `validateConfig` claimed in its own docstring to mirror the backend's
+  `_refuse_unauthenticated_exposure` while only logging a warning. Dev auth on a non-loopback bind
+  is now refused unless `ALLOW_INSECURE_AUTH=true` declares it deliberate. The loopback test also
+  gained `::1`, which the old inline check reported as an exposure it was not.
+- `createDevAuth` was a static import and an unconditional fallback, so the no-token provider sat
+  in the entry chunk of every build — `dev@localhost` was grep-able in a release bundle — one
+  failed `/config.js` fetch from being the active provider. Now behind `import.meta.env.PROD` and
+  the `__ALLOW_DEV_AUTH__` define, with `scripts/assert-no-dev-auth.mjs` asserting it against the
+  emitted chunks in **both** directions, so a stale marker string fails loudly rather than passing
+  for nothing.
+
 ---
 
 ## Issue 4: `GET /sessions` cannot populate a conversation list on its own
@@ -120,6 +139,59 @@ them: an unused session and a session whose transcript failed to load both come 
 
 **Fix:** have `GET /sessions` omit sessions with no messages, or expose a message count on
 `SessionSummary` so the client can. The former is better — it is the same query.
+
+---
+
+## Issue 8: the access token lives in the browser, and its refresh runs on a mechanism browsers are removing
+
+**Decided, not merely open.** Moving token custody to the BFF was designed, built and tested on
+`claude/frontend-hardening-stabilization-gqxzko` (PR #11, closed), and deliberately not adopted.
+This entry exists so the next person reads the reasoning instead of re-deriving it — and so the
+symptom below is recognised when it appears, because it will not look like a decision anyone made.
+
+**Where things stand.** `src/auth/msalAuth.ts` holds an Entra access token in the browser, and
+`src/api/client.ts` and `src/api/streamTurn.ts` send it as an `Authorization` header. This origin
+sets no cookies at all, and `server/proxy.ts:92` strips the `cookie` header on the way upstream to
+keep the service's `allow_credentials=false` posture true — so neither side has a CSRF surface
+today.
+
+**Two costs, and the second one has a clock on it.**
+
+- Any script running on this origin can read the token — ours, a dependency's, or a supply-chain
+  compromise of one. This app ships RDKit-WASM, Ketcher and a large npm tree, so that surface is
+  not hypothetical. An `httpOnly` cookie can be _used_ by injected script but not _read_, which
+  confines an attacker to this origin instead of handing them a portable credential.
+- MSAL refreshes silently through a hidden iframe to `login.microsoftonline.com`, which depends on
+  third-party cookies. Safari's ITP and Firefox's ETP already block them and Chrome is removing
+  them. When the iframe fails, MSAL falls back to an interactive redirect **mid-session**.
+  `server/config.ts` already carries `frame-src`, `connect-src` and `form-action` exceptions for
+  `login.microsoftonline.com` to keep this working at all.
+
+**The symptom to recognise.** "People keep getting logged out", reported first and most often by
+Safari and Firefox users. That is upstream browser policy arriving, not a regression here — and
+without this note it reads like a bug in the router or the session handling, which is where the
+time would go.
+
+**Why it was not adopted.** The BFF design is sound — stateless AES-256-GCM sealed cookie, HKDF-
+derived key, `__Host-` prefix, chunked because Entra tokens exceed the 4 KB cookie limit, three
+independent CSRF checks, ~1,500 lines of tests. The objections are operational rather than
+technical:
+
+- It makes the BFF a **confidential client**, so the Entra app registration needs a Web platform, a
+  client secret and `<origin>/auth/callback` as a redirect URI. That is a tenant admin action, not
+  a config edit, and in a regulated tenant it is a ticket and a wait.
+- Two new managed secrets. `ENTRA_CLIENT_SECRET` expires — an unrenewed one means nobody can log
+  in. Rotating `SESSION_SECRET` logs everyone out, because stateless means there is no record to
+  migrate.
+- It trades a known risk for a different one: no cookies today means nothing to forge, and cookies
+  create a CSRF surface. Mitigated three ways over, but it is a trade rather than a strict win.
+- **No revocation.** A sealed cookie is valid until it expires; logout clears the cookie rather
+  than invalidating a record. If "revoke this user immediately" is ever a GxP requirement, the
+  stateless design cannot satisfy it without the server-side store it exists to avoid.
+
+**What would change the answer:** a confirmed confidential-client registration in the target
+tenant, or the refresh failures above becoming common enough to be the bigger operational cost.
+Reopen PR #11 rather than rebuilding — the branch is retained.
 
 ---
 

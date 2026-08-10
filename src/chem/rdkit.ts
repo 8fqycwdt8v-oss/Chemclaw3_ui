@@ -21,10 +21,15 @@
  *    SMILES and nothing else, so the whole file path needs a toolkit that speaks MDL.
  *
  * The cost is real and the mitigation is structural rather than hopeful: this module is reached
- * only through a dynamic `import()`, so the WASM lands in its own chunk and **the entry bundle is
- * unchanged** — a page that shows no chemistry pays nothing, and nothing is preloaded. Measured on
- * this branch: entry 485.86 kB before, 485.78 kB after, with RDKit's JS and its 6.9 MB `.wasm` as
- * separate emitted assets that are fetched the first time a structure appears.
+ * only through a dynamic `import()`, so the WASM lands in its own chunk and **nothing chemical is
+ * in the entry bundle or preloaded from index.html** — a page that shows no chemistry pays nothing.
+ *
+ * Measured across the swap alone, which is the number that tests the claim: the entry chunk went
+ * 485.86 kB → 485.78 kB, with RDKit emitted as a 74 kB loader and a 6.9 MB `.wasm` beside it, both
+ * fetched the first time a structure appears. (The entry ends this branch at 509 kB. That
+ * difference is the application code added on top — the method/caveat table, the entity store and
+ * rail, the structure input — and none of it is RDKit or Ketcher: the only mention of either in
+ * the entry chunk is the dynamic-import reference to their chunks.)
  *
  * What that trade buys back is one toolkit deciding what a molecule is. Keeping smiles-drawer for
  * depiction beside RDKit for identity was the other option on the table, and it was rejected for

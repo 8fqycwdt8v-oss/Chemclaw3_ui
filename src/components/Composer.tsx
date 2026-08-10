@@ -19,7 +19,7 @@
  */
 
 import { useEffect, useId, useRef, useState } from 'react';
-import { Paperclip, Send, Square } from 'lucide-react';
+import { Hexagon, Paperclip, Send, Square } from 'lucide-react';
 import { MAX_MESSAGE_CHARS } from '../../shared/events.ts';
 import { api } from '../api/client.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
@@ -30,6 +30,8 @@ import { Button } from '@/components/ui/button';
 import { Label, Switch } from '@/components/ui/misc';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Loading } from '@/components/chem/Feedback';
+import { useEntityStore } from '../chem/entities.ts';
+import { StructureInput, type AcceptedStructure } from './StructureInput.tsx';
 
 const MAX_TEXTAREA_PX = 200;
 
@@ -42,7 +44,11 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   const { auth, ready } = useAuth();
   const [dryRun, setDryRun] = useState(false);
   const [upload, setUpload] = useState<Upload>(null);
+  const [structureOpen, setStructureOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  /** Where the caret was when the structure panel took focus. Captured on open rather than read
+   *  back on insert, because by then the caret belongs to the panel's own input. */
+  const caretRef = useRef<number | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const hintId = useId();
 
@@ -160,6 +166,44 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     void sendMessage({ conversationId, text: message, dryRun, auth });
   };
 
+  /**
+   * Put an accepted structure into the message being written — and nowhere else.
+   *
+   * It is inserted at the caret rather than sent, because a structure is almost never the whole
+   * question: "screen this for hazards" and "what is the pKa of this" are what a chemist is
+   * actually writing, and a panel that sent the SMILES on its own would force them to describe the
+   * molecule twice.
+   *
+   * It is also promoted into the entity rail. A structure a human drew or dropped and confirmed
+   * satisfies the rail's structured-source rule rather than weakening it — the rule exists to keep
+   * out strings the UI *guessed* were molecules, and there is no guess here (see the
+   * promotion-rule docstring in `src/chem/entities.ts`).
+   */
+  const insertStructure = ({ canonical, raw, source }: AcceptedStructure): void => {
+    // The raw spelling, not the canonical one: the store canonicalises for the key and keeps what
+    // was typed as an alias, so the rail can show a chemist the string they recognise.
+    void useEntityStore.getState().ingestUserStructure(conversationId, raw, source);
+
+    const at = caretRef.current ?? text.length;
+    const before = text.slice(0, at);
+    const after = text.slice(at);
+    // A SMILES glued to the previous word is a different token, and `looksLikeSmiles` would be
+    // right to refuse it. Pad only where padding is missing, so the chemist's own spacing survives.
+    const fragment = `${before && !/\s$/.test(before) ? ' ' : ''}${canonical}${after && !/^\s/.test(after) ? ' ' : ''}`;
+
+    setDraft(conversationId, `${before}${fragment}${after}`);
+    setStructureOpen(false);
+
+    const caret = before.length + fragment.length;
+    // After the state has been committed and the textarea is back on screen; setting the range
+    // against the pre-update value would put the caret in the wrong place.
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      el?.focus();
+      el?.setSelectionRange(caret, caret);
+    });
+  };
+
   const onUpload = async (file: File): Promise<void> => {
     if (!sessionId) {
       // Reachable only when warming is switched off or has not landed yet — typing one character
@@ -257,6 +301,10 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           </div>
         )}
 
+        {structureOpen && (
+          <StructureInput onAccept={insertStructure} onClose={() => setStructureOpen(false)} />
+        )}
+
         <div
           className={cn(
             'flex items-end gap-2 rounded-xl border bg-surface px-3 py-2 shadow-2xs transition-colors',
@@ -312,6 +360,26 @@ export function Composer({ conversationId }: { conversationId: string }): React.
               e.target.value = '';
             }}
           />
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Insert a structure"
+                className="tap-target"
+                onClick={() => {
+                  // Read here, while the textarea still owns the selection. Once the panel opens
+                  // it takes focus and `selectionStart` becomes the panel's own field.
+                  caretRef.current = textareaRef.current?.selectionStart ?? null;
+                  setStructureOpen((v) => !v);
+                }}
+              >
+                <Hexagon />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Paste, draw or drop a structure into this message</TooltipContent>
+          </Tooltip>
+
           <Tooltip>
             <TooltipTrigger asChild>
               <Button

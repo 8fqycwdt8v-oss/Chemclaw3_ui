@@ -23,10 +23,13 @@
  *    SMILES and nothing else.
  *
  * The bundle argument survives intact and is answered structurally: `src/chem/rdkit.ts` is behind a
- * dynamic `import()`, so the WASM is its own chunk, the entry bundle is unchanged (485.86 kB →
- * 485.78 kB on this branch) and nothing is preloaded. Keeping smiles-drawer alongside for depiction
- * was considered and dropped — any page with a rail has already fetched RDKit, so it would be
- * 190 kB of duplicate capability and, worse, a second opinion about what is drawable.
+ * dynamic `import()`, so the WASM is its own chunk and index.html preloads none of it. Measured
+ * across the swap alone, the entry chunk went 485.86 kB → 485.78 kB — the 6.9 MB binary and its
+ * 74 kB loader are separate emitted assets, fetched the first time a structure appears.
+ *
+ * Keeping smiles-drawer alongside for depiction was considered and dropped — any page with a rail
+ * has already fetched RDKit, so it would be 190 kB of duplicate capability and, worse, a second
+ * opinion about what is drawable.
  *
  * What is kept from the version this replaces, because none of it was about the drawing library:
  *

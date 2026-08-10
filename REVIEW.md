@@ -26,19 +26,20 @@ findings are listed unverified at the end and should be treated as leads, not re
 
 ## Status
 
-Fixed and pushed, each with a regression test that fails without it: **C1, C2, C3, C4, H1, H2,
-H3, H4, H5** — nine of the ten. Full gate green after every batch: typecheck, lint, format, 150
-unit tests (up from 125), 46/46 contrast pairs, build, Playwright desktop + mobile, and
-`scripts/smoke.mjs` reporting frames arriving incrementally, which is the check that guards the
-streaming path the proxy changes touched.
+**All ten are fixed and pushed**, each with a regression test verified to fail against the commit
+before its fix rather than merely assumed to. Full gate green after every batch: typecheck, lint,
+format, 163 unit tests (up from 125), 46/46 contrast pairs, build, Playwright desktop + mobile, and
+`scripts/smoke.mjs` reporting frames arriving incrementally — the check that guards the streaming
+path the proxy changes touched.
 
-**Outstanding: C5**, the multi-tab last-writer-wins. The write path it depends on has been
-rebuilt underneath it — writes now go through `src/state/persistStorage.ts` — so the merge has a
-single place to live, but reconciling two tabs' conversations is a design decision (merge by id
-and `updatedAt`, or take a `navigator.locks` write lock) rather than a mechanical fix, and it is
-better made deliberately than at the end of a long session.
+C5 is resolved by a merge rather than a lock: conversations are keyed by id, so newest-per-id wins
+and there is nothing to guess. `updatedAt` bumps on every token, which settles the case that
+matters most — a turn streaming in this tab always outranks another tab's stale copy of it.
+Deletion deliberately does not propagate; without a tombstone there is no way to distinguish
+"deleted there" from "created here", and of the two possible mistakes, resurrecting a conversation
+is recoverable and losing one is not.
 
-Two notes on what the fixes revealed:
+### What the fixes revealed
 
 - **H1 needed a store primitive that did not exist.** Retrying a turn means replacing the trailing
   failed pair, and nothing could remove a message. `prepareRetry` pops a `[user, failed assistant]`
@@ -47,6 +48,23 @@ Two notes on what the fixes revealed:
 - **H4 was two bugs.** Beyond `ready` never reaching a terminal state, the "Sign in again" button
   it offered called `pendingAuth.login()` — a deliberate no-op — so the one failure that disables
   the whole app had a button that did nothing.
+
+### Three bugs the fixes introduced, and one test that proved nothing
+
+Reviewing the diff turned up three defects in the new code, all the same shape: a state change
+that feeds back into whatever triggered it. None was in the original findings.
+
+| Where           | The loop                                                                                                                                                                                                                                                                                                   |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| cross-tab merge | `set()` → persist → `storage` event in the other tab → merge → write back. Each tab keeps its own `activeId`, so the snapshots never serialise identically and it never settles. Returning `{}` from the updater was not enough — zustand notifies on every `set()`, so the guard has to prevent the call. |
+| proxy           | Stop destroys the upstream request on purpose, and the response emits `ECONNRESET` on the way out. The new error handler reported every Stop as a backend failure.                                                                                                                                         |
+| persist quota   | The listener raises a banner; raising a banner is a `set()`; persist answers with another write; the write fails; it reports again.                                                                                                                                                                        |
+
+And the regression test for the second was **vacuous on the first attempt** — it spied on
+`console.warn`, but `server/log.ts` routes warn and error to stderr through `console.error`, so it
+passed with and without the guard. It was caught only by running each new test against the unfixed
+code, which is worth doing as a matter of course: that is the same false-confidence class this
+review was looking for elsewhere, found in code written during the review itself.
 
 ---
 

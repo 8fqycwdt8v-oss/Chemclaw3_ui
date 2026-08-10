@@ -10,7 +10,7 @@
 import http from 'node:http';
 import { existsSync } from 'node:fs';
 import sirv from 'sirv';
-import { cfg, validateConfig } from './config.ts';
+import { cfg, isLoopbackHost, validateConfig } from './config.ts';
 import { resolveRoute } from './routes.ts';
 import { proxy } from './proxy.ts';
 import { serveConfigJs } from './runtimeConfig.ts';
@@ -100,15 +100,16 @@ server.listen(cfg.port, cfg.bindHost, () => {
   log.info(`proxying /api -> ${cfg.apiUrl}`);
   log.info(`auth mode: ${cfg.authMode}`);
 
-  if (cfg.authMode === 'dev' && cfg.bindHost !== '127.0.0.1' && cfg.bindHost !== 'localhost') {
-    // Mirrors the backend's own fail-closed warning. With CHEMCLAW_ENTRA_REQUIRED=false every
-    // request upstream runs as a shared dev principal with all authorization gates open, so a
-    // network-reachable UI in that mode is an open door to the agent and its tools.
+  if (cfg.authMode === 'dev' && !isLoopbackHost(cfg.bindHost)) {
+    // Reaching this line now means ALLOW_INSECURE_AUTH=true — `validateConfig` refuses to start
+    // otherwise. So this is no longer the guard; it is the receipt for a deliberate choice, and it
+    // names the flag so the next reader of these logs knows the exposure was configured rather
+    // than stumbled into.
     log.warn(
-      'SECURITY: AUTH_MODE=dev on a non-loopback bind. No sign-in is required and the backend ' +
-        'is almost certainly running with CHEMCLAW_ENTRA_REQUIRED=false, meaning every request ' +
-        'is a shared principal with all authorization gates open. Do not expose this beyond a ' +
-        'trusted dev network.',
+      `SECURITY: AUTH_MODE=dev on a non-loopback bind (${cfg.bindHost}) with ` +
+        'ALLOW_INSECURE_AUTH=true. No sign-in is required and the backend is almost certainly ' +
+        'running with CHEMCLAW_ENTRA_REQUIRED=false, meaning every request is a shared principal ' +
+        'with all authorization gates open. Do not expose this beyond a trusted dev network.',
     );
   }
 });

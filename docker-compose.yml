@@ -119,6 +119,11 @@ services:
   ui:
     build:
       context: .
+      args:
+        # This stack defaults to AUTH_MODE=dev, so its bundle has to be built to permit the
+        # no-token provider. Tracks AUTH_MODE: bring your own tenant and the dev provider is not
+        # compiled into the image at all.
+        ALLOW_DEV_AUTH: ${ALLOW_DEV_AUTH:-true}
     depends_on:
       chemclaw:
         condition: service_healthy
@@ -128,6 +133,9 @@ services:
       # Service-to-service. This is the only thing that talks to the backend.
       CHEMCLAW_API_URL: http://chemclaw:8080
       AUTH_MODE: ${AUTH_MODE:-dev}
+      # A local stack binds 0.0.0.0 so the port mapping works, which is a non-loopback bind as far
+      # as the BFF can tell. Saying the exposure is deliberate is what lets it start.
+      ALLOW_INSECURE_AUTH: ${ALLOW_INSECURE_AUTH:-true}
       ENTRA_TENANT_ID: ${ENTRA_TENANT_ID:-}
       ENTRA_CLIENT_ID: ${ENTRA_CLIENT_ID:-}
       API_SCOPE: ${API_SCOPE:-}

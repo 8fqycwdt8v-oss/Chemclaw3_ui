@@ -5,8 +5,23 @@ import tailwindcss from '@tailwindcss/vite';
 
 const BFF_PORT = Number(process.env.BFF_PORT ?? 8787);
 
+/**
+ * Whether this build may fall back to the no-token dev auth provider (`src/auth/index.ts`).
+ *
+ * Defaults to `false`, so an ordinary `npm run build` cannot produce a bundle that serves
+ * unauthenticated access. A deployment that genuinely wants dev auth — `start.sh`, the compose
+ * stack, the e2e suite — opts in with an env var, which is a greppable string in a tracked file
+ * rather than an absent one.
+ */
+const ALLOW_DEV_AUTH = process.env.ALLOW_DEV_AUTH === 'true';
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  define: {
+    // A literal, so the dev-auth branch is statically dead in a normal production build rather
+    // than merely unreachable at runtime.
+    __ALLOW_DEV_AUTH__: JSON.stringify(ALLOW_DEV_AUTH),
+  },
   // `@/…` is what the vendored shadcn components import by. Mirrored in tsconfig.json and — the
   // one that gets forgotten — vitest.config.ts, which is a separate config with its own resolver.
   resolve: {

@@ -20,7 +20,32 @@ const num = (name: string, fallback: number): number => {
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : fallback;
 };
-const authMode: AuthMode = str('AUTH_MODE', 'dev') === 'msal' ? 'msal' : 'dev';
+/**
+ * The raw `AUTH_MODE` as given, kept beside the resolved mode so `validateConfig` can refuse a typo.
+ *
+ * This used to be `str('AUTH_MODE', 'dev') === 'msal' ? 'msal' : 'dev'`, which resolved *every*
+ * unrecognised value to the unauthenticated mode. So `AUTH_MODE=MSAL`, or `entra`, or a value
+ * carrying a trailing newline from a secret manager, booted a production deployment with no
+ * sign-in, `frame-ancestors *`, and no `X-Frame-Options` — silently, and looking exactly like a
+ * working deployment until someone noticed nobody had been asked to log in. A mode nobody named is
+ * a configuration error, not a default.
+ */
+const rawAuthMode = str('AUTH_MODE', 'dev');
+
+const MODES: Record<string, AuthMode> = { dev: 'dev', msal: 'msal' };
+
+/**
+ * Still `dev` on an unrecognised value, because `cfg` is a plain object built at module scope and
+ * has nowhere to throw to. The refusal is `validateConfig`'s job — `authModeIsValid` is what
+ * carries the fact there. What matters is that the process does not *serve* in this state.
+ */
+const authMode: AuthMode = MODES[rawAuthMode] ?? 'dev';
+const authModeIsValid = rawAuthMode in MODES;
+
+/** Loopback names, for the unauthenticated-exposure check. Mirrors the backend's `_LOOPBACK_HOSTS`. */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+export const isLoopbackHost = (host: string): boolean => LOOPBACK_HOSTS.has(host.trim());
 
 /** Entra's login host, needed in the CSP when MSAL is on — see `csp` below. */
 const ENTRA_HOST = 'https://login.microsoftonline.com';
@@ -83,6 +108,11 @@ export interface BffConfig {
   clientDir: string;
   apiUrl: string;
   authMode: AuthMode;
+  /** The raw `AUTH_MODE` as given, so a typo can be named in the refusal rather than guessed at. */
+  rawAuthMode: string;
+  authModeIsValid: boolean;
+  /** Opt-in to serving `AUTH_MODE=dev` on a non-loopback bind. See `validateConfig`. */
+  allowInsecureAuth: boolean;
   entraTenantId: string;
   entraClientId: string;
   apiScope: string;
@@ -102,6 +132,11 @@ export const cfg: BffConfig = {
   // The Chemclaw3 service. In compose this is the service name; locally, a uvicorn on :8080.
   apiUrl: str('CHEMCLAW_API_URL', 'http://127.0.0.1:8080'),
   authMode,
+  rawAuthMode,
+  authModeIsValid,
+  // Deliberately not defaulted from anything else. Exposing an unauthenticated UI is a decision,
+  // and the only way to record a decision is to make someone write it down.
+  allowInsecureAuth: bool('ALLOW_INSECURE_AUTH', false),
   entraTenantId: str('ENTRA_TENANT_ID'),
   // The SPA's own app registration. NOT the API's client id, and note the backend has no
   // CHEMCLAW_ENTRA_CLIENT_ID setting at all — its Settings model is extra="forbid", so
@@ -147,10 +182,38 @@ export function validateConfig(c: BffConfig = cfg): string[] {
     problems.push(`CHEMCLAW_API_URL is not a valid URL: ${JSON.stringify(c.apiUrl)}`);
   }
 
+  if (!c.authModeIsValid) {
+    problems.push(
+      `AUTH_MODE ${JSON.stringify(c.rawAuthMode)} is not a valid mode (expected "msal" or ` +
+        '"dev"). Refusing to start rather than falling back to unauthenticated access.',
+    );
+  }
+
   if (c.authMode === 'msal') {
     if (!c.entraTenantId) problems.push('ENTRA_TENANT_ID is required when AUTH_MODE=msal');
     if (!c.entraClientId) problems.push('ENTRA_CLIENT_ID is required when AUTH_MODE=msal');
     if (!c.apiScope) problems.push('API_SCOPE is required when AUTH_MODE=msal');
+  }
+
+  // The docstring above has claimed to mirror `_refuse_unauthenticated_exposure` since this
+  // function was written, while only logging a warning — and a warning on a container's stdout is
+  // not a refusal. With `CHEMCLAW_ENTRA_REQUIRED=false` upstream, every visitor to a reachable
+  // dev-mode UI drives the agent as a shared principal with all authorization gates open.
+  //
+  // `authModeIsValid` guards this so a typo produces one error naming the typo, rather than that
+  // error plus a confusing second one about a dev mode nobody asked for.
+  if (
+    c.authModeIsValid &&
+    c.authMode === 'dev' &&
+    !isLoopbackHost(c.bindHost) &&
+    !c.allowInsecureAuth
+  ) {
+    problems.push(
+      `AUTH_MODE=dev on a non-loopback bind (${c.bindHost}) requires no sign-in, so every ` +
+        'visitor drives the agent as a shared principal with all authorization gates open. Set ' +
+        'AUTH_MODE=msal, bind to 127.0.0.1, or set ALLOW_INSECURE_AUTH=true to say this is ' +
+        'deliberate.',
+    );
   }
 
   return problems;

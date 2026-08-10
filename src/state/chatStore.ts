@@ -208,7 +208,7 @@ function newAssistantMessage(): AssistantMessage {
 function closeToolCall(
   trace: TraceEntry[],
   tool: string,
-  ending: { result: string; resultRef?: string } | { failed: true },
+  ending: { result: string; resultRef?: string; numbers?: number[] } | { failed: true },
 ): TraceEntry[] {
   const index = trace.findIndex(
     (entry) =>
@@ -608,6 +608,11 @@ export const useChatStore = create<ChatState>()(
               trace: closeToolCall(m.trace, event.tool, {
                 result: event.preview,
                 ...(event.result_ref ? { resultRef: event.result_ref } : {}),
+                // Kept whole. This is the untruncated list beside a truncated preview, and it is
+                // the only structured chemistry the stream carries — `provenance.ts` checks the
+                // answer's figures against it, so dropping it here is what made every figure in
+                // an answer uncheckable.
+                numbers: event.numbers,
               }),
             })),
           );

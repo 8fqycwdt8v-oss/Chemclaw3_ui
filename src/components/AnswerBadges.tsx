@@ -12,12 +12,20 @@
  * says the one thing the reader cannot otherwise know — that "the ELN says nothing about that
  * batch" and "the ELN was unreachable" would have arrived as the same sentence.
  *
+ * It names what the absence cost the ANSWER rather than which connector was down. "safety was
+ * unreachable" is a fact about a pod and a chemist can do nothing with it; "no hazard screen, no
+ * genotoxicity alerts and no ICH impurity limits" is the same fact stated as what they now have to
+ * do about it. The connector name still rides along for whoever has to check the deployment.
+ * `src/chem/provenance.ts` owns the mapping and stays honest about a name it has never seen — the
+ * event's own contract warns that one need not resolve in the registry.
+ *
  * Both carry `role="alert"`: they qualify what the reader is about to believe, so they are the one
  * class of message here that should interrupt rather than wait its turn.
  */
 
 import { ChevronRight, TriangleAlert, Unplug } from 'lucide-react';
 import type { AssistantMessage } from '../state/types.ts';
+import { capabilityLoss } from '../chem/provenance.ts';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
@@ -64,10 +72,23 @@ export function CapabilityDegradedPill({
   if (down.length === 0) return null;
   return (
     <Notice icon={<Unplug className="size-4" />}>
-      {/* The joined list stays one text node: it reads as a sentence, and it is asserted as one. */}
-      <span className="font-semibold">Answered with fewer tools.</span> {down.join(', ')}{' '}
-      {down.length === 1 ? 'was' : 'were'} unreachable for this turn, so anything only{' '}
-      {down.length === 1 ? 'it' : 'they'} can reach is missing — not absent from the record.
+      <span className="font-semibold">Answered with fewer tools.</span> This answer therefore
+      contains:
+      {/* The chemistry statement, not the connector name. A chemist cannot act on "molfp was
+          unreachable"; they can act on "no precedent search". The raw name still rides along in
+          parentheses, because it is what an operator needs to check the deployment. */}
+      <span className="mt-1 block">
+        {down.map((connector) => (
+          <span key={connector} className="flex gap-1.5">
+            <span aria-hidden>·</span>
+            <span>
+              {capabilityLoss(connector)}{' '}
+              <span className="font-mono text-2xs opacity-70">({connector})</span>
+            </span>
+          </span>
+        ))}
+      </span>
+      <span className="mt-1 block">Missing — not absent from the record.</span>
     </Notice>
   );
 }

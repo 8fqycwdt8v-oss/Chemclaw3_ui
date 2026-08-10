@@ -31,6 +31,7 @@ import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { entitiesOf, messagesFor, useEntityStore } from '../chem/entities.ts';
+import { returnedFigures } from '../chem/provenance.ts';
 import { ElapsedTimer } from '@/components/chem/ElapsedTimer';
 import { EmptyState } from '@/components/chem/Feedback';
 import { cn } from '@/lib/utils';
@@ -75,6 +76,11 @@ const AssistantBubble = memo(function AssistantBubble({
   const question = message.trace.findLast?.((e) => e.kind === 'question')?.question;
   const approval = message.trace.findLast?.((e) => e.kind === 'approval_request')?.approval;
 
+  // Recomputed only when the trace grows, so the answer is not re-parsed on every token of the
+  // *next* turn. Empty on a turn whose tools returned no numbers, which is what switches the
+  // grounding overlay off rather than flagging every figure in it.
+  const figures = useMemo(() => returnedFigures(message.trace), [message.trace]);
+
   return (
     <div className="max-w-none" aria-busy={streaming || undefined}>
       <CapabilityDegradedPill message={message} />
@@ -103,7 +109,7 @@ const AssistantBubble = memo(function AssistantBubble({
               </div>
             )}
           >
-            <Markdown>{body}</Markdown>
+            <Markdown figures={figures}>{body}</Markdown>
           </ErrorBoundary>
         )
       ) : (

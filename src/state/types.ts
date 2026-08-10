@@ -62,6 +62,17 @@ export interface TraceEntry {
      * pulled because it exists. Absent or empty means there is nothing to offer.
      */
     resultRef?: string;
+    /**
+     * The numeric values the result carried, untruncated.
+     *
+     * The one piece of structured chemistry the stream carries, and it is on the trace row rather
+     * than derived from the preview beside it because the preview is cut at an arbitrary byte and
+     * this is not. `src/chem/provenance.ts` checks the answer's figures against it; `TracePanel`
+     * shows the list, so a reader who distrusts a mark can see the evidence rather than take it
+     * on faith. Absent for a call still running and empty for one that returned no numbers, which
+     * are different facts and the second of which switches the check off.
+     */
+    numbers?: number[];
   };
   toolFailure?: { tool: string; message: string };
   /**

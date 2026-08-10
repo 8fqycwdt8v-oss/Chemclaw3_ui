@@ -16,6 +16,11 @@
  * The preview stays in place regardless — it is what makes the row scannable — and the control
  * below it is what makes the row's numbers checkable.
  *
+ * Each call also carries the method behind it — GFN2-xTB, DFT, a cited table, a surrogate — and,
+ * one disclosure in, the caveat its own manifest attaches to it. A chemist should never have to ask
+ * which of those produced a number, and that text is written by the people who wrote the method and
+ * currently reaches nobody.
+ *
  * The disclosure is a Radix Collapsible so the trigger actually reports `aria-expanded` and
  * `aria-controls`; the hand-rolled toggle it replaces announced nothing about what it controlled.
  * The trigger stays the ONLY button in the collapsed state — the panel's tests select it by role,
@@ -29,6 +34,7 @@ import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
 import { JobFailureCard, JobResultCard } from './JobResultCard.tsx';
 import { ResultSheet } from './ResultSheet.tsx';
+import { methodFor } from '../chem/provenance.ts';
 import { ToolIcon } from '@/components/chem/toolIcons';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -109,6 +115,66 @@ function FullResult({
   );
 }
 
+/**
+ * What method produced this row's numbers, and what its authors say it does not establish.
+ *
+ * The badge is always visible once the panel is open, because "which method" is the question a
+ * chemist should never have to ask of a computed value; the caveat is one disclosure further in,
+ * because these are two to four lines each and five of them stacked is the annotation clutter that
+ * trains people to stop reading.
+ *
+ * Every caveat is the backend's own wording (see `src/chem/provenance.ts`). A tool this frontend
+ * has no sourced method for renders nothing at all — a confidently wrong method label would be
+ * worse than the silence it replaces.
+ */
+function MethodBadge({ tool }: { tool: string }): React.JSX.Element | null {
+  const method = methodFor(tool);
+  if (!method) return null;
+  return (
+    <div className="mt-1.5">
+      <Badge>{method.method}</Badge>
+      {method.caveat && (
+        <details className="group/caveat mt-1">
+          <summary className="tap-target inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-2xs text-ink-muted hover:text-ink focus-ring">
+            <ChevronRight
+              aria-hidden
+              className="size-3 transition-transform group-open/caveat:rotate-90"
+            />
+            what it does not say
+          </summary>
+          <p className="mt-1 border-l-2 border-warn/40 pl-2 text-2xs text-ink-muted">
+            {method.caveat}
+          </p>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The numbers this call returned, in full.
+ *
+ * From `tool_result.numbers`, never from the preview beside it — the preview is cut at an
+ * arbitrary byte and this list is not, which is the entire reason the service sends both. It is
+ * also what the figure marks in the answer above were checked against, so a reader who distrusts a
+ * mark can see the evidence rather than take it on faith.
+ */
+function ReturnedNumbers({ numbers }: { numbers: number[] }): React.JSX.Element | null {
+  if (numbers.length === 0) return null;
+  return (
+    <details className="group/values mt-1">
+      <summary className="tap-target inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-2xs text-ink-muted hover:text-ink focus-ring">
+        <ChevronRight
+          aria-hidden
+          className="size-3 transition-transform group-open/values:rotate-90"
+        />
+        {numbers.length} value{numbers.length === 1 ? '' : 's'} returned (untruncated)
+      </summary>
+      <Pre label="Values returned, untruncated">{numbers.join(', ')}</Pre>
+    </details>
+  );
+}
+
 function Row({
   entry,
   sessionId,
@@ -144,6 +210,7 @@ function Row({
             <span className="font-medium">{toolLabel(entry.toolCall?.tool ?? 'tool')}</span>
             <span className="font-mono text-2xs text-ink-subtle">{entry.toolCall?.tool}</span>
           </p>
+          {entry.toolCall?.tool && <MethodBadge tool={entry.toolCall.tool} />}
           {entry.toolCall?.arguments && (
             <details className="group mt-1">
               <summary className="tap-target inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-2xs text-ink-muted hover:text-ink focus-ring">
@@ -165,6 +232,7 @@ function Row({
               <Pre label={`Result preview from ${entry.toolCall.tool}`}>
                 {entry.toolCall.result}
               </Pre>
+              <ReturnedNumbers numbers={entry.toolCall.numbers ?? []} />
               {entry.toolCall.resultRef && (
                 <FullResult
                   sessionId={sessionId}

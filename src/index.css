@@ -163,9 +163,6 @@
   --shadow-md: 0 2px 4px -2px oklch(0% 0 0 / 0.06), 0 6px 16px -4px oklch(0% 0 0 / 0.09);
   --shadow-lg: 0 8px 28px -10px oklch(0% 0 0 / 0.16), 0 2px 8px -3px oklch(0% 0 0 / 0.08);
 
-  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
-  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
-
   --container-prose: 48rem;
   --spacing-sidebar: 17rem;
 

@@ -12,7 +12,7 @@
 #
 # Override with CHEMCLAW_REPO=/path/to/Chemclaw3 if it lives elsewhere.
 #
-# Only the UI publishes a port. The backend stays on the internal network, which is what
+# Only the UI publishes a port to the outside. The backend stays on the internal network, which is what
 # makes the dev auth posture below acceptable — see the comment on CHEMCLAW_SERVICE_ALLOW_INSECURE.
 
 name: chemclaw
@@ -53,7 +53,10 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
     ports:
       # 8233, not the image's usual 8080 — that would collide with the backend service port.
-      - '8233:8080'
+      # Loopback-bound: this is an unauthenticated Temporal console, and the header's claim that
+      # only the UI publishes a port — the stated justification for the dev auth posture — was
+      # not true while this listened on every interface.
+      - '127.0.0.1:8233:8080'
 
   # ---------------------------------------------------------------------------
   # Backend server — the Chemclaw3 FastAPI service.
@@ -133,6 +136,12 @@ services:
       API_SCOPE: ${API_SCOPE:-}
       APP_VERSION: ${APP_VERSION:-compose}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # The operator knobs. Without these the compose stack ignores them entirely, which made
+      # ISSUES.md Issue 5's kill switch — turn session warming off without a client rebuild —
+      # unreachable in the deployment the README tells people to use.
+      WARM_SESSIONS: ${WARM_SESSIONS:-true}
+      SSE_HEARTBEAT_MS: ${SSE_HEARTBEAT_MS:-15000}
+      UPSTREAM_CONNECT_TIMEOUT_MS: ${UPSTREAM_CONNECT_TIMEOUT_MS:-10000}
     ports:
       - '${UI_PORT:-3000}:8080'
 

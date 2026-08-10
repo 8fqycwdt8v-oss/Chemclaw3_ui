@@ -45,7 +45,8 @@ open http://localhost:3000
 ```
 
 This brings up Postgres/pgvector, Temporal, the Chemclaw3 service, and this UI. Only the UI
-publishes a port; the backend stays on the internal network.
+publishes a port to the outside; the backend and Temporal's console stay on loopback or the
+internal network.
 
 ### Against a locally-run backend
 

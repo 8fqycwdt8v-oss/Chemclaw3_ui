@@ -188,6 +188,10 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   return (
     <div
       id="composer"
+      // Focusable, like its #transcript sibling. A skip link pointing at a non-focusable element
+      // scrolls but does not move focus in several browsers, so the next Tab resumed from wherever
+      // focus already was — which for a skip link is the top of the page it was skipping.
+      tabIndex={-1}
       className={cn(
         'border-t border-border-subtle bg-surface-raised px-4 py-3',
         // env() clears the home indicator; --viewport-offset clears the iOS software keyboard,

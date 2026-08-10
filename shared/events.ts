@@ -178,27 +178,14 @@ const EVENT_TYPES = new Set<string>([
   'error',
 ]);
 
-/** Tools the agent advertises, used only to pick an icon/label in the trace panel. An unknown
- *  tool renders with a neutral fallback, so this list going stale is cosmetic. */
-export const KNOWN_TOOLS = [
-  'gather_evidence',
-  'expand_note',
-  'find_notes',
-  'compute_xtb_energy',
-  'predict_pka',
-  'predict_solubility',
-  'submit_qm_job',
-  'get_qm_job_status',
-  'suggest_next_experiment',
-  'screen_hazards',
-  'propose_knowledge_note',
-  'record_confirmed_answer',
-  'similar_reactions',
-  'similar_molecules',
-  'substructure_matches',
-] as const;
-
-export type KnownTool = (typeof KNOWN_TOOLS)[number];
+/*
+ * `KNOWN_TOOLS` used to live here, claiming to be the list that picks an icon in the trace panel.
+ * Nothing imported it. The icons come from an unrelated literal in `src/components/chem/toolIcons.tsx`,
+ * so a maintainer who followed the comment and added a tool here would have shipped a wrench and
+ * concluded the icon map was broken. Deleted rather than re-pointed: `toolIcons` keys off a plain
+ * string with a neutral fallback on purpose, which is the same growth-tolerant posture as
+ * `normalizeEvent` returning null for an unknown event type.
+ */
 
 const asString = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
 const asStringArray = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => String(x)) : []);

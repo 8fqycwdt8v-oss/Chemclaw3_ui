@@ -28,12 +28,21 @@ export function prefetchMarkdown(): void {
   void loader();
 }
 
-export function Markdown({ children }: { children: string }): React.JSX.Element {
+export function Markdown({
+  children,
+  figures,
+}: {
+  children: string;
+  /** Threaded straight through. The fallback deliberately does NOT mark figures: it renders the
+   *  same plain text a streaming answer does, and a mark that appeared only after the chunk
+   *  resolved would flash onto a settled answer. */
+  figures?: readonly number[];
+}): React.JSX.Element {
   return (
     <Suspense
       fallback={<div className="text-base leading-relaxed whitespace-pre-wrap">{children}</div>}
     >
-      <Inner>{children}</Inner>
+      <Inner figures={figures}>{children}</Inner>
     </Suspense>
   );
 }

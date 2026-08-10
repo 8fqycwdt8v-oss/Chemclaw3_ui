@@ -1,74 +1,54 @@
 /**
  * SMILES rendering.
  *
- * smiles-drawer rather than RDKit-WASM: this only ever needs a 2D depiction, and RDKit's payload
- * is two orders of magnitude larger than the whole rest of the bundle. Loaded dynamically so it
- * costs nothing until a structure actually appears.
+ * **RDKit-WASM, not smiles-drawer — and that reverses a decision this file used to argue for.**
+ * The old docstring said a 2D depiction was all this ever needed and RDKit's payload was two
+ * orders of magnitude larger than the rest of the bundle. Both halves were true and the conclusion
+ * was right for the UI that wrote it: the only structures on screen came from a job summary and an
+ * opt-in toggle on inline code spans, and depiction was genuinely the whole job.
  *
- * Three things this had wrong, all fixed together because they share a cause — the drawer being a
- * module singleton built with whichever size happened to render first:
+ * It is not the whole job any more, and the three things that changed have no smiles-drawer answer:
  *
- *  - Every later structure was drawn at the first caller's scale. A job card asked for 280x190 and
- *    an inline toggle for 260x180, so one of them was always letterboxed inside the other's box.
- *  - `max-w-full` on an attribute-sized <svg> shrinks the width and leaves `height` alone, so a
- *    structure squashed rather than scaled on a narrow screen.
- *  - Theme was read straight from `prefers-color-scheme`, so with an in-app toggle a structure
- *    stayed dark on a light page (and never re-drew when the OS flipped, either).
+ *  - **Canonical identity.** `src/chem/entities.ts` indexes what a conversation is *about*, keyed
+ *    on the compound. `COc1ccc(Br)cc1` and `BrC1=CC=C(OC)C=C1` have to collapse to one row or the
+ *    rail shows one bromoanisole twice and can never join a computed value to the structure it was
+ *    computed for. smiles-drawer parses a SMILES; it cannot canonicalise one, and no string
+ *    handling gets there.
+ *  - **Validation.** `src/chem/recognise.ts` is now deliberately looser than the rule it replaced,
+ *    because that rule rejected `CCO`. A looser recogniser is only safe if something else can say
+ *    "that is not a molecule" before it is drawn. smiles-drawer cannot be that arbiter: the object
+ *    that refuses a string is the same object that draws it, so a refusal is indistinguishable
+ *    from a rendering failure, and `entities.ts` needs the answer with no renderer in the room.
+ *  - **Molblock parsing.** `StructureInput`'s file drop reads `.mol`/`.sdf`. smiles-drawer speaks
+ *    SMILES and nothing else.
  *
- * Now: one drawer at a canonical size, a `viewBox` so the SVG scales proportionally, an
- * `aspect-ratio` wrapper so the space is reserved before it draws (no layout shift), and the
- * theme read from the same `data-theme` the rest of the app uses.
+ * The bundle argument survives intact and is answered structurally: `src/chem/rdkit.ts` is behind a
+ * dynamic `import()`, so the WASM is its own chunk and index.html preloads none of it. Measured
+ * across the swap alone, the entry chunk went 485.86 kB → 485.78 kB — the 6.9 MB binary and its
+ * 74 kB loader are separate emitted assets, fetched the first time a structure appears.
+ *
+ * Keeping smiles-drawer alongside for depiction was considered and dropped — any page with a rail
+ * has already fetched RDKit, so it would be 190 kB of duplicate capability and, worse, a second
+ * opinion about what is drawable.
+ *
+ * What is kept from the version this replaces, because none of it was about the drawing library:
+ *
+ *  - the reaction split, so `similar_reactions` hits and `reaction` notes are drawn as reactions
+ *    rather than falling through to a raw string;
+ *  - a `viewBox`-scaled drawing inside an `aspect-ratio` wrapper, so a structure scales instead of
+ *    squashing on a narrow screen and the space is reserved before it draws;
+ *  - the theme read from the app's own `data-theme` rather than from `prefers-color-scheme`, so a
+ *    structure re-draws when the in-app toggle flips.
  */
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { cn } from '../lib/cn.ts';
+import { isMolecule, moleculeSvg } from '../chem/rdkit.ts';
 import { useThemeStore } from '../state/themeStore.ts';
 
 /** One canonical drawing size. The viewBox scales it to whatever the layout gives it. */
 const CANVAS_WIDTH = 320;
 const CANVAS_HEIGHT = 220;
-
-interface DrawerLike {
-  draw: (tree: unknown, target: string | SVGElement, theme: string) => void;
-}
-
-let drawerPromise: Promise<{ parse: (s: string) => unknown; drawer: DrawerLike }> | null = null;
-
-async function loadDrawer() {
-  if (!drawerPromise) {
-    drawerPromise = import('smiles-drawer').then((mod) => {
-      const SD = (mod as { default?: unknown }).default ?? mod;
-      const lib = SD as {
-        SvgDrawer: new (opts: Record<string, unknown>) => DrawerLike;
-        parse: (smiles: string, ok: (tree: unknown) => void, fail: (e: unknown) => void) => void;
-      };
-      const drawer = new lib.SvgDrawer({
-        width: CANVAS_WIDTH,
-        height: CANVAS_HEIGHT,
-        padding: 12,
-        terminalCarbons: true,
-      });
-      const parse = (smiles: string): unknown => {
-        let parsed: unknown = null;
-        let failure: unknown = null;
-        // parse() is synchronous despite the callback signature.
-        lib.parse(
-          smiles,
-          (tree) => {
-            parsed = tree;
-          },
-          (err) => {
-            failure = err;
-          },
-        );
-        if (failure || parsed === null) throw failure ?? new Error('could not parse SMILES');
-        return parsed;
-      };
-      return { parse, drawer };
-    });
-  }
-  return drawerPromise;
-}
 
 export interface MoleculeProps {
   smiles: string;
@@ -80,14 +60,14 @@ export interface MoleculeProps {
 /**
  * A reaction SMILES — `reactants>agents>products`, or the two-part `A>>B`.
  *
- * smiles-drawer parses molecules and nothing else, so every reaction reaching this component fell
- * through to the raw-string fallback. That is most of what `similar_reactions` returns and every
- * `reaction` note's structure, so the one search built around reactions was the one search whose
- * hits could not be drawn.
+ * A molecule toolkit parses molecules, so every reaction reaching this component fell through to
+ * the raw-string fallback. That is most of what `similar_reactions` returns and every `reaction`
+ * note's structure, so the one search built around reactions was the one search whose hits could
+ * not be drawn. RDKit's *minimal* build ships no reaction object either, which is why the split
+ * stays here rather than moving down into `rdkit.ts`.
  *
- * Each component is drawn as the molecule it is and the arrow is laid out here, rather than asking
- * a molecule drawer to understand reactions. `>` cannot occur inside a molecule SMILES, so the
- * split is unambiguous.
+ * Each component is drawn as the molecule it is and the arrow is laid out here. `>` cannot occur
+ * inside a molecule SMILES, so the split is unambiguous.
  */
 function Reaction({ smiles, className, maxWidth }: Required<MoleculeProps>): React.JSX.Element {
   const [reactants = '', agents = '', products = ''] = smiles.split('>');
@@ -131,9 +111,8 @@ function Reaction({ smiles, className, maxWidth }: Required<MoleculeProps>): Rea
 }
 
 function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): React.JSX.Element {
-  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
-  const domId = useId().replace(/:/g, '_');
   // Subscribing to the app's resolved theme, so a structure re-draws when the user flips the
   // toggle — not only when the OS preference changes.
   const theme = useThemeStore((s) => s.resolved);
@@ -141,20 +120,19 @@ function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): R
   useEffect(() => {
     let cancelled = false;
 
-    loadDrawer()
-      .then(({ parse, drawer }) => {
-        if (cancelled || !svgRef.current) return;
-        const tree = parse(smiles);
-        drawer.draw(tree, svgRef.current, theme);
-        // Cleared on success rather than at the top of the effect: resetting synchronously made
-        // a re-render of an already-failed structure flash its fallback away and back.
-        setFailed(false);
-      })
-      .catch(() => {
-        // An invalid or exotic SMILES must never leave a blank box — we render the raw string
-        // instead so the chemist can still read and copy it.
-        if (!cancelled) setFailed(true);
-      });
+    void moleculeSvg(smiles, {
+      width: CANVAS_WIDTH,
+      height: CANVAS_HEIGHT,
+      dark: theme === 'dark',
+    }).then((drawn) => {
+      // The await crossed a render boundary; a structure that has since been replaced must not
+      // overwrite the one now on screen.
+      if (cancelled) return;
+      // Cleared on success rather than at the top of the effect: resetting synchronously made a
+      // re-render of an already-failed structure flash its fallback away and back.
+      setFailed(drawn === null);
+      setSvg(drawn);
+    });
 
     return () => {
       cancelled = true;
@@ -166,6 +144,8 @@ function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): R
       <div
         className={cn('rounded-lg border border-border-subtle bg-surface-sunken p-3', className)}
       >
+        {/* Shown, not swallowed: the string is the evidence for why nothing was drawn, and a
+            chemist can still read and copy it. */}
         <code className="block font-mono text-xs break-all">{smiles}</code>
         <p className="mt-1.5 text-xs text-ink-muted">
           Could not render this structure. The SMILES string is shown as written.
@@ -178,21 +158,18 @@ function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): R
     <span
       // aspect-ratio reserves the box before the async draw lands, so nothing shifts under the
       // reader mid-stream.
-      className={cn('block w-full', className)}
+      className={cn('block w-full [&>svg]:h-full [&>svg]:w-full', className)}
       style={{ maxWidth: `${maxWidth}px`, aspectRatio: `${CANVAS_WIDTH} / ${CANVAS_HEIGHT}` }}
-    >
-      <svg
-        ref={svgRef}
-        id={domId}
-        viewBox={`0 0 ${CANVAS_WIDTH} ${CANVAS_HEIGHT}`}
-        preserveAspectRatio="xMidYMid meet"
-        role="img"
-        aria-label={`Chemical structure for SMILES ${smiles}`}
-        className="h-full w-full"
-      >
-        <title>{`Chemical structure for SMILES ${smiles}`}</title>
-      </svg>
-    </span>
+      role="img"
+      aria-label={`Chemical structure for SMILES ${smiles}`}
+      // RDKit's SVG is generated from the molecule it just parsed, not from anything a user typed
+      // into a page — and it is markup, so it has to be injected as markup.
+      //
+      // The empty string is the loading state, and it has to be expressed THIS way: React throws
+      // at commit — not at build — on an element carrying both `children` and
+      // `dangerouslySetInnerHTML`, so a placeholder child beside this prop is not an option.
+      dangerouslySetInnerHTML={{ __html: svg ?? '' }}
+    />
   );
 }
 
@@ -220,11 +197,35 @@ export function Molecule(props: MoleculeProps): React.JSX.Element {
   return <SingleMolecule {...props} />;
 }
 
-/** An inline code span that parsed as a plausible SMILES: shown as text with a toggle, never
- *  auto-expanded. Chemistry prose contains many tokens that merely look like SMILES. */
+/**
+ * An inline code span in the answer that might be a structure.
+ *
+ * Two gates, and the second is what RDKit adds. It has always been *opt-in* — chemistry prose is
+ * full of tokens that superficially resemble SMILES, so a structure was never drawn without a
+ * click. Now the affordance itself is withheld until RDKit confirms the string is a molecule, so a
+ * token that merely looks like one no longer even offers a button. The syntactic recogniser
+ * proposes; RDKit disposes.
+ *
+ * The check is asynchronous and the code span renders immediately, so the toggle appears a beat
+ * later on the first structure of a page (the WASM is loading) and instantly thereafter. That is
+ * the right way round: text a chemist can read and copy is never blocked on a 6.9 MB download.
+ */
 export function InlineSmiles({ smiles }: { smiles: string }): React.JSX.Element {
   const [open, setOpen] = useState(false);
+  const [renderable, setRenderable] = useState(false);
   const panelId = `smiles-${useId().replace(/:/g, '_')}`;
+
+  useEffect(() => {
+    let cancelled = false;
+    void isMolecule(smiles).then((ok) => {
+      if (!cancelled) setRenderable(ok);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [smiles]);
+
+  if (!renderable) return <code>{smiles}</code>;
 
   return (
     <span className="inline-flex flex-col gap-1 align-baseline">

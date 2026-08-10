@@ -71,13 +71,19 @@ describe('capability_degraded', () => {
     expect(assistant.trace).toHaveLength(0);
   });
 
-  it('names the unreachable connectors in the answer card', () => {
+  it('says what the absence cost the answer, not which connector was down', () => {
+    // It used to join the names into a sentence — "eln, molfp were unreachable" — which is a fact
+    // about a pod that a chemist cannot act on. What they can act on is "no molecule precedent
+    // search". The raw name still rides along for whoever has to check the deployment, and a name
+    // this repo has never seen degrades to naming it rather than guessing at its chemistry.
     render(
       <CapabilityDegradedPill
         message={{ degradedConnectors: ['eln', 'molfp'] } as unknown as AssistantMessage}
       />,
     );
-    expect(screen.getByText(/eln, molfp/)).toBeTruthy();
+    expect(screen.getByText(/precedent search/)).toBeTruthy();
+    expect(screen.getByText(/nothing only eln can reach/)).toBeTruthy();
+    expect(screen.getByText('(molfp)')).toBeTruthy();
     expect(screen.getByText(/fewer tools/i)).toBeTruthy();
   });
 

@@ -11,6 +11,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { ChemclawEvent, JobTerminalEvent } from '../../shared/events.ts';
+import { useEntityStore } from '../chem/entities.ts';
 import type { ApiErrorKind } from '../api/errors.ts';
 import type {
   AssistantMessage,
@@ -207,7 +208,7 @@ function newAssistantMessage(): AssistantMessage {
 function closeToolCall(
   trace: TraceEntry[],
   tool: string,
-  ending: { result: string; resultRef?: string } | { failed: true },
+  ending: { result: string; resultRef?: string; numbers?: number[] } | { failed: true },
 ): TraceEntry[] {
   const index = trace.findIndex(
     (entry) =>
@@ -424,6 +425,11 @@ export const useChatStore = create<ChatState>()(
         const wasStreamingThis = streaming?.conversationId === id;
         if (wasStreamingThis) streaming?.abort.abort();
 
+        // The subject index goes with the conversation. It is keyed by conversation id and read
+        // by nobody else, so leaving it behind would be a rail for a transcript that no longer
+        // exists.
+        useEntityStore.getState().forget(id);
+
         set((s) => {
           const { [id]: _removed, ...rest } = s.conversations;
           const { [id]: _draft, ...drafts } = s.drafts;
@@ -447,6 +453,9 @@ export const useChatStore = create<ChatState>()(
         // behind — including an in-flight turn that would otherwise write into a conversation
         // this just deleted.
         get().streaming?.abort.abort();
+        // Same reason as `deleteConversation`: every conversation these indexes describe is about
+        // to stop existing.
+        useEntityStore.getState().clear();
         set(() => {
           const fresh = newConversation();
           return {
@@ -599,6 +608,11 @@ export const useChatStore = create<ChatState>()(
               trace: closeToolCall(m.trace, event.tool, {
                 result: event.preview,
                 ...(event.result_ref ? { resultRef: event.result_ref } : {}),
+                // Kept whole. This is the untruncated list beside a truncated preview, and it is
+                // the only structured chemistry the stream carries — `provenance.ts` checks the
+                // answer's figures against it, so dropping it here is what made every figure in
+                // an answer uncheckable.
+                numbers: event.numbers,
               }),
             })),
           );

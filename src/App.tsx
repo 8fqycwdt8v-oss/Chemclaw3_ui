@@ -19,6 +19,7 @@ import { TopBar } from './components/TopBar.tsx';
 import { MessageList } from './components/MessageList.tsx';
 import { JobFeed } from './components/JobFeed.tsx';
 import { Composer } from './components/Composer.tsx';
+import { EntityRail } from './components/EntityRail.tsx';
 import type { ChatMessage } from './state/types.ts';
 
 function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
@@ -167,18 +168,26 @@ export function AppShell({
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar onRetry={onRetry} />
-        <main className="flex min-h-0 flex-1 flex-col">
-          {children ??
-            (conversationId && (
-              <>
-                {/* Keyed so switching conversations resets the window, the scroll pin and the
-                    scroll position together, rather than three effects racing to do it. */}
-                <MessageList key={conversationId} conversationId={conversationId} />
-                <JobFeed />
-                <Composer conversationId={conversationId} />
-              </>
-            ))}
-        </main>
+        {/* The rail is a sibling of <main>, not a child of it: it indexes the conversation rather
+            than being part of the document the reader is reading, and a landmark inside another
+            landmark is not what "skip to the transcript" should land in. It takes the same
+            `conversationId` the transcript does, from the same route parameter, which is what
+            makes it structurally impossible for the two to describe different conversations. */}
+        <div className="flex min-h-0 flex-1">
+          <main className="flex min-w-0 flex-1 flex-col">
+            {children ??
+              (conversationId && (
+                <>
+                  {/* Keyed so switching conversations resets the window, the scroll pin and the
+                      scroll position together, rather than three effects racing to do it. */}
+                  <MessageList key={conversationId} conversationId={conversationId} />
+                  <JobFeed />
+                  <Composer conversationId={conversationId} />
+                </>
+              ))}
+          </main>
+          {conversationId && !children && <EntityRail conversationId={conversationId} />}
+        </div>
       </div>
     </div>
   );

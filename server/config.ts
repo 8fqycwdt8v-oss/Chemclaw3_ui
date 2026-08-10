@@ -37,8 +37,21 @@ function buildCsp(mode: AuthMode): string {
   const directives: Record<string, string[]> = {
     'default-src': ["'self'"],
     // No inline scripts: /config.js is a real same-origin file precisely so this can stay strict.
-    'script-src': ["'self'"],
-    // Tailwind injects a stylesheet; smiles-drawer emits inline style attributes on its SVG.
+    //
+    // `wasm-unsafe-eval` is what lets `WebAssembly.instantiate` run at all, and both chemistry
+    // dependencies need it: RDKit (`src/chem/rdkit.ts`) and Ketcher's Indigo worker
+    // (`src/chem/sketcher.ketcher.tsx`). It permits WASM compilation and nothing else — it does
+    // NOT re-open `eval` or inline script, which is exactly why the narrow token exists.
+    //
+    // Verify this against the BFF, not against Vite. The dev server serves index.html itself and
+    // never sends this header, so a missing directive here fails ONLY in the container: check
+    // `http://localhost:3000`, not `:5173`.
+    'script-src': ["'self'", "'wasm-unsafe-eval'"],
+    // Ketcher runs Indigo in a Web Worker created from a same-origin module URL. Without this the
+    // sketcher dialog mounts and then dies on the first chemistry operation — and `worker-src`
+    // does NOT fall back to `script-src` in browsers that implement it, so it has to be stated.
+    'worker-src': ["'self'"],
+    // Tailwind injects a stylesheet; RDKit and Ketcher both emit inline style attributes.
     'style-src': ["'self'", "'unsafe-inline'"],
     // blob: covers a canvas->objectURL path if a structure is ever exported as an image.
     'img-src': ["'self'", 'data:', 'blob:'],

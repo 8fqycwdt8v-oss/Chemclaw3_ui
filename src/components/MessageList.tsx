@@ -30,6 +30,8 @@ import { AnswerFooter, CapabilityDegradedPill, ReviewRequiredPill } from './Answ
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { useChatStore } from '../state/chatStore.ts';
+import { entitiesOf, messagesFor, useEntityStore } from '../chem/entities.ts';
+import { returnedFigures } from '../chem/provenance.ts';
 import { ElapsedTimer } from '@/components/chem/ElapsedTimer';
 import { EmptyState } from '@/components/chem/Feedback';
 import { cn } from '@/lib/utils';
@@ -74,6 +76,11 @@ const AssistantBubble = memo(function AssistantBubble({
   const question = message.trace.findLast?.((e) => e.kind === 'question')?.question;
   const approval = message.trace.findLast?.((e) => e.kind === 'approval_request')?.approval;
 
+  // Recomputed only when the trace grows, so the answer is not re-parsed on every token of the
+  // *next* turn. Empty on a turn whose tools returned no numbers, which is what switches the
+  // grounding overlay off rather than flagging every figure in it.
+  const figures = useMemo(() => returnedFigures(message.trace), [message.trace]);
+
   return (
     <div className="max-w-none" aria-busy={streaming || undefined}>
       <CapabilityDegradedPill message={message} />
@@ -102,7 +109,7 @@ const AssistantBubble = memo(function AssistantBubble({
               </div>
             )}
           >
-            <Markdown>{body}</Markdown>
+            <Markdown figures={figures}>{body}</Markdown>
           </ErrorBoundary>
         )
       ) : (
@@ -219,9 +226,30 @@ function BubbleBody({
 const WINDOW_STEP = 60;
 
 export function MessageList({ conversationId }: { conversationId: string }): React.JSX.Element {
-  const messages = useChatStore((s) => s.conversations[conversationId]?.messages);
+  const all = useChatStore((s) => s.conversations[conversationId]?.messages);
   const sessionId = useChatStore((s) => s.conversations[conversationId]?.sessionId ?? null);
   const contextLost = useChatStore((s) => s.conversations[conversationId]?.contextLost ?? false);
+
+  // Selecting a subject in the rail narrows the transcript to the turns that mention it. Read from
+  // THIS conversation's index, named by the same route parameter the rail is: a global `selected`
+  // matched one conversation's message ids against another's mentions, matched nothing, and left
+  // an empty transcript over a conversation full of turns.
+  const selectedEntity = useEntityStore((s) => {
+    const slice = entitiesOf(s, conversationId);
+    return slice.selected ? slice.entities[slice.selected] : undefined;
+  });
+
+  const messages = useMemo(() => {
+    if (!all || !selectedEntity) return all;
+    const hits = messagesFor(selectedEntity);
+    // The user message that *prompted* a matching assistant turn comes along with it: an answer
+    // shown without the question it answers reads as the agent volunteering something.
+    return all.filter((message, i) => {
+      if (hits.has(message.id)) return true;
+      const next = all[i + 1];
+      return message.role === 'user' && next?.role === 'assistant' && hits.has(next.id);
+    });
+  }, [all, selectedEntity]);
 
   const endRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
@@ -312,12 +340,22 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
           </div>
         )}
 
-        {total === 0 && (
-          <EmptyState icon={<FlaskConical className="size-5" />} title="Chemclaw">
-            Process &amp; analytical development assistant. Ask about a reaction, a property, or
-            what to run next.
-          </EmptyState>
-        )}
+        {total === 0 &&
+          // Two different nothings. A conversation with no turns is a new conversation; a
+          // conversation whose turns are all filtered out is a *filter* result, and saying
+          // "ask about a reaction" over a transcript full of turns is the failure the
+          // per-conversation index was introduced to stop.
+          (selectedEntity ? (
+            <EmptyState icon={<FlaskConical className="size-5" />} title="Nothing about that yet">
+              No turn in this conversation mentions it. Clear the filter in the rail to see the
+              whole transcript.
+            </EmptyState>
+          ) : (
+            <EmptyState icon={<FlaskConical className="size-5" />} title="Chemclaw">
+              Process &amp; analytical development assistant. Ask about a reaction, a property, or
+              what to run next.
+            </EmptyState>
+          ))}
 
         {shown.map((message) => (
           <Bubble key={message.id} message={message} sessionId={sessionId} />

@@ -103,6 +103,10 @@ describe('tool_result in the trace', () => {
     expect(trace[0]?.toolCall).toEqual({
       tool: 'predict_pka',
       arguments: '{"s":"CCO"}',
+      // Untruncated, and carried even when empty — an empty list is "this call returned no
+      // numbers", which is what switches the answer's grounding check off rather than flagging
+      // every figure in it.
+      numbers: [],
       result: 'pKa 15.9',
     });
   });

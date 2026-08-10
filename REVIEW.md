@@ -310,6 +310,29 @@ severity ceiling. **Nothing in the 41 is critical or high.** The first pass took
 was, and what is left is medium and below — real, worth fixing, and none of it load-bearing for
 correctness of an answer.
 
+### What has since been fixed
+
+Of the 35 distinct defects below, **28 are fixed and pushed**, along with both dependency
+advisories. `npm audit` now reports zero, `npm ci` installs `happy-dom@20` with no test changes
+needed, and CI gained a blocking audit step plus a concurrency group. Every behavioural fix carries
+a test verified to fail against the commit before it; the boot cases spawn the real built server,
+which is the only way to reach a module whose side effects are `listen()` and `process.exit()`.
+
+**Seven remain, and they are one coherent group: live-region and focus behaviour.**
+`AnswerBadges` replaying every historical verifier alert on a conversation switch; `JobFeed`
+mounting its live region and first card in the same commit, then re-reading the whole feed
+atomically on every change; focus dropping to `<body>` after the last "Load earlier" and after
+deleting a conversation; the 429 path firing two identical alerts and blurring the focused
+textarea; and `InlineSmiles`' `aria-controls` pointing at a panel that only exists while expanded.
+They are left together deliberately — they share one question (what should be announced, and when)
+and answering it piecemeal is how live regions end up contradicting each other. The axe pass
+cannot see any of them, so they need the screen-reader pass the e2e suite does not have.
+
+One more is deferred with a reason: the sidebar still re-renders once per animation frame, because
+`updatedAt` bumps on every token and any honest projection of it moves too. Not bumping per token
+is the real fix, but that value is also the tiebreaker the new cross-tab merge depends on, so it
+wants its own change. Each render is now cheap, which was the cost that mattered.
+
 ### Confirmed
 
 | Sev | File                                 | What is wrong                                                                                                                                                                 | Fix                                                                                         |

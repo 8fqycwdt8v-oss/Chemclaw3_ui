@@ -117,26 +117,36 @@ test('Load earlier keeps the reader where they were', async ({ page }) => {
 
   const anchor = page.getByText('Answer number 141');
   await expect(anchor).toBeVisible();
-  const before = await anchor.boundingBox();
+
+  // The bubble at the top of the viewport is the one the restore pins, so it is the one to measure.
+  // An earlier version of this test measured the *next* message down and allowed it a third of a
+  // viewport of slack, which conflated two different things and flaked whenever the second one got
+  // large: the restore's accuracy, and how wrong `contain-intrinsic-size` happened to be.
+  const anchorId = await scroller.evaluate(
+    (el) => (el.querySelector('[data-message-id]') as HTMLElement).dataset.messageId,
+  );
+  const topOf = (id: string): Promise<number> =>
+    page.evaluate(
+      (mid) => document.querySelector(`[data-message-id="${mid}"]`)!.getBoundingClientRect().top,
+      id,
+    );
+  const before = await topOf(anchorId!);
 
   await page.getByRole('button', { name: /Load earlier/ }).click();
   await expect(page.getByText('Question number 80')).toHaveCount(1);
 
-  // Prepending leaves scrollTop numerically unchanged, so without the anchor the reader is thrown
-  // forward by the entire inserted height — thousands of pixels, sixty messages away from what
-  // they were reading. The message they were looking at must still be on screen.
-  await expect(anchor).toBeInViewport();
+  // Prepending leaves scrollTop numerically unchanged, so without a restore the reader is thrown
+  // forward by the entire inserted height — thousands of pixels, sixty messages away from what they
+  // were reading. Pinned to the pixel, because the restore anchors on this element's own measured
+  // position rather than on `scrollHeight`, which is a fiction while sixty freshly inserted bubbles
+  // are still reporting their intrinsic-size estimate. (Measured: it was off by 2204px here.)
+  expect(Math.abs((await topOf(anchorId!)) - before)).toBeLessThan(4);
 
-  // A residue of a hundred-odd pixels is expected and is not the bug. The prepended bubbles carry
-  // `content-visibility: auto` with a `contain-intrinsic-size` *estimate*; the ones that end up
-  // near the viewport get laid out for real and resolve to less than the estimate, moving what is
-  // below them. Bounded at a fraction of the viewport, which is the difference between "settled
-  // slightly" and "lost your place".
-  const viewport = await scroller.evaluate((el) => el.clientHeight);
-  expect(before).not.toBeNull();
-  expect(Math.abs(((await anchor.boundingBox())?.y ?? 0) - (before?.y ?? 0))).toBeLessThan(
-    viewport / 3,
-  );
+  // Messages *below* the anchor may still settle, and that is a different thing from losing your
+  // place. The anchor bubble's own `contain-intrinsic-size` estimate is 220px and a one-line bubble
+  // is about 65, so when it resolves everything under it rises by the difference — about 175px
+  // here. The reader's message has to stay on screen through that; it does not have to stay still.
+  await expect(anchor).toBeInViewport();
 
   // And it must not have slammed back to the bottom, which is the other failure mode.
   const atBottom = await scroller.evaluate(

@@ -109,7 +109,10 @@ createServer(async (req, res) => {
 
   if (path === '/healthz' || path === '/readyz') return json(res, 200, { ok: true });
   if (path === '/sessions' && req.method === 'POST') return json(res, 200, { session_id: SID });
-  if (path === '/sessions' && req.method === 'GET') return json(res, 200, { sessions: [] });
+  // A bare array, which is what `list_sessions` returns. This answered `{sessions: []}`, so
+  // `remote.length` was undefined, `remote.filter` threw, and every browser test quietly ran the
+  // sidebar's degraded branch — the fixture was exercising the error path by accident.
+  if (path === '/sessions' && req.method === 'GET') return json(res, 200, []);
   // Two, so the picker has a choice to offer — with one it stays hidden.
   if (path === '/profiles') return json(res, 200, ['default', 'property-lookup']);
   if (path.endsWith('/messages') && req.method === 'GET') {

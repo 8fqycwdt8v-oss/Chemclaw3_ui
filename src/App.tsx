@@ -20,7 +20,10 @@ import { MessageList } from './components/MessageList.tsx';
 import { JobFeed } from './components/JobFeed.tsx';
 import { Composer } from './components/Composer.tsx';
 import { EntityRail } from './components/EntityRail.tsx';
-import type { ChatMessage } from './state/types.ts';
+// The transcript→messages mapping used to be inline here (which is why this file imported
+// `ChatMessage`); it moved to its own module so it could be tested against real backend payloads
+// rather than only through a rendered shell.
+import { transcriptToMessages } from './state/transcript.ts';
 
 function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
   return (
@@ -84,49 +87,8 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
         return;
       }
       if (cancelled || remote.length === 0) return;
-      const messages: ChatMessage[] = remote
-        // A message with no text but with calls is still worth showing — that is a turn whose
-        // work is the whole record of it. Only a message that is empty in both senses is dropped.
-        .filter((m) => m.text?.trim() || m.tool_calls?.length)
-        .map((m, i) =>
-          m.role === 'user'
-            ? { id: `h${i}`, role: 'user' as const, text: m.text, at: Date.now() }
-            : {
-                id: `h${i}`,
-                role: 'assistant' as const,
-                at: Date.now(),
-                status: 'done' as const,
-                streamedText: '',
-                finalText: m.text,
-                confidence: null,
-                unsupportedClaims: [],
-                reviewRequired: false,
-                // Null rather than guessed: the transcript records the answer, not which verifier
-                // scored it, and there is no confidence to qualify anyway.
-                verifiedBy: null,
-                // Empty on a rehydrated transcript, and honestly so: the backend persists the
-                // messages, not which connectors happened to be down when each was produced.
-                degradedConnectors: [],
-                // Same reason: a rehydrated message is finished, so it is not waiting on anything.
-                queued: false,
-                // Rebuilt from what the service stored. Every call is closed — a transcript is
-                // written after the turn, so nothing in it can still be running — and `result` is
-                // null for a call that raised, which reads as `failed` rather than as "returned
-                // nothing". The two are different and the row says which.
-                trace: (m.tool_calls ?? []).map((call, j) => ({
-                  id: `h${i}t${j}`,
-                  at: Date.now(),
-                  kind: 'tool_call' as const,
-                  toolCall: {
-                    tool: call.tool,
-                    arguments: call.arguments,
-                    ...(call.result === null ? { failed: true } : { result: call.result }),
-                  },
-                })),
-                latestPlan: null,
-                error: null,
-              },
-        );
+      const messages = transcriptToMessages(remote);
+      if (messages.length === 0) return;
       useChatStore.getState().hydrateTranscript(conversationId, messages);
     })();
     return () => {

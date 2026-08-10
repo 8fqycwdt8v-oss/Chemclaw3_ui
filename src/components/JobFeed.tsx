@@ -32,7 +32,12 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 export function JobFeed(): React.JSX.Element | null {
   const jobFeed = useChatStore((s) => s.jobFeed);
   const activeId = useChatStore((s) => s.activeId);
-  const conversations = useChatStore((s) => s.conversations);
+  // Read on demand rather than subscribed to. This needs one title, and the conversations map is
+  // a fresh object on every store write — so subscribing re-rendered the feed once per animation
+  // frame during a turn, including while it was rendering nothing at all.
+  const titleOf = (id: string | null): string | undefined =>
+    id ? useChatStore.getState().conversations[id]?.title : undefined;
+
   const dismiss = useChatStore((s) => s.dismissJobCompleted);
   const restore = useChatStore((s) => s.restoreJobCompleted);
   const [undoable, setUndoable] = useState<string | null>(null);
@@ -83,9 +88,7 @@ export function JobFeed(): React.JSX.Element | null {
           <ul className="flex flex-wrap gap-2">
             {visible.map((item) => {
               const elsewhere = item.conversationId && item.conversationId !== activeId;
-              const title = item.conversationId
-                ? conversations[item.conversationId]?.title
-                : undefined;
+              const title = titleOf(item.conversationId);
               return (
                 <li
                   key={item.event.job_id}

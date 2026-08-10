@@ -18,7 +18,7 @@
  *  - A legitimately silent stream must stay open. Only the connect phase is bounded.
  */
 
-import { useEffect, useMemo } from 'react';
+import { useEffect } from 'react';
 import { EventSourceParserStream } from 'eventsource-parser/stream';
 import { normalizeEvent } from '../../shared/events.ts';
 import { config } from '../env.ts';
@@ -37,29 +37,32 @@ const MAX_JOB_STREAMS = 3;
 
 export function useJobStreams(): void {
   const { auth, ready } = useAuth();
-  const conversations = useChatStore((s) => s.conversations);
-  const activeId = useChatStore((s) => s.activeId);
-  const throttled = useChatStore((s) => s.jobStreamsThrottled);
-
-  // A stable, comparable key. The conversations map is a fresh object on every store write, so a
-  // raw array here would tear down and reopen every stream once per animation frame while a turn
-  // streams — zustand v5 has no implicit shallow compare to save us.
-  const watchKey = useMemo(() => {
-    const budget = throttled ? 1 : MAX_JOB_STREAMS;
-    const candidates = Object.values(conversations)
+  /**
+   * A stable, comparable key — derived INSIDE the selector, not from a subscription to the map.
+   *
+   * The conversations map is a fresh object on every store write, so subscribing to it re-rendered
+   * this hook's host on every animation frame during a turn. That host is `AppShell`, so the whole
+   * tree below it re-rendered at the token rate — the exact thing the store's own header says
+   * selector-scoped subscriptions prevent. Returning the derived string instead means zustand
+   * compares the string, and a frame that changes nothing about which sessions to watch does not
+   * re-render anything.
+   */
+  const watchKey = useChatStore((s) => {
+    const budget = s.jobStreamsThrottled ? 1 : MAX_JOB_STREAMS;
+    const candidates = Object.values(s.conversations)
       .filter((c) => c.sessionId)
       // A conversation nobody has sent in has no job to report. This predicate is also what keeps
       // `warmSession` from inflating the stream count: warming gives a session, not a turn.
-      .filter((c) => c.messages.length > 0 || c.id === activeId)
+      .filter((c) => c.messages.length > 0 || c.id === s.activeId)
       .sort((a, b) => {
-        if (a.id === activeId) return -1; // the active conversation is always watched
-        if (b.id === activeId) return 1;
+        if (a.id === s.activeId) return -1; // the active conversation is always watched
+        if (b.id === s.activeId) return 1;
         return b.updatedAt - a.updatedAt;
       })
       .slice(0, budget)
       .map((c) => c.sessionId as string);
     return [...new Set(candidates)].join(',');
-  }, [conversations, activeId, throttled]);
+  });
 
   useEffect(() => {
     if (!ready || !watchKey) return;

@@ -13,7 +13,7 @@
  * sharpest edge in the product.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { MoreHorizontal, Plus, Search, Trash2, TriangleAlert } from 'lucide-react';
 import { api } from '../api/client.ts';
@@ -182,27 +182,36 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
   const throttled = useChatStore((s) => s.jobStreamsThrottled);
   const [query, setQuery] = useState('');
 
-  // The store prepends on create but server-merged stubs were appended, so a conversation used
-  // ten minutes ago could sit below one from last month.
-  const sorted = [...order].sort(
-    (a, b) => (conversations[b]?.updatedAt ?? 0) - (conversations[a]?.updatedAt ?? 0),
-  );
-
-  // Titles are derived from the first message, so searching them alone would miss anything said
-  // later — which is most of what a chemist wants to find again (a batch number, a ligand).
   const needle = query.trim().toLowerCase();
-  const matches = needle
-    ? sorted.filter((id) => {
-        const c = conversations[id];
-        if (!c) return false;
-        if (c.title.toLowerCase().includes(needle)) return true;
-        return c.messages.some((m) =>
-          (m.role === 'user' ? m.text : (m.finalText ?? m.streamedText))
-            .toLowerCase()
-            .includes(needle),
-        );
-      })
-    : sorted;
+
+  /**
+   * Ordering and filtering together, memoised, and the message scan skipped when nothing is typed.
+   *
+   * This all ran in the render body, so it re-sorted and lowercased every message of every
+   * conversation on every render — and `conversations` gets a new identity on every store write,
+   * which during a turn is once per animation frame. A chemist with thirty conversations open was
+   * rescanning their whole local history sixty times a second to filter a box they were not using.
+   */
+  const matches = useMemo(() => {
+    // The store prepends on create but server-merged stubs were appended, so a conversation used
+    // ten minutes ago could sit below one from last month.
+    const sorted = [...order].sort(
+      (a, b) => (conversations[b]?.updatedAt ?? 0) - (conversations[a]?.updatedAt ?? 0),
+    );
+    if (!needle) return sorted;
+    // Titles are derived from the first message, so searching them alone would miss anything said
+    // later — which is most of what a chemist wants to find again (a batch number, a ligand).
+    return sorted.filter((id) => {
+      const c = conversations[id];
+      if (!c) return false;
+      if (c.title.toLowerCase().includes(needle)) return true;
+      return c.messages.some((m) =>
+        (m.role === 'user' ? m.text : (m.finalText ?? m.streamedText))
+          .toLowerCase()
+          .includes(needle),
+      );
+    });
+  }, [needle, conversations, order]);
 
   return (
     <>

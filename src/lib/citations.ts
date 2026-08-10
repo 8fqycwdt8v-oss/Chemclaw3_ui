@@ -57,7 +57,10 @@ const NOTE_PREFIXES = [
 ] as const;
 
 const PATTERNS: { kind: string; re: RegExp }[] = [
-  { kind: 'note', re: new RegExp(`\\b(?:${NOTE_PREFIXES.join('|')})-[A-Za-z0-9][A-Za-z0-9_.-]*\\b`, 'g') },
+  {
+    kind: 'note',
+    re: new RegExp(`\\b(?:${NOTE_PREFIXES.join('|')})-[A-Za-z0-9][A-Za-z0-9_.-]*\\b`, 'g'),
+  },
   { kind: 'job', re: /\b(?:qm|calc|bo|report)-[A-Za-z0-9]{4,64}\b/g },
 ];
 

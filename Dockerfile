@@ -10,6 +10,14 @@ WORKDIR /app
 COPY . .
 # vite build -> dist/client ; esbuild --bundle -> dist/server.js
 RUN npm run build
+# Sourcemaps are built (they are worth having locally) but never shipped.
+#
+# `sourcemap: 'hidden'` only omits the `//# sourceMappingURL` comment — the .map files are still
+# emitted next to the bundles at a derivable path, the runtime stage copies them, and `sirv` serves
+# them. Verified before this line existed: GET /assets/index-*.js.map returned 200 and 2.3 MB
+# containing the original TypeScript of 55 source files, unauthenticated, in msal mode. Hidden is
+# not private. This also takes ~4.6 MB out of the image.
+RUN find dist -name '*.map' -delete
 
 # The runtime stage carries NO node_modules: esbuild inlines sirv into dist/server.js, and
 # everything else the BFF uses is a node: builtin.

@@ -132,3 +132,24 @@ describe('the storage listener', () => {
     expect(titles()).toEqual(before);
   });
 });
+
+describe('the merge converges', () => {
+  it('does not write back when the other tab told us nothing new', () => {
+    // Tab A writes, tab B merges, B's persist write fires a storage event back at A, A merges,
+    // A writes... Each tab keeps its own `activeId`, so the two snapshots never serialise
+    // identically and the browser fires an event on every write. Without a no-op guard that is a
+    // sustained cross-tab write storm — worse than the data loss it replaced.
+    const mine = conversationAt('mine', 200, 'mine');
+    useChatStore.setState({ conversations: { mine }, order: ['mine'], activeId: 'mine' });
+
+    let writes = 0;
+    const unsubscribe = useChatStore.subscribe(() => {
+      writes += 1;
+    });
+    // Exactly what this tab already has, which is what the second round of a ping-pong looks like.
+    useChatStore.getState().mergeFromOtherTab(persisted([conversationAt('mine', 200, 'mine')]));
+    unsubscribe();
+
+    expect(writes).toBe(0);
+  });
+});

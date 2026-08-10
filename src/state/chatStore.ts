@@ -441,58 +441,72 @@ export const useChatStore = create<ChatState>()(
       },
 
       mergeFromOtherTab(incoming) {
-        set((s) => {
-          const conversations: Record<string, Conversation> = { ...s.conversations };
+        const s = get();
+        const conversations: Record<string, Conversation> = { ...s.conversations };
 
-          for (const [id, remote] of Object.entries(incoming.conversations ?? {})) {
-            if (!remote) continue;
-            const local = conversations[id];
-            // Newest wins per conversation, which is the whole point: whole-snapshot writes made
-            // the loser's *other* conversations disappear with it. `updatedAt` bumps on every
-            // token, so a turn streaming in this tab always outranks the other tab's stale copy.
-            if (!local || remote.updatedAt > local.updatedAt) conversations[id] = remote;
+        // Whether anything actually arrived. This is computed BEFORE touching the store, and the
+        // store is left alone when nothing did: zustand notifies on every `set()`, even one that
+        // changes nothing, and a notification here means a persist write, which fires a `storage`
+        // event in the tab that just wrote to us, which merges and writes back. Because each tab
+        // keeps its own `activeId` the two snapshots never serialise identically, so the browser
+        // fires on every write and the ping-pong never settles — a sustained cross-tab write storm,
+        // worse than the data loss it replaced.
+        let changed = false;
+
+        for (const [id, remote] of Object.entries(incoming.conversations ?? {})) {
+          if (!remote) continue;
+          const local = conversations[id];
+          // Newest wins per conversation, which is the whole point: whole-snapshot writes made the
+          // loser's *other* conversations disappear with it. `updatedAt` bumps on every token, so
+          // a turn streaming in this tab always outranks the other tab's stale copy.
+          if (!local || remote.updatedAt > local.updatedAt) {
+            conversations[id] = remote;
+            changed = true;
           }
+        }
 
-          // A conversation the other tab deleted stays deleted only if we never touched it since;
-          // anything we have that it lacks is ours and survives. Deletion does not propagate,
-          // because there is no tombstone to tell "deleted there" from "created here".
-          const order = Object.keys(conversations)
-            .sort((a, b) => (conversations[b]?.updatedAt ?? 0) - (conversations[a]?.updatedAt ?? 0))
-            .slice(0, MAX_CONVERSATIONS);
+        // Job completions are announcements, so union them and take the most-read state of each:
+        // something dismissed in one tab should not reappear unread in another.
+        const feed = new Map<string, JobFeedItem>();
+        for (const item of [...(incoming.jobFeed ?? []), ...s.jobFeed]) {
+          const existing = feed.get(item.event.job_id);
+          feed.set(
+            item.event.job_id,
+            existing
+              ? {
+                  ...item,
+                  seen: existing.seen || item.seen,
+                  dismissed: existing.dismissed || item.dismissed,
+                }
+              : item,
+          );
+        }
+        if (feed.size !== s.jobFeed.length) changed = true;
 
-          const kept: Record<string, Conversation> = {};
-          for (const id of order) {
-            const conversation = conversations[id];
-            if (conversation) kept[id] = conversation;
-          }
+        if (!changed) return;
 
-          // Job completions are announcements, so union them and take the most-read state of
-          // each: something dismissed in one tab should not reappear unread in another.
-          const feed = new Map<string, JobFeedItem>();
-          for (const item of [...(incoming.jobFeed ?? []), ...s.jobFeed]) {
-            const existing = feed.get(item.event.job_id);
-            feed.set(
-              item.event.job_id,
-              existing
-                ? {
-                    ...item,
-                    seen: existing.seen || item.seen,
-                    dismissed: existing.dismissed || item.dismissed,
-                  }
-                : item,
-            );
-          }
+        // A conversation the other tab deleted stays deleted only if we never touched it since;
+        // anything we have that it lacks is ours and survives. Deletion does not propagate,
+        // because there is no tombstone to tell "deleted there" from "created here".
+        const order = Object.keys(conversations)
+          .sort((a, b) => (conversations[b]?.updatedAt ?? 0) - (conversations[a]?.updatedAt ?? 0))
+          .slice(0, MAX_CONVERSATIONS);
 
-          return {
-            conversations: kept,
-            order,
-            jobFeed: [...feed.values()]
-              .sort((a, b) => b.receivedAt - a.receivedAt)
-              .slice(0, MAX_JOB_FEED),
-            // `activeId` and `notifyOnJobComplete` stay this tab's own. Following another tab's
-            // selection would yank the reader out of what they are reading.
-            activeId: kept[s.activeId ?? ''] ? s.activeId : (order[0] ?? null),
-          };
+        const kept: Record<string, Conversation> = {};
+        for (const id of order) {
+          const conversation = conversations[id];
+          if (conversation) kept[id] = conversation;
+        }
+
+        set({
+          conversations: kept,
+          order,
+          jobFeed: [...feed.values()]
+            .sort((a, b) => b.receivedAt - a.receivedAt)
+            .slice(0, MAX_JOB_FEED),
+          // `activeId` and `notifyOnJobComplete` stay this tab's own. Following another tab's
+          // selection would yank the reader out of what they are reading.
+          activeId: kept[s.activeId ?? ''] ? s.activeId : (order[0] ?? null),
         });
       },
 

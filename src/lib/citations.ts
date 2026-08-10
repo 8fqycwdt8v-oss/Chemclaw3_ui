@@ -87,22 +87,12 @@ export function remarkCitations() {
 }
 
 /**
- * A heuristic "does this look like a SMILES string" test, used to offer a render affordance on
- * inline code spans.
+ * The SMILES recogniser used to live here, and it demanded a bond/branch/ring character or a digit
+ * so that plain words would not pass. That rejected `CCO` — ethanol, and every other
+ * straight-chain molecule a chemist writes without punctuation. It now lives in
+ * `src/chem/recognise.ts`, which asks the answerable question instead (could every letter be a
+ * SMILES atom?) and is affordable being looser because RDKit is the arbiter behind it.
  *
- * Deliberately conservative. Chemistry prose is full of tokens that superficially resemble SMILES
- * (`pH`, `NMR`, `1H`, unit strings), and auto-rendering a structure for something that is not a
- * molecule is worse than not offering it at all — so this demands a bond/branch/ring character
- * and rejects anything with whitespace or characters SMILES never uses.
+ * This file keeps the citation half: which prose tokens are identifiers is a different question
+ * from which are structures, and it is the one this module was named for.
  */
-export function looksLikeSmiles(text: string): boolean {
-  const s = text.trim();
-  if (s.length < 4 || s.length > 400) return false;
-  if (/\s/.test(s)) return false;
-  if (!/^[A-Za-z0-9@+\-[\]()=#$%/\\.*]+$/.test(s)) return false;
-  // Require at least one structural character; plain words would otherwise pass.
-  if (!/[()[\]=#]|[0-9]/.test(s)) return false;
-  // Must contain an element that can start an organic-subset atom.
-  if (!/[CNOPSFBIcnops]/.test(s)) return false;
-  return true;
-}

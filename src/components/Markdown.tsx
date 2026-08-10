@@ -9,7 +9,8 @@
 
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { remarkCitations, looksLikeSmiles } from '../lib/citations.ts';
+import { remarkCitations } from '../lib/citations.ts';
+import { looksLikeSmiles } from '../chem/recognise.ts';
 import { CitationChip } from './CitationChip.tsx';
 import { InlineSmiles } from './Molecule.tsx';
 

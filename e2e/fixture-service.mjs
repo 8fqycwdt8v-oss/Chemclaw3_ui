@@ -49,7 +49,10 @@ async function streamTurn(req, res) {
   const frames = [
     ['plan', { type: 'plan', todos: ['Check the hazard profile', 'Estimate the pKa'] }],
     ['tool_call', { type: 'tool_call', tool: 'screen_hazards', arguments: '{"smiles":"CCO"}' }],
-    ['tool_result', { type: 'tool_result', tool: 'screen_hazards', result: 'No acute hazards.' }],
+    // `preview`, not `result`. The contract field is `preview` (shared/events.ts), so `result`
+    // was dropped by normalizeEvent and this frame rendered an empty tool result — in the one
+    // test that exercises the whole chain against a real BFF.
+    ['tool_result', { type: 'tool_result', tool: 'screen_hazards', preview: 'No acute hazards.' }],
     ['token', { type: 'token', text: 'The pKa of acetic acid ' }],
     ['token', { type: 'token', text: 'is about 4.76 ' }],
     ['token', { type: 'token', text: 'in water at 25 °C.' }],

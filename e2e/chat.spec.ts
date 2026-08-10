@@ -59,4 +59,7 @@ test('the trace panel reports its own expanded state', async ({ page }) => {
   await toggle.click();
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   await expect(page.getByText('Screen hazards')).toBeVisible();
+  // What the call RETURNED, not just that it was made. The fixture used to send this under the
+  // wrong field name, so the frame arrived with an empty preview and nothing here noticed.
+  await expect(page.getByText('No acute hazards.')).toBeVisible();
 });

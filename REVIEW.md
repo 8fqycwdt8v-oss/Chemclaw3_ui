@@ -27,10 +27,19 @@ findings are listed unverified at the end and should be treated as leads, not re
 ## Status
 
 **All ten are fixed and pushed**, each with a regression test verified to fail against the commit
-before its fix rather than merely assumed to. Full gate green after every batch: typecheck, lint,
-format, 163 unit tests (up from 125), 46/46 contrast pairs, build, Playwright desktop + mobile, and
-`scripts/smoke.mjs` reporting frames arriving incrementally — the check that guards the streaming
-path the proxy changes touched.
+before its fix rather than merely assumed to. Green after every batch: typecheck, lint, format, 163
+unit tests (up from 125), 46/46 contrast pairs, build, and `scripts/smoke.mjs` reporting frames
+arriving incrementally — the check that guards the streaming path the proxy changes touched.
+
+Playwright is green too — 47 passed — but only after a correction worth recording. This container
+ships chromium r1194 while the pinned `@playwright/test` 1.62.1 expects r1234, so **every e2e run
+in this session failed to launch a browser at all**, and the failure was invisible because the runs
+were piped through `tail`: `$?` reported the exit status of `tail`, not of Playwright. Three
+separate "e2e green" claims rested on that. The suite does pass, against
+`executablePath: /opt/pw-browsers/chromium` — but it passed only once someone actually looked, and
+the earlier claims were unfounded rather than merely lucky. The lesson generalises past this
+container: never read `$?` through a pipe, and treat a gate that has never printed a pass count as
+unrun.
 
 C5 is resolved by a merge rather than a lock: conversations are keyed by id, so newest-per-id wins
 and there is nothing to guess. `updatedAt` bumps on every token, which settles the case that
@@ -282,33 +291,127 @@ recomputing per chunk.
 
 ---
 
-## Unverified remainder — 70 findings
+## The remaining leads, verified
 
-The fleet's verification stage never ran, and I hand-verified only the critical and high tier.
-These 70 are **leads, not results**: on a codebase with this much documented deliberate design,
-expect a substantial rejection rate.
+A verification pass ran the remainder against the corrected tree at `e116990`. **57 of the 70
+returned a verdict: 41 confirmed, 3 already fixed by the ten fixes above, 10 rejected, 3 deferred
+to the backend.** The 41 confirmations collapse to **35 distinct defects** — five were filed two or
+three times by different agents (the sourcemaps, the `start.sh` port, the cache-control header, the
+sidebar subscription, the composer upload state). Thirteen leads did not return a verdict and stay
+unverified; they include both items flagged early last round — `AnswerBadges.tsx:44` (the review
+pill has no test) and `Prompts.tsx:78` (focus after confirming an approval).
 
-| File                                                                                                                                                                                                                                                                                                                             | Findings | Severities  |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------- |
-| `server/index.ts`                                                                                                                                                                                                                                                                                                                | 8        | M×7 L       |
-| `src/components/Composer.tsx`                                                                                                                                                                                                                                                                                                    | 5        | M×5         |
-| `src/components/Sidebar.tsx`                                                                                                                                                                                                                                                                                                     | 4        | M×4         |
-| `src/state/chatStore.ts`                                                                                                                                                                                                                                                                                                         | 4        | M×3 L       |
-| `e2e/fixture-service.mjs`                                                                                                                                                                                                                                                                                                        | 3        | M L L       |
-| `shared/events.ts`                                                                                                                                                                                                                                                                                                               | 3        | M M L       |
-| `src/components/JobFeed.tsx`                                                                                                                                                                                                                                                                                                     | 3        | M M L       |
-| `src/components/Molecule.tsx`                                                                                                                                                                                                                                                                                                    | 3        | L×3         |
-| `docker-compose.yml`, `server/config.ts`, `server/proxy.ts`, `server/routes.ts`, `src/api/client.ts`, `src/App.tsx`, `src/components/AnswerBadges.tsx`, `src/components/MessageList.tsx`, `src/components/ui/dropdown-menu.tsx`, `src/hooks/useJobStreams.ts`, `vite.config.ts`, `src/components/chem/SkipLinks.tsx`, `start.sh` | 2 each   | mixed M/L/N |
-| 11 further files                                                                                                                                                                                                                                                                                                                 | 1 each   | mixed       |
+The outright rejection rate is 10/57, about 18%, and another 6 were already fixed or are not this
+repo's to answer — so roughly a quarter of the leads were not actionable as filed, and duplicate
+filings cost another six. That is the expected shape, not a disappointment: a codebase that writes
+down its deliberate decisions gives an unverified fleet plenty of things that look wrong and are
+not, and the cost of finding that out is exactly this pass. The more telling number is the
+severity ceiling. **Nothing in the 41 is critical or high.** The first pass took everything that
+was, and what is left is medium and below — real, worth fixing, and none of it load-bearing for
+correctness of an answer.
 
-Two worth surfacing early because they concern the safety signalling this product exists for:
+### Confirmed
 
-- **`src/components/AnswerBadges.tsx:44`** — the "needs expert review" pill, the confidence badge
-  and the unsupported-claims disclosure are mounted by **no unit test and no e2e spec**. The only
-  `review_required: true` in the repo is a store fixture. The contract regression that `events.ts`
-  itself records — degraded answers rendering as confident ones — has no guard against recurrence.
-- **`src/components/Prompts.tsx:78`** — confirming an approval reportedly drops focus to `<body>`
-  and announces nothing, on the flow the product describes as irreversible and attributable.
+| Sev | File                                 | What is wrong                                                                                                                                                                 | Fix                                                                                         |
+| --- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| M   | `vite.config.ts:19`                  | `sourcemap: 'hidden'` drops the trailer but still emits ~4.8 MB of maps with full `sourcesContent`; the Dockerfile copies them and `sirv` serves them at `<bundle>.js.map`.   | `sourcemap: false`, or delete `*.map` before the runtime `COPY`.                            |
+| M   | `server/index.ts:30`                 | A missing `CLIENT_DIR` kills the process — `sirv`'s eager `readdirSync` throws before `listen`, one line after a warning promising 404s. Hits `npm run dev` on a fresh clone. | Construct `sirv` only if the directory exists; fall through to the existing 404 handler.    |
+| M   | `server/index.ts:49`                 | The no-cache guard tests the request path, so `/c/:id` and `/s/:id` — the URLs users actually reload — get a validator and no `Cache-Control`. Filed three times.             | Key the header off the served document: no extension ⇒ `cache-control: no-cache`.           |
+| M   | `server/index.ts:99`                 | `requestTimeout = 0` for a reason that never applied (it bounds receipt, not the SSE response), leaving slow-body holds unreaped on the upload path.                          | `server.requestTimeout = 300_000` and reword the comment.                                   |
+| M   | `server/index.ts:110`                | The only guard against a world-reachable sign-in-free front door is a `warn` log, deleted by `LOG_LEVEL=error`, while `config.ts` calls it a mirror of the backend's refusal. | Move it into `validateConfig` as a hard problem unless `UI_ALLOW_INSECURE=true`.            |
+| M   | `server/proxy.ts:32`                 | At `maxSockets: 128` further requests queue with no socket, so the connect timeout never arms and nothing logs — every `/api` call hangs forever.                             | `maxSockets: Infinity`, and arm the connect timer before `.on('socket')`.                   |
+| M   | `server/routes.ts:39`                | The approval-id length cap counts **percent-encoded** characters, so a long or non-ASCII hold id 404s at the proxy and renders as "not found".                                | Widen to `{1,512}` and say in the docstring that the cap is measured encoded.               |
+| M   | `server/config.ts:91`                | Default `PORT` equals the default upstream port, so a bare `docker run` self-proxies, passes its own healthcheck, and answers `POST /api/sessions` with `index.html`.         | In `validateConfig`, reject a loopback `apiUrl` whose port equals `c.port`.                 |
+| M   | `src/components/Sidebar.tsx:180`     | `SidebarBody` selects the whole `conversations` map, which gets a new identity every rAF while streaming; rows are unmemoised Radix menus. Filed twice.                       | Select a shallow-compared projection; `memo` `ConversationRow` with a stable `onSelect`.    |
+| M   | `src/components/Composer.tsx:44`     | Upload state (banner, progress, Cancel, `AbortController`) is component state on a Composer that never remounts, so it follows the reader into the wrong conversation.        | Abort and clear `upload` in an effect keyed on `conversationId`.                            |
+| M   | `src/components/JobFeed.tsx:53`      | The live region and its first card mount in the same commit, so the first background job completion is announced to nobody.                                                   | Render the `role="status"` wrapper unconditionally; early-return around its body.           |
+| M   | `src/components/JobFeed.tsx:58`      | `role="status"` is implicitly atomic and wraps the whole feed, so dismissing one card re-reads the heading and every remaining card, SMILES included.                         | Make it a plain landmark and route one sentence per event through `announceStatus`.         |
+| M   | `src/components/Composer.tsx:192`    | A 429 mounts two `role="alert"` regions with the same sentence in one commit, and disables the focused textarea.                                                              | Demote the composer notice to `role="status"`; move focus before disabling.                 |
+| M   | `src/components/AnswerBadges.tsx:33` | `Notice` is unconditionally `role="alert"` and renders from persisted state, so a conversation switch fires every historical verifier alert at once.                          | Pass a liveness flag; `role="alert"` only for the live turn.                                |
+| M   | `src/components/MessageList.tsx:306` | The last press of "Load earlier" unmounts the focused button, dropping focus to `<body>` with nothing announced and nothing visibly moving.                                   | Focus the oldest previously-shown `<article>` and announce the count.                       |
+| M   | `src/components/Sidebar.tsx:162`     | Deleting a conversation destroys the menu trigger before Radix restores focus to it, and `preventDefault()` suppresses the fallback — focus lands on `<body>`, silently.      | Focus the adjacent row (or "New conversation") and announce the deletion.                   |
+| L   | `docker-compose.yml:135`             | The `ui` environment block omits `WARM_SESSIONS`, `SSE_HEARTBEAT_MS` and `UPSTREAM_CONNECT_TIMEOUT_MS`, so ISSUES.md Issue 5's kill switch is unreachable under compose.      | Add all three as `${VAR:-default}`, matching the other operator variables.                  |
+| L   | `start.sh:8`                         | Defaults the upstream to port 8000 unconditionally; every other source says 8080. The banner then prints the wrong target confidently. Filed twice.                           | Use 8080 (or drop the export), and fix the 8100/8099 comment on line 15.                    |
+| L   | `docker-compose.yml:56`              | The header's "only the UI publishes a port" — the stated justification for the dev auth posture — is false: `temporal-ui` publishes 8233 on all interfaces, unauthenticated.  | Bind it to `127.0.0.1:8233:8080` and correct the header and README.                         |
+| L   | `.env.example:2`                     | "Copy to .env for local use" is false: nothing loads a `.env` on either Node path, so `AUTH_MODE=msal` in a `.env` silently yields dev auth with no sign-in.                  | `node --env-file=.env`, or say plainly that only compose reads it, for interpolation.       |
+| L   | `playwright.config.ts:46`            | `test:e2e` has no build dependency and reuses a running server locally, so a stale `dist/` passes green. CI is safe only because it builds first.                             | `"test:e2e": "npm run build && playwright test"`.                                           |
+| L   | `server/config.ts:93`                | The `clientDir` default uses `URL.pathname`, so an install path needing percent-encoding resolves to a directory that does not exist — a hard boot failure under `npm start`. | `fileURLToPath(new URL('./client', import.meta.url))`, as `vite.config.ts` already does.    |
+| L   | `server/proxy.ts:86`                 | The heartbeat uses one value as both interval and idle threshold, so the worst-case wire gap is ~2× `SSE_HEARTBEAT_MS` — the knob does not bound what it appears to bound.    | Tick at half the threshold, keeping the same comparison.                                    |
+| L   | `shared/events.ts:183`               | `KNOWN_TOOLS` has zero consumers; the icons it claims to drive come from an unrelated literal in `toolIcons.tsx`, so following the comment ships a wrench.                    | Delete it, or retype `TOOL_ICON` as `Record<KnownTool, LucideIcon>` so they cannot drift.   |
+| L   | `src/components/Markdown.tsx:57`     | react-markdown's hast `node` is spread onto the DOM: every link, `h3`–`h6` and inline code renders `node="[object Object]"`.                                                  | Destructure `node: _node` out in the three overrides.                                       |
+| L   | `src/components/Molecule.tsx:37`     | `loadDrawer` caches the promise, not the result, so one failed chunk load permanently breaks every depiction on the page and blames the SMILES for it.                        | Null the cached promise in a `.catch` so the next mount retries.                            |
+| L   | `src/components/Composer.tsx:176`    | The `#composer` skip-link target has no `tabIndex={-1}`, unlike its `#transcript` sibling, so on some browsers the skip link does not move focus.                             | Add `tabIndex={-1}`, or point the link at `#composer-input`.                                |
+| L   | `src/components/Sidebar.tsx:194`     | The search filter is unmemoised and lowercases every message of every conversation in the render body — once per rAF while streaming, given the selector above.               | `useMemo` on `[needle, conversations]` and cache a lowercased haystack per conversation.    |
+| L   | `src/components/JobFeed.tsx:35`      | Subscribes to the whole `conversations` map to read one title, re-rendering every frame — including when it renders nothing.                                                  | Read the title via `getState()`, or select a shallow-compared title projection.             |
+| L   | `src/App.tsx:112`                    | `hydrateTranscript` guards only on the incoming array being empty, never on the local one, so a transcript read landing mid-send discards the user's message.                 | Re-check `conversation.messages.length` before replacing.                                   |
+| N   | `src/index.css:166`                  | `--ease-out-quart` and `--ease-soft` are referenced by nothing and tree-shaken out of the build; they read as a house vocabulary that does not exist.                         | Delete both, or adopt one in the two transitions that would use it.                         |
+| N   | `server/index.ts:101`                | No `'error'` listener on the server, so `EADDRINUSE` prints a raw stack in a file that otherwise prints clean `config:` errors.                                               | `server.on('error', …)` → log and `exit(1)`.                                                |
+| N   | `server/routes.ts:39`                | The character class contains `:`, which the docstring's stated rule ("exactly what `encodeURIComponent` can emit") excludes; no test exercises the literal.                   | Drop `:`, or document why it is retained.                                                   |
+| N   | `src/components/Molecule.tsx:160`    | `aria-controls` points at a panel that only exists while expanded, and collapsed is the default.                                                                              | Spread it conditionally, or keep the panel mounted and use `hidden`.                        |
+| N   | `src/components/Molecule.tsx:137`    | An unbounded model-supplied SMILES becomes the image's accessible name inside JobFeed's live region; the inline path caps at 400 chars, the job path caps at nothing.         | Truncate the string used for `aria-label`/`<title>`, keeping the full text in the `<code>`. |
+
+### Already fixed
+
+All three by commit `13c29c7`, which added `src/state/persistStorage.ts`:
+
+- **Per-frame localStorage writes** (`chatStore.ts:793`) — the persist storage is now a 250 ms
+  trailing coalescer with a `pagehide`/`visibilitychange` flush; pinned by `tests/persistStorage.test.ts`.
+- **Per-keystroke writes** (`chatStore.ts:797`) — same fix; `setDraft` bursts collapse to one write.
+- **Token batcher duplicating text on a throwing write** (`sendMessage.ts:88`) — the write no longer
+  happens on `appendTokens`' stack and quota failures raise a banner instead of throwing into callers.
+
+### Rejected
+
+Ten, kept here so the next review does not re-litigate them.
+
+- **Documented and deliberate (3).** The floating `node:22-alpine` base (a patch-freshness tradeoff,
+  with everything that breaks a build already lockfile-pinned); `api.request` spreading caller
+  headers last (last-wins is the only way a caller can override `accept`, and no caller passes
+  `authorization`); `EVENT_TYPES` being hand-maintained (the file header names that hazard, and the
+  three lists agree 14/14 today).
+- **Factually wrong (3).** CSP absent on `/api` responses is not an XSS hole — CSP is a document
+  policy and every navigable HTML response comes from `sirv` with the full header set. An
+  error-killed turn does carry an incompleteness label: `failTurn` sets `error` and `MessageList`
+  renders it in a danger box under the text. Approval-id encoding was never broken client-side; the
+  bug the tests record was the BFF's route pattern.
+- **Describes a state the tree cannot reach (2).** The plan card's auto-send path does skip the
+  `ready` gate, but no card renders an auto-sending button while `!ready`, and half the claim
+  describes the dead "Sign in again" button that H4 already fixed. `migratePersisted` mishandles a
+  version 4 payload that no build has ever written.
+- **Duplicate of something already known (2).** The missing coverage provider (on the known list,
+  and partly stale now that `tests/csp.test.ts` exists); the event contract's "four parallel lists"
+  restating the `EVENT_TYPES` item above.
+
+### For the backend
+
+Three leads whose truth depends on the FastAPI service. Written to be moved into `ISSUES.md`.
+
+**Does the service do any work after yielding the terminal `answer` event?**
+`src/api/streamTurn.ts:98-112` breaks on the terminal event without draining to `{done: true}`, then
+calls `reader.cancel()` on the success path. That disconnect propagates: `server/proxy.ts:207` sees
+`res.writableFinished === false` and destroys the upstream request. If the handler's generator is
+already exhausted this is a no-op; if the service persists the turn, settles budget, or releases a
+lock after yielding `answer`, a normal successful turn is cancelled milliseconds before it commits.
+Not answerable here — `GET /sessions/{id}/messages` 404s (Issue 2), so a systematically short
+transcript would be invisible, and the e2e fixture's post-answer behaviour was written by this repo.
+**Fix if confirmed:** drain to `done` on the success path, keeping the unconditional cancel for the
+abort and error exits.
+
+**Does the service keep emitting trace events after an `approval_request` hold?**
+`src/state/chatStore.ts:683` trims each message's trace to `MAX_TRACE_ENTRIES = 200`, and the
+Approve/Reject gate is read only from that array (`MessageList.tsx:75`). `latestPlan` is
+deliberately hoisted out of the trimmed array; the approval is not. If 200+ further trace-producing
+events can arrive on the same assistant message after a hold, a rendered approval card disappears.
+**Fix if confirmed:** exempt `question`/`approval_request` from the slice, or hoist the latest one
+beside `latestPlan`.
+
+**What is `verifier_confidence_threshold` set to?**
+`src/components/AnswerBadges.tsx:75` hardcodes its own tone bands at 0.8/0.5 while
+`ReviewRequiredPill` renders straight from `review_required`, which `shared/events.ts:107-109` says
+is `confidence < verifier_confidence_threshold`. If that threshold can exceed 0.8, an answer can
+show a green "high confidence" badge next to a "needs expert review" pill. At any threshold ≤ 0.8
+the contradiction is unreachable. **Fix if confirmed:** clamp the badge tone when `reviewRequired`
+is true.
 
 ## Coverage and confidence
 

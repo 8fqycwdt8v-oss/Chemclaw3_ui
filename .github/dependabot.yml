@@ -1,0 +1,38 @@
+# Neither of the advisories this repo is currently carrying — a critical RCE in `happy-dom` and a
+# high in `nanoid` — was surfaced by anything automatic. Both were found by reading `npm audit`
+# output by hand during a review, which is not a process.
+#
+# Weekly rather than daily, and grouped, because the point is a small number of reviewable PRs
+# rather than a stream of them. Two pins are deliberate and must not be bumped silently:
+#
+#   - `eslint` is held at 9 because `eslint-plugin-jsx-a11y` does not declare support for 10
+#     (see the header of `eslint.config.js`).
+#   - `typescript` is held at ~5.9; the `baseUrl` in `tsconfig.json` stops functioning in 7.0, so
+#     that has to be dealt with before the major lands.
+#
+# Security updates are not grouped: those want to arrive on their own and be read on their own.
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      production:
+        dependency-type: production
+        update-types: [minor, patch]
+      development:
+        dependency-type: development
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: eslint
+        update-types: [version-update:semver-major]
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

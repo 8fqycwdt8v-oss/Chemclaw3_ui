@@ -29,6 +29,20 @@ devDependencies so `vite build` can run. Tests currently cannot be run on Replit
 
 **Impact:** `npm test` (vitest) cannot run on Replit without this fix. Build and server are fine.
 
+**Update — the pin now carries a critical advisory.** `npm audit` reports `happy-dom@15.11.7` as
+**critical**: GHSA-37j7-fg3j-429f, a VM context escape leading to RCE, affecting everything
+`<= 20.8.8`. It is dev-only — the vitest DOM environment, never shipped to the browser and absent
+from the runtime image, which carries no `node_modules` at all — but it does execute in CI.
+
+So option 1 above ("pin to an older version not flagged by the scanner") is no longer available:
+there is no `15.x` that clears it. The live choice is between upgrading past `20.8.8` and moving
+the environment to `jsdom`, and the tradeoff is not ours alone to make — the constraint that forced
+the pin is Replit's package firewall, which is external to this repo. Whoever still runs this on
+Replit should confirm the upgrade is not re-blocked before we commit to it.
+
+`nanoid@3.3.16` (dev, transitive via `postcss`) is also flagged **high** — infinite loop on zero
+size — and is fixable non-breaking with no such tradeoff.
+
 ---
 
 ## Issue 2: GET /api/sessions and GET /api/sessions/{id}/messages whitelisted in BFF but missing from backend
@@ -135,3 +149,32 @@ search; upload progress and cancellation; `@axe-core/playwright` in the e2e suit
 - **A real MSAL redirect has not been exercised against this router.** The `/auth/callback` route
   is structured so nothing writes the URL until `handleRedirectPromise()` has consumed the
   fragment, and the e2e suite runs in `dev` auth mode, which cannot prove it.
+
+  This gap has now cost something concrete. See Issue 6.
+
+---
+
+## Issue 6: the framing headers blocked MSAL's own silent token renewal, and the fix is unverified
+
+`acquireTokenSilent` renews through a hidden iframe. That iframe goes to Entra, and Entra redirects
+it **back to our own** `redirectUri` — `${window.location.origin}/auth/callback` — which the BFF
+serves as the SPA fallback. So the app ends up framing itself.
+
+In every non-`dev` mode the BFF was sending `frame-ancestors 'none'` (`server/config.ts`) and
+`X-Frame-Options: DENY` (`server/index.ts`). Both forbid framing **including same-origin**, so the
+callback document could never render inside the renewal iframe: MSAL never read the fragment and
+the token silently stopped being renewable roughly an hour after login. That is the same class of
+failure the comment above `buildCsp` warns about for `connect-src` — "looks like a random logout and
+is miserable to trace back to a header" — reached through a different directive.
+
+`frame-src` was never the problem: it governs where we may frame _to_, and already allowed Entra.
+
+**Fixed here** — `frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN`. Cross-origin framing,
+which is what clickjacking actually requires, is still refused. `tests/csp.test.ts` pins both
+directions.
+
+**Still unverified, and this is the point:** nothing in this repo can prove the fix works, for the
+same reason nothing caught the bug. The e2e suite runs in `dev` auth mode and takes neither branch.
+**One login against a live tenant, left idle past the access token's lifetime (~1 hour), is what
+settles it.** Until someone does that and records the result here, treat Entra silent renewal as
+untested rather than working.

@@ -117,8 +117,22 @@ jobs:
             || { echo "::error::the standalone server bundle did not answer /healthz"; exit 1; }
           echo "ok: server bundle runs with no node_modules"
 
+      - name: No dev auth provider in a default production bundle
+        run: npm run check:no-dev-auth
+
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
+
+      # The e2e suite drives a production build unauthenticated, so it needs a bundle that was
+      # built to permit the dev provider — which is the opt-in path, and therefore the other
+      # direction of the check above. Asserting it here means neither direction can rot: a
+      # define that stopped working fails the step before this one, and a marker string that
+      # went stale fails this one.
+      - name: Rebuild the client with dev auth permitted, for the browser suite
+        run: ALLOW_DEV_AUTH=true npm run build:client
+
+      - name: The opt-in build really does carry it
+        run: ALLOW_DEV_AUTH=true npm run check:no-dev-auth
 
       - name: Browser tests
         run: npm run test:e2e
@@ -153,8 +167,14 @@ jobs:
 
       - name: The container serves the SPA and its runtime config
         run: |
+          # ALLOW_INSECURE_AUTH because the container binds 0.0.0.0 in dev auth mode, which the BFF
+          # now refuses to serve unless the exposure is declared. The image itself is built with
+          # the default ALLOW_DEV_AUTH=false, so its bundle carries no dev provider — the SPA would
+          # refuse to start a session. That is fine and deliberate here: every assertion below is
+          # about the server, and the one about the SPA is that the fallback serves its HTML.
           docker run -d --name ui -p 8080:8080 \
-            -e AUTH_MODE=dev -e CHEMCLAW_API_URL=http://127.0.0.1:9 chemclaw3-ui:ci
+            -e AUTH_MODE=dev -e ALLOW_INSECURE_AUTH=true \
+            -e CHEMCLAW_API_URL=http://127.0.0.1:9 chemclaw3-ui:ci
           for i in $(seq 1 30); do
             curl -sf http://127.0.0.1:8080/healthz >/dev/null && break || sleep 1
           done

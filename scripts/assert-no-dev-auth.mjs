@@ -1,0 +1,76 @@
+/**
+ * Assert that a production bundle does not contain the no-token dev auth provider.
+ *
+ * `src/auth/index.ts` guards `createDevAuth` behind `import.meta.env.PROD` and the
+ * `__ALLOW_DEV_AUTH__` define, and Vite currently eliminates the whole branch.
+ *
+ * But dead-code elimination is a bundler optimisation, not a contract. A Rollup or Vite upgrade
+ * that emitted the dynamic import as a lazily-fetched chunk instead of dropping it would leave the
+ * provider shipped and reachable, and nothing in the type system or the test suite would notice —
+ * the guard would still *read* correctly. So the guarantee is asserted against the actual output.
+ *
+ * Run with ALLOW_DEV_AUTH=true this asserts the opposite: the provider must be present, because a
+ * deployment that deliberately opted in and silently got a bundle that throws on startup is the
+ * same class of surprise pointing the other way. A check that only ever tests one direction stops
+ * being able to tell "correctly absent" from "the marker string moved".
+ */
+
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const CLIENT_DIR = process.env.CLIENT_DIR ?? 'dist/client';
+const ALLOWED = process.env.ALLOW_DEV_AUTH === 'true';
+
+/** Strings unique to `src/auth/devAuth.ts` — its account literals, which no other module produces. */
+const MARKERS = ['dev@localhost', 'Dev principal'];
+
+function jsFiles(dir) {
+  const out = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...jsFiles(path));
+    // .map files legitimately contain the source of every module the build considered, including
+    // ones it dropped, so they would produce a false positive.
+    else if (entry.name.endsWith('.js')) out.push(path);
+  }
+  return out;
+}
+
+let files;
+try {
+  files = jsFiles(CLIENT_DIR);
+} catch (err) {
+  console.error(`assert-no-dev-auth: cannot read ${CLIENT_DIR} — run \`npm run build\` first.`);
+  console.error(String(err));
+  process.exit(1);
+}
+
+const hits = files.filter((file) => {
+  const source = readFileSync(file, 'utf8');
+  return MARKERS.some((marker) => source.includes(marker));
+});
+
+if (ALLOWED) {
+  if (hits.length === 0) {
+    console.error(
+      'assert-no-dev-auth: ALLOW_DEV_AUTH=true, but the dev auth provider is in NO chunk. Either ' +
+        'the define stopped working, or the marker strings in devAuth.ts changed and this check ' +
+        'has silently stopped testing anything.',
+    );
+    process.exit(1);
+  }
+  console.log(`ok: dev auth is present in ${hits.length} chunk(s), as ALLOW_DEV_AUTH=true asks`);
+  process.exit(0);
+}
+
+if (hits.length > 0) {
+  console.error('assert-no-dev-auth: the no-token dev auth provider is in a production bundle:');
+  for (const file of hits) console.error(`  ${file}`);
+  console.error(
+    'Anyone served this bundle can be given an unauthenticated session. Rebuild without ' +
+      'ALLOW_DEV_AUTH, or set it deliberately if an unauthenticated UI is what you meant to ship.',
+  );
+  process.exit(1);
+}
+
+console.log(`ok: no dev auth provider in ${files.length} chunk(s) under ${CLIENT_DIR}`);

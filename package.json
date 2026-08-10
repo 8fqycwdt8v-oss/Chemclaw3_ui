@@ -22,6 +22,7 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "check:contrast": "node scripts/check-contrast.mjs",
+    "check:no-dev-auth": "node scripts/assert-no-dev-auth.mjs",
     "check:openapi": "node --experimental-strip-types scripts/check-openapi.mjs"
   },
   "dependencies": {

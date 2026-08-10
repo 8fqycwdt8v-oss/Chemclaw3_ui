@@ -8,6 +8,11 @@ RUN npm ci --no-audit --no-fund
 FROM deps AS build
 WORKDIR /app
 COPY . .
+# Whether this image's bundle may serve the no-token dev auth provider. Defaults to false, so a
+# plain `docker build` cannot produce an image that hands out unauthenticated sessions; the compose
+# stack, which runs AUTH_MODE=dev on purpose, passes true.
+ARG ALLOW_DEV_AUTH=false
+ENV ALLOW_DEV_AUTH=${ALLOW_DEV_AUTH}
 # vite build -> dist/client ; esbuild --bundle -> dist/server.js
 RUN npm run build
 

@@ -135,15 +135,25 @@ function DecisionControls({
  * the binding decorative.
  */
 function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.JSX.Element {
-  const { auth } = useAuth();
+  const { auth, ready } = useAuth();
   const [plan, setPlan] = useState<{ hash: string; todos: string[] } | null>(null);
   // `unavailable` is the older-service path: no plan route, so the composer fallback stands in.
   // Derived from the session at mount: with no session there is no plan route to read, and
   // flipping to 'unavailable' from inside the effect rendered a spinner for one frame first.
   const [state, setState] = useState<
-    'loading' | 'idle' | 'sending' | 'approved' | 'rejected' | 'failed' | 'unavailable'
+    | 'loading'
+    | 'idle'
+    | 'sending'
+    | 'approved'
+    | 'rejected'
+    | 'failed'
+    | 'unavailable'
+    // The plan route exists but could not be read right now. Distinct from `unavailable`, which
+    // asserts the route is absent and stands the unbound fallback up in its place.
+    | 'unreadable'
   >(sessionId ? 'loading' : 'unavailable');
   const [error, setError] = useState<string | null>(null);
+  const [readNonce, setReadNonce] = useState(0);
 
   // Through a ref, so the read below depends on the session alone. `useAuth()` hands back a fresh
   // object on every render, and an effect that listed it as a dependency re-read the plan on each
@@ -156,6 +166,12 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
 
   useEffect(() => {
     if (!sessionId) return;
+    // Wait for auth, like every other token-requiring read. Before this gate the card fetched on
+    // mount against the placeholder provider, whose `getAccessToken` throws by design — the catch
+    // below read that as "this service has no plan route" and dropped a *hash-bound, attributable*
+    // sign-off to the unbound conversational fallback, permanently, on every page load that
+    // rendered the card in the first commit.
+    if (!ready) return;
     let live = true;
     void (async () => {
       try {
@@ -163,17 +179,29 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
         if (!live) return;
         setPlan({ hash: status.plan_hash, todos: status.plan });
         setState(status.approved ? 'approved' : 'idle');
-      } catch {
-        // Any failure here — a service without the route, an expired token, an unreachable pod —
-        // leaves the chemist with a card they can still act on rather than one that cannot be
-        // answered at all.
-        if (live) setState('unavailable');
+      } catch (err) {
+        if (!live) return;
+        // Only a genuinely absent route means "older service". Anything else — an expired token,
+        // a 500, an unreachable pod — is transient, and answering it with the unbound fallback
+        // would trade an attributable decision for an unattributable one over a blip.
+        // A 404 is the older-service signal: no plan route, so the composer fallback stands in.
+        // `errorFromStatus` kinds every 404 as `session_not_found`, which covers both "no such
+        // route" and "dead session"; either way there is no plan here to bind a decision to.
+        const absent = err instanceof ApiError && err.kind === 'session_not_found';
+        setState(absent ? 'unavailable' : 'unreadable');
+        setError(
+          absent
+            ? null
+            : err instanceof Error
+              ? err.message
+              : 'Could not read the plan awaiting a decision.',
+        );
       }
     })();
     return () => {
       live = false;
     };
-  }, [sessionId, token]);
+  }, [sessionId, token, ready, readNonce]);
 
   const decide = async (approved: boolean): Promise<void> => {
     if (!sessionId || !plan) return;
@@ -203,6 +231,30 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
   };
 
   if (state === 'loading') return <Loading size="xs">Reading the plan…</Loading>;
+
+  if (state === 'unreadable') {
+    // Deliberately offers no way to approve. The decision this card exists to record is bound to
+    // a plan hash we do not currently have, and answering in the conversation instead would
+    // convert an attributable sign-off into an unattributable one over what may be a blip.
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-xs text-ink-muted">
+          {error ?? 'Could not read the plan awaiting a decision.'}
+        </p>
+        <Button
+          variant="outline"
+          size="xs"
+          onClick={() => {
+            setError(null);
+            setState('loading');
+            setReadNonce((n) => n + 1);
+          }}
+        >
+          Try again
+        </Button>
+      </div>
+    );
+  }
 
   if (state === 'unavailable') {
     return (

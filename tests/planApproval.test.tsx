@@ -22,8 +22,24 @@ import { ApprovalPrompt } from '../src/components/Prompts.tsx';
 import { api } from '../src/api/client.ts';
 import { ApiError } from '../src/api/errors.ts';
 
+/**
+ * `ready` is part of this contract, not scenery. The shell renders before auth resolves, against
+ * a placeholder whose `getAccessToken` throws by design — so a card that reads the plan without
+ * waiting for `ready` gets that throw and, before the gate below existed, read it as "this
+ * service has no plan route" and stood the unbound conversational fallback up in its place.
+ */
+const authState = { ready: true, throws: false };
+
 vi.mock('../src/auth/AuthContext.tsx', () => ({
-  useAuth: () => ({ auth: { getAccessToken: async () => 'token' } }),
+  useAuth: () => ({
+    ready: authState.ready,
+    auth: {
+      getAccessToken: async () => {
+        if (authState.throws) throw new Error('auth is not ready yet');
+        return 'token';
+      },
+    },
+  }),
 }));
 
 const SID = 'b'.repeat(32);
@@ -47,6 +63,8 @@ const planStatus = (hash: string, plan: string[] = ['Run xTB on the aryl bromide
 beforeEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  authState.ready = true;
+  authState.throws = false;
 });
 
 describe('plan approval', () => {
@@ -115,5 +133,55 @@ describe('plan approval', () => {
 
     await waitFor(() => expect(decideApproval).toHaveBeenCalled());
     expect(getPlan).not.toHaveBeenCalled();
+  });
+});
+
+describe('the plan gate does not downgrade itself', () => {
+  it('waits for auth instead of reading the placeholder provider as a missing route', async () => {
+    // The card mounts in the first commit after a page load, before auth resolves.
+    authState.ready = false;
+    authState.throws = true;
+    const getPlan = vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('h1'));
+
+    render(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
+
+    // It must not have asked, and must not have concluded the route is absent.
+    await waitFor(() => expect(screen.queryByText(/Reading the plan/)).toBeTruthy());
+    expect(getPlan).not.toHaveBeenCalled();
+    expect(screen.queryByText(/cannot record a plan decision/)).toBeNull();
+  });
+
+  it('reads the plan once auth becomes ready', async () => {
+    vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('h1'));
+    authState.ready = false;
+    authState.throws = true;
+    const { rerender } = render(
+      <ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />,
+    );
+
+    authState.ready = true;
+    authState.throws = false;
+    rerender(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
+
+    expect(await screen.findByText('Run xTB on the aryl bromide')).toBeTruthy();
+  });
+
+  it('offers a retry, not the unbound fallback, when the plan read fails transiently', async () => {
+    // A 500 is not "this service predates the plan route". Answering it in the conversation would
+    // trade an attributable sign-off for an unattributable one over a blip.
+    vi.spyOn(api, 'getPlan').mockRejectedValue(new ApiError('network', 'upstream unavailable'));
+
+    render(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
+
+    expect(await screen.findByRole('button', { name: /Try again/ })).toBeTruthy();
+    expect(screen.queryByText(/cannot record a plan decision/)).toBeNull();
+  });
+
+  it('still falls back to the composer when the route is genuinely absent', async () => {
+    vi.spyOn(api, 'getPlan').mockRejectedValue(new ApiError('session_not_found', 'not found', 404));
+
+    render(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
+
+    expect(await screen.findByText(/cannot record a plan decision/)).toBeTruthy();
   });
 });

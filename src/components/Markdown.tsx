@@ -47,7 +47,10 @@ const components: Components = {
 
   a({ href, children, ...props }) {
     if (href?.startsWith('#cite/')) {
-      const [, kind = 'note', id = ''] = href.slice('#cite/'.length).split('/');
+      // `remarkCitations` emits exactly `#cite/<kind>/<id>`, so after stripping the prefix this
+      // splits into two segments. Destructuring past a leading hole put the id in `kind` and left
+      // `id` empty, which rendered every chip as an unlabelled button — see tests/citations.test.tsx.
+      const [kind = 'note', id = ''] = href.slice('#cite/'.length).split('/');
       return <CitationChip kind={kind} id={id} />;
     }
     return (

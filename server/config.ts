@@ -48,8 +48,14 @@ function buildCsp(mode: AuthMode): string {
     'form-action': ["'self'"],
     'base-uri': ["'none'"],
     // Allow framing from any origin in dev mode so the Replit preview iframe works.
-    // Production deployments behind Entra auth should tighten this back to "'none'".
-    'frame-ancestors': mode === 'dev' ? ['*'] : ["'none'"],
+    //
+    // Everywhere else this is 'self', NOT 'none'. MSAL's silent token renewal opens a hidden
+    // iframe, and Entra redirects that iframe back to *our own* `redirectUri` — so the app ends
+    // up framing itself. 'none' forbids that too, which made silent renewal structurally
+    // impossible in the one mode that needs it: the token expired about an hour after login and
+    // it looked like a random logout. 'self' keeps the clickjacking protection intact, because
+    // clickjacking requires a *different* origin to do the framing.
+    'frame-ancestors': mode === 'dev' ? ['*'] : ["'self'"],
     'object-src': ["'none'"],
   };
 

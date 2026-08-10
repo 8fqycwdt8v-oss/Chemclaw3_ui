@@ -62,11 +62,25 @@ function attachHeartbeat(upstreamRes: IncomingMessage, res: ServerResponse): voi
   let lastChunkAt = Date.now();
   let atFrameBoundary = true;
 
+  // The last two bytes *forwarded*, carried across chunks rather than recomputed from each one.
+  // A chunk boundary can fall anywhere, including between the two newlines that terminate a frame
+  // and inside a 1-byte chunk, so `chunk.subarray(-2)` cannot see a terminator that straddles two
+  // chunks: it reported mid-frame and suppressed the heartbeat for the whole idle that followed,
+  // which is precisely when the heartbeat exists to fire.
+  let prev = 0;
+  let last = 0;
+
   // A 'data' listener coexists with .pipe(); both receive chunks in flowing mode.
   upstreamRes.on('data', (chunk: Buffer) => {
     lastChunkAt = Date.now();
-    const tail = chunk.subarray(-2);
-    atFrameBoundary = tail.length === 2 && tail[0] === 0x0a && tail[1] === 0x0a;
+    if (chunk.length >= 2) {
+      prev = chunk[chunk.length - 2]!;
+      last = chunk[chunk.length - 1]!;
+    } else if (chunk.length === 1) {
+      prev = last;
+      last = chunk[0]!;
+    }
+    atFrameBoundary = prev === 0x0a && last === 0x0a;
   });
 
   const timer = setInterval(() => {
@@ -139,6 +153,24 @@ export function proxy(
       res.flushHeaders();
 
       if (streaming && cfg.sseHeartbeatMs > 0) attachHeartbeat(upstreamRes, res);
+
+      /**
+       * An upstream that dies *after* its headers is the case `upstreamReq.on('error')` below does
+       * not cover: once the response callback has run, a broken connection surfaces here, on the
+       * response, not on the request. And `.pipe()` does not forward a source error to its
+       * destination — it only unpipes. So without this the client response was never ended and
+       * never destroyed: the browser held an open, silent connection indefinitely, with no error
+       * event and nothing in the log. A turn stream simply stopped mid-sentence.
+       *
+       * Headers are already sent, so there is no status left to write. Destroying is what tells
+       * the client the response is not coming; `streamTurn` surfaces that as a stream error.
+       */
+      upstreamRes.on('error', (err: NodeJS.ErrnoException) => {
+        log.warn(
+          `upstream stream error for ${req.method} ${upstreamPath}: ${err.message} (${err.code ?? 'no code'})`,
+        );
+        if (!res.writableEnded) res.destroy();
+      });
 
       upstreamRes.pipe(res);
     },

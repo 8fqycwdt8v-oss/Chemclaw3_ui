@@ -40,8 +40,11 @@ const assets = sirv(cfg.clientDir, {
     res.setHeader('x-content-type-options', 'nosniff');
     res.setHeader('referrer-policy', 'same-origin');
     // Omit X-Frame-Options in dev mode so the Replit preview iframe can load the page.
-    // Production (msal auth) keeps the strict DENY.
-    if (cfg.authMode !== 'dev') res.setHeader('x-frame-options', 'DENY');
+    // SAMEORIGIN rather than DENY, for the same reason `frame-ancestors` is 'self': MSAL renews
+    // tokens through a hidden iframe that Entra redirects back to /auth/callback on this origin,
+    // and DENY blocks a page from being framed even by itself. Cross-origin framing — the actual
+    // clickjacking vector — is still refused.
+    if (cfg.authMode !== 'dev') res.setHeader('x-frame-options', 'SAMEORIGIN');
     // Hashed assets are immutable; index.html must never be cached or a deploy won't take.
     if (pathname === '/index.html' || pathname === '/') {
       res.setHeader('cache-control', 'no-cache');

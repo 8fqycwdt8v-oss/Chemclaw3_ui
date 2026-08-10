@@ -27,6 +27,7 @@ findings are listed unverified at the end and should be treated as leads, not re
 ## Critical
 
 ### C1 · Every citation chip in every answer renders empty
+
 `src/components/Markdown.tsx:50`
 
 `src/lib/citations.ts:73` emits `#cite/${kind}/${token}`. The consumer strips the `#cite/` prefix
@@ -51,6 +52,7 @@ subject.
 contact. A unit test asserting `#cite/note/NOTE-1` renders a chip labelled `NOTE-1`.
 
 ### C2 · An upstream failure after headers hangs the browser forever
+
 `server/proxy.ts:143`
 
 `upstreamRes.pipe(res)` does not forward source errors, and the error handler at line 179 is on
@@ -73,6 +75,7 @@ disconnect propagation at line 175, which is load-bearing for Stop.
 **Test:** `server/` has no unit tests at all beyond `routes.test.ts`.
 
 ### C3 · Entra silent token refresh is structurally impossible in production
+
 `server/config.ts:52` + `server/index.ts:44`
 
 MSAL renews tokens through a hidden iframe. That iframe navigates to Entra, which redirects it
@@ -83,7 +86,7 @@ as `index.html` through `sirv`, whose `setHeaders` stamps:
 - `x-frame-options: DENY` for every non-dev mode (`index.ts:44`) — i.e. exactly MSAL mode
 - `frame-ancestors 'none'` for every non-dev mode (`config.ts:52`)
 
-Both forbid the app being framed *at all*, including by itself. The renewal iframe cannot render
+Both forbid the app being framed _at all_, including by itself. The renewal iframe cannot render
 the callback document, MSAL never reads the fragment, and `acquireTokenSilent` times out.
 
 `frame-src: [ENTRA_HOST]` is correct and not the problem — that governs the outbound navigation.
@@ -91,8 +94,8 @@ The blocking directives are the ones governing who may frame this app.
 
 This is the failure `buildCsp`'s own comment describes — "a failure that looks like a random logout
 and is miserable to trace back to a header" — reached through frame directives rather than
-`connect-src`. It is invisible today because, per `ISSUES.md`, *"a real MSAL redirect has not been
-exercised against this router… the e2e suite runs in dev auth mode, which cannot prove it."*
+`connect-src`. It is invisible today because, per `ISSUES.md`, _"a real MSAL redirect has not been
+exercised against this router… the e2e suite runs in dev auth mode, which cannot prove it."_
 
 **Fix:** in msal mode allow same-origin framing of the callback — `frame-ancestors 'self'` and
 either omit `x-frame-options` or use `SAMEORIGIN`. Narrowing the exemption to `/auth/callback` keeps
@@ -101,11 +104,12 @@ either omit `x-frame-options` or use `SAMEORIGIN`. Narrowing the exemption to `/
 `ISSUES.md`, which already tracks this as unproven.
 
 ### C4 · The GxP plan gate silently downgrades to an unbound approval
+
 `src/components/Prompts.tsx:157`
 
-`AuthContext.tsx:13-15` states the contract: *"`ready` is what consumers gate on. Anything that
+`AuthContext.tsx:13-15` states the contract: _"`ready` is what consumers gate on. Anything that
 needs a token — sending, uploading, the session list, the transcript read, the job streams — must
-wait for it."*
+wait for it."_
 
 The plan read needs a token and does not gate on `ready`. Its effect depends only on
 `[sessionId, token]` and fires on mount. The shell deliberately renders before auth resolves
@@ -128,6 +132,7 @@ Given the domain, that is the most consequential defect in this review.
 **Test:** mount the card with auth pending, assert it does not enter `'unavailable'`.
 
 ### C5 · Two tabs silently destroy each other's conversations
+
 `src/state/chatStore.ts:666`
 
 Each tab hydrates `chemclaw3.chat.v2` once at module load, then writes its **entire** in-memory
@@ -148,6 +153,7 @@ conversation.
 ## High
 
 ### H1 · The Retry button after a failed turn is a guaranteed no-op
+
 `src/App.tsx:139` (corroborated independently by three agents)
 
 `TopBar.tsx:8-11` documents the intent exactly: the retryable kinds (503 `capacity`, and the BFF's
@@ -165,6 +171,7 @@ is already gone from the composer.
 failures, rehydrate for transcript failures.
 
 ### H2 · Every store write re-serialises the whole transcript to localStorage
+
 `src/state/chatStore.ts:679`
 
 zustand `persist` runs `partialize` + `JSON.stringify` + a **synchronous** `localStorage.setItem`
@@ -182,6 +189,7 @@ data. That work is pure waste.
 at minimum keep `setDraft` off the persist path.
 
 ### H3 · A localStorage quota error escapes every store action
+
 `src/state/chatStore.ts:675`
 
 Verified by absence: there is **no `try`/`catch` anywhere in `chatStore.ts`** and no
@@ -197,6 +205,7 @@ no error surfaced. The same applies in Safari private mode, where `setItem` thro
 raise a banner rather than throwing into callers.
 
 ### H4 · Auth failure leaves the app permanently half-disabled
+
 `src/auth/AuthContext.tsx:51`
 
 The `.catch` sets a banner but never calls `setReady`. `ready` is a two-state flag over three states
@@ -211,6 +220,7 @@ indication of why the app does nothing.
 **Fix:** model the three states explicitly and give the failure a terminal, retryable state.
 
 ### H5 · The SSE heartbeat suppresses itself when the last chunk does not end on a frame boundary
+
 `server/proxy.ts:68`
 
 `atFrameBoundary` is computed from the current chunk alone, so a frame terminator split across two
@@ -234,18 +244,18 @@ The fleet's verification stage never ran, and I hand-verified only the critical 
 These 70 are **leads, not results**: on a codebase with this much documented deliberate design,
 expect a substantial rejection rate.
 
-| File | Findings | Severities |
-|---|---|---|
-| `server/index.ts` | 8 | M×7 L |
-| `src/components/Composer.tsx` | 5 | M×5 |
-| `src/components/Sidebar.tsx` | 4 | M×4 |
-| `src/state/chatStore.ts` | 4 | M×3 L |
-| `e2e/fixture-service.mjs` | 3 | M L L |
-| `shared/events.ts` | 3 | M M L |
-| `src/components/JobFeed.tsx` | 3 | M M L |
-| `src/components/Molecule.tsx` | 3 | L×3 |
-| `docker-compose.yml`, `server/config.ts`, `server/proxy.ts`, `server/routes.ts`, `src/api/client.ts`, `src/App.tsx`, `src/components/AnswerBadges.tsx`, `src/components/MessageList.tsx`, `src/components/ui/dropdown-menu.tsx`, `src/hooks/useJobStreams.ts`, `vite.config.ts`, `src/components/chem/SkipLinks.tsx`, `start.sh` | 2 each | mixed M/L/N |
-| 11 further files | 1 each | mixed |
+| File                                                                                                                                                                                                                                                                                                                             | Findings | Severities  |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------- |
+| `server/index.ts`                                                                                                                                                                                                                                                                                                                | 8        | M×7 L       |
+| `src/components/Composer.tsx`                                                                                                                                                                                                                                                                                                    | 5        | M×5         |
+| `src/components/Sidebar.tsx`                                                                                                                                                                                                                                                                                                     | 4        | M×4         |
+| `src/state/chatStore.ts`                                                                                                                                                                                                                                                                                                         | 4        | M×3 L       |
+| `e2e/fixture-service.mjs`                                                                                                                                                                                                                                                                                                        | 3        | M L L       |
+| `shared/events.ts`                                                                                                                                                                                                                                                                                                               | 3        | M M L       |
+| `src/components/JobFeed.tsx`                                                                                                                                                                                                                                                                                                     | 3        | M M L       |
+| `src/components/Molecule.tsx`                                                                                                                                                                                                                                                                                                    | 3        | L×3         |
+| `docker-compose.yml`, `server/config.ts`, `server/proxy.ts`, `server/routes.ts`, `src/api/client.ts`, `src/App.tsx`, `src/components/AnswerBadges.tsx`, `src/components/MessageList.tsx`, `src/components/ui/dropdown-menu.tsx`, `src/hooks/useJobStreams.ts`, `vite.config.ts`, `src/components/chem/SkipLinks.tsx`, `start.sh` | 2 each   | mixed M/L/N |
+| 11 further files                                                                                                                                                                                                                                                                                                                 | 1 each   | mixed       |
 
 Two worth surfacing early because they concern the safety signalling this product exists for:
 

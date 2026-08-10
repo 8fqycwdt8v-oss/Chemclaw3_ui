@@ -34,14 +34,20 @@ devDependencies so `vite build` can run. Tests currently cannot be run on Replit
 `<= 20.8.8`. It is dev-only — the vitest DOM environment, never shipped to the browser and absent
 from the runtime image, which carries no `node_modules` at all — but it does execute in CI.
 
-So option 1 above ("pin to an older version not flagged by the scanner") is no longer available:
-there is no `15.x` that clears it. The live choice is between upgrading past `20.8.8` and moving
-the environment to `jsdom`, and the tradeoff is not ours alone to make — the constraint that forced
-the pin is Replit's package firewall, which is external to this repo. Whoever still runs this on
-Replit should confirm the upgrade is not re-blocked before we commit to it.
+Option 1 above ("pin to an older version not flagged by the scanner") is therefore no longer
+available: there is no `15.x` that clears it.
 
-`nanoid@3.3.16` (dev, transitive via `postcss`) is also flagged **high** — infinite loop on zero
-size — and is fixable non-breaking with no such tradeoff.
+**Resolved by upgrading to `happy-dom@^20.11.2`.** This was measured rather than assumed — the
+whole suite passes unchanged on it (163 unit tests, plus typecheck, lint, build and 47 Playwright
+tests), no test needed editing, and `npm audit` now reports **0 vulnerabilities**. Option 2
+(switching to `jsdom`) was not needed and would have touched every `.tsx` test for no benefit.
+
+`nanoid` was bumped 3.3.16 → 3.3.18 in the same pass, clearing the **high** advisory against it.
+
+**The one thing this cannot settle is Replit.** The original 403 was against `happy-dom@16.8.1`
+specifically; whether the firewall also blocks `20.11.2` is not knowable from here. If it does, the
+options in order of preference are `npm overrides` to a non-flagged patch release, or option 2
+above. Do not resolve it by returning to `15.x` — that reintroduces a critical RCE in CI.
 
 ---
 

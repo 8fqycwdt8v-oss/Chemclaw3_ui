@@ -3,3 +3,8 @@ node_modules
 playwright-report
 test-results
 package-lock.json
+
+# Contains a `git format-patch` output verbatim. Prettier strips the single space on a diff's blank
+# context lines, which is exactly the byte that makes `git am` work — formatting this file silently
+# turns a working patch into one that fails to apply.
+BACKEND-SESSION-LISTING.md

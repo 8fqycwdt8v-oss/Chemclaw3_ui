@@ -55,6 +55,20 @@ export interface TraceEntry {
     result?: string;
     failed?: boolean;
     /**
+     * The call ran and how it ended was not recorded. Only a *rehydrated* transcript reaches this.
+     *
+     * The stored transcript pairs calls with results by `call_id` and returns `result: null` when
+     * the pairing is incomplete — which the service's own `TranscriptToolCall` docstring says
+     * happens for a turn that died mid-call **or a result row that was pruned**, and asks a surface
+     * to render as "this ran and we do not know how it ended".
+     *
+     * That is why it is not `failed`. `failed` names an outcome — the tool raised — and retention
+     * deleting a result row is not that outcome. It is not the empty state either: with neither
+     * field set the row reads "running…", which is false inside a transcript that finished days
+     * ago. Three existing states, none of them true, so there is a fourth.
+     */
+    unresolved?: boolean;
+    /**
      * Content address of the untruncated result, when the service stored one.
      *
      * Carried on the trace rather than fetched eagerly: the point of the backend's split is that

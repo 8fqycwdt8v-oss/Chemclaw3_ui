@@ -12,6 +12,7 @@ import { ApiError } from '../api/errors.ts';
 import { streamTurn } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from './chatStore.ts';
+import { useEntityStore } from '../chem/entities.ts';
 import { announceStatus, describeAnswer } from './announce.ts';
 
 export interface SendOptions {
@@ -160,6 +161,12 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         // running yet, and without this the wait is indistinguishable from a hang.
         if (event.type === 'queued') announceStatus('Waiting for a free slot on the server.');
         useChatStore.getState().applyEvent(conversationId, messageId, event);
+        // The conversation's subject index. Fire-and-forget: ingestion canonicalises through
+        // RDKit, so it is asynchronous, and the transcript must not wait on a WASM call to render
+        // the event it has already applied. Named with this conversation's id rather than the
+        // store's idea of the active one — the rail and the transcript have to describe the same
+        // conversation even when the reader has switched away mid-turn.
+        void useEntityStore.getState().ingest(conversationId, messageId, event);
       },
     });
     batcher.flush();

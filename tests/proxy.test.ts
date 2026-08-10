@@ -87,6 +87,49 @@ describe('an upstream that dies after its headers', () => {
   });
 });
 
+describe('a client that goes away first', () => {
+  it('does not report Stop as an upstream failure', async () => {
+    // Stop destroys the upstream request on purpose (that is what releases the backend's turn
+    // lock — there is no cancel endpoint), and the upstream response then emits ECONNRESET on the
+    // way out. Reporting that as an upstream error is both untrue and the kind of log noise that
+    // sends someone hunting a backend problem that never happened.
+    const upstream = await listen((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.flushHeaders();
+      res.write('data: {"type":"token"}\n\n');
+      setInterval(() => {
+        try {
+          res.write(': hb\n\n');
+        } catch {
+          /* the socket is gone; nothing to do */
+        }
+      }, 100).unref();
+    });
+    // console.error, not console.warn: `log.warn` routes warn and error to stderr (server/log.ts).
+    // Spying on the wrong one makes this test pass whether or not the guard exists.
+    const warn = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const bff = await startBff(upstream);
+
+    await new Promise<void>((resolve) => {
+      const r = http.get({ port: bff, path: '/sessions/x/messages' }, (res) => {
+        res.on('data', () => {});
+        res.on('error', () => {});
+        setTimeout(() => {
+          r.destroy(); // the user presses Stop
+          resolve();
+        }, 150);
+      });
+      r.on('error', () => {});
+    });
+    await new Promise((r) => setTimeout(r, 200));
+
+    const upstreamWarnings = warn.mock.calls
+      .map((c) => String(c[0] ?? ''))
+      .filter((m) => m.includes('upstream stream error'));
+    expect(upstreamWarnings).toEqual([]);
+  });
+});
+
 describe('the heartbeat frame-boundary check', () => {
   it('sees a frame terminator split across two chunks', async () => {
     // The frame's two closing newlines are written in separate chunks, so neither chunk on its own

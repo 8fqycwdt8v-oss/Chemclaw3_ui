@@ -121,6 +121,16 @@ export function proxy(
   upstreamPath: string,
   expectSse: boolean,
 ): void {
+  /**
+   * Set when the client goes away first — Stop, a closed tab, a navigation.
+   *
+   * That path tears the upstream request down deliberately (see the `res.on('close')` handler
+   * below), and the upstream response then emits ECONNRESET on the way out. Without this flag the
+   * error handler reports every Stop as an upstream failure, which is both untrue and the sort of
+   * log noise that sends someone looking for a backend problem that never happened.
+   */
+  let clientGone = false;
+
   const upstreamReq = transport.request(
     {
       protocol: upstream.protocol,
@@ -166,6 +176,8 @@ export function proxy(
        * the client the response is not coming; `streamTurn` surfaces that as a stream error.
        */
       upstreamRes.on('error', (err: NodeJS.ErrnoException) => {
+        // Our own teardown coming back at us. Nothing to report and nothing left to close.
+        if (clientGone) return;
         log.warn(
           `upstream stream error for ${req.method} ${upstreamPath}: ${err.message} (${err.code ?? 'no code'})`,
         );
@@ -205,7 +217,10 @@ export function proxy(
    * releases that lock.
    */
   res.on('close', () => {
-    if (!res.writableFinished) upstreamReq.destroy();
+    if (!res.writableFinished) {
+      clientGone = true;
+      upstreamReq.destroy();
+    }
   });
 
   upstreamReq.on('error', (err: NodeJS.ErrnoException) => {

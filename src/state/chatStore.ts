@@ -10,6 +10,7 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+import { coalescedLocalStorage, setQuotaListener } from './persistStorage.ts';
 import type { ChemclawEvent, JobCompletedEvent } from '../../shared/events.ts';
 import type { ApiErrorKind } from '../api/errors.ts';
 import type {
@@ -707,7 +708,10 @@ export const useChatStore = create<ChatState>()(
       // acceptable as the emergency it was the first time.
       name: 'chemclaw3.chat.v2',
       version: 3,
-      storage: createJSONStorage(() => localStorage),
+      // Not bare `localStorage`. persist writes synchronously on every `set()` — once per
+      // animation frame while streaming — and a quota failure used to escape into whichever
+      // action happened to trigger it. See `persistStorage.ts`; the shape written is unchanged.
+      storage: createJSONStorage(() => coalescedLocalStorage),
 
       migrate: migratePersisted,
 
@@ -758,3 +762,13 @@ export const useChatStore = create<ChatState>()(
     },
   ),
 );
+
+/**
+ * Surface a persist failure instead of throwing it into whichever action triggered the write.
+ *
+ * Registered here rather than inside the adapter because the banner is this store's to raise, and
+ * the adapter must stay usable without one.
+ */
+setQuotaListener((message) => {
+  useChatStore.getState().setBanner({ kind: 'warn', text: message });
+});

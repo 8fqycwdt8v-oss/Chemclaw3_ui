@@ -24,6 +24,32 @@ findings are listed unverified at the end and should be treated as leads, not re
 
 ---
 
+## Status
+
+Fixed and pushed, each with a regression test that fails without it: **C1, C2, C3, C4, H1, H2,
+H3, H4, H5** — nine of the ten. Full gate green after every batch: typecheck, lint, format, 150
+unit tests (up from 125), 46/46 contrast pairs, build, Playwright desktop + mobile, and
+`scripts/smoke.mjs` reporting frames arriving incrementally, which is the check that guards the
+streaming path the proxy changes touched.
+
+**Outstanding: C5**, the multi-tab last-writer-wins. The write path it depends on has been
+rebuilt underneath it — writes now go through `src/state/persistStorage.ts` — so the merge has a
+single place to live, but reconciling two tabs' conversations is a design decision (merge by id
+and `updatedAt`, or take a `navigator.locks` write lock) rather than a mechanical fix, and it is
+better made deliberately than at the end of a long session.
+
+Two notes on what the fixes revealed:
+
+- **H1 needed a store primitive that did not exist.** Retrying a turn means replacing the trailing
+  failed pair, and nothing could remove a message. `prepareRetry` pops a `[user, failed assistant]`
+  pair and returns the question, which both discriminates the banner's two producers and lets
+  `sendMessage` re-append on its normal path instead of needing a second send path.
+- **H4 was two bugs.** Beyond `ready` never reaching a terminal state, the "Sign in again" button
+  it offered called `pendingAuth.login()` — a deliberate no-op — so the one failure that disables
+  the whole app had a button that did nothing.
+
+---
+
 ## Critical
 
 ### C1 · Every citation chip in every answer renders empty

@@ -8,6 +8,7 @@
  */
 
 import http from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { existsSync } from 'node:fs';
 import sirv from 'sirv';
 import { cfg, validateConfig } from './config.ts';
@@ -22,35 +23,54 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-if (!existsSync(cfg.clientDir)) {
+const clientDirExists = existsSync(cfg.clientDir);
+if (!clientDirExists) {
   log.warn(`client directory ${cfg.clientDir} does not exist — static assets will 404.`);
   log.warn('Run `npm run build:client` first, or use `npm run dev` for the Vite dev server.');
 }
 
-const assets = sirv(cfg.clientDir, {
-  // SPA fallback, so /auth/callback and any client route resolve to index.html.
-  single: true,
-  etag: true,
-  // Serve Vite's precompressed output rather than compressing at request time. This is both
-  // faster and keeps any compression middleware — which would break SSE — out of the process.
-  gzip: true,
-  brotli: true,
-  setHeaders(res, pathname) {
-    res.setHeader('content-security-policy', cfg.csp);
-    res.setHeader('x-content-type-options', 'nosniff');
-    res.setHeader('referrer-policy', 'same-origin');
-    // Omit X-Frame-Options in dev mode so the Replit preview iframe can load the page.
-    // SAMEORIGIN rather than DENY, for the same reason `frame-ancestors` is 'self': MSAL renews
-    // tokens through a hidden iframe that Entra redirects back to /auth/callback on this origin,
-    // and DENY blocks a page from being framed even by itself. Cross-origin framing — the actual
-    // clickjacking vector — is still refused.
-    if (cfg.authMode !== 'dev') res.setHeader('x-frame-options', 'SAMEORIGIN');
-    // Hashed assets are immutable; index.html must never be cached or a deploy won't take.
-    if (pathname === '/index.html' || pathname === '/') {
-      res.setHeader('cache-control', 'no-cache');
-    }
-  },
-});
+/**
+ * Built only when the directory is there.
+ *
+ * `sirv` reads the tree eagerly at construction and throws ENOENT if it is missing — one line
+ * after the warning above promises 404s instead. So a fresh clone running `npm run dev`, which
+ * starts this process before anything has been built, got a dead BFF and a stack trace rather
+ * than the degraded-but-running server the warning describes.
+ */
+const assets = !clientDirExists
+  ? (_req: IncomingMessage, _res: ServerResponse, next: () => void): void => next()
+  : sirv(cfg.clientDir, {
+      // SPA fallback, so /auth/callback and any client route resolve to index.html.
+      single: true,
+      etag: true,
+      // Serve Vite's precompressed output rather than compressing at request time. This is both
+      // faster and keeps any compression middleware — which would break SSE — out of the process.
+      gzip: true,
+      brotli: true,
+      setHeaders(res, pathname) {
+        res.setHeader('content-security-policy', cfg.csp);
+        res.setHeader('x-content-type-options', 'nosniff');
+        res.setHeader('referrer-policy', 'same-origin');
+        // Omit X-Frame-Options in dev mode so the Replit preview iframe can load the page.
+        // SAMEORIGIN rather than DENY, for the same reason `frame-ancestors` is 'self': MSAL renews
+        // tokens through a hidden iframe that Entra redirects back to /auth/callback on this origin,
+        // and DENY blocks a page from being framed even by itself. Cross-origin framing — the actual
+        // clickjacking vector — is still refused.
+        if (cfg.authMode !== 'dev') res.setHeader('x-frame-options', 'SAMEORIGIN');
+        // Hashed assets are immutable; index.html must never be cached or a deploy won't take.
+        //
+        // Keyed off what is actually SERVED, not what was requested. `single: true` answers every
+        // client route with index.html, so testing the request path missed `/c/:id` and `/s/:id` —
+        // precisely the URLs a user reloads or has bookmarked. Those got a validator and no
+        // `cache-control`, so a deploy did not take for the people most likely to have the app open.
+        // Anything without a file extension is a client route, and therefore the shell.
+        const servesTheShell =
+          pathname === '/' || !pathname.slice(pathname.lastIndexOf('/')).includes('.');
+        if (servesTheShell) {
+          res.setHeader('cache-control', 'no-cache');
+        }
+      },
+    });
 
 const server = http.createServer((req, res) => {
   const rawUrl = req.url ?? '/';
@@ -91,12 +111,26 @@ const server = http.createServer((req, res) => {
 });
 
 // Must exceed any fronting load balancer's idle timeout, or connection reuse races produce
-// sporadic 502s. `requestTimeout` measures time to RECEIVE a request, not to respond, so
-// disabling it does not affect long SSE responses — but set it explicitly so nobody has to
-// re-derive that when they see a 600s stream and a 300s default in the Node docs.
+// sporadic 502s.
 server.keepAliveTimeout = 120_000;
 server.headersTimeout = 125_000;
-server.requestTimeout = 0;
+// `requestTimeout` bounds time to RECEIVE a request, not to respond — so it never had anything to
+// do with the 600s SSE responses the previous `0` was set to protect. Disabling it only removed
+// the sole bound on the attachment upload path, where a client can hold a socket open by sending
+// a body one byte at a time and nothing reaps it. Five minutes is far above any real upload here
+// and far below forever.
+server.requestTimeout = 300_000;
+
+server.on('error', (err: NodeJS.ErrnoException) => {
+  // EADDRINUSE is the common one and deserves the same treatment as a bad config value, which
+  // this file otherwise takes care to report readably.
+  log.error(
+    err.code === 'EADDRINUSE'
+      ? `config: port ${cfg.port} is already in use`
+      : `server error: ${err.message}`,
+  );
+  process.exit(1);
+});
 
 server.listen(cfg.port, cfg.bindHost, () => {
   log.info(`chemclaw3-ui listening on http://${cfg.bindHost}:${cfg.port}`);
@@ -107,7 +141,15 @@ server.listen(cfg.port, cfg.bindHost, () => {
     // Mirrors the backend's own fail-closed warning. With CHEMCLAW_ENTRA_REQUIRED=false every
     // request upstream runs as a shared dev principal with all authorization gates open, so a
     // network-reachable UI in that mode is an open door to the agent and its tools.
-    log.warn(
+    // `error`, not `warn`. This is the only notice that the front door is open, and at warn level
+    // `LOG_LEVEL=error` — a perfectly ordinary production setting — deleted it entirely, leaving
+    // nothing at all to say the app was reachable with no sign-in.
+    //
+    // Deliberately still a log line rather than a refusal to boot: docker-compose.yml and start.sh
+    // both bind 0.0.0.0 with AUTH_MODE=dev on purpose, so failing closed here would break the
+    // documented quickstart. Whether that combination should be allowed at all is a policy call
+    // for this repo's owners, not something to change underneath them.
+    log.error(
       'SECURITY: AUTH_MODE=dev on a non-loopback bind. No sign-in is required and the backend ' +
         'is almost certainly running with CHEMCLAW_ENTRA_REQUIRED=false, meaning every request ' +
         'is a shared principal with all authorization gates open. Do not expose this beyond a ' +

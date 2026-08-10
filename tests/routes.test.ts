@@ -111,7 +111,17 @@ describe('proxy route whitelist', () => {
     it('still refuses an id with a raw path separator or over the length cap', () => {
       // A raw (unencoded) slash would change the route's shape, not just its parameter.
       expect(resolveRoute('GET', '/api/approvals/approval-a/b')).toBeNull();
-      expect(resolveRoute('GET', `/api/approvals/${'a'.repeat(129)}`)).toBeNull();
+      expect(resolveRoute('GET', `/api/approvals/${'a'.repeat(513)}`)).toBeNull();
+    });
+
+    it('admits a hold id whose ENCODED form is long', () => {
+      // The cap counts what arrives, which is percent-encoded. `encodeURIComponent` turns one
+      // non-ASCII character into up to nine bytes, so the old 128 refused ids far shorter than it
+      // looked like it allowed — and the refusal reached the chemist as a 404 on Approve.
+      const id = `approval-${'ä'.repeat(40)}`;
+      const encoded = encodeURIComponent(id);
+      expect(encoded.length).toBeGreaterThan(128);
+      expect(resolveRoute('GET', `/api/approvals/${encoded}`)).not.toBeNull();
     });
   });
 });

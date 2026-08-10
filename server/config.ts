@@ -6,6 +6,8 @@
  * at BUILD time, which is exactly what we are working around).
  */
 
+import { fileURLToPath } from 'node:url';
+
 export type AuthMode = 'dev' | 'msal';
 
 const str = (name: string, fallback = ''): string => process.env[name]?.trim() || fallback;
@@ -90,7 +92,11 @@ export interface BffConfig {
 export const cfg: BffConfig = {
   port: num('PORT', 8080),
   bindHost: str('BIND_HOST', '0.0.0.0'),
-  clientDir: str('CLIENT_DIR', new URL('./client', import.meta.url).pathname),
+  // `fileURLToPath`, not `.pathname`: a file URL percent-encodes whatever the path needs escaped,
+  // so an install directory containing a space or a non-ASCII character resolved to a path that
+  // does not exist — and `sirv` reads eagerly, making that a hard boot failure rather than a 404.
+  // `vite.config.ts` already resolves it this way.
+  clientDir: str('CLIENT_DIR', fileURLToPath(new URL('./client', import.meta.url))),
   // The Chemclaw3 service. In compose this is the service name; locally, a uvicorn on :8080.
   apiUrl: str('CHEMCLAW_API_URL', 'http://127.0.0.1:8080'),
   authMode,
@@ -123,6 +129,21 @@ export function validateConfig(c: BffConfig = cfg): string[] {
     const parsed = new URL(c.apiUrl);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       problems.push(`CHEMCLAW_API_URL must be http(s), got ${parsed.protocol}`);
+    }
+    // Refuse to proxy to ourselves. The default PORT and the default upstream port are both 8080,
+    // so `docker run` with neither set produced a process that forwarded /api to its own listener:
+    // it passed its own healthcheck and answered POST /api/sessions with index.html — a shape that
+    // looks like a backend fault from every angle except this one.
+    const upstreamPort = Number(parsed.port || (parsed.protocol === 'https:' ? 443 : 80));
+    // `URL.hostname` keeps the brackets on an IPv6 literal, so '::1' alone never matches.
+    const loopback = ['127.0.0.1', 'localhost', '::1', '[::1]', '0.0.0.0'].includes(
+      parsed.hostname,
+    );
+    if (loopback && upstreamPort === c.port) {
+      problems.push(
+        `CHEMCLAW_API_URL points at this server's own port (${c.port}) — point it at the ` +
+          'Chemclaw service, or move PORT',
+      );
     }
   } catch {
     problems.push(`CHEMCLAW_API_URL is not a valid URL: ${JSON.stringify(c.apiUrl)}`);

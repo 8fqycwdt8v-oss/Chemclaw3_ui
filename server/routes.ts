@@ -26,9 +26,15 @@ const SID = '([0-9a-f]{32})';
  * the approval and its Approve button would 404 here, never reaching the service.
  *
  * The set is therefore exactly what `encodeURIComponent` can emit: its unreserved characters
- * `A-Za-z0-9-_.!~*'()` plus `%` for the escapes it produces. Note it does NOT escape `!~*'()`,
+ * `A-Za-z0-9-_.!~*'()` plus `%` for the escapes it produces. (`:` was in this class and is not one
+ * of them; it is gone, and nothing exercised it.) Note it does NOT escape `!~*'()`,
  * so `approval-Suzuki(A)` arrives literally — a pattern that merely added `%` would still have
  * refused that one. A test pins each case.
+ *
+ * The length cap counts ENCODED characters, which is what actually arrives here. That is why it
+ * is 512 rather than 128: `encodeURIComponent` turns one non-ASCII character into up to nine
+ * bytes, so a 128-cap measured post-encoding refused hold ids far shorter than it appeared to
+ * allow — and the refusal surfaced as a 404 from this proxy on a legitimate Approve click.
  *
  * Widening here is safe in a way it would not be for `SID`: this segment is forwarded
  * still-encoded, and the service uses the decoded value purely as a Temporal workflow-id lookup,
@@ -36,7 +42,7 @@ const SID = '([0-9a-f]{32})';
  * still fails to match, because that would change the route's shape rather than its parameter.
  * The length cap and the closed character set still hold.
  */
-const APPROVAL = "([A-Za-z0-9._:~!*'()%-]{1,128})";
+const APPROVAL = "([A-Za-z0-9._~!*'()%-]{1,512})";
 
 export interface Route {
   method: string;

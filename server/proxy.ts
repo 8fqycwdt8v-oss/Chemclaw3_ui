@@ -29,7 +29,13 @@ const transport = upstream.protocol === 'https:' ? https : http;
 const agent = new transport.Agent({
   keepAlive: true,
   keepAliveMsecs: 15_000,
-  maxSockets: 128,
+  // Unbounded on purpose. Every SSE stream pins a socket for its whole lifetime — a turn plus up
+  // to MAX_JOB_STREAMS job streams per open tab — so a cap here is reached by ordinary use, not by
+  // abuse. And the failure it produces is the worst available shape: requests past the cap queue
+  // inside the agent without a socket, so `.on('socket')` never fires, the connect timeout never
+  // arms, nothing logs, and every /api call simply hangs forever with the process looking healthy.
+  // The real bound on concurrency is the backend's own; queueing here only hides it.
+  maxSockets: Infinity,
   timeout: 0,
 });
 
@@ -83,12 +89,19 @@ function attachHeartbeat(upstreamRes: IncomingMessage, res: ServerResponse): voi
     atFrameBoundary = prev === 0x0a && last === 0x0a;
   });
 
-  const timer = setInterval(() => {
-    if (res.writableEnded || res.destroyed) return;
-    if (Date.now() - lastChunkAt < cfg.sseHeartbeatMs) return;
-    if (!atFrameBoundary) return;
-    res.write(': hb\n\n');
-  }, cfg.sseHeartbeatMs);
+  // Tick at half the threshold. With one value used as both, a gap that opened just after a tick
+  // was not noticed until the next one, so the worst-case wire silence was 2x SSE_HEARTBEAT_MS —
+  // the knob did not bound what its name says it bounds, which matters when it is being set to sit
+  // under a specific intermediary's idle timeout.
+  const timer = setInterval(
+    () => {
+      if (res.writableEnded || res.destroyed) return;
+      if (Date.now() - lastChunkAt < cfg.sseHeartbeatMs) return;
+      if (!atFrameBoundary) return;
+      res.write(': hb\n\n');
+    },
+    Math.max(1, Math.floor(cfg.sseHeartbeatMs / 2)),
+  );
 
   const stop = (): void => clearInterval(timer);
   res.on('close', stop);

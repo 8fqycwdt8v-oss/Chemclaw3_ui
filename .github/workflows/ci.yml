@@ -6,6 +6,14 @@ on:
     branches: [main]
   pull_request:
 
+# One run per ref. The full job builds, installs a browser and runs Playwright twice over, so a
+# branch pushed three times in a minute otherwise queues three of them and the two older ones can
+# only ever report on code nobody is looking at any more. `main` is exempt: every commit there is
+# a release candidate and its result is worth having even if a newer one is already running.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -17,6 +25,13 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      # Both advisories this repo carried — a critical RCE in happy-dom and a high in nanoid —
+      # sat in the lockfile for weeks and were found by reading `npm audit` output by hand during
+      # a review. Blocking rather than advisory: an advisory check that nobody reads is the state
+      # we were already in. `high` rather than `critical` because the nanoid one was a high.
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
 
       - name: Typecheck
         run: npm run typecheck

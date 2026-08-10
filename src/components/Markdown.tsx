@@ -71,7 +71,10 @@ const components: Components = {
       // every citation chip therefore rendered as an empty button — the linkified id, the whole
       // point of the plugin, was invisible on screen.
       const [kind = 'note', id = ''] = href.slice('#cite/'.length).split('/');
-      return <CitationChip kind={kind} id={id} />;
+      // Narrowed here rather than defaulted inside the chip: the href is a string this plugin
+      // wrote, but it is still a string, and the palette is now a total map over the two kinds
+      // `kindOf` emits. Anything else is a note, which is what it rendered as before anyway.
+      return <CitationChip kind={kind === 'job' ? 'job' : 'note'} id={id} />;
     }
     if (href?.startsWith(FIGURE_HREF)) {
       return <FigureMark grounding={href.slice(FIGURE_HREF.length)}>{children}</FigureMark>;

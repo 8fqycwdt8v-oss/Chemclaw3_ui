@@ -27,6 +27,7 @@
 
 import { visit, SKIP } from 'unist-util-visit';
 import type { Node, Parent } from 'unist';
+import type { KnownTool } from '../../shared/events.ts';
 import type { TraceEntry } from '../state/types.ts';
 
 interface TextNode extends Node {
@@ -140,8 +141,16 @@ export function isGroundedFigure(
  * No sign in the pattern: a leading `-` is decided by what precedes it, because `5-10` is a range
  * of two positive numbers and `≈ -4.76` is one negative one, and a regex that swallows the hyphen
  * cannot tell them apart.
+ *
+ * **A comma is a thousands separator or it is not part of the number.** This used to read
+ * `\d[\d,]*`, which swallowed any comma between digits — so `1,2-dichloroethane` yielded the
+ * literal `1,2`, `Number("12")` read it as twelve, and the compound's *name* rendered as a grounded
+ * figure the moment any tool in the turn returned 12, 1.2 or 1 200 under one of the scale factors.
+ * Locant lists are not an edge case in chemistry prose: `2,6-lutidine`, `1,3-butadiene`,
+ * `1,2,4-trimethylbenzene`. So a comma counts only in front of exactly three digits, and
+ * `figuresIn` drops the survivors of a `digit,digit` pair outright.
  */
-const DIGIT_RUN = /\d[\d,]*(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+const DIGIT_RUN = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
 
 /** Characters that make a preceding position part of a word rather than a boundary. A `-` is NOT
  *  one: it separates a range, and it also joins an identifier — the leading-zero and
@@ -166,6 +175,8 @@ export interface Figure {
  * - a run following `.` — the third component of `1.2.3`, which is a version and not a decimal;
  * - a leading zero followed by another digit — `08` in a date, `007` in an id;
  * - a run followed by a word character, which is a unit or an identifier glued on;
+ * - either half of a `digit,digit` pair the thousands rule did not accept — the locants of
+ *   `1,2-dichloroethane` and `2,6-lutidine`, which are positions on a ring and not quantities;
  * - anything longer than 15 digits, which no calculator in this system reports.
  */
 export function figuresIn(text: string): Figure[] {
@@ -174,15 +185,21 @@ export function figuresIn(text: string): Figure[] {
     const digits = match[0];
     const at = match.index ?? 0;
     const before = text[at - 1] ?? '';
+    const twoBefore = text[at - 2] ?? '';
     const after = text[at + digits.length] ?? '';
+    const twoAfter = text[at + digits.length + 1] ?? '';
     if (WORD_BEFORE.test(before)) continue;
     if (/\w/.test(after)) continue;
     if (/^0\d/.test(digits)) continue;
+    // A bare comma between two digits, on either side. `DIGIT_RUN` has already claimed every
+    // comma that separates thousands, so what is left is a locant list — and one half of `1,2`
+    // read as the number 1 is no better than the whole of it read as 12.
+    if (after === ',' && /\d/.test(twoAfter)) continue;
+    if (before === ',' && /\d/.test(twoBefore)) continue;
     if (digits.replace(/\D/g, '').length > 15) continue;
 
     // A `-` is a sign only where a number could start: after whitespace, an opening bracket, or
     // nothing. Between two digits it is a range, and both ends are positive.
-    const twoBefore = text[at - 2] ?? '';
     const signed = before === '-' && !/[A-Za-z0-9_.]/.test(twoBefore);
     const start = signed ? at - 1 : at;
     const literal = text.slice(start, at + digits.length);
@@ -302,7 +319,10 @@ const LEDGER = 'Calibration ledger';
 const STORE = 'Calculation store';
 const RETRIEVAL = 'Knowledge-graph retrieval';
 
-const TOOL_METHOD: Record<string, ToolMethod> = {
+/** Keyed on `KnownTool` — the tool list in `shared/events.ts` — so a method attributed to a tool
+ *  the backend does not have will not compile. Partial, because a tool with no sourced method
+ *  belongs here as an absence: `methodFor` returns null and no badge renders. */
+const TOOL_METHOD: Partial<Record<KnownTool, ToolMethod>> = {
   // calc — inline GFN2-xTB calculators. Bundle manifest: "Fast cached property calculators …
   // heavy QM goes through the durable compute_dft_energy instead."
   compute_xtb_energy: {
@@ -521,8 +541,10 @@ const TOOL_METHOD: Record<string, ToolMethod> = {
 };
 
 /** The method behind a tool, or null for one this map does not know. Null renders no badge:
- *  a wrong method claim is worse than a missing one. */
-export const methodFor = (tool: string): ToolMethod | null => TOOL_METHOD[tool] ?? null;
+ *  a wrong method claim is worse than a missing one. Takes a plain string, because the name came
+ *  off the wire and the backend adds tools without asking this repo. */
+export const methodFor = (tool: string): ToolMethod | null =>
+  (TOOL_METHOD as Record<string, ToolMethod | undefined>)[tool] ?? null;
 
 /* ---------------------------------------------------------- lost capability */
 

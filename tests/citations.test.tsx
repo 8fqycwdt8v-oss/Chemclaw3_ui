@@ -113,6 +113,21 @@ describe('with the authoritative list', () => {
     );
     expect(chips().sort()).toEqual(['compound-4-bromoanisole', 'qm-a1b2c3d4']);
   });
+
+  it('tells a job chip apart from a note chip on sight', () => {
+    // The palette still keyed on `reaction`/`note`/`qm` — the vocabulary from before ids were read
+    // off the corpus — so `PALETTE['job']` was undefined and a durable run rendered in the note
+    // tone. They are different things to click on and they now look different.
+    const { container } = render(
+      <Markdown noteIds={['compound-4-bromoanisole']}>
+        {'Launched qm-a1b2c3d4 for compound-4-bromoanisole.'}
+      </Markdown>,
+    );
+    const tone = (id: string): string =>
+      [...container.querySelectorAll('button')].find((b) => b.textContent === id)?.className ?? '';
+    expect(tone('qm-a1b2c3d4')).not.toBe(tone('compound-4-bromoanisole'));
+    expect(tone('qm-a1b2c3d4')).toContain('accent');
+  });
 });
 
 describe('without one', () => {

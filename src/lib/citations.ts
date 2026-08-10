@@ -55,7 +55,7 @@ const escapeForRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\
  * `\b` is a boundary between a word and a non-word character, and a note id continues past several
  * of those: `rxn-4821` sits inside `rxn-4821.a`, and `\b` on the `.` would chip a *prefix* of the
  * token in the text as though the whole id had matched. So the alphabet an id may continue with
- * (`looksLikeNoteId`: `[A-Za-z0-9_.-]`) is what must not follow.
+ * (`NOTE_ID_PATTERN`'s own `[A-Za-z0-9_.-]`) is what must not follow.
  *
  * Except a trailing `.` — which is how a chemist ends a sentence, and demanding its absence outright
  * meant no id at the end of one was ever chipped. A `.` only continues an id when a character of
@@ -104,9 +104,20 @@ function citationPattern(noteIds: readonly string[]): RegExp {
   );
 }
 
+/**
+ * What a chip is a chip *of*.
+ *
+ * Two members, and the type is exported so `CitationChip` can key its palette on the same closed
+ * set rather than on a vocabulary nobody produces. The previous one was `reaction`/`note`/`qm`:
+ * `kindOf` stopped emitting all three some time ago, so `PALETTE['job']` was undefined and every
+ * job id rendered in the note tone — the two became indistinguishable at exactly the point the
+ * distinction was introduced.
+ */
+export type CitationKind = 'note' | 'job';
+
 /** A token the service named as a note is a note, whatever its prefix happens to look like —
  *  `report-` and `bo-` are minted as both note ids and job ids. */
-const kindOf = (token: string, authoritative: ReadonlySet<string>): string =>
+const kindOf = (token: string, authoritative: ReadonlySet<string>): CitationKind =>
   authoritative.has(token) || !isJobId(token) ? 'note' : 'job';
 
 /**

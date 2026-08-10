@@ -9,7 +9,7 @@
 
 import { useEffect, useMemo, useRef } from 'react';
 import type { AssistantMessage, ChatMessage, Conversation, TurnError } from '../state/types.ts';
-import { messagesFor, useEntityStore } from '../chem/entities.ts';
+import { entitiesOf, messagesFor, useEntityStore } from '../chem/entities.ts';
 import { returnedFigures } from '../chem/provenance.ts';
 import { returnedNoteIds } from '../lib/citations.ts';
 import { Markdown } from './Markdown.tsx';
@@ -133,7 +133,7 @@ function AssistantBubble({
         />
       )}
 
-      <AnswerFooter message={message} />
+      <AnswerFooter message={message} figures={figures} />
       <TracePanel trace={message.trace} />
     </div>
   );
@@ -186,8 +186,15 @@ export function MessageList({
   // Selecting an entity in the rail narrows the transcript to the turns that mention it. The user
   // message that *prompted* a matching assistant turn comes along with it: an answer shown without
   // the question it answers reads as the agent volunteering something.
-  const selected = useEntityStore((s) => s.selected);
-  const selectedEntity = useEntityStore((s) => (s.selected ? s.entities[s.selected] : undefined));
+  //
+  // Read from THIS conversation's index, which is the whole of the fix for a filter that used to
+  // match these message ids against another conversation's mentions — matching nothing, and
+  // rendering "no turn mentions that" over a transcript full of turns.
+  const selected = useEntityStore((s) => entitiesOf(s, conversation.id).selected);
+  const selectedEntity = useEntityStore((s) => {
+    const slice = entitiesOf(s, conversation.id);
+    return slice.selected ? slice.entities[slice.selected] : undefined;
+  });
 
   const filtered = useMemo(() => {
     if (!selected) return conversation.messages;

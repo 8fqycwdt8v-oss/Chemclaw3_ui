@@ -170,6 +170,22 @@ describe('what may be flagged', () => {
     expect(figuresIn('on 2026-08-04').map((f) => f.text)).toEqual(['2026']);
     expect(figuresIn('version 1.2.3').map((f) => f.text)).toEqual(['1.2']);
   });
+
+  it('reads the locants in a compound name as no figure at all', () => {
+    // The pattern used to allow a comma anywhere inside a digit run, so `1,2` came out as the
+    // literal "1,2" and `Number` read it as twelve — and a turn whose tools returned 12, 1.2 or
+    // 1 200 would have painted the *name* of the compound as a grounded figure. Locant lists are
+    // the common case in chemical names, not an oddity.
+    expect(figuresIn('1,2-dichloroethane in 2,6-lutidine').map((f) => f.text)).toEqual([]);
+    expect(figuresIn('1,3-butadiene and 1,2,4-trimethylbenzene').map((f) => f.text)).toEqual([]);
+    expect(verdict('1,2', [12])).toBe('NOT-A-FIGURE');
+  });
+
+  it('still reads a thousands separator as one number', () => {
+    // The reason the comma was allowed in the first place, and it survives: three digits after it.
+    expect(figuresIn('5,000 g and 1,234.5 mL').map((f) => f.value)).toEqual([5000, 1234.5]);
+    expect(verdict('1,234.5', [1234.5])).toBe('grounded');
+  });
 });
 
 describe('rendering the marks', () => {
@@ -225,15 +241,31 @@ describe('verified_by', () => {
     expect(screen.getByText(/deterministic citation gate/i)).toBeTruthy();
   });
 
-  it('says verification was off when it was', () => {
-    render(<ReviewRequiredPill message={message({ reviewRequired: true, verifiedBy: null })} />);
-    expect(screen.getByText(/not enabled on this deployment/i)).toBeTruthy();
+  it('claims nothing about a deployment whose turn did not say what checked it', () => {
+    // `null` is the absence of a field, not a statement that verification is off — it is equally
+    // what an older backend and an unrecognised verifier name look like. Claiming "not enabled"
+    // here contradicted the footer four lines below, which was rendering a real confidence score
+    // for the same turn.
+    render(
+      <ReviewRequiredPill
+        message={message({ reviewRequired: true, confidence: 0.4, verifiedBy: null })}
+      />,
+    );
+    expect(screen.getByText(/Needs expert review\./)).toBeTruthy();
+    expect(screen.queryByText(/not enabled on this deployment/i)).toBeNull();
+    expect(screen.queryByText(/nothing scored this answer/i)).toBeNull();
+    expect(screen.queryByText(/not judged/i)).toBeNull();
   });
 
   it('names the check beside the confidence score', () => {
     // A citation-gate 1.00 and a judged 1.00 are not the same object; the backend measured the
     // fallback as the more generous of the two.
-    render(<AnswerFooter message={message({ confidence: 1, verifiedBy: 'citation-gate' })} />);
+    render(
+      <AnswerFooter
+        message={message({ confidence: 1, verifiedBy: 'citation-gate' })}
+        figures={[]}
+      />,
+    );
     expect(screen.getByText(/checked by: citation gate/i)).toBeTruthy();
   });
 });

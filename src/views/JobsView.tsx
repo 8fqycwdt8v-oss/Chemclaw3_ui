@@ -17,7 +17,7 @@ import { useMemo, useState } from 'react';
 import { api, type DurableJobStatus, type JobRecordSummary } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
-import { useEntityStore, type JobEntity } from '../chem/entities.ts';
+import { runningJobs, useEntityStore } from '../chem/entities.ts';
 import { JobResultCard } from '../components/JobResultCard.tsx';
 import { cn } from '../lib/cn.ts';
 import { Button, Callout, Page, Pill, When, type Tone } from './ui.tsx';
@@ -46,21 +46,16 @@ export function JobsView(): React.JSX.Element {
   const records = useResource<JobRecordSummary[]>((getToken) => api.listJobs(getToken), []);
   const [selected, setSelected] = useState<string | null>(null);
 
-  // Jobs this browser saw start. `useJobFeed` stays mounted at the App level, so a completion that
-  // lands while this page is open updates these rows without a refresh.
+  // Jobs this browser saw start, in EVERY conversation — the entity index is per conversation and
+  // this surface deliberately is not, because a durable run outliving its chat is the whole reason
+  // the page exists. `useJobFeed` stays mounted at the App level, so a completion that lands while
+  // this page is open updates these rows without a refresh.
   //
-  // Two selectors and a `useMemo`, not one selector that filters. Zustand v5 compares the selector
-  // result by reference, so a selector returning a freshly-built array is a new snapshot on every
-  // render — which is an infinite render loop, not a slow component.
-  const entities = useEntityStore((s) => s.entities);
-  const order = useEntityStore((s) => s.order);
-  const live = useMemo(
-    () =>
-      order
-        .map((key) => entities[key])
-        .filter((e): e is JobEntity => e?.kind === 'job' && e.status === 'running'),
-    [order, entities],
-  );
+  // A selector for the raw map and a `useMemo` over it, not one selector that filters. Zustand v5
+  // compares the selector result by reference, so a selector returning a freshly-built array is a
+  // new snapshot on every render — which is an infinite render loop, not a slow component.
+  const byConversation = useEntityStore((s) => s.byConversation);
+  const live = useMemo(() => runningJobs(byConversation), [byConversation]);
 
   return (
     <Page

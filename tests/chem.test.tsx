@@ -14,9 +14,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import {
-  isCalcRef,
+  NOTE_ID_PATTERN,
   isJobId,
-  looksLikeNoteId,
   looksLikeReactionSmiles,
   looksLikeSmiles,
   smilesFromArguments,
@@ -64,19 +63,20 @@ describe('looksLikeReactionSmiles', () => {
 describe('identifier shapes', () => {
   it('recognises the note prefixes this system actually mints', () => {
     // The list these come from replaced `reaction-` and `note-`, which matched nothing the backend
-    // has ever written — so the citation chip was firing on almost no real citation.
+    // has ever written — so the citation chip was firing on almost no real citation. Asserted
+    // through the pattern the remark plugin actually uses: the whole-string twin that used to be
+    // tested here was read by nothing else, and a rule with two spellings drifts.
+    const matches = (text: string): boolean => new RegExp(NOTE_ID_PATTERN.source).test(text);
     for (const id of ['compound-4-bromoanisole', 'rxn-suzuki-biaryl', 'playbook-degassing']) {
-      expect(looksLikeNoteId(id), id).toBe(true);
+      expect(matches(id), id).toBe(true);
     }
-    expect(looksLikeNoteId('note-something')).toBe(false);
-    expect(looksLikeNoteId('ordinary-word')).toBe(false);
+    expect(matches('note-something')).toBe(false);
+    expect(matches('ordinary-word')).toBe(false);
   });
 
-  it('recognises job ids and calc refs', () => {
+  it('recognises job ids', () => {
     expect(isJobId('qm-abc123')).toBe(true);
     expect(isJobId('qm-')).toBe(false);
-    expect(isCalcRef('xtb@1.2.3:deadbeef:cafe1234')).toBe(true);
-    expect(isCalcRef('not a ref')).toBe(false);
   });
 });
 

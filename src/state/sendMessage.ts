@@ -95,7 +95,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         // Fire-and-forget: ingestion canonicalises through RDKit, so it is asynchronous, and the
         // transcript must never wait on the entity rail. A structure that arrives in the rail a
         // moment after the trace row is fine; a stalled token stream is not.
-        void useEntityStore.getState().ingest(messageId, event);
+        void useEntityStore.getState().ingest(conversationId, messageId, event);
       },
     });
     batcher.flush();

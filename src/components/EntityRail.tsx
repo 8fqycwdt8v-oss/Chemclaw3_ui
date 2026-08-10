@@ -16,6 +16,7 @@
  */
 
 import {
+  entitiesOf,
   useEntityStore,
   type Entity,
   type JobEntity,
@@ -81,9 +82,15 @@ function MoleculeRow({ entity }: { entity: MoleculeEntity }): React.JSX.Element 
   );
 }
 
-function Row({ entity }: { entity: Entity }): React.JSX.Element {
-  const selected = useEntityStore((s) => s.selected === entity.key);
-  const pinned = useEntityStore((s) => s.pinned.includes(entity.key));
+function Row({
+  conversationId,
+  entity,
+}: {
+  conversationId: string;
+  entity: Entity;
+}): React.JSX.Element {
+  const selected = useEntityStore((s) => entitiesOf(s, conversationId).selected === entity.key);
+  const pinned = useEntityStore((s) => entitiesOf(s, conversationId).pinned.includes(entity.key));
   const select = useEntityStore((s) => s.select);
   const togglePin = useEntityStore((s) => s.togglePin);
 
@@ -96,7 +103,7 @@ function Row({ entity }: { entity: Entity }): React.JSX.Element {
     >
       <button
         type="button"
-        onClick={() => select(entity.key)}
+        onClick={() => select(conversationId, entity.key)}
         aria-pressed={selected}
         className="w-full text-left focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
       >
@@ -125,7 +132,7 @@ function Row({ entity }: { entity: Entity }): React.JSX.Element {
         </span>
         <button
           type="button"
-          onClick={() => togglePin(entity.key)}
+          onClick={() => togglePin(conversationId, entity.key)}
           aria-label={pinned ? `Unpin ${entity.key}` : `Pin ${entity.key}`}
           className={cn(
             'rounded px-1 text-[10px]',
@@ -139,11 +146,20 @@ function Row({ entity }: { entity: Entity }): React.JSX.Element {
   );
 }
 
-export function EntityRail(): React.JSX.Element | null {
-  const entities = useEntityStore((s) => s.entities);
-  const order = useEntityStore((s) => s.order);
-  const selected = useEntityStore((s) => s.selected);
+export function EntityRail({
+  conversationId,
+}: {
+  /** The conversation whose index this is. Named rather than read off an "active conversation"
+   *  pointer, so the rail cannot describe one conversation while the transcript beside it
+   *  describes another — see `src/chem/entities.ts`. */
+  conversationId: string;
+}): React.JSX.Element | null {
+  // One subscription to the conversation's whole slice. Its identity changes only when *this*
+  // conversation ingests something, and `NO_ENTITIES` is a shared constant, so a conversation with
+  // no entities does not mint a new snapshot on every render.
+  const slice = useEntityStore((s) => entitiesOf(s, conversationId));
   const select = useEntityStore((s) => s.select);
+  const { entities, order, selected } = slice;
 
   const all = order.map((key) => entities[key]).filter((e): e is Entity => Boolean(e));
   if (all.length === 0) return null;
@@ -156,7 +172,7 @@ export function EntityRail(): React.JSX.Element | null {
       {selected && (
         <button
           type="button"
-          onClick={() => select(null)}
+          onClick={() => select(conversationId, null)}
           className="mb-2 rounded border border-border-subtle px-2 py-1 text-xs text-ink-muted hover:text-ink"
         >
           Showing turns about one subject — clear
@@ -173,7 +189,7 @@ export function EntityRail(): React.JSX.Element | null {
             </h2>
             <ul className="space-y-1.5">
               {rows.map((entity) => (
-                <Row key={entity.key} entity={entity} />
+                <Row key={entity.key} conversationId={conversationId} entity={entity} />
               ))}
             </ul>
           </section>

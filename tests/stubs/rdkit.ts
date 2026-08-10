@@ -82,8 +82,15 @@ const MOLBLOCK_FORMULAE: Record<string, string> = {
  */
 function molblockSmiles(input: string): string | null {
   const lines = input.split(/\r?\n/);
-  // Line 4 is the counts line, and `V2000` at its end is what identifies the dialect. Anything
-  // else — a SMILES string, a V3000 block, a CSV someone dropped on the file target — is not ours.
+  // Line 4 is the counts line — **by position, not by search**. The MDL header is four fixed lines
+  // (title, program, comment, counts) and the title is routinely *empty*, which is what
+  // `MolToMolBlock` and ChemDraw write. Indexing rather than scanning for a `V2000` line anywhere
+  // is what makes this fake faithful instead of forgiving: a splitter that eats a blank title line
+  // shifts every header line up by one, and only a positional reader notices. Real RDKit does not
+  // notice either — it reads the shifted line as counts and returns a wrong molecule or none.
+  //
+  // `V2000` at the end identifies the dialect. Anything else — a SMILES string, a V3000 block, a
+  // CSV someone dropped on the file target — is not ours.
   const counts = lines[3];
   if (!counts || !/V2000\s*$/.test(counts)) return null;
 

@@ -74,7 +74,7 @@ export function App(): React.JSX.Element {
    * needs. Above the router it also survives navigation, so a DFT job that lands while the
    * reviewer is reading the queue is still claimed and still reaches the chemist.
    */
-  useJobFeed(conversation?.sessionId ?? null, auth);
+  useJobFeed(conversation?.id ?? null, conversation?.sessionId ?? null, auth);
 
   const problems = configProblems();
   if (problems.length > 0) return <ConfigError problems={problems} />;

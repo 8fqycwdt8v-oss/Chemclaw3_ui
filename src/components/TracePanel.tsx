@@ -18,6 +18,7 @@
  */
 
 import { useState } from 'react';
+import type { KnownTool } from '../../shared/events.ts';
 import type { TraceEntry } from '../state/types.ts';
 import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
@@ -33,8 +34,13 @@ import { ResultCard } from './results/ResultCard.tsx';
  * `get_durable_job_status` — so the two rows a chemist watching a long QM run stares at were the
  * two guaranteed to miss. Grouped by capability, which is also how the backend's manifests are
  * organised, so a new bundle's tools have an obvious home.
+ *
+ * `KnownTool` is what now stops that recurring: the key type is the tool list in `shared/events.ts`,
+ * so an icon for a tool the backend does not have does not compile. *Partial*, because a missing
+ * icon is the cosmetic gap this docstring opens with — the list is the vocabulary, not a
+ * requirement to spell all of it.
  */
-const TOOL_ICON: Record<string, string> = {
+const TOOL_ICON: Partial<Record<KnownTool, string>> = {
   // chem — bench chemistry
   resolve_compound: '🔤',
   stoichiometry_table: '⚖️',
@@ -95,6 +101,10 @@ const TOOL_ICON: Record<string, string> = {
   list_attachments: '📁',
   read_attachment: '📖',
 };
+
+/** The icon for a tool name off the wire, or the neutral fallback. */
+const iconFor = (tool: string): string =>
+  (TOOL_ICON as Record<string, string | undefined>)[tool] ?? '🔧';
 
 /**
  * What method produced this row's numbers, and what its authors say it does not establish.
@@ -184,7 +194,10 @@ function Row({ entry }: { entry: TraceEntry }): React.JSX.Element | null {
       return (
         <div>
           <p className="flex items-center gap-1.5 text-sm">
-            <span aria-hidden>{TOOL_ICON[entry.toolCall?.tool ?? ''] ?? '🔧'}</span>
+            {/* Looked up by plain string, not by `KnownTool`: the name came off the wire and the
+                backend adds tools without asking this repo. The type is there to check what is
+                *written* in the map, not to gate what may be drawn. */}
+            <span aria-hidden>{iconFor(entry.toolCall?.tool ?? '')}</span>
             <span className="font-medium">{toolLabel(entry.toolCall?.tool ?? 'tool')}</span>
             <span className="font-mono text-xs text-ink-muted">{entry.toolCall?.tool}</span>
           </p>

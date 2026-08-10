@@ -11,6 +11,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { ChemclawEvent } from '../../shared/events.ts';
+import { useEntityStore } from '../chem/entities.ts';
 import type { ApiErrorKind } from '../api/errors.ts';
 import type {
   AssistantMessage,
@@ -244,6 +245,9 @@ export const useChatStore = create<ChatState>()(
       },
 
       deleteConversation(id) {
+        // The subject index goes with the conversation. It is keyed by conversation id and read by
+        // nobody else, so leaving it behind would be a rail for a transcript that no longer exists.
+        useEntityStore.getState().forget(id);
         set((s) => {
           const { [id]: _removed, ...rest } = s.conversations;
           const order = s.order.filter((x) => x !== id);
@@ -256,6 +260,9 @@ export const useChatStore = create<ChatState>()(
       },
 
       clearAll() {
+        // Same reason as `deleteConversation`: every conversation these indexes describe is about
+        // to stop existing.
+        useEntityStore.getState().clear();
         set(() => {
           const fresh = newConversation();
           return {

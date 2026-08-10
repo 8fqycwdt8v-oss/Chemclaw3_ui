@@ -177,6 +177,19 @@ const SIMILAR = {
   verdict: '2 indexed molecule(s) matched this query.',
 };
 
+/** `substructure_matches` -> the same `FingerprintSearch` envelope with no score on any hit. */
+const SUBSTRUCTURE = {
+  subject: 'molecule',
+  hits: [
+    { compound_note_id: 'compound-4-bromoanisole', smiles: 'COc1ccc(Br)cc1' },
+    { compound_note_id: 'compound-biphenyl-ether', smiles: 'COc1ccc(cc1)-c1ccccc1' },
+  ],
+  index_empty: false,
+  scan_truncated: false,
+  hits_truncated: false,
+  verdict: '2 indexed molecule(s) contain this fragment.',
+};
+
 /** `stoichiometry_table` -> `ChargeTable`. `unresolved` names a reagent that is in NO row. */
 const CHARGE_TABLE = {
   basis_name: '4-bromoanisole',
@@ -445,6 +458,40 @@ describe('detecting a result by its shape', () => {
       flags: [HAZARDS.flags[0], { rule_id: 'x', severity: 'high', matched: 'CCO' }],
     };
     expect(detectResult('screen_hazards', damaged)).toBeNull();
+  });
+
+  it('refuses a list whose lost row was not an object at all', () => {
+    // The guard used to compare two *filtered* lists, so a non-object element was dropped one step
+    // earlier than it could see: `[flag, null]` carded as a one-flag screen, and a charge table
+    // rendered minus a reagent — which is the exact "silently-dropped reagent is a wrong table"
+    // failure this module says it refuses.
+    expect(detectResult('screen_hazards', { ...HAZARDS, flags: [HAZARDS.flags[0], null] })).toBeNull();
+    expect(
+      detectResult('screen_genotoxic_alerts', { ...GENOTOX, alerts: [...GENOTOX.alerts, 'oops'] }),
+    ).toBeNull();
+    expect(
+      detectResult('stoichiometry_table', {
+        ...CHARGE_TABLE,
+        rows: [...CHARGE_TABLE.rows, 'Pd(dppf)Cl2'],
+      }),
+    ).toBeNull();
+  });
+
+  it('does not call a substructure hit list a ranking', () => {
+    // A SMARTS match either fires or it does not, so `substructure_matches` carries no similarity.
+    // Carding it as "most similar first" with a `similarity` column of em dashes announced both an
+    // ordering the result does not have and a number it never returned.
+    const detected = detectResult('substructure_matches', SUBSTRUCTURE);
+    if (detected?.kind !== 'ranked') throw new Error('not detected');
+    expect(detected.title).not.toMatch(/similar/i);
+    expect(detected.scoreLabel).not.toBe('similarity');
+    expect(detected.items.map((item) => item.score)).toEqual(['', '']);
+    // The payload's own verdict still carries, unreworded — it is what distinguishes "nothing
+    // bears this fragment" from "nothing is indexed".
+    expect(detected.framing).toBe(SUBSTRUCTURE.verdict);
+    // And a real similarity search is still framed as the ranking it is.
+    const similar = detectResult('similar_molecules', SIMILAR);
+    expect(similar?.kind === 'ranked' && similar.title).toMatch(/most similar first/);
   });
 
   it('returns null for text that is not a result at all', () => {

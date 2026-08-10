@@ -21,13 +21,14 @@
  */
 
 import type { AssistantMessage } from '../state/types.ts';
-import { capabilityLoss, returnedFigures } from '../chem/provenance.ts';
+import { capabilityLoss } from '../chem/provenance.ts';
+
+/** The two checks the wire can name. `null` is the *absence* of the field and is deliberately not
+ *  a third member here — see `verifierNote`. */
+type NamedVerifier = Exclude<AssistantMessage['verifiedBy'], null>;
 
 /**
- * How the turn's confidence — or its absence — was arrived at.
- *
- * The three cases are genuinely three different situations for a reviewer, and until now they all
- * rendered as the same sentence:
+ * How the turn's confidence was arrived at — for the two cases where the wire says.
  *
  * - `judge`   — the LLM judge ran and scored the answer against what this turn's tools returned.
  * - `citation-gate` — the judge did not run. The deterministic fallback checks only that every
@@ -35,34 +36,26 @@ import { capabilityLoss, returnedFigures } from '../chem/provenance.ts';
  *   the backend measured it as the *more generous* of the two: the same cited-but-contradicted
  *   answer scored 1.0/supported here against 0.0/unsupported judged. A high score from this check
  *   is not the same object as a high score from the judge.
- * - `null`    — verification was off for this deployment, so nothing scored the answer at all. A
- *   `review_required` alongside it came from the answer-shape gate, which is a different check.
+ *
+ * **`null` gets no sentence, and that is the fix.** It used to render as "answer verification is
+ * not enabled on this deployment, so nothing scored this answer" — a positive claim about the
+ * deployment that a missing field cannot support. `null` is also what an older backend that never
+ * sent the field looks like, and what a verifier name `normalizeEvent` did not recognise looks
+ * like. A turn arriving as `{review_required: true, confidence: 0.40}` with no `verified_by` made
+ * the pill say nothing had scored the answer while `AnswerFooter` rendered "low confidence 0.40"
+ * four lines below: two contradictory statements, and the new one was the false one.
  */
-function verifierNote(verifiedBy: AssistantMessage['verifiedBy']): string {
-  switch (verifiedBy) {
-    case 'judge':
-      return 'Scored by the LLM judge against what this turn’s tools returned.';
-    case 'citation-gate':
-      return (
-        'The judge did not run. This turn fell back to the deterministic citation gate, which ' +
+function verifierNote(verifiedBy: NamedVerifier): string {
+  return verifiedBy === 'judge'
+    ? 'Scored by the LLM judge against what this turn’s tools returned.'
+    : 'The judge did not run. This turn fell back to the deterministic citation gate, which ' +
         'only checks that every cited id was in front of the model — so nobody scored whether the ' +
-        'answer follows from its evidence.'
-      );
-    default:
-      return 'Answer verification is not enabled on this deployment, so nothing scored this answer.';
-  }
+        'answer follows from its evidence.';
 }
 
 /** The short form, for the confidence chip. */
-function verifierLabel(verifiedBy: AssistantMessage['verifiedBy']): string {
-  switch (verifiedBy) {
-    case 'judge':
-      return 'judge';
-    case 'citation-gate':
-      return 'citation gate';
-    default:
-      return 'unscored';
-  }
+function verifierLabel(verifiedBy: NamedVerifier): string {
+  return verifiedBy === 'judge' ? 'judge' : 'citation gate';
 }
 
 export function ReviewRequiredPill({
@@ -75,18 +68,29 @@ export function ReviewRequiredPill({
   // A turn the judge never scored and a turn the judge scored badly are different findings, and
   // the reviewer's next action differs: re-run the check, versus read the answer against its
   // evidence. They used to render as one sentence.
-  const degraded = message.verifiedBy !== 'judge';
-  const headline = degraded ? 'Needs expert review — and was not judged.' : 'Needs expert review.';
+  //
+  // Three states, not two: `null` is "this turn does not say what checked it", which is neither of
+  // the above and is not evidence for either. It gets the plain headline and no second sentence —
+  // the flag itself is the whole of what is known, and saying less is the only honest way to say
+  // it.
+  const verifiedBy = message.verifiedBy;
+  const headline =
+    verifiedBy === 'citation-gate'
+      ? 'Needs expert review — and was not judged.'
+      : 'Needs expert review.';
   const body =
-    message.verifiedBy === 'judge'
+    verifiedBy === 'judge'
       ? 'The verifier could not fully support this answer from the cited evidence.'
-      : verifierNote(message.verifiedBy);
+      : verifiedBy === null
+        ? ''
+        : verifierNote(verifiedBy);
 
   return (
     <div className="mb-2 flex items-start gap-2 rounded-md border border-warn/40 bg-warn-soft px-3 py-2">
       <span aria-hidden>⚠️</span>
       <p className="text-sm text-warn">
-        <span className="font-semibold">{headline}</span> {body}
+        <span className="font-semibold">{headline}</span>
+        {body && ` ${body}`}
       </p>
     </div>
   );
@@ -144,8 +148,7 @@ function confidenceTone(value: number): { cls: string; label: string } {
  * What it offers instead is the thing a chemist actually wants next: the values the tools really
  * returned, behind one disclosure. That is the "expandable on demand" half of the overlay.
  */
-function GroundingLegend({ message }: { message: AssistantMessage }): React.JSX.Element | null {
-  const figures = returnedFigures(message.trace);
+function GroundingLegend({ figures }: { figures: readonly number[] }): React.JSX.Element | null {
   if (figures.length === 0) return null;
 
   return (
@@ -172,16 +175,20 @@ function GroundingLegend({ message }: { message: AssistantMessage }): React.JSX.
 
 export function AnswerFooter({
   message,
+  figures,
 }: {
   message: AssistantMessage;
+  /** What this turn's tools returned, computed once by the bubble that also hands it to the
+   *  markdown renderer. Derived here as well until now — twice per footer render, on top of the
+   *  parent's memoised copy, for a walk over the whole trace on every streamed token batch. */
+  figures: readonly number[];
 }): React.JSX.Element | null {
   const hasConfidence = message.confidence !== null;
   const hasClaims = message.unsupportedClaims.length > 0;
-  // Rendered whenever a check ran, not only when it produced a score: "the judge never ran" is a
-  // fact about this answer even on a turn with no confidence number to show.
-  const hasVerifier = message.verifiedBy !== null;
-  const hasFigures = returnedFigures(message.trace).length > 0;
-  if (!hasConfidence && !hasClaims && !hasVerifier && !hasFigures) return null;
+  // The verifier chip renders whenever a check *named itself*, not only when it produced a score:
+  // "the judge never ran" is a fact about this answer even on a turn with no confidence number.
+  const verifiedBy = message.verifiedBy;
+  if (!hasConfidence && !hasClaims && verifiedBy === null && figures.length === 0) return null;
 
   const tone = hasConfidence ? confidenceTone(message.confidence as number) : null;
 
@@ -198,15 +205,15 @@ export function AnswerFooter({
           </span>
         )}
 
-        {hasVerifier && (
+        {verifiedBy !== null && (
           // Beside the score rather than inside it: which check ran is a different question from
           // what the check concluded, and a score shown without it invites reading a citation-gate
           // 1.00 as a judged 1.00.
           <span
             className="inline-flex items-center rounded border border-border-subtle bg-surface-sunken px-2 py-0.5 text-xs text-ink-muted"
-            title={verifierNote(message.verifiedBy)}
+            title={verifierNote(verifiedBy)}
           >
-            checked by: {verifierLabel(message.verifiedBy)}
+            checked by: {verifierLabel(verifiedBy)}
           </span>
         )}
       </div>
@@ -227,7 +234,7 @@ export function AnswerFooter({
         </details>
       )}
 
-      <GroundingLegend message={message} />
+      <GroundingLegend figures={figures} />
     </div>
   );
 }

@@ -41,7 +41,7 @@ export function ChatView(): React.JSX.Element {
         />
         <Composer conversationId={conversation.id} />
       </div>
-      <EntityRail />
+      <EntityRail conversationId={conversation.id} />
     </div>
   );
 }

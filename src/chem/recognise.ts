@@ -115,15 +115,14 @@ export function looksLikeReactionSmiles(text: string): boolean {
 }
 
 /**
- * A calculation reference — `type@version:hash:hash`.
- *
- * The same shape the backend validates note frontmatter against (`kg/note.py`), and the handle
- * `list_artifacts` and `fetch_artifact` take. Distinctive enough to match on sight, which makes it
- * the one identifier here with no false-positive problem.
+ * There was an `isCalcRef` here — `type@version:hash:hash`, the handle `list_artifacts` and
+ * `fetch_artifact` take, and the one identifier in this file with no false-positive problem. It is
+ * gone because nothing consumed it: no surface resolves a calc ref, since reaching a calculation's
+ * artifacts needs a backend route that does not exist (US-12 in `docs/chemistry-aware-frontend.md`
+ * is still "needs backend"). Only its own test read it. It is four lines to write again on the day
+ * something can act on the answer, and a recogniser nobody asks is indistinguishable from one that
+ * is wrong.
  */
-const CALC_REF = /^[^\s@:]+@[^\s:]+:[0-9a-f]+:[0-9a-f]+$/;
-
-export const isCalcRef = (text: string): boolean => CALC_REF.test(text.trim());
 
 /**
  * Note-id prefixes this system actually mints.
@@ -164,14 +163,14 @@ const JOB_ID = /^(qm|calc|bo|report)-[A-Za-z0-9]{4,64}$/;
 
 export const isJobId = (text: string): boolean => JOB_ID.test(text.trim());
 
-/** Whether `text` has the shape of a knowledge-graph note id. */
-export function looksLikeNoteId(text: string): boolean {
-  const s = text.trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(s)) return false;
-  return NOTE_PREFIXES.some((prefix) => s.startsWith(`${prefix}-`) && s.length > prefix.length + 1);
-}
-
-/** The regex source for note-shaped tokens, for the remark plugin that linkifies them in prose. */
+/**
+ * Note-shaped tokens in prose, for the remark plugin that linkifies them.
+ *
+ * The only form of this test that survives, and the only one anything asked. A whole-string
+ * `looksLikeNoteId` stood beside it and was read by nothing but its own test — two spellings of one
+ * rule, of which the unused one was free to drift. `[A-Za-z0-9_.-]` is the alphabet an id may
+ * continue with, and `citations.ts` writes its own lookarounds from the same set.
+ */
 export const NOTE_ID_PATTERN = new RegExp(
   `\\b(?:${NOTE_PREFIXES.join('|')})-[A-Za-z0-9][A-Za-z0-9_.-]*\\b`,
   'g',

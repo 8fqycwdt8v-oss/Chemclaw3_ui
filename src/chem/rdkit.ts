@@ -174,12 +174,23 @@ export async function moleculesFromMolfile(text: string): Promise<MolfileRecords
  * SDF spec and cannot appear inside a molblock's fixed-width atom or bond table. A plain `.mol`
  * file has no delimiter at all and comes back as a single record, which is why the caller does not
  * need to know which of the two it was handed.
+ *
+ * **A record's leading structure is load-bearing and must survive.** A molblock's header is four
+ * *fixed* lines — title, program, comment, counts — and the title is routinely **blank**: that is
+ * what `Chem.MolToMolBlock` writes by default, and what ChemDraw and most exporters write. This
+ * used to `.trim()` each record, which ate the empty title line *and* the leading spaces of the
+ * program line, so the counts line moved from index 3 to index 2, the parser read a program banner
+ * as the atom/bond counts, and a perfectly valid `.mol` file was reported as "No structure found".
+ *
+ * So the delimiter is consumed together with the newline that ends it — that newline belongs to the
+ * separator, not to the record after it — and only *trailing* whitespace is stripped. A leading
+ * newline that is left is the record's own empty title line.
  */
 export function splitSdfRecords(text: string): string[] {
   return text
-    .split(/^\$\$\$\$[^\S\n]*$/m)
-    .map((record) => record.trim())
-    .filter((record) => record.length > 0);
+    .split(/^\$\$\$\$[^\S\n]*\r?\n?/m)
+    .map((record) => record.replace(/\s+$/, ''))
+    .filter((record) => record !== '');
 }
 
 export interface DrawOptions {

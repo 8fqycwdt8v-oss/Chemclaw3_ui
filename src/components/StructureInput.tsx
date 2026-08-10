@@ -80,8 +80,16 @@ export function StructureInput({ onAccept, onClose }: StructureInputProps): Reac
   const [drawing, setDrawing] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [fileNote, setFileNote] = useState<string | null>(null);
-  /** The records of a multi-structure SDF, held so the chemist can step through them. */
-  const [records, setRecords] = useState<string[] | null>(null);
+  /**
+   * The records of a multi-structure SDF, held so the chemist can step through them.
+   *
+   * Carries the load it came in on. `RecordStepper` keeps its position in component state, so a
+   * second file has to *remount* it — otherwise the index survives and a three-record file dropped
+   * after a ten-record one reads "8 / 3" while showing record 1. Two files can hold identical
+   * structures, so the identity of the load is the counter and not the contents.
+   */
+  const [records, setRecords] = useState<{ load: number; smiles: string[] } | null>(null);
+  const loads = useRef(0);
 
   // How the current candidate arrived. A ref rather than state because it never affects the
   // rendering — it is carried out with the accepted structure so the rail can say where it came
@@ -150,7 +158,8 @@ export function StructureInput({ onAccept, onClose }: StructureInputProps): Reac
     }
 
     source.current = 'file';
-    setRecords(smiles.length > 1 ? smiles : null);
+    loads.current += 1;
+    setRecords(smiles.length > 1 ? { load: loads.current, smiles } : null);
     setRaw(smiles[0] ?? '');
     setFileNote(
       [
@@ -259,7 +268,9 @@ export function StructureInput({ onAccept, onClose }: StructureInputProps): Reac
           {/* Outside the preview block on purpose: stepping to the next record puts the field back
               into "checking" for a moment, and a stepper that unmounted there would lose its place
               on every press. */}
-          {records && records.length > 1 && <RecordStepper records={records} onPick={setRaw} />}
+          {records && (
+            <RecordStepper key={records.load} records={records.smiles} onPick={setRaw} />
+          )}
           {fileNote && <p className="text-xs text-ink-muted">{fileNote}</p>}
         </div>
       )}
@@ -382,6 +393,26 @@ function SketcherDialog({
   const [state, setState] = useState<SketcherState>('loading');
   const [problem, setProblem] = useState<string | null>(null);
 
+  /**
+   * Escape closes it, from wherever the focus happens to be.
+   *
+   * On the document while the dialog is mounted, rather than as `onKeyDown` on the overlay div — a
+   * div is not focusable, so React's handler only ever fired once the user had clicked *inside*
+   * it, which made Escape a no-op at exactly the moment it is reached for: right after the dialog
+   * opens. The listener lives and dies with the dialog, so nothing outside it is affected.
+   *
+   * It does not reach keystrokes the editor swallows in its own subtree, and that is the right
+   * trade: Cancel is a button two inches away, and taking Escape away from a drawing canvas that
+   * wants it would be worse than missing it there.
+   */
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -441,9 +472,6 @@ function SketcherDialog({
       aria-modal="true"
       aria-label="Draw a structure"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') onClose();
-      }}
     >
       <div className="flex h-[min(80vh,42rem)] w-[min(92vw,60rem)] flex-col rounded-xl border border-border-subtle bg-surface-raised p-3">
         <div className="mb-2 flex items-center justify-between">

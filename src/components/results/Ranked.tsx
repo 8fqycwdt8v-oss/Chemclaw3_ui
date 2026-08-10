@@ -23,7 +23,9 @@ export function Ranked({ result }: { result: RankedComparison }): React.JSX.Elem
     <section className="space-y-2">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h4 className="text-sm font-medium">{result.title}</h4>
-        <span className="text-xs text-ink-muted">{result.scoreLabel}</span>
+        {result.scoreLabel && (
+          <span className="text-xs text-ink-muted">{result.scoreLabel}</span>
+        )}
       </div>
 
       {result.framing && (
@@ -51,7 +53,9 @@ export function Ranked({ result }: { result: RankedComparison }): React.JSX.Elem
                     have to infer, and the order is the whole result. */}
                 <span className="w-5 shrink-0 text-xs text-ink-muted">{i + 1}.</span>
                 <span className="break-all text-sm font-medium">{item.label}</span>
-                <span className="ml-auto font-mono text-sm">{item.score}</span>
+                {/* No score column where the result has no score — an exact-match hit list has
+                    none, and a column of placeholders reads as data that went missing. */}
+                {item.score && <span className="ml-auto font-mono text-sm">{item.score}</span>}
               </div>
               {item.detail && <p className="ml-7 text-xs text-ink-muted">{item.detail}</p>}
               {item.noteId && (

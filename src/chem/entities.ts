@@ -44,6 +44,36 @@
  * Anything RDKit refuses is dropped rather than admitted under its raw string. A rail entry that is
  * not a molecule cannot be drawn, cannot be compared, and cannot be searched for; it is a row that
  * only takes up space.
+ *
+ * ## One index per conversation
+ *
+ * The store holds a slice per conversation id, and **every reader and every writer names the
+ * conversation it means**. There is no "active conversation" pointer in here to keep in step with
+ * `chatStore.activeId`, because the invariant this shape exists to guarantee — the rail and the
+ * transcript always describe the same conversation — is exactly the kind that a second copy of the
+ * current id quietly breaks. `MessageList` and `EntityRail` both render the slice of the
+ * conversation object they were handed, so they cannot disagree.
+ *
+ * It was one global bag before, scoped to nothing. Switching conversations left the previous one's
+ * molecules, jobs and notes in the rail, and left `selected` pointing at them — so the transcript
+ * filter matched the new conversation's message ids against the old conversation's mentions,
+ * matched nothing, and rendered "No turn in this conversation mentions that yet." over a
+ * conversation full of turns.
+ *
+ * **Keyed rather than cleared on switch**, and the reason is that entities are only ever minted by
+ * a *live* stream: a reloaded transcript re-hydrates messages but re-ingests nothing. Clearing on
+ * switch would therefore not lose an index that could be rebuilt on the way back — it would leave
+ * every conversation but the current one permanently railless until someone sent a new turn into
+ * it. Keying is also what a chemist expects of something titled "what this conversation is about".
+ *
+ * **Not persisted**, unlike `chatStore`. Two reasons, and the first is sufficient: everything here
+ * is derived, and a persisted derivation is a second copy that drifts from the transcript it was
+ * derived from — including across the trim `chatStore.partialize` performs on the transcript
+ * itself, after which a persisted rail would name turns that no longer exist. The second is size:
+ * this holds canonical SMILES, mention lists and job rows per conversation, with no bound of its
+ * own. So a reload starts each rail empty, exactly as it does today. That understates the
+ * conversation rather than misstating it, and the rail renders nothing at all when empty, so it
+ * never claims a conversation was about nothing.
  */
 
 import { create } from 'zustand';
@@ -121,7 +151,8 @@ export interface NoteEntity extends EntityBase {
 
 export type Entity = MoleculeEntity | ReactionEntity | JobEntity | NoteEntity;
 
-export interface EntityState {
+/** One conversation's index. */
+export interface ConversationEntities {
   entities: Record<string, Entity>;
   /** Insertion order, newest first — the order the rail renders. */
   order: string[];
@@ -129,25 +160,61 @@ export interface EntityState {
   selected: string | null;
   /** Keys the user pinned, so two molecules can be held side by side. */
   pinned: string[];
+}
 
-  ingest: (messageId: string, event: ChemclawEvent) => Promise<void>;
+/** The slice a conversation with no entities has. A shared frozen constant rather than a fresh
+ *  object, because it is what selectors return for such a conversation and Zustand compares
+ *  selector results by reference — a new `{}` per render is an infinite render loop. */
+export const NO_ENTITIES: ConversationEntities = Object.freeze({
+  entities: {},
+  order: [],
+  selected: null,
+  pinned: [],
+});
+
+export interface EntityState {
+  /** Keyed by conversation id. See "one index per conversation" above. */
+  byConversation: Record<string, ConversationEntities>;
+
+  ingest: (conversationId: string, messageId: string, event: ChemclawEvent) => Promise<void>;
   /** Admit a structure the user pasted, dropped or drew. See the promotion rule above for why this
    *  belongs. Returns the canonical key, or `null` if RDKit refused — the caller has already shown
    *  the chemist a drawing, so a refusal here means something changed under it. */
-  ingestUserStructure: (raw: string, source: UserStructureSource) => Promise<string | null>;
-  select: (key: string | null) => void;
-  togglePin: (key: string) => void;
+  ingestUserStructure: (
+    conversationId: string,
+    raw: string,
+    source: UserStructureSource,
+  ) => Promise<string | null>;
+  select: (conversationId: string, key: string | null) => void;
+  togglePin: (conversationId: string, key: string) => void;
+  /** Drop one conversation's index — called when the conversation itself is deleted, so the index
+   *  cannot outlive its subject. */
+  forget: (conversationId: string) => void;
+  /** Drop every index. */
   clear: () => void;
 }
 
+/** One conversation's index, or the empty one. The single reader of `byConversation`, so a caller
+ *  never has to decide what a conversation with no entities looks like. */
+export const entitiesOf = (
+  state: EntityState,
+  conversationId: string | null | undefined,
+): ConversationEntities =>
+  (conversationId ? state.byConversation[conversationId] : undefined) ?? NO_ENTITIES;
+
 /** Merge an entity in, or add a mention to the one already there. */
-function upsert(state: EntityState, entity: Entity, mention: Mention): Partial<EntityState> {
-  const existing = state.entities[entity.key];
+function upsert(
+  slice: ConversationEntities,
+  entity: Entity,
+  mention: Mention,
+): ConversationEntities {
+  const existing = slice.entities[entity.key];
 
   if (!existing) {
     return {
-      entities: { ...state.entities, [entity.key]: { ...entity, mentions: [mention] } },
-      order: [entity.key, ...state.order],
+      ...slice,
+      entities: { ...slice.entities, [entity.key]: { ...entity, mentions: [mention] } },
+      order: [entity.key, ...slice.order],
     };
   }
 
@@ -172,19 +239,28 @@ function upsert(state: EntityState, entity: Entity, mention: Mention): Partial<E
       : {}),
   } as Entity;
 
-  return { entities: { ...state.entities, [entity.key]: merged } };
+  return { ...slice, entities: { ...slice.entities, [entity.key]: merged } };
 }
 
-export const useEntityStore = create<EntityState>()((set, get) => ({
-  entities: {},
-  order: [],
-  selected: null,
-  pinned: [],
+/** Rewrite one conversation's slice, leaving every other conversation's untouched. */
+function write(
+  conversationId: string,
+  fn: (slice: ConversationEntities) => ConversationEntities,
+): void {
+  useEntityStore.setState((s) => ({
+    byConversation: { ...s.byConversation, [conversationId]: fn(entitiesOf(s, conversationId)) },
+  }));
+}
 
-  async ingest(messageId, event) {
+export const useEntityStore = create<EntityState>()(() => ({
+  byConversation: {},
+
+  async ingest(conversationId, messageId, event) {
     const at = Date.now();
     const add = (entity: Entity, tool?: string): void => {
-      set((s) => upsert(s, entity, { messageId, at, ...(tool ? { tool } : {}) }));
+      write(conversationId, (slice) =>
+        upsert(slice, entity, { messageId, at, ...(tool ? { tool } : {}) }),
+      );
     };
 
     switch (event.type) {
@@ -255,7 +331,7 @@ export const useEntityStore = create<EntityState>()((set, get) => ({
           jobId: event.job_id,
           // A completion carries no `kind`; an existing row's value survives the merge, and a
           // completion that arrives without its start (a reload mid-job) reads as a plain job.
-          jobKind: (get().entities[`job:${event.job_id}`] as JobEntity | undefined)?.jobKind ?? 'job',
+          jobKind: existingJobKind(conversationId, event.job_id),
           status: 'completed',
           ...(canonical ? { moleculeSmiles: canonical } : {}),
           mentions: [],
@@ -282,7 +358,7 @@ export const useEntityStore = create<EntityState>()((set, get) => ({
           kind: 'job',
           key: `job:${event.job_id}`,
           jobId: event.job_id,
-          jobKind: (get().entities[`job:${event.job_id}`] as JobEntity | undefined)?.jobKind ?? 'job',
+          jobKind: existingJobKind(conversationId, event.job_id),
           status: 'failed',
           reason: event.reason,
           mentions: [],
@@ -310,7 +386,7 @@ export const useEntityStore = create<EntityState>()((set, get) => ({
     }
   },
 
-  async ingestUserStructure(raw, source) {
+  async ingestUserStructure(conversationId, raw, source) {
     const at = Date.now();
     // Canonicalised here rather than trusted from the caller, even though the composer has already
     // canonicalised it to draw the preview. The key is the identity of the entity; deriving it in
@@ -318,9 +394,9 @@ export const useEntityStore = create<EntityState>()((set, get) => ({
     const canonical = await canonicalSmiles(raw);
     if (!canonical) return null;
 
-    set((s) =>
+    write(conversationId, (slice) =>
       upsert(
-        s,
+        slice,
         {
           kind: 'molecule',
           key: canonical,
@@ -337,22 +413,64 @@ export const useEntityStore = create<EntityState>()((set, get) => ({
     return canonical;
   },
 
-  select(key) {
-    set((s) => ({ selected: s.selected === key ? null : key }));
-  },
-
-  togglePin(key) {
-    set((s) => ({
-      pinned: s.pinned.includes(key) ? s.pinned.filter((k) => k !== key) : [...s.pinned, key],
+  select(conversationId, key) {
+    write(conversationId, (slice) => ({
+      ...slice,
+      selected: slice.selected === key ? null : key,
     }));
   },
 
+  togglePin(conversationId, key) {
+    write(conversationId, (slice) => ({
+      ...slice,
+      pinned: slice.pinned.includes(key)
+        ? slice.pinned.filter((k) => k !== key)
+        : [...slice.pinned, key],
+    }));
+  },
+
+  forget(conversationId) {
+    useEntityStore.setState((s) => {
+      const { [conversationId]: _dropped, ...rest } = s.byConversation;
+      return { byConversation: rest };
+    });
+  },
+
   clear() {
-    set({ entities: {}, order: [], selected: null, pinned: [] });
+    useEntityStore.setState({ byConversation: {} });
   },
 }));
+
+/** The kind an already-known job was started as. A completion and a failure both carry no `kind`,
+ *  and losing it would relabel a DFT run as a generic job at the moment it most needs naming. */
+function existingJobKind(conversationId: string, jobId: string): string {
+  const existing = entitiesOf(useEntityStore.getState(), conversationId).entities[`job:${jobId}`];
+  return existing?.kind === 'job' ? existing.jobKind : 'job';
+}
 
 /** The message ids an entity was seen in — what the transcript filters to when one is selected. */
 export function messagesFor(entity: Entity | undefined): Set<string> {
   return new Set(entity?.mentions.map((m) => m.messageId) ?? []);
+}
+
+/**
+ * Every job this browser watched start and has not seen end, across all conversations.
+ *
+ * The one reader that is deliberately *not* scoped to a conversation, because the surface it feeds
+ * is not either: `/jobs` exists precisely because a durable run outlives the chat that launched it,
+ * and "started in this browser and not yet finished" would become a different, smaller claim if it
+ * only counted the conversation currently on screen. Deduplicated by job id — two conversations
+ * that both saw the same id are one run.
+ */
+export function runningJobs(byConversation: Record<string, ConversationEntities>): JobEntity[] {
+  const seen = new Map<string, JobEntity>();
+  for (const slice of Object.values(byConversation)) {
+    for (const key of slice.order) {
+      const entity = slice.entities[key];
+      if (entity?.kind === 'job' && entity.status === 'running' && !seen.has(entity.jobId)) {
+        seen.set(entity.jobId, entity);
+      }
+    }
+  }
+  return [...seen.values()];
 }

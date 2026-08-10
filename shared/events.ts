@@ -316,11 +316,25 @@ const EVENT_TYPES = new Set<string>([
 ]);
 
 /**
- * Tools the agent advertises, used only to pick an icon/label in the trace panel. An unknown tool
- * renders with a neutral fallback, so this list going stale is cosmetic — but it had gone stale in
- * the direction that is not: it named `submit_qm_job` and `get_qm_job_status`, which the backend
- * deleted (they are `compute_dft_energy` and `get_durable_job_status` now), so the two entries most
- * likely to be hit by a chemist watching a long QM run were the two that could never match.
+ * Every tool the agent advertises — the closed set of names the frontend's per-tool tables are
+ * allowed to key on.
+ *
+ * It used to say it picked the trace panel's icon, and it did not: `TracePanel` has always had its
+ * own `TOOL_ICON` map and never imported this. So there were three parallel tool tables (this one,
+ * `TOOL_ICON`, and `TOOL_METHOD` in `src/chem/provenance.ts`), one of which nothing read, and the
+ * docstring on the unread one claimed it was the one in use.
+ *
+ * It is now the **key domain** of the other two: both are declared as
+ * `Partial<Record<KnownTool, …>>`, so an entry naming a tool the backend does not have is a
+ * compile error rather than a row that can never match. That is exactly the failure this list
+ * itself once had — it named `submit_qm_job` and `get_qm_job_status`, which the backend had
+ * replaced with `compute_dft_energy` and `get_durable_job_status`, so the two entries a chemist
+ * watching a long QM run stares at were the two that could never fire.
+ *
+ * What it deliberately does NOT do is gate lookups. A tool absent from here still renders, with the
+ * neutral fallbacks the tables already had: the backend adds tools without asking this repo, and a
+ * frontend that refused to draw a row for one it had not heard of would be worse than one whose
+ * icon is a wrench.
  *
  * Two sources, kept apart because they are discovered differently and a reader looking for a name
  * needs to know which half to search: the seven connector bundles declare theirs in
@@ -397,7 +411,7 @@ const IN_PROCESS_TOOLS = [
   'stop_watching',
 ] as const;
 
-export const KNOWN_TOOLS = [...CONNECTOR_TOOLS, ...IN_PROCESS_TOOLS] as const;
+const KNOWN_TOOLS = [...CONNECTOR_TOOLS, ...IN_PROCESS_TOOLS] as const;
 
 export type KnownTool = (typeof KNOWN_TOOLS)[number];
 

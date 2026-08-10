@@ -19,9 +19,19 @@ import type { AuthProvider } from '../auth/types.ts';
 import { useEntityStore } from '../chem/entities.ts';
 import { useChatStore } from '../state/chatStore.ts';
 
-export function useJobFeed(sessionId: string | null, auth: AuthProvider): void {
+/**
+ * `conversationId` and `sessionId` must name the *same* conversation — the entity rows this stream
+ * closes belong to the conversation whose session it is subscribed to, and filing a completion
+ * under a different one would leave the original row claiming "running" forever while a stranger's
+ * rail grew a job it never started.
+ */
+export function useJobFeed(
+  conversationId: string | null,
+  sessionId: string | null,
+  auth: AuthProvider,
+): void {
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || !conversationId) return;
 
     const controller = new AbortController();
     let stopped = false;
@@ -76,7 +86,9 @@ export function useJobFeed(sessionId: string | null, auth: AuthProvider): void {
                   // it; this stream is the only thing that ever closes it. No message id to
                   // attribute the sighting to — the turn is long over — so it is stamped with the
                   // job's own id, which is the truthful answer to "where did this come from".
-                  void useEntityStore.getState().ingest(`job:${event.job_id}`, event);
+                  void useEntityStore
+                    .getState()
+                    .ingest(conversationId, `job:${event.job_id}`, event);
                 }
               } catch {
                 // one bad frame is not worth dropping the stream
@@ -99,7 +111,7 @@ export function useJobFeed(sessionId: string | null, auth: AuthProvider): void {
       stopped = true;
       controller.abort();
     };
-  }, [sessionId, auth]);
+  }, [conversationId, sessionId, auth]);
 }
 
 /** Exponential backoff with jitter, capped at 30s, abortable. */

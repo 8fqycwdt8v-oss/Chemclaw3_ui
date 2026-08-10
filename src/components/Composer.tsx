@@ -94,7 +94,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   const insertStructure = ({ canonical, raw, source }: AcceptedStructure): void => {
     // The raw spelling, not the canonical one: the store canonicalises for the key and keeps what
     // was typed as an alias, so the rail can show a chemist the string they recognise.
-    void useEntityStore.getState().ingestUserStructure(raw, source);
+    void useEntityStore.getState().ingestUserStructure(conversationId, raw, source);
 
     const at = caretRef.current ?? text.length;
     const before = text.slice(0, at);

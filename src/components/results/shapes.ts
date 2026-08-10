@@ -138,11 +138,16 @@ function detectCitedFlags(node: unknown): CitedFlagList | null {
   const subject = Array.isArray(node.flags) ? 'hazard' : Array.isArray(node.alerts) ? 'genotox' : null;
   if (!subject) return null;
 
-  const raw = records(subject === 'hazard' ? node.flags : node.alerts);
+  // Against the RAW array, not against `records()`'s output. `records` has already dropped every
+  // element that was not an object, so comparing the two filtered lists asked "did `flagFrom`
+  // reject anything" and could never see a row lost one step earlier — which is the same silent
+  // truncation, arrived at sooner.
+  const rawList: unknown[] = (subject === 'hazard' ? node.flags : node.alerts) as unknown[];
+  const raw = records(rawList);
   const flags = raw.map(flagFrom).filter((f): f is CitedFlag => f !== null);
   // A list that lost rows on the way in is not this result. Rendering the survivors would be the
   // silent-truncation failure the backend refuses whole results to avoid.
-  if (flags.length !== raw.length) return null;
+  if (flags.length !== rawList.length) return null;
 
   const verdict = str(node.verdict);
   const screened = strings(node.screened);
@@ -171,7 +176,9 @@ function detectCitedFlags(node: unknown): CitedFlagList | null {
 
 export interface RankedItem {
   label: string;
-  /** The ranking quantity as it should be read: a difference from the leader, or a similarity. */
+  /** The ranking quantity as it should be read: a difference from the leader, or a similarity.
+   *  Empty where the result carries no such quantity at all — an exact-match hit list — in which
+   *  case no score column is rendered rather than one full of placeholders. */
   score: string;
   /** What that number is. Shown once, in the header, not repeated per row. */
   detail: string | null;
@@ -207,8 +214,11 @@ export interface RankedComparison {
 /** `compare_solvents` — `SolventComparisonResult`, ranked by ΔG where it has one and ΔE otherwise. */
 function detectSolventRanking(node: unknown): RankedComparison | null {
   if (!isRecord(node)) return null;
-  const raw = records(node.effects);
-  if (raw.length === 0) return null;
+  // Raw array kept for the same reason as the two detectors above: a screen that lost a solvent on
+  // the way in is not this screen, and a ranking missing one of its entries is a wrong ranking.
+  const rawList: unknown[] = Array.isArray(node.effects) ? node.effects : [];
+  const raw = records(rawList);
+  if (raw.length === 0 || raw.length !== rawList.length) return null;
 
   const uncertainty = num(node.uncertainty_kcal);
   const spread = num(node.spread_kcal);
@@ -266,6 +276,20 @@ function detectSearchRanking(node: unknown): RankedComparison | null {
   if (!subject && !verdict) return null;
 
   const raw = records(node.hits);
+  /**
+   * Whether these hits are *ranked*, decided by the payload rather than by the tool name.
+   *
+   * A `substructure_matches` hit has no similarity score, because a SMARTS pattern either fires on
+   * a molecule or it does not — there is no "more matching". Carding that as "Similar molecules,
+   * most similar first" under a `similarity` column reading `—` on every row announced an ordering
+   * the result does not have and a number it never carried. An exact-match hit list is not a
+   * ranking, so it does not get a ranking's framing or its column.
+   *
+   * `every`, and empty is not ranked: with no hit to look at, nothing here knows an order exists,
+   * and the neutral heading claims less than the ranked one.
+   */
+  const ranked = raw.length > 0 && raw.every((hit) => num(hit.similarity) !== null);
+
   const items = raw.map((hit): RankedItem => {
     const similarity = num(hit.similarity);
     const smiles = str(hit.smiles);
@@ -275,7 +299,9 @@ function detectSearchRanking(node: unknown): RankedComparison | null {
     const isReaction = subject === 'reaction' || (label !== null && label.includes('>'));
     return {
       label: label ?? smiles ?? str(hit.id) ?? 'hit',
-      score: similarity === null ? '—' : formatNumber(similarity),
+      // No column at all rather than an em dash per row: a dash reads as "this row is missing its
+      // score", and no row here has one to miss.
+      score: similarity === null ? '' : formatNumber(similarity),
       detail: null,
       smiles: isReaction ? null : smiles,
       reactionSmiles: isReaction ? label : null,
@@ -283,12 +309,25 @@ function detectSearchRanking(node: unknown): RankedComparison | null {
     };
   });
 
+  const noun = subject ?? 'record';
+  const Noun = `${noun.charAt(0).toUpperCase()}${noun.slice(1)}`;
   const empty = boolOrNull(node.index_empty) === true;
   const truncated = boolOrNull(node.scan_truncated) === true || boolOrNull(node.hits_truncated) === true;
   return {
     kind: 'ranked',
-    title: `Similar ${subject ?? 'record'}s, most similar first`,
-    scoreLabel: 'similarity',
+    // A heading for each of the three things this payload can be, and no heading claims more than
+    // its rows support. The empty one is the case the `verdict` below exists for — "nothing is
+    // indexed" and "we have no precedent" are opposite answers — so the title stays out of its way.
+    title: ranked
+      ? `Similar ${noun}s, most similar first`
+      : raw.length === 0
+        ? `${Noun} search`
+        : `${Noun} matches, in the order the index returned them`,
+    scoreLabel: ranked
+      ? 'similarity'
+      : raw.length === 0
+        ? ''
+        : 'no similarity score — a match either fires or it does not',
     items,
     // The payload's own sentence, verbatim. It distinguishes "we have no precedent" from "nothing
     // has been indexed" and from "the scan stopped early", which is the whole reason it exists —
@@ -343,11 +382,16 @@ const cell = (value: unknown): string => {
 /** `stoichiometry_table` — `ChargeTable`. */
 function detectChargeTable(node: unknown): RowTable | null {
   if (!isRecord(node)) return null;
-  const raw = records(node.rows);
+  const rawList: unknown[] = Array.isArray(node.rows) ? node.rows : [];
+  const raw = records(rawList);
   const basis = str(node.basis_name);
   if (raw.length === 0 || !basis) return null;
   // Every row of a charge table is a thing to weigh out. One that cannot state its own name and
-  // mass is not a row a chemist can act on, and a table missing one is a wrong table.
+  // mass is not a row a chemist can act on, and a table missing one is a wrong table — including
+  // when it was `records()` that dropped it, which is why the count is checked against the raw
+  // array. `ChargeTable.unresolved` exists precisely because a silently-dropped reagent is the
+  // failure mode this whole module refuses.
+  if (raw.length !== rawList.length) return null;
   if (!raw.every((row) => str(row.name) !== null && num(row.mass_g) !== null)) return null;
 
   const unresolved = strings(node.unresolved);

@@ -65,8 +65,14 @@ export function TopBar(): React.JSX.Element {
   const [health, setHealth] = useState<Health>('checking');
   const banner = useChatStore((s) => s.banner);
   const activeId = useChatStore((s) => s.activeId);
-  const active = useChatStore((s) => (s.activeId ? s.conversations[s.activeId] : undefined));
-  const retryText = retryableText(active);
+  // The derived string, not the conversation it is derived from. Subscribing to the whole active
+  // conversation re-rendered this header — health poll, nav, account, banner and all — on every
+  // token batch of every turn, roughly sixty times a second, to recompute a string that changes at
+  // most once per turn. Zustand compares the selector's *result*, so returning `string | null`
+  // keeps the header out of the streaming render path entirely.
+  const retryText = useChatStore((s) =>
+    retryableText(s.activeId ? s.conversations[s.activeId] : undefined),
+  );
   // The same test App.tsx uses to decide whether the sidebar is mounted: `/` is the chat surface,
   // and it is the only route with a composer to send anything through.
   const onChat = useLocation().pathname === '/';

@@ -4,7 +4,9 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "baseUrl": ".",
+    // No `baseUrl`: it is deprecated and stops functioning in TypeScript 7.0, and `paths` has not
+    // needed it since 5.0 — the entries below resolve relative to this file. Removing it now keeps
+    // the eventual major upgrade from being blocked on a config change nobody remembers making.
     "paths": { "@/*": ["./src/*"] },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,

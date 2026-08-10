@@ -131,6 +131,13 @@ export function migratePersisted(persisted: unknown, version: number): Persisted
   return steps.reduce<Partial<PersistedState>>((acc, step) => step(acc), state) as PersistedState;
 }
 
+/**
+ * The persisted key. Frozen — see the note on `name` in the persist config. Named here because
+ * the cross-tab listener at the bottom of this file has to match it exactly, and a literal in two
+ * places is a silent no-op waiting to happen.
+ */
+const PERSIST_KEY = 'chemclaw3.chat.v2';
+
 /** Keep persisted state bounded — see `partialize` below. */
 const MAX_CONVERSATIONS = 30;
 const MAX_JOB_FEED = 50;
@@ -288,6 +295,15 @@ export interface ChatState {
   selectConversation: (id: string) => void;
   deleteConversation: (id: string) => void;
   clearAll: () => void;
+  /**
+   * Fold in what another tab just wrote, in response to a `storage` event.
+   *
+   * Every tab hydrated the persisted key once at load and thereafter wrote its whole in-memory
+   * snapshot over it, with nothing listening — so a tab that had been open since before another
+   * tab created a conversation destroyed it on its next store write. Multiple tabs are an
+   * expected pattern here; `msalAuth` uses `sessionStorage` precisely so tokens are per-tab.
+   */
+  mergeFromOtherTab: (incoming: PersistedState) => void;
   setSessionId: (conversationId: string, sessionId: string, contextLost?: boolean) => void;
   hydrateTranscript: (conversationId: string, messages: ChatMessage[]) => void;
 
@@ -420,6 +436,62 @@ export const useChatStore = create<ChatState>()(
             banner: null,
             jobFeed: [],
             streaming: null,
+          };
+        });
+      },
+
+      mergeFromOtherTab(incoming) {
+        set((s) => {
+          const conversations: Record<string, Conversation> = { ...s.conversations };
+
+          for (const [id, remote] of Object.entries(incoming.conversations ?? {})) {
+            if (!remote) continue;
+            const local = conversations[id];
+            // Newest wins per conversation, which is the whole point: whole-snapshot writes made
+            // the loser's *other* conversations disappear with it. `updatedAt` bumps on every
+            // token, so a turn streaming in this tab always outranks the other tab's stale copy.
+            if (!local || remote.updatedAt > local.updatedAt) conversations[id] = remote;
+          }
+
+          // A conversation the other tab deleted stays deleted only if we never touched it since;
+          // anything we have that it lacks is ours and survives. Deletion does not propagate,
+          // because there is no tombstone to tell "deleted there" from "created here".
+          const order = Object.keys(conversations)
+            .sort((a, b) => (conversations[b]?.updatedAt ?? 0) - (conversations[a]?.updatedAt ?? 0))
+            .slice(0, MAX_CONVERSATIONS);
+
+          const kept: Record<string, Conversation> = {};
+          for (const id of order) {
+            const conversation = conversations[id];
+            if (conversation) kept[id] = conversation;
+          }
+
+          // Job completions are announcements, so union them and take the most-read state of
+          // each: something dismissed in one tab should not reappear unread in another.
+          const feed = new Map<string, JobFeedItem>();
+          for (const item of [...(incoming.jobFeed ?? []), ...s.jobFeed]) {
+            const existing = feed.get(item.event.job_id);
+            feed.set(
+              item.event.job_id,
+              existing
+                ? {
+                    ...item,
+                    seen: existing.seen || item.seen,
+                    dismissed: existing.dismissed || item.dismissed,
+                  }
+                : item,
+            );
+          }
+
+          return {
+            conversations: kept,
+            order,
+            jobFeed: [...feed.values()]
+              .sort((a, b) => b.receivedAt - a.receivedAt)
+              .slice(0, MAX_JOB_FEED),
+            // `activeId` and `notifyOnJobComplete` stay this tab's own. Following another tab's
+            // selection would yank the reader out of what they are reading.
+            activeId: kept[s.activeId ?? ''] ? s.activeId : (order[0] ?? null),
           };
         });
       },
@@ -706,7 +778,7 @@ export const useChatStore = create<ChatState>()(
       // The KEY is frozen from here on. Schema changes go through `version` + `migrate` below:
       // bumping the key again is a silent wipe of everyone's local history, which is only ever
       // acceptable as the emergency it was the first time.
-      name: 'chemclaw3.chat.v2',
+      name: PERSIST_KEY,
       version: 3,
       // Not bare `localStorage`. persist writes synchronously on every `set()` — once per
       // animation frame while streaming — and a quota failure used to escape into whichever
@@ -772,3 +844,23 @@ export const useChatStore = create<ChatState>()(
 setQuotaListener((message) => {
   useChatStore.getState().setBanner({ kind: 'warn', text: message });
 });
+
+/**
+ * Fold in writes from other tabs.
+ *
+ * `storage` fires only in tabs *other* than the writer, which is exactly the signal needed: every
+ * tab wrote its whole snapshot over the key and nothing read anyone else's, so whichever tab
+ * wrote last silently destroyed conversations the others held. Merging is the honest resolution —
+ * conversations are keyed by id, so there is nothing to guess.
+ */
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (event) => {
+    if (event.key !== PERSIST_KEY || !event.newValue) return;
+    try {
+      const parsed = JSON.parse(event.newValue) as { state?: PersistedState };
+      if (parsed.state?.conversations) useChatStore.getState().mergeFromOtherTab(parsed.state);
+    } catch {
+      // Another tab wrote something unparseable. Ours is still good; leave it alone.
+    }
+  });
+}

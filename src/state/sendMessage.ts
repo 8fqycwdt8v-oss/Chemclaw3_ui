@@ -253,6 +253,20 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
  * destroys its upstream request, which FastAPI sees as a client disconnect — releasing the
  * session's turn slot. That chain is why the next message does not come back 409.
  */
+/**
+ * Re-run the turn that just failed.
+ *
+ * The banner's Retry used to re-drive the remote transcript read, which is guarded on a
+ * conversation having no messages — always false after a turn — so it cleared the error and
+ * resent nothing, on exactly the two failures (503 capacity, 502/network) it was added for.
+ */
+export function retryLastTurn(conversationId: string, auth: AuthProvider): boolean {
+  const text = useChatStore.getState().prepareRetry(conversationId);
+  if (text === null) return false;
+  void sendMessage({ conversationId, text, auth });
+  return true;
+}
+
 export function stopStreaming(): void {
   const { streaming } = useChatStore.getState();
   streaming?.abort.abort();

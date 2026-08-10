@@ -42,7 +42,7 @@ const HEALTH: Record<Health, { status: Status; label: string }> = {
 };
 
 export function TopBar({ onRetry }: { onRetry?: () => void }): React.JSX.Element {
-  const { auth, refresh } = useAuth();
+  const { auth, refresh, status: authStatus, retry: retryAuth } = useAuth();
   const [health, setHealth] = useState<Health>('checking');
   const [drawer, setDrawer] = useState(false);
   const banner = useChatStore((s) => s.banner);
@@ -180,8 +180,16 @@ export function TopBar({ onRetry }: { onRetry?: () => void }): React.JSX.Element
             </Button>
           )}
           {banner.action === 'reauth' && (
-            <Button variant="outline-destructive" size="xs" onClick={() => void auth.login()}>
-              Sign in again
+            // Two different failures share this action. If the *bootstrap* failed there is no
+            // real provider yet, only the placeholder — whose `login()` is a deliberate no-op, so
+            // this button used to do nothing at all on the one failure that disables the whole
+            // app. Restarting the bootstrap is the only way back from that state.
+            <Button
+              variant="outline-destructive"
+              size="xs"
+              onClick={() => (authStatus === 'failed' ? retryAuth() : void auth.login())}
+            >
+              {authStatus === 'failed' ? 'Try again' : 'Sign in again'}
             </Button>
           )}
 

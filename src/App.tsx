@@ -11,6 +11,7 @@ import { configProblems } from './env.ts';
 import { useAuth } from './auth/AuthContext.tsx';
 import { useChatStore } from './state/chatStore.ts';
 import { api } from './api/client.ts';
+import { retryLastTurn } from './state/sendMessage.ts';
 import { useJobStreams } from './hooks/useJobStreams.ts';
 import { useJobNotifications } from './hooks/useJobNotifications.ts';
 import { useVisualViewport } from './hooks/useVisualViewport.ts';
@@ -125,6 +126,7 @@ export function AppShell({
   children?: React.ReactNode;
 }): React.JSX.Element {
   const [rehydrateNonce, setRehydrateNonce] = useState(0);
+  const { auth } = useAuth();
 
   useVisualViewport();
   useRemoteTranscript(conversationId, rehydrateNonce);
@@ -135,11 +137,22 @@ export function AppShell({
   // backgrounded is the case this whole path exists for.
   useJobNotifications();
 
-  // What the banner's Retry does: clear it and let the transcript read run again.
+  /**
+   * The banner's Retry has two producers and needs to do two different things.
+   *
+   * A failed *turn* (503 capacity, 502/network) must resend the turn. A failed *transcript read*
+   * must re-run the read. Both set `action: 'retry'`, and this handler only ever did the second —
+   * which is guarded on the conversation having no messages, always false once a turn has run.
+   * So on the two failures the button was added for, it cleared the error and resent nothing.
+   *
+   * `retryLastTurn` reports whether the tail was a retryable failed turn, which is exactly the
+   * discriminator: if it was, it has been resent; if not, fall through to the transcript read.
+   */
   const onRetry = useCallback(() => {
     useChatStore.getState().setBanner(null);
+    if (conversationId && retryLastTurn(conversationId, auth)) return;
     setRehydrateNonce((n) => n + 1);
-  }, []);
+  }, [conversationId, auth]);
 
   const problems = configProblems();
   if (problems.length > 0) return <ConfigError problems={problems} />;

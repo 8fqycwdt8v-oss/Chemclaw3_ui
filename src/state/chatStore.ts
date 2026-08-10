@@ -291,6 +291,13 @@ export interface ChatState {
   hydrateTranscript: (conversationId: string, messages: ChatMessage[]) => void;
 
   appendUserMessage: (conversationId: string, text: string) => string;
+  /**
+   * Pop a trailing failed turn and hand back the text that produced it, or `null` if the tail is
+   * not a retryable [user, failed assistant] pair. Backs the banner's Retry, which previously
+   * re-ran the transcript read — a path the same conversation's message count always rejects, so
+   * the button cleared the error and resent nothing.
+   */
+  prepareRetry: (conversationId: string) => string | null;
   startAssistantMessage: (conversationId: string) => string;
   appendTokens: (conversationId: string, messageId: string, text: string) => void;
   applyEvent: (conversationId: string, messageId: string, event: ChemclawEvent) => void;
@@ -468,6 +475,34 @@ export const useChatStore = create<ChatState>()(
           };
         });
         return id;
+      },
+
+      prepareRetry(conversationId) {
+        const conversation = get().conversations[conversationId];
+        if (!conversation) return null;
+        const messages = conversation.messages;
+        const last = messages[messages.length - 1];
+        const prior = messages[messages.length - 2];
+        // Only a turn that actually failed is retryable, and only from the very end of the
+        // transcript — anything else and we would be rewriting history the reader has already
+        // seen. The pair comes off together so `sendMessage` can re-append both as it normally
+        // does, rather than needing a second, subtly different send path.
+        if (!last || last.role !== 'assistant' || last.status === 'streaming') return null;
+        if (!prior || prior.role !== 'user') return null;
+        set((s) => {
+          const current = s.conversations[conversationId];
+          if (!current) return {};
+          return {
+            conversations: {
+              ...s.conversations,
+              [conversationId]: {
+                ...current,
+                messages: current.messages.slice(0, -2),
+              },
+            },
+          };
+        });
+        return prior.text;
       },
 
       startAssistantMessage(conversationId) {

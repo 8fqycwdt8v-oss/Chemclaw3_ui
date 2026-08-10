@@ -21,3 +21,18 @@ import { createAuthProvider } from './index.ts';
 import type { AuthProvider } from './types.ts';
 
 export const authReady: Promise<AuthProvider> = createAuthProvider();
+
+/**
+ * Start over after a failed bootstrap.
+ *
+ * The module-scope promise above is created once on purpose, and that is what makes a failure
+ * permanent: it is already rejected, so nothing awaiting it can ever succeed and the app sits
+ * with everything token-gated disabled behind a dismissable banner. This is the only way back,
+ * and it is deliberately explicit — a user pressing "Try again", never an automatic retry.
+ *
+ * Constructing a second provider is safe *here* precisely because the first one failed; the
+ * StrictMode double-invoke this module exists to prevent is a mount-time hazard, not this.
+ */
+export function restartAuth(): Promise<AuthProvider> {
+  return createAuthProvider();
+}

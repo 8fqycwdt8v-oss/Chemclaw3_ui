@@ -158,6 +158,10 @@ const Bubble = memo(function Bubble({
   const streaming = message.role === 'assistant' && message.status === 'streaming';
   return (
     <div
+      // The handle "Load earlier" anchors its scroll restore on. A `data-` attribute rather than a
+      // ref map: the restore needs exactly one element, chosen after the render that inserted the
+      // others, and threading sixty refs to find it would be a lot of bookkeeping for one query.
+      data-message-id={message.id}
       // Skip layout and paint for bubbles scrolled out of view. `auto` on the intrinsic size makes
       // the browser remember each one's real height, so the scrollbar does not jump as they
       // realise — a fixed guess would also fight the trace panel, whose expanded height is many
@@ -226,8 +230,8 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
   const endRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
-  /** Set by "Load earlier" so the layout effect below can put the reader back where they were. */
-  const anchorRef = useRef<number | null>(null);
+  /** Set by "Load earlier": which bubble the reader was looking at, and where it was on screen. */
+  const anchorRef = useRef<{ id: string; top: number } | null>(null);
 
   const [windowSize, setWindowSize] = useState(WINDOW_STEP);
 
@@ -245,7 +249,22 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
     // Synchronously, before React can re-render: the pin effect below would otherwise still see a
     // stale `true` and slam the reader back to the bottom of a list they just expanded upwards.
     pinnedRef.current = false;
-    anchorRef.current = el ? el.scrollHeight - el.scrollTop : null;
+    // Anchor on a real element rather than on `scrollHeight - scrollTop`.
+    //
+    // The arithmetic version is exact only if `scrollHeight` is truthful at the moment the layout
+    // effect runs, and with `content-visibility: auto` it is not: sixty freshly prepended bubbles
+    // report `contain-intrinsic-size`'s *estimate* until the browser gets round to laying them out,
+    // and every one that then resolves to a different height moves everything below it. Measured on
+    // a 663px-tall mobile viewport, that left the reader's message 380px from where it had been —
+    // still on screen, but most of a screen away from where they were looking.
+    //
+    // The first currently-shown bubble is on screen, so it is fully laid out and its position is
+    // real. Recording where it is now, and putting it back there afterwards, is immune to every
+    // estimate above it being wrong.
+    const first = shown[0];
+    const node = first ? el?.querySelector(`[data-message-id="${CSS.escape(first.id)}"]`) : null;
+    anchorRef.current =
+      node && el ? { id: first!.id, top: node.getBoundingClientRect().top } : null;
     setWindowSize((n) => n + WINDOW_STEP);
   };
 
@@ -254,9 +273,14 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
   // scrollTop numerically unchanged, which throws the reader forward by the inserted height.
   useLayoutEffect(() => {
     const el = scrollerRef.current;
-    if (!el || anchorRef.current === null) return;
-    el.scrollTop = el.scrollHeight - anchorRef.current;
+    const anchor = anchorRef.current;
     anchorRef.current = null;
+    if (!el || !anchor) return;
+    const node = el.querySelector(`[data-message-id="${CSS.escape(anchor.id)}"]`);
+    if (!node) return;
+    // Relative, not absolute: scrolling by how far the anchor moved needs no view of the document's
+    // total height, which is the number that cannot be trusted here.
+    el.scrollTop += node.getBoundingClientRect().top - anchor.top;
   }, [shown]);
 
   // Keep the view pinned to the bottom while streaming, but stop fighting the user the moment they

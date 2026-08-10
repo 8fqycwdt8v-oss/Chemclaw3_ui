@@ -8,10 +8,10 @@
  *
  * Three backend constraints shape this, all of them still true:
  *
- *  - The backend caps concurrent event streams per user and 429s past the cap. This repo does not
- *    know the cap's value, and the failure mode is invisible: the 429 path backs off and retries
- *    forever, so overshooting looks like "notifications quietly stopped". So there is an explicit
- *    client-side budget, and it only ever adjusts DOWNWARD when a 429 says we guessed high.
+ *  - The backend caps concurrent event streams per user and 429s past the cap. The cap's value is
+ *    now known — see `MAX_JOB_STREAMS` — but the failure mode is unchanged: the 429 path backs off
+ *    and retries forever, so overshooting looks like "notifications quietly stopped". So there is
+ *    an explicit client-side budget, and it only ever adjusts DOWNWARD.
  *  - Its claim is destructive and scoped to `job_completed` in SQL. We are one of two consumers
  *    racing for those rows, so a missed event is expected and must never be treated as an error.
  *    More streams do not multiply delivery; they multiply racers.
@@ -28,10 +28,22 @@ import { useChatStore } from '../state/chatStore.ts';
 /**
  * How many sessions to watch at once.
  *
- * Derived from what the feature needs — the active conversation, plus the two most recently used,
- * which covers "I launched a run, moved on, and it finished" — and NOT from a guess at the
- * backend's cap, which is unknown here. A number justified by the use case is defensible; one
- * justified by an invented cap is not.
+ * Chosen from what the feature needs — the active conversation, plus the two most recently used,
+ * which covers "I launched a run, moved on, and it finished" — and now checked against the real
+ * cap rather than left as a defensible guess. The service's is
+ * `service_max_event_streams_per_user`, default **5** (`chemclaw/core/config/service.py`), enforced
+ * in `routes/streams.py` beside a per-pod total. Three fits under five, so the number stands; what
+ * changed is that it is a measured margin instead of a hope.
+ *
+ * The margin is thinner than it looks, and that is the part worth knowing. The cap is **per
+ * principal, per process, counted across connections** — it has no idea what a tab is. Two windows
+ * on one account ask for six against a cap of five, so the second window's last stream 429s.
+ * Nothing here can see the other tab: the count lives in the pod's memory, and a client-side budget
+ * can only bound its own. So the overshoot is real, expected in a two-window workflow, and handled
+ * rather than prevented — the 429 path below drops this tab to a single stream, which brings the
+ * pair back under the cap. Preventing it properly means one tab holding the streams for all of
+ * them (a `BroadcastChannel` leader election), which is a feature and not a constant; it is filed
+ * in ISSUES.md rather than half-built here.
  */
 const MAX_JOB_STREAMS = 3;
 
@@ -93,9 +105,15 @@ async function openStream(
         },
       });
 
-      // Over the per-user stream cap. Backing off hard is necessary but not sufficient: a silent
-      // retry loop is exactly how this failure hides. A second one in a row means our budget is
-      // above the real cap, so we say so and drop to a single stream for the life of the page.
+      // Over the per-user stream cap (`service_max_event_streams_per_user`, default 5, shared
+      // across this account's tabs). Backing off hard is necessary but not sufficient: a silent
+      // retry loop is exactly how this failure hides. A second one in a row means this tab's share
+      // of the cap is smaller than its budget — almost always a second window — so we say so and
+      // drop to a single stream for the life of the page.
+      //
+      // Still no recovery path, and still deliberately: raising the budget again after a quiet
+      // spell would flap against whatever else holds the cap, and the cost of staying low is one
+      // tab watching one conversation instead of three. Down is cheap; oscillating is not.
       if (res.status === 429) {
         consecutive429 += 1;
         if (consecutive429 >= 2) useChatStore.getState().setJobStreamsThrottled(true);

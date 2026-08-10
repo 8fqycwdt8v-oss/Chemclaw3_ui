@@ -41,17 +41,21 @@ async function request<T>(path: string, getToken: TokenGetter, init: RequestInit
   return (await res.json()) as T;
 }
 
+/**
+ * One of the caller's sessions, as `GET /sessions` lists them.
+ *
+ * There is deliberately no `title`. It was declared optional with a note that the service does not
+ * send one and that whoever removed it should fix the sidebar's copy in the same commit — this is
+ * that commit. The title is now recovered from the transcript when the conversation is opened
+ * (`chatStore.hydrateTranscript`), so the placeholder is genuinely temporary rather than
+ * permanent, and an optional field nobody can ever populate is gone.
+ *
+ * `created_at` is when the session was *started*, not its last activity. Sorting a conversation
+ * list by it is wrong and the sidebar does not; see ISSUES.md.
+ */
 export interface SessionSummary {
   session_id: string;
   created_at?: string;
-  /**
-   * NOT sent by the service — `SessionSummary` there is `session_id` and `created_at` only.
-   *
-   * Kept optional and kept here because the sidebar's fallback ("Earlier conversation") reads as a
-   * placeholder for a title that failed to load, when in fact there is no title to load. Whoever
-   * removes this should change that copy in the same commit, or add the field upstream.
-   */
-  title?: string;
 }
 
 /** One tool call as the transcript records it. `arguments` and `result` are truncated server-side

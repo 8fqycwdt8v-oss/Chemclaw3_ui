@@ -120,11 +120,45 @@ describe('transcript rehydrate', () => {
       'gather_evidence',
       'predict_pka',
     ]);
-    // A transcript is written after the turn, so no call in it can still be running. A stored
-    // `result` of null means the call raised — which is `failed`, not "returned nothing".
+    // A transcript is written after the turn, so no call in it can still be running — but a stored
+    // `result` of null is not `failed` either. The service's own `TranscriptToolCall` docstring
+    // says it means the pairing is incomplete, "a turn that failed mid-call, or a call whose
+    // result row was pruned", and asks a surface to render "this ran and we do not know how it
+    // ended". Retention deleting a row months later is not the tool raising, and in a record a
+    // chemist may read as evidence the two must not be collapsed.
     expect(assistant.trace[0]?.toolCall?.result).toBe('3 notes');
-    expect(assistant.trace[1]?.toolCall?.failed).toBe(true);
+    expect(assistant.trace[1]?.toolCall?.unresolved).toBe(true);
+    expect(assistant.trace[1]?.toolCall?.failed).toBeUndefined();
     expect(assistant.trace[1]?.toolCall?.result).toBeUndefined();
+  });
+
+  it('names a restored conversation after what was actually asked in it', async () => {
+    // `GET /sessions` carries no title — the server mints a session before anyone has spoken — so
+    // every conversation restored from another device arrived as "Earlier conversation".
+    const stub = stubFetch((url) =>
+      url.includes('/messages')
+        ? new Response(JSON.stringify(TRANSCRIPT), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        : new Response(JSON.stringify({ detail: 'not found' }), { status: 404 }),
+    );
+    restore = stub.restore;
+
+    const cid = seed('server');
+    useChatStore.setState((s) => ({
+      conversations: {
+        ...s.conversations,
+        [cid]: { ...s.conversations[cid]!, title: 'Earlier conversation' },
+      },
+    }));
+    renderShell(cid);
+
+    await waitFor(() =>
+      expect(useChatStore.getState().conversations[cid]?.title).toBe(
+        'What did we decide about the ligand?',
+      ),
+    );
   });
 
   it('does not read the messages of a session this browser just warmed', async () => {

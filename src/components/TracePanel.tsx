@@ -7,11 +7,14 @@
  * disclaims showing results while showing them is worse than either version.
  *
  * A call is also announced when it is *issued* now, so an entry with no result yet is a call still
- * running rather than one whose result was withheld. Three states per row: running, returned,
- * failed.
+ * running rather than one whose result was withheld. Four states per row: running, returned,
+ * failed, and — reachable only from a reloaded transcript — outcome-not-recorded.
  *
- * `arguments` and `result` are raw strings the backend truncates to 200 characters, so both are
- * displayed as-is rather than parsed as JSON. The truncation is no longer the end of it: a row
+ * `arguments` and `result` are raw strings the backend truncates, so both are
+ * displayed as-is rather than parsed as JSON. No width is quoted here: the live stream truncates
+ * at `agent_audit_max_arg_chars` (200) and the stored transcript at its own, wider bound (400), so
+ * a reloaded row is legitimately longer than the same row was live. The truncation is no longer
+ * the end of it either: a row
  * whose result was stored carries a ref, and `ResultSheet` fetches and renders the whole thing.
  * The preview stays in place regardless — it is what makes the row scannable — and the control
  * below it is what makes the row's numbers checkable.
@@ -136,7 +139,10 @@ function Row({
       );
 
     case 'tool_call': {
-      const running = entry.toolCall?.result === undefined && !entry.toolCall?.failed;
+      const running =
+        entry.toolCall?.result === undefined &&
+        !entry.toolCall?.failed &&
+        !entry.toolCall?.unresolved;
       return (
         <div>
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
@@ -153,7 +159,7 @@ function Row({
                 />
                 arguments
               </summary>
-              {/* Raw, truncated to 200 chars server-side — never parsed as JSON. */}
+              {/* Raw, truncated server-side — never parsed as JSON. */}
               <Pre label={`Arguments to ${entry.toolCall.tool}`}>{entry.toolCall.arguments}</Pre>
             </details>
           )}
@@ -181,6 +187,11 @@ function Row({
               <span aria-hidden className="size-1.5 animate-pulse rounded-full bg-brand" />
               running…
             </p>
+          )}
+          {/* Reached only by a reloaded transcript, and it says the one true thing rather than
+              picking whichever of running / returned / failed would look tidiest. */}
+          {entry.toolCall?.unresolved && (
+            <p className="mt-1 text-2xs text-ink-muted">outcome not recorded</p>
           )}
         </div>
       );

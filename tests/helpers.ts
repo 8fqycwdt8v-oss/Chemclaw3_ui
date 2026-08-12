@@ -40,6 +40,9 @@ export function toolResultEvent(over: Partial<ToolResultEvent> = {}): ToolResult
     result_ref: '',
     note_ids: [],
     numbers: [],
+    // `normalizeEvent` always sets this, so a builder used in `toEqual` must too. Empty is the
+    // main agent — the same default the backend serialises.
+    agent: '',
     ...over,
   };
 }

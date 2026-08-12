@@ -47,7 +47,13 @@ describe('normalizeEvent', () => {
 
   it('accepts tool_failed rather than dropping it', () => {
     const event = normalizeEvent({ type: 'tool_failed', tool: 'predict_pka', message: 'timeout' });
-    expect(event).toEqual({ type: 'tool_failed', tool: 'predict_pka', message: 'timeout' });
+    expect(event).toEqual({
+      type: 'tool_failed',
+      tool: 'predict_pka',
+      message: 'timeout',
+      // Empty is the main agent; a specialist's failure carries its name here (backend M9).
+      agent: '',
+    });
   });
 
   it('still drops a genuinely unknown event', () => {

@@ -5,7 +5,7 @@
  * and setting BOTH the SSE `event:` name and the JSON `type` field to the same discriminator.
  * We prefer the JSON field and fall back to the SSE name.
  *
- * Verified against 8fqycwdt8v-oss/Chemclaw3 (src/chemclaw/api/events.py). Fifteen members —
+ * Verified against 8fqycwdt8v-oss/Chemclaw3 (src/chemclaw/api/events.py). Seventeen members —
  * `question` and `note_proposed` are easy to miss, and `job_started` carries `kind`.
  *
  * It said ten for a while, and the two it was missing were the two that report trouble:
@@ -19,6 +19,17 @@
  * forever, because the only event that would have corrected it was dropped in this file. The
  * lesson has now cost three events, so state it as a rule: **`EVENT_TYPES` is the gate.** Adding
  * an interface to the union without adding its discriminator here changes nothing at runtime.
+ *
+ * Then it said fifteen, and it was two short: `evidence_source` (backend M10) and `handoff`
+ * (backend M9) had both shipped without reaching this file. Same rule, fifth and sixth time. The
+ * pattern behind all six is worth naming, because it is not carelessness: this file mirrors a
+ * contract that lives in another repository, and nothing mechanical connects them — the backend
+ * can add a member and stay green, and so can this. Until something checks the two against each
+ * other, the only defence is that a backend change is not finished until it lands here.
+ *
+ * The same release added a field rather than a member: `agent` on `tool_call`, `tool_failed` and
+ * `tool_result`, naming the specialist that raised the event. Empty means the main agent, so it is
+ * additive by construction and an existing reader is unaffected.
  *
  * This file is imported by both the SPA (bundled by Vite) and the mock backend (bundled by
  * esbuild). Keep it dependency-free.
@@ -44,6 +55,17 @@ export interface ToolCallEvent {
   /** A RAW string truncated to 200 chars by the backend — NOT parsed JSON, and possibly cut
    *  mid-token. Never `JSON.parse` this unguarded. */
   arguments: string;
+  /** The specialist that raised this event; **empty means the main agent**, which is what every
+   *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
+   *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
+   *  property of the turn, decided before any routing, so attributing it would invent a fact.
+   *
+   *  Optional in the type, always populated by `normalizeEvent`. Required would contradict the
+   *  claim the field is built on: the backend defaults it to `''` precisely so an existing
+   *  consumer is unaffected, and a required mirror makes every construction site — every test,
+   *  every fixture, the mock — name a field that means "no specialist". Absent and `''` both read
+   *  as the main agent, so a falsy check is the whole handling. */
+  agent?: string;
 }
 
 export interface TokenEvent {
@@ -196,6 +218,17 @@ export interface ToolFailedEvent {
    *  can route around a failed call, and when it cannot, this is the only event that says why. */
   tool: string;
   message: string;
+  /** The specialist that raised this event; **empty means the main agent**, which is what every
+   *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
+   *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
+   *  property of the turn, decided before any routing, so attributing it would invent a fact.
+   *
+   *  Optional in the type, always populated by `normalizeEvent`. Required would contradict the
+   *  claim the field is built on: the backend defaults it to `''` precisely so an existing
+   *  consumer is unaffected, and a required mirror makes every construction site — every test,
+   *  every fixture, the mock — name a field that means "no specialist". Absent and `''` both read
+   *  as the main agent, so a falsy check is the whole handling. */
+  agent?: string;
 }
 
 export interface ToolResultEvent {
@@ -225,6 +258,41 @@ export interface ToolResultEvent {
   note_ids: string[];
   /** Numeric values the result carried, untruncated for the same reason. */
   numbers: number[];
+  /** The specialist that raised this event; **empty means the main agent**, which is what every
+   *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
+   *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
+   *  property of the turn, decided before any routing, so attributing it would invent a fact.
+   *
+   *  Optional in the type, always populated by `normalizeEvent`. Required would contradict the
+   *  claim the field is built on: the backend defaults it to `''` precisely so an existing
+   *  consumer is unaffected, and a required mirror makes every construction site — every test,
+   *  every fixture, the mock — name a field that means "no specialist". Absent and `''` both read
+   *  as the main agent, so a falsy check is the whole handling. */
+  agent?: string;
+}
+
+export interface EvidenceSourceEvent {
+  type: 'evidence_source';
+  /** One retrieval source's own report of what it contributed to a sweep, emitted while the sweep
+   *  runs. `gather_evidence` asks every source at once and merges the results, and in the merged
+   *  list a source that returned nothing is indistinguishable from a source nobody asked — which
+   *  is a real defect the backend has already paid for once. */
+  source: string;
+  /** What the source FOUND, before the cross-source cap. So "had nothing to say" and "was crowded
+   *  out of the budget" stay distinguishable; they are different problems with different fixes. */
+  chunks: number;
+}
+
+export interface HandoffEvent {
+  type: 'handoff';
+  /** The specialist being entered, or **empty when control returned** to the agent above it. The
+   *  empty string is a declared value here, not a missing field: the pair brackets a specialist's
+   *  work, and dropping the second one leaves a trace showing a turn stuck inside a specialist it
+   *  already left. Matches the `agent` stamped on the events raised in between. */
+  to: string;
+  /** The supervisor's own stated reason for delegating — prose for a human. Nothing branches on
+   *  it, and it is empty on the hand back. */
+  reason: string;
 }
 
 export type ChemclawEvent =
@@ -238,6 +306,8 @@ export type ChemclawEvent =
   | CapabilityDegradedEvent
   | ToolFailedEvent
   | ToolResultEvent
+  | EvidenceSourceEvent
+  | HandoffEvent
   | QuestionEvent
   | NoteProposedEvent
   | ApprovalRequestEvent
@@ -257,6 +327,8 @@ const EVENT_TYPES = new Set<string>([
   'capability_degraded',
   'tool_failed',
   'tool_result',
+  'evidence_source',
+  'handoff',
   'question',
   'note_proposed',
   'approval_request',
@@ -348,6 +420,10 @@ const asStringArray = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) =>
  *  rendering, and one `NaN` in it is a blank cell nobody can explain. */
 const asNumberArray = (v: unknown): number[] =>
   Array.isArray(v) ? v.filter((x): x is number => typeof x === 'number' && Number.isFinite(x)) : [];
+/** A count, never `NaN`/`Infinity`. Same reason as `asNumberArray`'s filter: a non-finite number
+ *  here renders as a blank nobody can explain, and 0 is the honest reading of "not reported". */
+const asCount = (v: unknown): number =>
+  typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : 0;
 
 /**
  * Coerce one decoded SSE frame into a `ChemclawEvent`, or `null` if it is not one we know.
@@ -375,6 +451,7 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         type: 'tool_call',
         tool: asString(o.tool, 'unknown'),
         arguments: asString(o.arguments),
+        agent: asString(o.agent),
       };
     case 'token':
       return { type: 'token', text: asString(o.text) };
@@ -399,6 +476,7 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         type: 'tool_failed',
         tool: asString(o.tool, 'unknown'),
         message: asString(o.message, 'The tool call failed.'),
+        agent: asString(o.agent),
       };
     case 'tool_result':
       return {
@@ -408,7 +486,18 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         result_ref: asString(o.result_ref),
         note_ids: asStringArray(o.note_ids),
         numbers: asNumberArray(o.numbers),
+        agent: asString(o.agent),
       };
+    case 'evidence_source':
+      return {
+        type: 'evidence_source',
+        source: asString(o.source, 'unknown'),
+        chunks: asCount(o.chunks),
+      };
+    case 'handoff':
+      // `to` falls back to '' deliberately — that is the hand-back, a declared value, so there is
+      // no sentinel to distinguish a malformed frame from a real return to the main agent.
+      return { type: 'handoff', to: asString(o.to), reason: asString(o.reason) };
     case 'question':
       return {
         type: 'question',

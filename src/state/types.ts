@@ -22,7 +22,8 @@ export type TraceKind =
   | 'job_failed'
   | 'question'
   | 'note_proposed'
-  | 'approval_request';
+  | 'approval_request'
+  | 'handoff';
 
 /**
  * One entry in the "show your work" panel, in arrival order.
@@ -35,6 +36,14 @@ export interface TraceEntry {
   at: number;
   kind: TraceKind;
   plan?: { todos: string[] };
+  /**
+   * The turn entered a specialist, or came back out of one.
+   *
+   * `to` empty is the hand back, and it is a declared value rather than a missing field — the
+   * pair brackets the specialist's work, so rendering only the entry would leave a trace showing
+   * a turn permanently inside a specialist it already left.
+   */
+  handoff?: { to: string; reason: string };
   /**
    * A tool invocation and, once it comes back, what it returned.
    *
@@ -52,6 +61,8 @@ export interface TraceEntry {
   toolCall?: {
     tool: string;
     arguments: string;
+    /** The specialist that made the call; absent or empty is the main agent. */
+    agent?: string;
     result?: string;
     failed?: boolean;
     /**

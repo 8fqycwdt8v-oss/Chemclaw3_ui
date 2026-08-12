@@ -259,7 +259,7 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
       return {
         ...base,
         kind: 'tool_call',
-        toolCall: { tool: event.tool, arguments: event.arguments },
+        toolCall: { tool: event.tool, arguments: event.arguments, agent: event.agent },
       };
     case 'job_failed':
       return {
@@ -299,6 +299,8 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
         kind: 'approval_request',
         approval: { prompt: event.prompt, approvalId: event.approval_id },
       };
+    case 'handoff':
+      return { ...base, kind: 'handoff', handoff: { to: event.to, reason: event.reason } };
     default:
       return null;
   }

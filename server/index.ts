@@ -22,12 +22,26 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-if (!existsSync(cfg.clientDir)) {
+// A missing client directory is survivable and the warning below says so: under `npm run dev`
+// the BFF only proxies and serves /config.js, and Vite serves the client. It was not actually
+// survivable — `sirv` calls `readdirSync` on construction and threw ENOENT one line after the
+// warning promised a 404, so a plain `npm run dev` on a fresh checkout (no `dist/client` yet)
+// killed the BFF at import. Vite still came up and proxied /api to a dead port, which is why the
+// symptom reached the browser as a 502 rather than as this stack trace.
+const clientDirExists = existsSync(cfg.clientDir);
+if (!clientDirExists) {
   log.warn(`client directory ${cfg.clientDir} does not exist — static assets will 404.`);
   log.warn('Run `npm run build:client` first, or use `npm run dev` for the Vite dev server.');
 }
 
-const assets = sirv(cfg.clientDir, {
+const assets = !clientDirExists
+  ? // Make the warning true rather than fatal: 404 every asset, serve everything else normally.
+    ((_req: http.IncomingMessage, res: http.ServerResponse, next?: () => void) => {
+      if (next) return next();
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('client build not present');
+    })
+  : sirv(cfg.clientDir, {
   // SPA fallback, so /auth/callback and any client route resolve to index.html.
   single: true,
   etag: true,
@@ -47,7 +61,7 @@ const assets = sirv(cfg.clientDir, {
       res.setHeader('cache-control', 'no-cache');
     }
   },
-});
+    });
 
 const server = http.createServer((req, res) => {
   const rawUrl = req.url ?? '/';

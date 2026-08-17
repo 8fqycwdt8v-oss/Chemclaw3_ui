@@ -46,11 +46,19 @@ export default defineConfig({
         configure(proxy) {
           proxy.on('proxyRes', (proxyRes, _req, res) => {
             const contentType = String(proxyRes.headers['content-type'] ?? '');
-            if (contentType.includes('text/event-stream')) {
-              // Vite's dev proxy will otherwise hold the header block, so the browser cannot
-              // distinguish "connecting" from "the agent is thinking".
-              (res as { flushHeaders?: () => void }).flushHeaders?.();
-            }
+            if (!contentType.includes('text/event-stream')) return;
+            // Flush the header block early so the browser can tell "connecting" from "the agent
+            // is thinking" — but write the upstream headers ourselves first, because the order
+            // here is not what it looks like. http-proxy emits `proxyRes` *before* it copies the
+            // upstream headers onto `res`, and it guards that copy with `!res.headersSent`.
+            // Flushing alone therefore sent an empty header block and turned the copy into a
+            // no-op: the body streamed perfectly while `content-type` — and the BFF's CSP and
+            // nosniff headers — never arrived at all. The client checks the content type before
+            // it will parse, so every turn in the browser died on `Expected an event stream but
+            // received ""`, while the identical request straight to the BFF on 8787 was correct.
+            // That asymmetry is the tell, and it is why curl-to-the-BFF cannot clear this path.
+            res.writeHead(proxyRes.statusCode ?? 200, proxyRes.headers);
+            (res as { flushHeaders?: () => void }).flushHeaders?.();
           });
         },
       },

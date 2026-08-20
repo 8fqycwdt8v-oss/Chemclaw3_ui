@@ -20,7 +20,7 @@
  * the alternative is a card whose only buttons do nothing.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import { api } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
@@ -152,14 +152,23 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
   useEffect(() => {
     authRef.current = auth;
   });
-  const token = useCallback((): Promise<string | null> => authRef.current.getAccessToken(), []);
+  // The *provider*, not just its token, so a 401 on the plan routes recovers like every other
+  // route (`api/client.ts`'s `TokenGetter`). Still stable across renders — the ref is what keeps
+  // the effect's dependency list to the session, which is the reason it exists.
+  const currentAuth = useMemo(
+    () => ({
+      getAccessToken: () => authRef.current.getAccessToken(),
+      handleUnauthorized: () => authRef.current.handleUnauthorized(),
+    }),
+    [],
+  );
 
   useEffect(() => {
     if (!sessionId) return;
     let live = true;
     void (async () => {
       try {
-        const status = await api.getPlan(sessionId, token);
+        const status = await api.getPlan(sessionId, currentAuth);
         if (!live) return;
         setPlan({ hash: status.plan_hash, todos: status.plan });
         setState(status.approved ? 'approved' : 'idle');
@@ -173,14 +182,14 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
     return () => {
       live = false;
     };
-  }, [sessionId, token]);
+  }, [sessionId, currentAuth]);
 
   const decide = async (approved: boolean): Promise<void> => {
     if (!sessionId || !plan) return;
     setState('sending');
     setError(null);
     try {
-      await api.decidePlan(sessionId, approved, plan.hash, token);
+      await api.decidePlan(sessionId, approved, plan.hash, currentAuth);
       setState(approved ? 'approved' : 'rejected');
       return;
     } catch (err) {
@@ -194,7 +203,7 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
     // what is actually being proposed — and never retry the decision with the new hash, which
     // would approve a plan nobody read.
     try {
-      const status = await api.getPlan(sessionId, token);
+      const status = await api.getPlan(sessionId, currentAuth);
       setPlan({ hash: status.plan_hash, todos: status.plan });
       setState('idle');
     } catch {
@@ -287,7 +296,7 @@ export function ApprovalPrompt({
     setState('sending');
     setError(null);
     try {
-      await api.decideApproval(approvalId, approved, () => auth.getAccessToken());
+      await api.decideApproval(approvalId, approved, auth);
       setState(approved ? 'approved' : 'rejected');
     } catch (err) {
       setState('failed');

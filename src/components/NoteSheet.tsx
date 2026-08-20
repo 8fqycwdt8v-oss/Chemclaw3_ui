@@ -89,7 +89,7 @@ export function NoteSheet({
     (id: string) => {
       setState({ status: 'loading' });
       api
-        .getNote(id, () => auth.getAccessToken())
+        .getNote(id, auth)
         .then((view) => setState({ status: 'ready', view }))
         .catch((err: unknown) =>
           setState({

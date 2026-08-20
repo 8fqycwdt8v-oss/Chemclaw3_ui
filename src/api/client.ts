@@ -12,15 +12,46 @@
  */
 
 import { config } from '../env.ts';
+import type { AuthProvider } from '../auth/types.ts';
 import { ApiError, errorFromStatus, readDetail } from './errors.ts';
 
-export type TokenGetter = () => Promise<string | null>;
+/**
+ * How a request authenticates.
+ *
+ * Two accepted shapes, and the second is the one every caller in this app actually has. A bare
+ * `() => Promise<string | null>` can only produce a token; an auth provider can also *recover*
+ * from a 401 — refresh silently, or start an interactive redirect — which is what turns an expired
+ * session into a sign-in prompt instead of a dead-end error toast.
+ *
+ * Before this union, `handleUnauthorized` had exactly one caller in the whole app
+ * (`state/sendMessage.ts`, the turn path). Every other route — the conversation list, the
+ * transcript, the review queue, the jobs panel, the approvals inbox, plan decisions, attachment
+ * upload, and both detail fetches — surfaced "Your session has expired. Please sign in again." with
+ * no way to act on it. Widening the parameter rather than threading a second argument through
+ * eighteen signatures is what makes the recovery uniform: `request` below asks once, and every
+ * route inherits it.
+ */
+export type TokenGetter =
+  (() => Promise<string | null>) | Pick<AuthProvider, 'getAccessToken' | 'handleUnauthorized'>;
 
-async function request<T>(path: string, getToken: TokenGetter, init: RequestInit = {}): Promise<T> {
-  const token = await getToken();
-  let res: Response;
+/** The bearer for this request, from either accepted shape. */
+export const tokenFrom = async (auth: TokenGetter): Promise<string | null> =>
+  typeof auth === 'function' ? auth() : auth.getAccessToken();
+
+/**
+ * Ask the provider to recover from a 401, or report that it cannot.
+ *
+ * `false` for a bare token getter — it has nothing to recover with — and for a provider that
+ * started an interactive redirect (navigation is in flight, so this request is abandoned) or hit
+ * its re-auth cooldown. Only `true` means "a fresh token is available now, retry once".
+ */
+export const recoverFrom = async (auth: TokenGetter): Promise<boolean> =>
+  typeof auth === 'function' ? false : auth.handleUnauthorized();
+
+async function send(path: string, auth: TokenGetter, init: RequestInit): Promise<Response> {
+  const token = await tokenFrom(auth);
   try {
-    res = await fetch(`${config.apiBase}${path}`, {
+    return await fetch(`${config.apiBase}${path}`, {
       ...init,
       cache: 'no-store',
       headers: {
@@ -34,6 +65,19 @@ async function request<T>(path: string, getToken: TokenGetter, init: RequestInit
     });
   } catch {
     throw new ApiError('network', 'Could not reach the Chemclaw service.');
+  }
+}
+
+async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {}): Promise<T> {
+  let res = await send(path, auth, init);
+  // One retry, only on 401, only when the caller passed something that can recover. Once: a
+  // second attempt after a refresh that did not help is a redirect loop, and the provider's own
+  // cooldown exists because that loop is indistinguishable from a hang.
+  //
+  // Every body this function sends is a string, so re-sending it is safe. `uploadAttachment` does
+  // not come through here — it is XHR, for upload progress — and carries its own copy of this.
+  if (res.status === 401 && (await recoverFrom(auth))) {
+    res = await send(path, auth, init);
   }
 
   if (!res.ok) throw errorFromStatus(res.status, await readDetail(res));
@@ -219,6 +263,56 @@ export interface PlanStatus {
   decided_by: string | null;
 }
 
+/**
+ * POST one file to a session's attachment route, reporting progress.
+ *
+ * XHR rather than `fetch`, which is the one place in this client that deviates: `fetch` still
+ * cannot report upload progress in any shipping browser, and an SOP or a large CSV over a lab VPN
+ * is exactly where an indeterminate spinner stops being honest. Everything else here stays on
+ * `fetch`.
+ *
+ * A module function rather than a method, because `uploadAttachment` has to be able to call it
+ * twice — once, and once more after a recovered 401.
+ */
+function upload(
+  sessionId: string,
+  file: File,
+  token: string | null,
+  options: { onProgress?: (fraction: number) => void; signal?: AbortSignal },
+): Promise<AttachmentSummary> {
+  const form = new FormData();
+  form.append('file', file);
+
+  return new Promise<AttachmentSummary>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `${config.apiBase}/sessions/${sessionId}/attachments`);
+    xhr.responseType = 'json';
+    xhr.setRequestHeader('accept', 'application/json');
+    if (token) xhr.setRequestHeader('authorization', `Bearer ${token}`);
+
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) options.onProgress?.(e.loaded / e.total);
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.response as AttachmentSummary);
+        return;
+      }
+      const detail =
+        typeof xhr.response === 'object' && xhr.response !== null
+          ? (xhr.response as { detail?: unknown }).detail
+          : undefined;
+      reject(errorFromStatus(xhr.status, typeof detail === 'string' ? detail : undefined));
+    };
+    xhr.onerror = () => reject(new ApiError('network', 'Could not reach the Chemclaw service.'));
+    xhr.onabort = () => reject(new ApiError('aborted', 'Upload cancelled.'));
+
+    options.signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+    xhr.send(form);
+  });
+}
+
 export const api = {
   async health(): Promise<boolean> {
     try {
@@ -281,49 +375,25 @@ export const api = {
   /**
    * Upload a working file, reporting progress and honouring a cancel.
    *
-   * XHR rather than `fetch`, which is the one place in this client that deviates: `fetch` still
-   * cannot report upload progress in any shipping browser, and an SOP or a large CSV over a lab
-   * VPN is exactly where an indeterminate spinner stops being honest. Everything else here stays
-   * on `fetch`.
+   * The body is `upload` below; this half is only the one-shot 401 recovery `request` gives every
+   * other route. It cannot share that path — see `upload`'s docstring for why this one is XHR —
+   * so it carries its own copy, which is the same shape and the same "once, never twice" rule.
+   * A `File` is re-readable, so a retry costs the bytes again and nothing else.
    */
   async uploadAttachment(
     sessionId: string,
     file: File,
-    getToken: TokenGetter,
+    auth: TokenGetter,
     options: { onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
   ): Promise<AttachmentSummary> {
-    const token = await getToken();
-    const form = new FormData();
-    form.append('file', file);
-
-    return new Promise<AttachmentSummary>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', `${config.apiBase}/sessions/${sessionId}/attachments`);
-      xhr.responseType = 'json';
-      xhr.setRequestHeader('accept', 'application/json');
-      if (token) xhr.setRequestHeader('authorization', `Bearer ${token}`);
-
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) options.onProgress?.(e.loaded / e.total);
-      };
-
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          resolve(xhr.response as AttachmentSummary);
-          return;
-        }
-        const detail =
-          typeof xhr.response === 'object' && xhr.response !== null
-            ? (xhr.response as { detail?: unknown }).detail
-            : undefined;
-        reject(errorFromStatus(xhr.status, typeof detail === 'string' ? detail : undefined));
-      };
-      xhr.onerror = () => reject(new ApiError('network', 'Could not reach the Chemclaw service.'));
-      xhr.onabort = () => reject(new ApiError('aborted', 'Upload cancelled.'));
-
-      options.signal?.addEventListener('abort', () => xhr.abort(), { once: true });
-      xhr.send(form);
-    });
+    try {
+      return await upload(sessionId, file, await tokenFrom(auth), options);
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'unauthorized' && (await recoverFrom(auth))) {
+        return upload(sessionId, file, await tokenFrom(auth), options);
+      }
+      throw err;
+    }
   },
 
   /**

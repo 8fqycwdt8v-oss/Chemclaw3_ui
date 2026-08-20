@@ -72,7 +72,7 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
       // to retry — the reader could not tell "nothing was said yet" from "we could not load it".
       let remote: Awaited<ReturnType<typeof api.getMessages>>;
       try {
-        remote = await api.getMessages(sessionId, () => auth.getAccessToken());
+        remote = await api.getMessages(sessionId, auth);
       } catch (err) {
         if (!cancelled) {
           useChatStore.getState().setBanner({

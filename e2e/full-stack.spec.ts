@@ -148,7 +148,16 @@ test('8 · /readyz reports every connector healthy', async ({ request }) => {
   expect(res.ok(), `readyz returned ${res.status()}`).toBe(true);
 
   const body = JSON.stringify(await res.json());
-  for (const connector of ['props', 'rxnpredict', 'chem', 'safety', 'calc', 'bo', 'molfp', 'rxnfp']) {
+  for (const connector of [
+    'props',
+    'rxnpredict',
+    'chem',
+    'safety',
+    'calc',
+    'bo',
+    'molfp',
+    'rxnfp',
+  ]) {
     expect(body, `${connector} missing from /readyz`).toContain(connector);
   }
   // `mock-vendor` is `unprobed`, not `unhealthy`: it serves no REST health route, and its manifest

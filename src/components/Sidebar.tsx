@@ -54,7 +54,7 @@ function useServerSessions(): 'idle' | 'degraded' {
     let cancelled = false;
     void (async () => {
       try {
-        const remote = await api.listSessions(() => auth.getAccessToken());
+        const remote = await api.listSessions(auth);
         if (cancelled) return;
         // Reset on success: without this a single failure latched the warning permanently, so a
         // transient hiccup left "showing local conversations only" on screen for the session.

@@ -454,7 +454,7 @@ export function ResultSheet({
     setLoadedFor(resultRef);
     setState({ status: 'loading' });
     api
-      .getToolResult(sessionId, resultRef, () => auth.getAccessToken())
+      .getToolResult(sessionId, resultRef, auth)
       .then((result) => setState({ status: 'ready', result }))
       .catch((err: unknown) =>
         setState({

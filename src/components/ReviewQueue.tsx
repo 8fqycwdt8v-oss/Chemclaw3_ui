@@ -77,7 +77,7 @@ function ProposalSheet({
     setError(null);
     setReason('');
     api
-      .getProposal(id, () => auth.getAccessToken())
+      .getProposal(id, auth)
       .then(setDetail)
       .catch((err: unknown) =>
         setError(err instanceof Error ? err.message : 'Could not read that proposal.'),
@@ -87,7 +87,7 @@ function ProposalSheet({
   const decide = (approved: boolean) => async (): Promise<void> => {
     setBusy(true);
     try {
-      await api.decideProposal(id, approved, reason, () => auth.getAccessToken());
+      await api.decideProposal(id, approved, reason, auth);
       onOpenChange(false);
       onDecided();
     } catch (err) {
@@ -255,7 +255,7 @@ function Holds(): React.JSX.Element {
     if (!ready) return;
     let cancelled = false;
     void api
-      .listApprovals(() => auth.getAccessToken())
+      .listApprovals(auth)
       .then((list) => !cancelled && setHolds(list))
       .catch(() => !cancelled && setHolds([]));
     return () => {
@@ -307,7 +307,7 @@ function Proposals(): React.JSX.Element {
     if (!ready) return;
     let cancelled = false;
     void api
-      .listProposals(() => auth.getAccessToken(), { state: 'pending' })
+      .listProposals(auth, { state: 'pending' })
       .then((list) => !cancelled && setProposals(list))
       .catch(() => !cancelled && setProposals([]));
     return () => {

@@ -52,7 +52,7 @@ function JobSheet({
     (id: string) => {
       setStatus(null);
       api
-        .getJob(id, () => auth.getAccessToken())
+        .getJob(id, auth)
         .then(setStatus)
         .catch((err: unknown) =>
           setNotice(err instanceof Error ? err.message : 'Could not read that job.'),
@@ -69,7 +69,7 @@ function JobSheet({
 
   const cancel = async (): Promise<void> => {
     try {
-      await api.cancelJob(jobId, () => auth.getAccessToken());
+      await api.cancelJob(jobId, auth);
       // Never "cancelled": the service accepts the request, and a workflow past its last
       // cancellation point finishes anyway. Saying it stopped would be a claim we cannot back.
       setNotice(
@@ -169,7 +169,7 @@ export function JobsPanel(): React.JSX.Element {
     if (!ready) return;
     let cancelled = false;
     void api
-      .listJobs(() => auth.getAccessToken(), { text: submitted })
+      .listJobs(auth, { text: submitted })
       .then((list) => !cancelled && setLoaded({ query: submitted, list }))
       .catch(() => !cancelled && setLoaded({ query: submitted, list: [] }));
     return () => {

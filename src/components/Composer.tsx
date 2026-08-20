@@ -124,7 +124,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     if (!ready) return;
     let cancelled = false;
     void api
-      .listProfiles(() => auth.getAccessToken())
+      .listProfiles(auth)
       .then((list) => !cancelled && setProfiles(list))
       // Silent: a service without the route has exactly one profile, and a banner about a
       // picker nobody asked for would be noise.
@@ -217,7 +217,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     const abort = new AbortController();
     setUpload({ state: 'busy', text: `Uploading ${file.name}…`, progress: 0, abort });
     try {
-      const summary = await api.uploadAttachment(sessionId, file, () => auth.getAccessToken(), {
+      const summary = await api.uploadAttachment(sessionId, file, auth, {
         signal: abort.signal,
         onProgress: (fraction) =>
           setUpload((u) => (u?.state === 'busy' ? { ...u, progress: fraction } : u)),

@@ -36,31 +36,31 @@ if (!clientDirExists) {
 
 const assets = !clientDirExists
   ? // Make the warning true rather than fatal: 404 every asset, serve everything else normally.
-    ((_req: http.IncomingMessage, res: http.ServerResponse, next?: () => void) => {
+    (_req: http.IncomingMessage, res: http.ServerResponse, next?: () => void) => {
       if (next) return next();
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('client build not present');
-    })
-  : sirv(cfg.clientDir, {
-  // SPA fallback, so /auth/callback and any client route resolve to index.html.
-  single: true,
-  etag: true,
-  // Serve Vite's precompressed output rather than compressing at request time. This is both
-  // faster and keeps any compression middleware — which would break SSE — out of the process.
-  gzip: true,
-  brotli: true,
-  setHeaders(res, pathname) {
-    res.setHeader('content-security-policy', cfg.csp);
-    res.setHeader('x-content-type-options', 'nosniff');
-    res.setHeader('referrer-policy', 'same-origin');
-    // Omit X-Frame-Options in dev mode so the Replit preview iframe can load the page.
-    // Production (msal auth) keeps the strict DENY.
-    if (cfg.authMode !== 'dev') res.setHeader('x-frame-options', 'DENY');
-    // Hashed assets are immutable; index.html must never be cached or a deploy won't take.
-    if (pathname === '/index.html' || pathname === '/') {
-      res.setHeader('cache-control', 'no-cache');
     }
-  },
+  : sirv(cfg.clientDir, {
+      // SPA fallback, so /auth/callback and any client route resolve to index.html.
+      single: true,
+      etag: true,
+      // Serve Vite's precompressed output rather than compressing at request time. This is both
+      // faster and keeps any compression middleware — which would break SSE — out of the process.
+      gzip: true,
+      brotli: true,
+      setHeaders(res, pathname) {
+        res.setHeader('content-security-policy', cfg.csp);
+        res.setHeader('x-content-type-options', 'nosniff');
+        res.setHeader('referrer-policy', 'same-origin');
+        // Omit X-Frame-Options in dev mode so the Replit preview iframe can load the page.
+        // Production (msal auth) keeps the strict DENY.
+        if (cfg.authMode !== 'dev') res.setHeader('x-frame-options', 'DENY');
+        // Hashed assets are immutable; index.html must never be cached or a deploy won't take.
+        if (pathname === '/index.html' || pathname === '/') {
+          res.setHeader('cache-control', 'no-cache');
+        }
+      },
     });
 
 const server = http.createServer((req, res) => {

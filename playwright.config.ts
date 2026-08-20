@@ -19,6 +19,15 @@ const FIXTURE_PORT = 4322;
 
 export default defineConfig({
   testDir: './e2e',
+  // **The exact complement of `playwright.full-stack.config.ts`'s `testMatch`.** That config selects
+  // `full-stack.spec.ts` and nothing else; this one had no `testMatch` at all, so it also picked it
+  // up — and ran the four-repo suite against `e2e/fixture-service.mjs`, which replies with one
+  // canned answer regardless of the question. Asked for the flash point of 2-MeTHF, the fixture
+  // answered with the pKa of acetic acid and a `screen_hazards({"smiles":"CCO"})` call, so
+  // "a solvent question reaches the props server" could not pass here however healthy the stack.
+  //
+  // Nobody had seen it: `format:check` was failing on `main`, so CI never reached this step.
+  testIgnore: /full-stack\.spec\.ts/,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

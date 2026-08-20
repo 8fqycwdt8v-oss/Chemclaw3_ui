@@ -23,6 +23,7 @@ import { EventSourceParserStream } from 'eventsource-parser/stream';
 import { normalizeEvent } from '../../shared/events.ts';
 import { config } from '../env.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
+import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from '../state/chatStore.ts';
 
 /**
@@ -78,7 +79,7 @@ export function useJobStreams(): void {
     const sessionIds = watchKey.split(',').filter(Boolean);
     const controllers = sessionIds.map((sessionId) => {
       const controller = new AbortController();
-      void openStream(sessionId, auth.getAccessToken, controller);
+      void openStream(sessionId, auth, controller);
       return controller;
     });
     return () => controllers.forEach((c) => c.abort());
@@ -87,15 +88,16 @@ export function useJobStreams(): void {
 
 async function openStream(
   sessionId: string,
-  getToken: () => Promise<string | null>,
+  auth: AuthProvider,
   controller: AbortController,
 ): Promise<void> {
   let attempt = 0;
   let consecutive429 = 0;
+  let reauthed = false;
 
   while (!controller.signal.aborted) {
     try {
-      const token = await getToken();
+      const token = await auth.getAccessToken();
       const res = await fetch(`${config.apiBase}/sessions/${sessionId}/events`, {
         signal: controller.signal,
         cache: 'no-store',
@@ -121,6 +123,24 @@ async function openStream(
         continue;
       }
       consecutive429 = 0;
+
+      // A 401 is not a transport failure and must not be backed off like one. It used to fall
+      // into the branch below — increment, wait, retry, forever — so an unrecoverable rejection
+      // (a revoked token, a misconfigured audience after a redeploy) became an unbounded request
+      // loop from every open tab, against a service whose per-principal rate budget cannot see
+      // it: that budget lives *inside* the front door's `require_principal` and only spends after
+      // validation succeeds.
+      //
+      // So: ask the provider to recover, once. Under MSAL that is usually invisible, because
+      // `getAccessToken` already refreshes silently — reaching here means the refresh did not
+      // help, which is precisely when retrying the same token forever is the wrong answer. If it
+      // cannot recover, stop watching. The conversation still works; only push-back is lost, and
+      // the turn path will surface the sign-in prompt on the next message.
+      if (res.status === 401) {
+        if (reauthed || !(await auth.handleUnauthorized())) return;
+        reauthed = true;
+        continue;
+      }
 
       if (!res.ok || !res.body) {
         attempt += 1;

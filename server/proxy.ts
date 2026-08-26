@@ -92,6 +92,12 @@ function buildUpstreamHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
     // The backend sets allow_credentials=false and uses no cookies at all. Not forwarding them
     // keeps it that way, so there is no CSRF surface to reason about.
     if (key === 'cookie') continue;
+    // The service's own internal headers, which a browser has no business setting. Nothing on the
+    // front door reads them today — the actor comes from the validated bearer token, and these are
+    // stamped by the service on its way OUT to a connector — so this is not a live hole; it is the
+    // trap removed before somebody adds a reader. A header that arrives from a browser and is
+    // named like one the system trusts elsewhere is the shape of the next mistake, not this one.
+    if (key.startsWith('x-chemclaw-')) continue;
     headers[key] = value;
   }
   // Never let the upstream compress an event stream: a compressor buffers until its window

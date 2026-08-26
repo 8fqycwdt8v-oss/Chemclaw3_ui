@@ -126,15 +126,44 @@ function DecisionControls({
  * and ask again — never to re-fetch the hash and approve whatever is current, which would make
  * the binding decorative.
  */
-function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.JSX.Element {
+function PlanApprovalPrompt({
+  sessionId,
+  planTodos,
+  planHash,
+}: {
+  sessionId: string | null;
+  /** The plan this message rendered, from its own `plan` event. */
+  planTodos?: string[] | null;
+  /**
+   * The identity of `planTodos`, as the same event stated it.
+   *
+   * Preferred over the fetch below, and that is the fix rather than an optimisation: the service
+   * added `plan_hash` to the event precisely so a client would not have to ask again, because the
+   * ask races the revision the hash exists to catch — between the render and the fetch the agent
+   * may revise the plan, and the round trip answers with whatever is current rather than with what
+   * this card is showing. Taking both from one event is what makes "the hash of the plan the human
+   * read" literally true.
+   *
+   * Absent or empty for a service that predates the field, which falls back to the fetch — the
+   * previous behaviour, kept for exactly that case.
+   */
+  planHash?: string | null;
+}): React.JSX.Element {
   const { auth } = useAuth();
-  const [plan, setPlan] = useState<{ hash: string; todos: string[] } | null>(null);
+  // What the turn's own `plan` event carried, when it carried a hash. Derived during render rather
+  // than copied into state by an effect: it is a prop, so storing it would be one more thing that
+  // can disagree with its source, and the effect below then exists only for the fetch.
+  const streamedPlan = planHash && planTodos ? { hash: planHash, todos: planTodos } : null;
+  const [fetchedPlan, setFetchedPlan] = useState<{ hash: string; todos: string[] } | null>(null);
+  // The fetch wins when there is one, and there is one only after a 409 re-read — which is exactly
+  // when the streamed plan is known to be stale.
+  const plan = fetchedPlan ?? streamedPlan;
   // `unavailable` is the older-service path: no plan route, so the composer fallback stands in.
   // Derived from the session at mount: with no session there is no plan route to read, and
   // flipping to 'unavailable' from inside the effect rendered a spinner for one frame first.
   const [state, setState] = useState<
     'loading' | 'idle' | 'sending' | 'approved' | 'rejected' | 'failed' | 'unavailable'
-  >(sessionId ? 'loading' : 'unavailable');
+  >(streamedPlan ? 'idle' : sessionId ? 'loading' : 'unavailable');
   const [error, setError] = useState<string | null>(null);
 
   // Through a ref, so the read below depends on the session alone. `useAuth()` hands back a fresh
@@ -157,12 +186,16 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
 
   useEffect(() => {
     if (!sessionId) return;
+    // Nothing to read: the stream already said what the plan is and what its identity is, so this
+    // card binds to what the message rendered and costs no round trip at all. The fetch is the
+    // fallback for a service that sent no hash, not the normal path.
+    if (planHash && planTodos) return;
     let live = true;
     void (async () => {
       try {
         const status = await api.getPlan(sessionId, currentAuth);
         if (!live) return;
-        setPlan({ hash: status.plan_hash, todos: status.plan });
+        setFetchedPlan({ hash: status.plan_hash, todos: status.plan });
         setState(status.approved ? 'approved' : 'idle');
       } catch {
         // Any failure here — a service without the route, an expired token, an unreachable pod —
@@ -174,7 +207,7 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
     return () => {
       live = false;
     };
-  }, [sessionId, currentAuth]);
+  }, [sessionId, currentAuth, planHash, planTodos]);
 
   const decide = async (approved: boolean): Promise<void> => {
     if (!sessionId || !plan) return;
@@ -196,7 +229,7 @@ function PlanApprovalPrompt({ sessionId }: { sessionId: string | null }): React.
     // would approve a plan nobody read.
     try {
       const status = await api.getPlan(sessionId, currentAuth);
-      setPlan({ hash: status.plan_hash, todos: status.plan });
+      setFetchedPlan({ hash: status.plan_hash, todos: status.plan });
       setState('idle');
     } catch {
       setState('failed');
@@ -271,12 +304,18 @@ export function ApprovalPrompt({
   prompt,
   approvalId,
   sessionId,
+  planTodos,
+  planHash,
 }: {
   prompt: string;
   approvalId: string;
   /** The server session this conversation is bound to — the plan gate is per session, and
    *  `null` (no session yet) is what makes the composer fallback the only option. */
   sessionId: string | null;
+  /** The plan this message rendered and its identity, forwarded to the plan card so a decision
+   *  binds to what was shown rather than to a second read that races it. */
+  planTodos?: string[] | null;
+  planHash?: string | null;
 }): React.JSX.Element {
   const { auth } = useAuth();
   const [state, setState] = useState<'idle' | 'sending' | 'approved' | 'rejected' | 'failed'>(
@@ -314,7 +353,7 @@ export function ApprovalPrompt({
           onDecide={(approved) => void decide(approved)}
         />
       ) : (
-        <PlanApprovalPrompt sessionId={sessionId} />
+        <PlanApprovalPrompt sessionId={sessionId} planTodos={planTodos} planHash={planHash} />
       )}
     </div>
   );

@@ -13,9 +13,34 @@
  */
 
 import { EventSourceParserStream } from 'eventsource-parser/stream';
-import { normalizeEvent, type AnswerEvent, type ChemclawEvent } from '../../shared/events.ts';
+import {
+  normalizeEvent,
+  type AnswerEvent,
+  type ChemclawEvent,
+  type ErrorCode,
+} from '../../shared/events.ts';
 import { ApiError, errorFromEvent, errorFromStatus, readDetail } from './errors.ts';
 import { config } from '../env.ts';
+
+/**
+ * Error codes that qualify the answer still to come, rather than replacing it.
+ *
+ * The backend documents `loop_cap_reached` as "the only member that shares its turn with an
+ * answer": the runaway guard stops a turn that has been streaming text all along, so the event
+ * arrives after those tokens and BEFORE the `AnswerEvent` they add up to — the same
+ * "mark it partial while it is still arriving" ordering `capability_degraded` uses.
+ *
+ * Treating it as terminal cost more than the badge. Throwing here runs the `finally` below, whose
+ * `reader.cancel()` the BFF turns into a destroyed upstream request and FastAPI into a client
+ * disconnect — so the backend's turn was cancelled at that yield, before `_record_transcript`. The
+ * partial answer was lost from the live view AND from the durable transcript, on a turn that had
+ * done all the work and was three events from delivering it.
+ *
+ * A set rather than an equality check because the shape is the backend's, not this code's: any
+ * future code the backend orders before an answer belongs here, and one place is where that stays
+ * true.
+ */
+const PARTIAL_ANSWER_CODES: ReadonlySet<ErrorCode> = new Set<ErrorCode>(['loop_cap_reached']);
 
 export interface StreamTurnOptions {
   sessionId: string;
@@ -89,7 +114,9 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       // an older frontend must degrade rather than break.
       if (!event) continue;
 
-      if (event.type === 'error') {
+      // An `error` event ends the turn — with exactly one exception, which the backend names and
+      // this client used to ignore. See `PARTIAL_ANSWER_CODES`.
+      if (event.type === 'error' && !PARTIAL_ANSWER_CODES.has(event.code)) {
         throw errorFromEvent(event);
       }
 

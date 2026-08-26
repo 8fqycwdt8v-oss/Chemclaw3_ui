@@ -42,6 +42,8 @@ function answer(trace: TraceEntry[]): AssistantMessage {
     verifiedBy: null,
     degradedConnectors: [],
     queued: false,
+    partialReason: null,
+    latestPlanHash: null,
     trace,
     latestPlan: null,
     error: null,

@@ -26,7 +26,7 @@
  * verifier's. See `MethodLine` for why it is a line and not a stack of caveats.
  */
 
-import { ChevronRight, FlaskConical, TriangleAlert, Unplug } from 'lucide-react';
+import { ChevronRight, FlaskConical, Scissors, TriangleAlert, Unplug } from 'lucide-react';
 import type { AssistantMessage, TraceEntry } from '../state/types.ts';
 import { capabilityLoss, methodsUsed } from '../chem/provenance.ts';
 import { Badge } from '@/components/ui/badge';
@@ -62,6 +62,25 @@ export function ReviewRequiredPill({
     <Notice icon={<TriangleAlert className="size-4" />}>
       <span className="font-semibold">Needs expert review.</span> The verifier could not fully
       support this answer from the cited evidence.
+    </Notice>
+  );
+}
+
+export function PartialAnswerPill({
+  message,
+}: {
+  message: AssistantMessage;
+}): React.JSX.Element | null {
+  if (!message.partialReason) return null;
+  return (
+    <Notice icon={<Scissors className="size-4" />}>
+      <span className="font-semibold">Cut short.</span> {message.partialReason}
+      {/* The service sends this BEFORE the answer, deliberately, so the reader meets it above the
+          text rather than discovering afterwards that the text was not the whole job. The turn is
+          not failed by it: what follows is real work, it is just not finished work. */}
+      <span className="mt-1 block">
+        What follows is what the turn managed, not what it set out to do.
+      </span>
     </Notice>
   );
 }

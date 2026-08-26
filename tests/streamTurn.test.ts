@@ -37,7 +37,7 @@ const collect = async (
 };
 
 const HAPPY: ChemclawEvent[] = [
-  { type: 'plan', todos: ['gather evidence', 'answer'] },
+  { type: 'plan', todos: ['gather evidence', 'answer'], plan_hash: 'h' },
   { type: 'token', text: 'Acetic ' },
   { type: 'tool_call', tool: 'gather_evidence', arguments: '{"query": "acetic acid pKa"' },
   { type: 'token', text: 'acid has a pKa of 4.76.' },
@@ -46,6 +46,46 @@ const HAPPY: ChemclawEvent[] = [
 ];
 
 describe('streamTurn', () => {
+  it('keeps reading past a loop-cap error and returns the partial answer it precedes', async () => {
+    // The backend calls `loop_cap_reached` "the only member that shares its turn with an answer":
+    // the runaway guard stops a turn that has been streaming all along, so the event arrives after
+    // those tokens and BEFORE the answer they add up to.
+    //
+    // Treating it as terminal cost more than the badge. Throwing runs the `finally`, whose
+    // `reader.cancel()` the BFF turns into a destroyed upstream request and FastAPI into a client
+    // disconnect — so the backend's turn was cancelled at that yield, before it recorded the
+    // transcript. The partial answer was lost from the screen AND from the stored conversation,
+    // on a turn three events from delivering it.
+    const { events, answerText } = await collect(
+      sseFrames([
+        { type: 'token', text: 'Partial ' },
+        errorEvent({ code: 'loop_cap_reached', message: 'reached its 25-iteration limit' }),
+        { type: 'token', text: 'work.' },
+        answerEvent({ text: 'Partial work.' }),
+      ]),
+    );
+    expect(events.map((e) => e.type)).toEqual(['token', 'error', 'token', 'answer']);
+    expect(answerText).toBe('Partial work.');
+  });
+
+  it('still ends the turn on every other error code', async () => {
+    // The exception is one code, not a general softening. A `turn_timeout` or an `internal` has no
+    // answer behind it, and reading on would hang until the stream closed.
+    const stub = stubFetch(() =>
+      sseResponse(sseFrames([errorEvent({ code: 'turn_timeout', message: 'too slow' })])),
+    );
+    restore = stub.restore;
+    await expect(
+      streamTurn({
+        sessionId: SESSION,
+        message: 'hello',
+        signal: new AbortController().signal,
+        getToken: async () => null,
+        onEvent: () => undefined,
+      }),
+    ).rejects.toBeInstanceOf(ApiError);
+  });
+
   it('yields every event in order and returns the terminal answer', async () => {
     const { events, answerText } = await collect(sseFrames(HAPPY));
     expect(events.map((e) => e.type)).toEqual([

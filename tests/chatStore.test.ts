@@ -80,11 +80,13 @@ describe('chatStore', () => {
     const cid = useChatStore.getState().createConversation();
     const mid = useChatStore.getState().startAssistantMessage(cid);
 
-    useChatStore.getState().applyEvent(cid, mid, { type: 'plan', todos: ['a'] });
+    useChatStore.getState().applyEvent(cid, mid, { type: 'plan', todos: ['a'], plan_hash: 'h' });
     useChatStore
       .getState()
       .applyEvent(cid, mid, { type: 'tool_call', tool: 'gather_evidence', arguments: '{}' });
-    useChatStore.getState().applyEvent(cid, mid, { type: 'plan', todos: ['a', 'b'] });
+    useChatStore
+      .getState()
+      .applyEvent(cid, mid, { type: 'plan', todos: ['a', 'b'], plan_hash: 'h' });
 
     const message = assistantOf(cid, mid);
     expect(message.trace.map((e) => e.kind)).toEqual(['plan', 'tool_call', 'plan']);

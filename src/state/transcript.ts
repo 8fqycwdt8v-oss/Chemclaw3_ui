@@ -91,10 +91,12 @@ export function transcriptToMessages(remote: TranscriptMessage[]): ChatMessage[]
       verifiedBy: null,
       // The backend stores the messages, not which connectors happened to be down at the time.
       degradedConnectors: [],
+      partialReason: null,
       // A rehydrated message is finished, so it is not waiting on anything.
       queued: false,
       trace: traceFrom(calls, key, at),
       latestPlan: null,
+      latestPlanHash: null,
       error: null,
     });
   }

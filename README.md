@@ -124,6 +124,7 @@ shared/     the event contract, mirrored from the service's api/events.py
 scripts/    dev launcher, server bundler, smoke test, contrast gate
 e2e/        Playwright specs and the SSE fixture service
 public/     theme boot script, favicon — served as-is by the BFF
+docs/       concept studies — what the chemistry surface is for, and what it still is not
 ```
 
 Three files carry most of the difficulty and are commented accordingly:

@@ -19,7 +19,7 @@ import {
   type MoleculeEntity,
 } from '../src/chem/entities.ts';
 import type { ChemclawEvent } from '../shared/events.ts';
-import { EntityRail } from '../src/components/EntityRail.tsx';
+import { EntityRail, EntityRailTrigger } from '../src/components/EntityRail.tsx';
 import { MessageList } from '../src/components/MessageList.tsx';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { answerEvent, toolResultEvent } from './helpers.ts';
@@ -251,11 +251,165 @@ describe('<EntityRail>', () => {
       </>,
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: /CCO/ }));
+    // The filter control specifically, not the "use in my message" control beside it — a row
+    // carries both now, and they are siblings rather than nested because a button inside a button
+    // is invalid and the browser resolves it by dropping one.
+    fireEvent.click(await screen.findByRole('button', { name: /CCO/, pressed: false }));
 
     await waitFor(() => expect(screen.queryByText('unrelated question')).toBeNull());
     // The question that prompted the matching turn comes with it: an answer shown without it
     // reads as the agent volunteering something.
     expect(screen.getByText('what is its pKa')).toBeTruthy();
+  });
+});
+
+/**
+ * The join `src/chem/rdkit.ts` names as the first of three reasons for shipping a 6.9 MB toolkit:
+ * canonical identity exists so the rail can "join a computed value to the structure it was computed
+ * for". The key collapsed the spellings for a long time and nothing was ever attached to it.
+ *
+ * What these pin down is mostly what the join must NOT claim. The wire carries no call id, so the
+ * match is `(messageId, tool)`; `numbers` carries no labels and no units; and a call on several
+ * structures cannot attribute its figures to any one of them.
+ */
+describe('values joined to the structure they were computed for', () => {
+  it('attaches a call’s figures to the structure it was called on', async () => {
+    await ingest('m1', {
+      type: 'tool_call',
+      tool: 'predict_pka',
+      arguments: JSON.stringify({ smiles: 'CCO' }),
+    });
+    await ingest('m1', toolResultEvent({ tool: 'predict_pka', numbers: [15.9, 1.6] }));
+
+    const molecule = entity('CCO') as MoleculeEntity;
+    expect(molecule.mentions[0]?.values).toEqual([15.9, 1.6]);
+    expect(molecule.mentions[0]?.shared).toBeUndefined();
+  });
+
+  it('does not attach them to a structure a different turn used the same tool on', async () => {
+    await ingest('m1', {
+      type: 'tool_call',
+      tool: 'predict_pka',
+      arguments: JSON.stringify({ smiles: 'CCO' }),
+    });
+    await ingest('m2', {
+      type: 'tool_call',
+      tool: 'predict_pka',
+      arguments: JSON.stringify({ smiles: 'COc1ccc(Br)cc1' }),
+    });
+    await ingest('m2', toolResultEvent({ tool: 'predict_pka', numbers: [4.8] }));
+
+    expect((entity('CCO') as MoleculeEntity).mentions[0]?.values).toBeUndefined();
+    expect((entity('COc1ccc(Br)cc1') as MoleculeEntity).mentions[0]?.values).toEqual([4.8]);
+  });
+
+  it('marks figures from a call that named several structures', async () => {
+    // compare_solvents takes a list. The same numbers land on every structure it was given, and
+    // the rail has to say so rather than implying a per-structure result.
+    //
+    // Not `CO` as the second solvent, tempting as methanol is: `looksLikeSmiles` refuses anything
+    // under three characters because `NO` and `CO` collide with ordinary prose far too often, so
+    // the recogniser would hand this call one structure and the assertion would pass for the wrong
+    // reason.
+    await ingest('m1', {
+      type: 'tool_call',
+      tool: 'compare_solvents',
+      arguments: JSON.stringify({ solvents: ['CCO', 'CC(=O)O'] }),
+    });
+    await ingest('m1', toolResultEvent({ tool: 'compare_solvents', numbers: [-1.2, -0.8] }));
+
+    for (const key of ['CCO', 'CC(=O)O']) {
+      const molecule = entity(key) as MoleculeEntity;
+      expect(molecule.mentions[0]?.values).toEqual([-1.2, -0.8]);
+      expect(molecule.mentions[0]?.shared).toBe(true);
+    }
+  });
+
+  it('attaches nothing to a note the same call cited', async () => {
+    // A pKa is not a fact about a knowledge note, and putting one beside it would say it was.
+    await ingest('m1', toolResultEvent({ tool: 'find_notes', note_ids: ['compound-ethanol'] }));
+    await ingest('m1', toolResultEvent({ tool: 'find_notes', numbers: [3] }));
+
+    expect(entity('note:compound-ethanol')?.mentions[0]?.values).toBeUndefined();
+  });
+
+  it('renders the figures beside the structure, naming the tool that returned them', async () => {
+    await ingest('m1', {
+      type: 'tool_call',
+      tool: 'predict_pka',
+      arguments: JSON.stringify({ smiles: 'CCO' }),
+    });
+    await ingest('m1', toolResultEvent({ tool: 'predict_pka', numbers: [15.9, 1.6] }));
+
+    render(<EntityRail conversationId={C1} />);
+
+    // The tool is named beside the numbers: a figure whose method is unnamed is the failure this
+    // repo is arranged against.
+    expect(await screen.findByText('15.9, 1.6')).toBeTruthy();
+    // And nothing invents a unit or a label — `numbers` carries neither.
+    expect(document.body.textContent).not.toMatch(/pKa\s*=/);
+  });
+
+  it('caps a wide result rather than printing fifty figures into a rail row', async () => {
+    const many = Array.from({ length: 12 }, (_, i) => i + 1);
+    await ingest('m1', {
+      type: 'tool_call',
+      tool: 'compute_electronic_properties',
+      arguments: JSON.stringify({ smiles: 'CCO' }),
+    });
+    await ingest('m1', toolResultEvent({ tool: 'compute_electronic_properties', numbers: many }));
+
+    render(<EntityRail conversationId={C1} />);
+
+    expect(await screen.findByText(/\+6$/)).toBeTruthy();
+  });
+});
+
+/**
+ * The rail below `lg`.
+ *
+ * It was `hidden … lg:flex` with no replacement, so on a tablet or a phone the structures, the
+ * jobs, the notes and the transcript filter did not exist. `Sidebar`'s docstring records the last
+ * time this shipped here — it took the conversation switcher and the recovery control off phones,
+ * and calls it "the sharpest edge in the product".
+ */
+describe('<EntityRailTrigger>', () => {
+  it('offers nothing while the conversation is about nothing', () => {
+    const { container } = render(<EntityRailTrigger conversationId={C1} />);
+    // Not a disabled button and not an empty drawer: a control that opens nothing is worse than
+    // no control, which is the same rule the rail itself follows on a wide screen.
+    expect(container.textContent).toBe('');
+  });
+
+  it('opens the same rail, with the same rows', async () => {
+    await ingest('m1', {
+      type: 'tool_call',
+      tool: 'predict_pka',
+      arguments: JSON.stringify({ smiles: 'CCO' }),
+    });
+
+    render(<EntityRailTrigger conversationId={C1} />);
+    fireEvent.click(screen.getByRole('button', { name: /What this conversation is about/ }));
+
+    // The body is shared with the persistent column, so this is the same component and cannot
+    // drift from it.
+    await waitFor(() => expect(document.querySelector('[data-smiles="CCO"]')).toBeTruthy());
+    expect(screen.getByText('predict_pka')).toBeTruthy();
+  });
+
+  it('closes when a subject is selected, because the transcript is behind it', async () => {
+    await ingest('m1', {
+      type: 'tool_call',
+      tool: 'predict_pka',
+      arguments: JSON.stringify({ smiles: 'CCO' }),
+    });
+
+    render(<EntityRailTrigger conversationId={C1} />);
+    fireEvent.click(screen.getByRole('button', { name: /What this conversation is about/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /CCO/, pressed: false }));
+
+    await waitFor(() => expect(document.querySelector('[data-smiles="CCO"]')).toBeNull());
+    // And the filter it just applied is real.
+    expect(slice().selected).toBe('CCO');
   });
 });

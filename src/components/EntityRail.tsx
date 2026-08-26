@@ -13,6 +13,28 @@
  * only. A rail full of near-misses is worse than no rail, because a chemist stops reading it and
  * then misses the one row that mattered.
  *
+ * ## It shows the values now, which is what the toolkit was bought for
+ *
+ * `src/chem/rdkit.ts` justifies a 6.9 MB dependency on three grounds, and the first is that
+ * canonical identity lets the rail "join a computed value to the structure it was computed for".
+ * The key collapsed the spellings and nothing was ever attached to it: a row was a drawing, a
+ * SMILES and a comma-joined list of tool names. `ValueList` is the other half.
+ *
+ * It is deliberately unglamorous, because `tool_result.numbers` carries no labels and no units.
+ * "predict_pka returned 4.76, 1.6" is the whole of what can truthfully be said — dressing it up as
+ * "pKa = 4.76 ± 1.6" would invent an order the wire does not promise and a meaning it does not
+ * carry. The method badge and its caveat live one click away in the trace, which is where a reader
+ * who wants more than the figures should end up.
+ *
+ * ## Below `lg` it is a sheet, not an absence
+ *
+ * It used to be `hidden … lg:flex` with no replacement, so on a tablet or a phone the structures,
+ * the jobs, the notes and the transcript filter simply did not exist. `Sidebar`'s own docstring
+ * records the last time this pattern shipped here — it took the conversation switcher and the
+ * recovery control off phones, and calls it "the sharpest edge in the product". The fix is the same
+ * one: share the body between a persistent column and a Sheet, so there is one implementation and
+ * the small screen cannot quietly drift from the large one.
+ *
  * **There is no pin control**, and its absence is deliberate rather than pending. The branch this
  * comes from had one, and what it did was toggle a boolean that changed the pin's own colour:
  * nothing rendered a pinned entity anywhere else, so "hold two candidates side by side" was a
@@ -21,10 +43,20 @@
  * structure to be held.
  */
 
-import { entitiesOf, useEntityStore, type Entity, type JobEntity } from '../chem/entities.ts';
+import { useState } from 'react';
+import { FlaskConical } from 'lucide-react';
+import {
+  entitiesOf,
+  useEntityStore,
+  type Entity,
+  type JobEntity,
+  type Mention,
+} from '../chem/entities.ts';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
+import { UseStructure } from '@/components/chem/UseStructure';
 import { Molecule } from './Molecule.tsx';
 
 /** Past tense, because the provenance line reads as a list of things that happened to the entity —
@@ -52,6 +84,11 @@ const JOB_TONE: Record<JobEntity['status'], 'ok' | 'danger' | 'neutral'> = {
   running: 'neutral',
 };
 
+/** How many figures to show per call before saying how many more there are. A property tool
+ *  returns two or three; `compute_electronic_properties` returns about fifty, and a rail row is
+ *  not where fifty numbers become legible. */
+const VALUES_SHOWN = 6;
+
 function JobRow({ entity }: { entity: JobEntity }): React.JSX.Element {
   return (
     <span className="block min-w-0">
@@ -69,12 +106,54 @@ function JobRow({ entity }: { entity: JobEntity }): React.JSX.Element {
   );
 }
 
+/**
+ * What the tools returned for this structure.
+ *
+ * One line per tool that returned anything, naming the tool — a number whose method is unnamed is
+ * the failure this whole repo is arranged against. No units and no labels, because they are not on
+ * the wire (see `Mention.values`), and a call that named several structures is marked, because the
+ * same figures are attached to each of them.
+ */
+function ValueList({ mentions }: { mentions: readonly Mention[] }): React.JSX.Element | null {
+  const withValues = mentions.filter((m) => m.tool && (m.values?.length ?? 0) > 0);
+  if (withValues.length === 0) return null;
+
+  return (
+    <span className="mt-1.5 block border-t border-border-subtle pt-1.5">
+      {withValues.map((mention, i) => {
+        const values = mention.values ?? [];
+        const shown = values.slice(0, VALUES_SHOWN);
+        return (
+          <span key={`${mention.messageId}-${mention.tool}-${i}`} className="mt-0.5 block">
+            <span className="block truncate font-mono text-2xs text-ink-subtle">
+              {mention.tool}
+            </span>
+            <span className="block font-mono text-2xs tabular-nums text-ink-muted">
+              {shown.map((v) => v.toLocaleString()).join(', ')}
+              {values.length > shown.length && ` … +${values.length - shown.length}`}
+            </span>
+            {mention.shared && (
+              <span className="block text-2xs text-ink-subtle">
+                one call, several structures — these are the call’s figures
+              </span>
+            )}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
 function Row({
   conversationId,
   entity,
+  onSelected,
 }: {
   conversationId: string;
   entity: Entity;
+  /** Called after a subject is selected. The sheet uses it to close: the transcript it just
+   *  filtered is behind it. */
+  onSelected?: () => void;
 }): React.JSX.Element {
   const selected = useEntityStore((s) => entitiesOf(s, conversationId).selected === entity.key);
   const select = useEntityStore((s) => s.select);
@@ -89,17 +168,34 @@ function Row({
     ),
   ].join(', ');
 
+  const structure =
+    entity.kind === 'molecule'
+      ? entity.smiles
+      : entity.kind === 'reaction'
+        ? entity.reactionSmiles
+        : null;
+
   return (
-    <li>
+    <li
+      className={cn(
+        'rounded-md border transition-colors',
+        selected ? 'border-brand bg-brand-soft' : 'border-border-subtle bg-surface-raised',
+      )}
+    >
+      {/* The filter button and the "use this" control are SIBLINGS, not nested. A button inside a
+          button is invalid, and the browser resolves it by dropping one — which is a control that
+          silently does nothing, the exact shape of the pin this rail deleted. */}
       <button
         type="button"
-        onClick={() => select(conversationId, entity.key)}
+        onClick={() => {
+          select(conversationId, entity.key);
+          onSelected?.();
+        }}
         aria-pressed={selected}
         className={cn(
-          'block w-full rounded-md border p-2 text-left transition-colors focus-ring',
-          selected
-            ? 'border-brand bg-brand-soft'
-            : 'border-border-subtle bg-surface-raised hover:border-border-strong',
+          'block w-full rounded-t-md p-2 text-left',
+          !selected && 'hover:bg-surface-sunken',
+          'focus-ring',
         )}
       >
         {entity.kind === 'molecule' && (
@@ -120,18 +216,25 @@ function Row({
         )}
 
         <span className="mt-1 block truncate text-2xs text-ink-subtle">{provenance || '—'}</span>
+        <ValueList mentions={entity.mentions} />
       </button>
+
+      {structure && (
+        <div className="flex justify-end px-2 pb-2">
+          <UseStructure smiles={structure} />
+        </div>
+      )}
     </li>
   );
 }
 
-export function EntityRail({
+/** The rail's contents. Shared by the persistent column and the sheet, so the two cannot drift. */
+function RailBody({
   conversationId,
+  onSelected,
 }: {
-  /** The conversation whose index this is. Named rather than read off an "active conversation"
-   *  pointer, so the rail cannot describe one conversation while the transcript beside it
-   *  describes another — see `src/chem/entities.ts`. */
   conversationId: string;
+  onSelected?: () => void;
 }): React.JSX.Element | null {
   // One subscription to the conversation's whole slice. Its identity changes only when *this*
   // conversation ingests something, and `NO_ENTITIES` is a shared constant, so a conversation with
@@ -141,16 +244,10 @@ export function EntityRail({
   const { entities, order, selected } = slice;
 
   const all = order.map((key) => entities[key]).filter((e): e is Entity => Boolean(e));
-  // Nothing at all rather than an empty panel: a rail that reserves a sixth of the width to say
-  // "no subjects yet" is worse than the space it takes, and a fresh conversation is every
-  // conversation's first state.
   if (all.length === 0) return null;
 
   return (
-    <aside
-      aria-label="What this conversation is about"
-      className="hidden w-56 shrink-0 flex-col overflow-y-auto border-l border-border-subtle bg-surface-sunken p-3 lg:flex"
-    >
+    <>
       {selected && (
         <Button
           variant="outline"
@@ -172,12 +269,89 @@ export function EntityRail({
             </h2>
             <ul className="space-y-1.5">
               {rows.map((entity) => (
-                <Row key={entity.key} conversationId={conversationId} entity={entity} />
+                <Row
+                  key={entity.key}
+                  conversationId={conversationId}
+                  entity={entity}
+                  onSelected={onSelected}
+                />
               ))}
             </ul>
           </section>
         );
       })}
+    </>
+  );
+}
+
+/** How many subjects this conversation has. Drives whether the rail exists at all. */
+function useSubjectCount(conversationId: string): number {
+  return useEntityStore((s) => entitiesOf(s, conversationId).order.length);
+}
+
+export function EntityRail({
+  conversationId,
+}: {
+  /** The conversation whose index this is. Named rather than read off an "active conversation"
+   *  pointer, so the rail cannot describe one conversation while the transcript beside it
+   *  describes another — see `src/chem/entities.ts`. */
+  conversationId: string;
+}): React.JSX.Element | null {
+  const count = useSubjectCount(conversationId);
+  // Nothing at all rather than an empty panel: a rail that reserves a sixth of the width to say
+  // "no subjects yet" is worse than the space it takes, and a fresh conversation is every
+  // conversation's first state.
+  if (count === 0) return null;
+
+  return (
+    <aside
+      aria-label="What this conversation is about"
+      className="hidden w-56 shrink-0 flex-col overflow-y-auto border-l border-border-subtle bg-surface-sunken p-3 lg:flex"
+    >
+      <RailBody conversationId={conversationId} />
     </aside>
+  );
+}
+
+/**
+ * The same rail, on a screen too narrow to hold it beside the transcript.
+ *
+ * Rendered by the top bar rather than by the shell, for the same reason the conversation drawer's
+ * trigger is: a control belongs where a reader looks for controls, and the transcript has no chrome
+ * of its own on a phone.
+ *
+ * The trigger disappears with the rail's own emptiness rule, so nobody is ever offered a button
+ * that opens a drawer with nothing in it.
+ */
+export function EntityRailTrigger({
+  conversationId,
+}: {
+  conversationId: string;
+}): React.JSX.Element | null {
+  const [open, setOpen] = useState(false);
+  const count = useSubjectCount(conversationId);
+  if (count === 0) return null;
+
+  return (
+    <Sheet open={open} onOpenChange={setOpen}>
+      <SheetTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-label={`What this conversation is about (${count})`}
+          className="lg:hidden"
+        >
+          <FlaskConical />
+        </Button>
+      </SheetTrigger>
+      <SheetContent side="right" title="What this conversation is about" className="w-72 p-0">
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 pt-10">
+          {/* Selecting a subject filters the transcript, which is *behind* this sheet — so the
+              sheet gets out of the way rather than leaving a chemist to dismiss it and wonder
+              whether the tap registered. */}
+          <RailBody conversationId={conversationId} onSelected={() => setOpen(false)} />
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }

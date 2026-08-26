@@ -129,7 +129,7 @@ export function AppShell({
     <div className="flex h-full">
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
-        <TopBar onRetry={onRetry} />
+        <TopBar onRetry={onRetry} conversationId={children ? undefined : conversationId} />
         {/* The rail is a sibling of <main>, not a child of it: it indexes the conversation rather
             than being part of the document the reader is reading, and a landmark inside another
             landmark is not what "skip to the transcript" should land in. It takes the same

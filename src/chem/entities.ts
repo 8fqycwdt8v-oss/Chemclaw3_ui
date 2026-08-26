@@ -94,6 +94,29 @@ export interface Mention {
    *  it: the rail's provenance line answers "which tools touched this", and writing `sketch` there
    *  would be a tool name that does not exist. */
   source?: UserStructureSource;
+  /**
+   * The figures the tool returned in this turn — `tool_result.numbers`, untruncated.
+   *
+   * This is the join `src/chem/rdkit.ts` names as the first of three reasons for shipping a 6.9 MB
+   * toolkit: canonical identity exists so the rail can "join a computed value to the structure it
+   * was computed for". The key collapsed the spellings; nothing was ever attached to it.
+   *
+   * ## What this can honestly claim, and what it cannot
+   *
+   * The wire carries no call id, so the join is by `(messageId, tool)`: the numbers a tool returned
+   * in a turn are attached to the structures that tool was *called on* in that turn. When a call
+   * named one structure — which is the shape of `predict_pka`, `predict_solubility`, `predict_logd`
+   * and every other property tool — that is exact. When it named several, the same values attach
+   * to each, and the rail says so rather than implying a per-structure result.
+   *
+   * `numbers` also carries **no labels and no units**. "predict_pka returned 4.76, 1.6" is the most
+   * that can truthfully be said, and the surface must not dress it up as "pKa = 4.76 ± 1.6" — the
+   * order is not promised and the meaning is not on the wire.
+   */
+  values?: number[];
+  /** True when the call this mention belongs to named more than one structure, so `values` cannot
+   *  be attributed to this one alone. */
+  shared?: boolean;
   at: number;
 }
 
@@ -251,9 +274,14 @@ export const useEntityStore = create<EntityState>()(() => ({
 
   async ingest(conversationId, messageId, event) {
     const at = Date.now();
-    const add = (entity: Entity, tool?: string): void => {
+    const add = (entity: Entity, tool?: string, shared?: boolean): void => {
       write(conversationId, (slice) =>
-        upsert(slice, entity, { messageId, at, ...(tool ? { tool } : {}) }),
+        upsert(slice, entity, {
+          messageId,
+          at,
+          ...(tool ? { tool } : {}),
+          ...(shared ? { shared: true } : {}),
+        }),
       );
     };
 
@@ -262,7 +290,12 @@ export const useEntityStore = create<EntityState>()(() => ({
         // `arguments` only, and only when it parses as a whole JSON document. That is the exact
         // boundary the service announces a call on, so a complete document is the normal case and
         // a truncated one is visibly not JSON.
-        for (const raw of smilesFromArguments(event.arguments)) {
+        const named = smilesFromArguments(event.arguments);
+        // Whether this call can attribute its result to one structure. Recorded here, at the only
+        // moment it is knowable: the result event that follows carries the tool and the numbers
+        // and says nothing about how many structures went in.
+        const shared = named.length > 1;
+        for (const raw of named) {
           if (looksLikeReactionSmiles(raw)) {
             // Not canonicalised: RDKit's minimal build has no reaction object, and canonicalising
             // each component separately would produce a key that is not a reaction SMILES. The
@@ -277,6 +310,7 @@ export const useEntityStore = create<EntityState>()(() => ({
                 firstSeen: at,
               },
               event.tool,
+              shared,
             );
             continue;
           }
@@ -294,6 +328,7 @@ export const useEntityStore = create<EntityState>()(() => ({
               firstSeen: at,
             },
             event.tool,
+            shared,
           );
         }
         return;
@@ -306,6 +341,14 @@ export const useEntityStore = create<EntityState>()(() => ({
           add(
             { kind: 'note', key: `note:${noteId}`, noteId, mentions: [], firstSeen: at },
             event.tool,
+          );
+        }
+        // And the figures it returned, joined to the structures it was called on. See
+        // `Mention.values` for what that join can and cannot claim; `numbers` and not `preview`,
+        // because the preview is cut at an arbitrary byte and this list is not.
+        if (event.numbers.length > 0) {
+          write(conversationId, (slice) =>
+            attachValues(slice, messageId, event.tool, event.numbers),
           );
         }
         return;
@@ -435,6 +478,45 @@ export const useEntityStore = create<EntityState>()(() => ({
     useEntityStore.setState({ byConversation: {} });
   },
 }));
+
+/**
+ * Attach a call's returned figures to the structures it was called on in that turn.
+ *
+ * Matched on `(messageId, tool)`, because the wire carries no call id — see `Mention.values`. Only
+ * mentions of a *structure* are touched: a note the same call cited is not a thing a number was
+ * computed for, and attaching to it would put a pKa beside a knowledge note.
+ *
+ * Written last-wins rather than accumulating. A tool called twice on one structure in one turn is
+ * two results and the store keeps one mention for the pair (that dedup is deliberate — it is what
+ * stops "seen in 4 turns" being a lie), so accumulating would concatenate two calls' figures into
+ * a list attributed to neither.
+ */
+function attachValues(
+  slice: ConversationEntities,
+  messageId: string,
+  tool: string,
+  values: number[],
+): ConversationEntities {
+  let touched = false;
+  const entities: Record<string, Entity> = {};
+
+  for (const [key, entity] of Object.entries(slice.entities)) {
+    if (entity.kind !== 'molecule' && entity.kind !== 'reaction') {
+      entities[key] = entity;
+      continue;
+    }
+    let changed = false;
+    const mentions = entity.mentions.map((mention) => {
+      if (mention.messageId !== messageId || mention.tool !== tool) return mention;
+      changed = true;
+      return { ...mention, values };
+    });
+    entities[key] = changed ? ({ ...entity, mentions } as Entity) : entity;
+    touched ||= changed;
+  }
+
+  return touched ? { ...slice, entities } : slice;
+}
 
 /** The kind an already-known job was started as. A completion and a failure both carry no `kind`,
  *  and losing it would relabel a DFT run as a generic job at the moment it most needs naming. */

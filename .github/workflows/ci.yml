@@ -9,6 +9,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Re-running the gate against a ref otherwise costs an empty commit or a close-and-reopen, both
+  # of which are things this repository's own review rules forbid — so without this there is no
+  # legitimate way to re-run a gate at all. That is not hypothetical: a run wedged before it
+  # reached the queue could be neither cancelled ("409 Cannot cancel a workflow run that has not
+  # been queued yet") nor re-run, and the PR simply had no route to a verdict while every other
+  # branch's CI drained normally. `Chemclaw3`'s own ci.yml added this trigger for the same reason.
+  workflow_dispatch:
 
 # A second push to a PR supersedes the first; there is no value in finishing a run for a commit
 # nobody will merge.

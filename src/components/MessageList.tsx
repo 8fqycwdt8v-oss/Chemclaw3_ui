@@ -26,7 +26,12 @@ import { Button } from '@/components/ui/button';
 import type { AssistantMessage, ChatMessage } from '../state/types.ts';
 import { Markdown } from './LazyMarkdown.tsx';
 import { TracePanel } from './TracePanel.tsx';
-import { AnswerFooter, CapabilityDegradedPill, PartialAnswerPill, ReviewRequiredPill } from './AnswerBadges.tsx';
+import {
+  AnswerFooter,
+  CapabilityDegradedPill,
+  PartialAnswerPill,
+  ReviewRequiredPill,
+} from './AnswerBadges.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { useChatStore } from '../state/chatStore.ts';

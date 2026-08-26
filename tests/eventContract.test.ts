@@ -63,7 +63,12 @@ describe('the event contract admits every member of its own union', () => {
 
   it('does not invent a chunk count from a frame that carries none', () => {
     const parsed = normalizeEvent({ type: 'evidence_source', source: 'lexical' });
-    expect(parsed).toEqual({ type: 'evidence_source', source: 'lexical', chunks: 0, failed: false });
+    expect(parsed).toEqual({
+      type: 'evidence_source',
+      source: 'lexical',
+      chunks: 0,
+      failed: false,
+    });
   });
 });
 

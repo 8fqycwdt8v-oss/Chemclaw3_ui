@@ -138,7 +138,9 @@ describe('the plan the stream already carried', () => {
 
     expect(await screen.findByText('Run xTB on the aryl bromide')).toBeTruthy();
     await decideVia(/approve/i);
-    await waitFor(() => expect(decide).toHaveBeenCalledWith(SID, true, 'streamed-hash', expect.anything()));
+    await waitFor(() =>
+      expect(decide).toHaveBeenCalledWith(SID, true, 'streamed-hash', expect.anything()),
+    );
     expect(getPlan).not.toHaveBeenCalled();
   });
 

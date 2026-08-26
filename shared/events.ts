@@ -100,7 +100,7 @@ export interface TokenEvent {
 export interface JobStartedEvent {
   type: 'job_started';
   job_id: string;
-  /** "qm" | "report" | "campaign" | "job" — lets a surface label the job without parsing the id. */
+  /** "calc" | "report" | "campaign" | "job" — lets a surface label the job without parsing the id. */
   kind: string;
 }
 
@@ -423,15 +423,12 @@ export const KNOWN_TOOLS = [
   'report_measurement',
   'list_artifacts',
   'fetch_artifact',
-  // Durable calculation and QM jobs.
+  // Durable calculation jobs.
   'compute_reaction_energy',
   'compare_solvents',
   'scan_coordinate',
   'sample_conformers',
   'compute_interaction_energy',
-  'compute_dft_energy',
-  'submit_qm_job',
-  'get_qm_job_status',
   // Safety.
   'screen_hazards',
   'screen_genotoxic_alerts',

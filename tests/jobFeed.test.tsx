@@ -2,7 +2,7 @@
  * Cross-turn job completions reach the screen.
  *
  * `useJobFeed` has always consumed `GET /sessions/{id}/events` and written each completion into
- * `jobFeed` — and until now nothing rendered it, so a DFT run that finished after its turn ended
+ * `jobFeed` — and until now nothing rendered it, so a search that finished after its turn ended
  * was invisible however well the backend delivered it. These tests cover the store contract and
  * the component, which is where that gap actually was.
  */
@@ -58,16 +58,19 @@ beforeEach(() => {
 
 describe('jobFeed store', () => {
   it('keeps completions newest-first', () => {
-    push(completion('qm-1'));
-    push(completion('qm-2'));
-    expect(useChatStore.getState().jobFeed.map((j) => j.event.job_id)).toEqual(['qm-2', 'qm-1']);
+    push(completion('calc-1'));
+    push(completion('calc-2'));
+    expect(useChatStore.getState().jobFeed.map((j) => j.event.job_id)).toEqual([
+      'calc-2',
+      'calc-1',
+    ]);
   });
 
   it('does not stack a redelivered completion twice', () => {
     // The push-back stream reconnects with backoff and delivery is at-least-once, so the same
     // completion can legitimately arrive again. Two identical cards would read as two jobs.
-    push(completion('qm-1'));
-    push(completion('qm-1'));
+    push(completion('calc-1'));
+    push(completion('calc-1'));
     expect(useChatStore.getState().jobFeed).toHaveLength(1);
   });
 
@@ -75,33 +78,33 @@ describe('jobFeed store', () => {
     // Now that the feed is persisted this is the difference between a stable list and one that
     // reshuffles on every reconnect: a filter-then-unshift would put a three-day-old card back at
     // the top, above completions that genuinely arrived since, and restamp it as new.
-    push(completion('qm-old'));
+    push(completion('calc-old'));
     const original = useChatStore.getState().jobFeed[0]?.receivedAt ?? 0;
     push(completion('qm-new'));
 
-    push(completion('qm-old'));
+    push(completion('calc-old'));
 
     const feed = useChatStore.getState().jobFeed;
-    expect(feed.map((j) => j.event.job_id)).toEqual(['qm-new', 'qm-old']);
+    expect(feed.map((j) => j.event.job_id)).toEqual(['qm-new', 'calc-old']);
     expect(feed[1]?.receivedAt).toBe(original);
   });
 
   it('a redelivered completion does not un-see or un-dismiss itself', () => {
     // Otherwise the badge count climbs again on every reconnect for work already read, and a
     // dismissed card comes back.
-    push(completion('qm-1'));
-    useChatStore.getState().dismissJobItem('qm-1');
+    push(completion('calc-1'));
+    useChatStore.getState().dismissJobItem('calc-1');
 
-    push(completion('qm-1'));
+    push(completion('calc-1'));
 
     expect(useChatStore.getState().jobFeed[0]?.dismissed).toBe(true);
     expect(useChatStore.getState().jobFeed[0]?.seen).toBe(true);
   });
 
   it('dismisses only the named job', () => {
-    push(completion('qm-1'));
-    push(completion('qm-2'));
-    useChatStore.getState().dismissJobItem('qm-1');
+    push(completion('calc-1'));
+    push(completion('calc-2'));
+    useChatStore.getState().dismissJobItem('calc-1');
     // Dismissal is a flag now, not a delete: the feed is durable, so destroying the only copy on
     // one click would be unrecoverable.
     expect(
@@ -109,7 +112,7 @@ describe('jobFeed store', () => {
         .getState()
         .jobFeed.filter((j) => !j.dismissed)
         .map((j) => j.event.job_id),
-    ).toEqual(['qm-2']);
+    ).toEqual(['calc-2']);
   });
 });
 

@@ -238,7 +238,6 @@ describe('method badges', () => {
       'upper bound on the ground-state profile and is not a transition state',
     );
     expect(methodFor('screen_hazards')?.caveat).toContain('does NOT mean the chemistry is safe');
-    expect(methodFor('compute_dft_energy')?.method).toContain('DFT');
     expect(methodFor('suggest_next_experiment')?.method).toContain('BoFire');
     expect(methodFor('resolve_compound')?.method).toBe('RDKit');
     expect(methodFor('find_notes')?.method).toContain('retrieval');
@@ -258,7 +257,6 @@ describe('capability_degraded as a chemistry statement', () => {
   it('maps each bundle to what its absence cost the answer', () => {
     expect(capabilityLoss('safety')).toContain('hazard screen');
     expect(capabilityLoss('calc')).toContain('computed properties');
-    expect(capabilityLoss('qm')).toContain('DFT');
     expect(capabilityLoss('molfp')).toContain('precedent search');
     expect(capabilityLoss('rxnfp')).toContain('precedent search');
     expect(capabilityLoss('bo')).toContain('experiment design');

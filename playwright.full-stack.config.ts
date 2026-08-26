@@ -3,7 +3,7 @@
  *
  * Unlike `playwright.config.ts`, this config starts **nothing**. It points at a stack that is
  * already up — Chemclaw3's `make live-e2e-full-stack`, which runs Postgres, Temporal, the
- * Chemclaw3-mcp fleet, Chemclaw3_mock's HPC/ELN/vendor mocks, this repo's BFF and SPA, and a real
+ * Chemclaw3-mcp fleet, Chemclaw3_mock's ELN/Entra/vendor mocks, this repo's BFF and SPA, and a real
  * Anthropic model behind the front door. There is no fixture service anywhere in the chain.
  *
  * That distinction is the whole point of the file. The fixture suite answers "does the client

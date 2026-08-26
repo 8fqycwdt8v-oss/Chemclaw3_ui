@@ -121,10 +121,8 @@ test('5 · evidence comes back from the seeded ELN/ORD data (Chemclaw3_mock)', a
   expect(answer.length).toBeGreaterThan(40);
 });
 
-test('6 · a durable job is launched and tracked (Temporal + the HPC mock)', async () => {
-  await ask(
-    'Run a DFT single-point energy calculation on benzene at B3LYP/6-31G* and submit it as a job.',
-  );
+test('6 · a durable job is launched and tracked (Temporal)', async () => {
+  await ask('Search the conformers of 1,2-dichloroethane and submit it as a durable job.');
 
   // The durable panel is the product surface for long work; a job that runs but never appears
   // there is invisible to the chemist who started it.

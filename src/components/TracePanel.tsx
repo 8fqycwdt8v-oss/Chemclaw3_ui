@@ -20,7 +20,7 @@
  * below it is what makes the row's numbers checkable.
  *
  * Each call also carries the structures it was made on, drawn from its `arguments` document, and
- * the method behind it — GFN2-xTB, DFT, a cited table, a surrogate — and, one disclosure in, the
+ * the method behind it — GFN2-xTB, CREST, a cited table, a surrogate — and, one disclosure in, the
  * caveat its own manifest attaches to it. A chemist should never have to ask
  * which of those produced a number, and that text is written by the people who wrote the method and
  * currently reaches nobody.

@@ -9,7 +9,7 @@
  * tells you whether to run it again. The registry is deliberately not scoped to the caller
  * upstream, because a finished calculation is a fact about the lab rather than about a person.
  *
- * **"Can I stop it?"** — until now the only escape from a mis-launched HPC job was the banner's
+ * **"Can I stop it?"** — until now the only escape from a mis-launched durable job was the banner's
  * "Start a fresh session", which abandons the job rather than stopping it. Cancellation is a
  * *request*: the service answers 202 and a workflow already past its last cancellation point will
  * finish regardless, so the wording never claims the job stopped.
@@ -220,7 +220,7 @@ export function JobsPanel(): React.JSX.Element {
           >
             {submitted
               ? 'The search covers the rationale recorded when each run was launched, not its result.'
-              : 'A durable job appears here as soon as one is launched — a DFT calculation, an optimisation campaign, a development report.'}
+              : 'A durable job appears here as soon as one is launched — a conformer search, an optimisation campaign, a development report.'}
           </EmptyState>
         )}
 

@@ -4,7 +4,7 @@
  * Shared by the two places a completion can arrive, which are genuinely different events despite
  * showing the same thing: inside a turn, as a trace row (`TracePanel`), and outside one, from the
  * push-back stream (`JobFeed`). A chemist should not have to learn two visual languages for "the
- * DFT job finished" depending on whether they happened to be mid-conversation when it did.
+ * job finished" depending on whether they happened to be mid-conversation when it did.
  *
  * The summary is whatever the backend put in the push-back payload, so every field is probed
  * rather than assumed — a job kind with a different shape renders its id and nothing else instead

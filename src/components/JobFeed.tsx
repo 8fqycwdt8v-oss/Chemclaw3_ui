@@ -1,7 +1,7 @@
 /**
  * Durable jobs that finished *outside* a turn.
  *
- * A DFT run takes minutes to days. It is launched inside one conversation turn, which ends long
+ * A conformer search takes minutes to hours. It is launched inside one conversation turn, which ends long
  * before the cluster does, and the backend pushes the completion back over
  * `GET /sessions/{id}/events` whenever it lands.
  *

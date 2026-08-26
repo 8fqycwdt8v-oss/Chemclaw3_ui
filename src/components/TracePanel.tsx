@@ -19,8 +19,9 @@
  * The preview stays in place regardless — it is what makes the row scannable — and the control
  * below it is what makes the row's numbers checkable.
  *
- * Each call also carries the method behind it — GFN2-xTB, DFT, a cited table, a surrogate — and,
- * one disclosure in, the caveat its own manifest attaches to it. A chemist should never have to ask
+ * Each call also carries the structures it was made on, drawn from its `arguments` document, and
+ * the method behind it — GFN2-xTB, DFT, a cited table, a surrogate — and, one disclosure in, the
+ * caveat its own manifest attaches to it. A chemist should never have to ask
  * which of those produced a number, and that text is written by the people who wrote the method and
  * currently reaches nobody.
  *
@@ -38,6 +39,8 @@ import { toolLabel } from '../lib/format.ts';
 import { JobFailureCard, JobResultCard } from './JobResultCard.tsx';
 import { ResultSheet } from './ResultSheet.tsx';
 import { methodFor } from '../chem/provenance.ts';
+import { smilesFromArguments } from '../chem/recognise.ts';
+import { Molecule } from './Molecule.tsx';
 import { ToolIcon } from '@/components/chem/toolIcons';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -178,6 +181,45 @@ function ReturnedNumbers({ numbers }: { numbers: number[] }): React.JSX.Element 
   );
 }
 
+/**
+ * The structures a call was actually made on.
+ *
+ * `smilesFromArguments` has been written, tested and proven safe on this exact source since the
+ * entity store was built — and the entity store was its only caller, while this panel rendered the
+ * same argument document as raw text behind a disclosure. So "did it compute the pKa of the
+ * compound I meant" was answered by reading a SMILES string, which is the question US-1 asks and
+ * the one a drawing answers at a glance.
+ *
+ * **Only from `arguments`, and only when it parses as whole JSON.** That is the exact boundary the
+ * service announces a call on, so a complete document is the normal case and a truncated one is
+ * visibly not JSON. The preview beside it is cut at an arbitrary byte and is off limits: a SMILES
+ * cut short very often stays valid as a smaller, different molecule, and nothing downstream can
+ * catch that.
+ *
+ * Drawn unconditionally rather than behind `drawStructures`. That preference governs answer prose,
+ * where a chemist is reading; this panel is only open because someone came to check the work, and
+ * the check is the picture.
+ */
+function CalledOn({ argumentsJson }: { argumentsJson: string }): React.JSX.Element | null {
+  const structures = smilesFromArguments(argumentsJson);
+  if (structures.length === 0) return null;
+  return (
+    <ul className="mt-1.5 flex flex-wrap items-start gap-2">
+      {structures.map((smiles) => (
+        <li
+          key={smiles}
+          className="rounded-md border border-border-subtle bg-surface-raised p-1"
+          // The string is on the element as well as in the drawing: a reader checking a structure
+          // wants to be able to copy the thing they are checking.
+          title={smiles}
+        >
+          <Molecule smiles={smiles} maxWidth={150} />
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Row({
   entry,
   sessionId,
@@ -217,6 +259,7 @@ function Row({
             <span className="font-mono text-2xs text-ink-subtle">{entry.toolCall?.tool}</span>
           </p>
           {entry.toolCall?.tool && <MethodBadge tool={entry.toolCall.tool} />}
+          {entry.toolCall?.arguments && <CalledOn argumentsJson={entry.toolCall.arguments} />}
           {entry.toolCall?.arguments && (
             <details className="group mt-1">
               <summary className="tap-target inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-2xs text-ink-muted hover:text-ink focus-ring">

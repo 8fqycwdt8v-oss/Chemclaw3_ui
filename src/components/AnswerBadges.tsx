@@ -21,11 +21,14 @@
  *
  * Both carry `role="alert"`: they qualify what the reader is about to believe, so they are the one
  * class of message here that should interrupt rather than wait its turn.
+ *
+ * `AnswerFooter` also carries the turn's methods, which is the one qualifier here that is not the
+ * verifier's. See `MethodLine` for why it is a line and not a stack of caveats.
  */
 
-import { ChevronRight, TriangleAlert, Unplug } from 'lucide-react';
-import type { AssistantMessage } from '../state/types.ts';
-import { capabilityLoss } from '../chem/provenance.ts';
+import { ChevronRight, FlaskConical, TriangleAlert, Unplug } from 'lucide-react';
+import type { AssistantMessage, TraceEntry } from '../state/types.ts';
+import { capabilityLoss, methodsUsed } from '../chem/provenance.ts';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
@@ -112,14 +115,55 @@ const VERIFIER_LABEL: Record<'judge' | 'citation-gate', string> = {
   'citation-gate': 'scored against this turn’s evidence',
 };
 
+/**
+ * What produced this turn's numbers, in one line.
+ *
+ * The method a value came from used to be four disclosures deep — behind "Show the agent's work",
+ * then the row for the call, then the badge on it — while the value itself sat in the answer at
+ * depth 0. Provenance was inverted relative to risk, and a qualifier at that depth is a qualifier
+ * nobody reads.
+ *
+ * This is deliberately the shortest thing that fixes it: the distinct methods, once, with no
+ * caveats. The caveats are two to four lines each and belong exactly where they are, one
+ * disclosure into the trace — stacking five of them here would be the annotation clutter that
+ * trains a reader to skip the whole footer, which is worse than the depth was.
+ *
+ * Nothing renders for a turn whose tools this repo has no sourced method for. A confidently wrong
+ * method label is worse than a missing one, and that does not change by being higher up the page.
+ */
+function MethodLine({ trace }: { trace: readonly TraceEntry[] }): React.JSX.Element | null {
+  const methods = methodsUsed(trace);
+  if (methods.length === 0) return null;
+  return (
+    <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-2xs text-ink-muted">
+      <FlaskConical aria-hidden className="size-3 shrink-0" />
+      <span>Computed by</span>
+      {methods.map((method, i) => (
+        <span key={method}>
+          <span className="text-ink">{method}</span>
+          {i < methods.length - 1 && <span aria-hidden> ·</span>}
+        </span>
+      ))}
+      <span className="text-ink-subtle">
+        — what each does not establish is in the agent’s work below.
+      </span>
+    </p>
+  );
+}
+
 export function AnswerFooter({ message }: { message: AssistantMessage }): React.JSX.Element | null {
   const { confidence, unsupportedClaims, verifiedBy } = message;
-  if (confidence === null && unsupportedClaims.length === 0) return null;
+  const methods = methodsUsed(message.trace);
+  // The footer exists if there is anything to put in it. The method line is the third such thing,
+  // and it is the one that renders on an ordinary turn with the verifier switched off — which is
+  // most deployments, and was previously a turn with no footer at all.
+  if (confidence === null && unsupportedClaims.length === 0 && methods.length === 0) return null;
 
   const scored = confidence !== null ? confidenceTone(confidence) : null;
 
   return (
     <div className="mt-3 flex flex-col gap-2 border-t border-border-subtle pt-3">
+      <MethodLine trace={message.trace} />
       {scored && confidence !== null && (
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={scored.tone}>

@@ -43,8 +43,11 @@
 
 import { useEffect, useId, useState } from 'react';
 import { cn } from '../lib/cn.ts';
-import { isMolecule, moleculeSvg } from '../chem/rdkit.ts';
+import { moleculeSvg } from '../chem/rdkit.ts';
+import { mightBeStructure, readStructure, type ReadStructure } from '../chem/structure.ts';
 import { useThemeStore } from '../state/themeStore.ts';
+import { usePrefsStore } from '../state/prefsStore.ts';
+import { UseStructure } from './chem/UseStructure.tsx';
 
 /** One canonical drawing size. The viewBox scales it to whatever the layout gives it. */
 const CANVAS_WIDTH = 320;
@@ -198,62 +201,125 @@ export function Molecule(props: MoleculeProps): React.JSX.Element {
 }
 
 /**
- * An inline code span in the answer that might be a structure.
+ * An inline code span that might be a structure — in an answer, or in the chemist's own message.
  *
  * Two gates, and the second is what RDKit adds. It has always been *opt-in* — chemistry prose is
  * full of tokens that superficially resemble SMILES, so a structure was never drawn without a
- * click. Now the affordance itself is withheld until RDKit confirms the string is a molecule, so a
+ * click. The affordance itself is withheld until RDKit confirms the string is a structure, so a
  * token that merely looks like one no longer even offers a button. The syntactic recogniser
  * proposes; RDKit disposes.
  *
- * The check is asynchronous and the code span renders immediately, so the toggle appears a beat
+ * The check is asynchronous and the code span renders immediately, so the control appears a beat
  * later on the first structure of a page (the WASM is loading) and instantly thereafter. That is
  * the right way round: text a chemist can read and copy is never blocked on a 6.9 MB download.
+ *
+ * ## What changed, and what deliberately did not
+ *
+ * The per-instance `useState(false)` is gone. It made an answer naming six compounds six clicks,
+ * and reset all six on a reload or a re-parse — asking the same chemist the same question over and
+ * over, and never remembering the answer. `usePrefsStore.drawStructures` is that question asked
+ * once (`src/components/chem/DrawStructuresToggle.tsx`); when it is on, the per-token button is not
+ * merely pre-pressed, it is *gone*, because a control that can only be in one state is furniture.
+ *
+ * The gate itself did not change. Nothing is drawn from a recogniser's guess in either setting.
+ *
+ * ## Reactions reach this now
+ *
+ * `isMolecule` refuses a reaction — a molecule toolkit parses molecules — so gating on it alone
+ * meant every reaction SMILES in every answer fell through to plain text, while `Molecule` has
+ * been able to draw them all along. `readStructure` asks the right question of each kind.
+ *
+ * ## And the structure is an input
+ *
+ * `UseStructure` is what stops a drawing being terminal. Every structure this app rendered used to
+ * be a picture: the agent would give a chemist the SMILES they asked for, the UI would draw it and
+ * RDKit would confirm it, and the only way to ask a follow-up was to select the text with a mouse.
  */
 export function InlineSmiles({ smiles }: { smiles: string }): React.JSX.Element {
+  const always = usePrefsStore((s) => s.drawStructures);
   const [open, setOpen] = useState(false);
-  const [renderable, setRenderable] = useState(false);
+  const [read, setRead] = useState<ReadStructure | null>(null);
   const panelId = `smiles-${useId().replace(/:/g, '_')}`;
 
   useEffect(() => {
     let cancelled = false;
-    void isMolecule(smiles).then((ok) => {
-      if (!cancelled) setRenderable(ok);
+    void readStructure(smiles).then((structure) => {
+      if (!cancelled) setRead(structure);
     });
     return () => {
       cancelled = true;
     };
   }, [smiles]);
 
-  if (!renderable) return <code>{smiles}</code>;
+  if (!read) return <code className="font-mono">{smiles}</code>;
+
+  const shown = always || open;
 
   return (
     <span className="inline-flex flex-col gap-1 align-baseline">
       <span className="inline-flex items-baseline gap-1">
-        <code>{smiles}</code>
-        <button
-          type="button"
-          onClick={() => setOpen((v) => !v)}
-          aria-expanded={open}
-          aria-controls={panelId}
-          aria-label={open ? `Hide structure for ${smiles}` : `Show structure for ${smiles}`}
-          className={cn(
-            'tap-target rounded-sm border border-border-subtle px-1 text-[0.7em] text-ink-muted',
-            'transition-colors hover:bg-surface-sunken hover:text-ink',
-            'focus-ring',
-          )}
-        >
-          {open ? 'hide' : '⌬'}
-        </button>
+        <code className="font-mono">{smiles}</code>
+        {/* Only while the preference is off. With it on this button has one reachable state, and
+            the thing that changes it is the toggle in the top bar. */}
+        {!always && (
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            aria-expanded={open}
+            aria-controls={panelId}
+            aria-label={open ? `Hide structure for ${smiles}` : `Show structure for ${smiles}`}
+            className={cn(
+              // `current` rather than a named ink: this also renders inside the user's own message
+              // bubble, which is a brand fill, and a fixed muted grey is illegible on it.
+              'tap-target rounded-sm border border-current/40 px-1 text-[0.7em] opacity-70',
+              'transition-opacity hover:opacity-100',
+              'focus-ring',
+            )}
+          >
+            {open ? 'hide' : '⌬'}
+          </button>
+        )}
       </span>
-      {open && (
+      {shown && (
         <span
           id={panelId}
-          className="block rounded-lg border border-border-subtle bg-surface-raised p-2"
+          className="block rounded-lg border border-border-subtle bg-surface-raised p-2 text-ink"
         >
-          <Molecule smiles={smiles} maxWidth={260} />
+          {/* The canonical form, not the spelling in the text: this is the structure, and it is
+              also what `UseStructure` hands back, so the two cannot disagree. */}
+          <Molecule smiles={read.canonical} maxWidth={260} />
+          <span className="mt-1 flex justify-end">
+            <UseStructure smiles={read.canonical} label />
+          </span>
         </span>
       )}
     </span>
+  );
+}
+
+/**
+ * Plain text with its structures made legible — the chemist's own message.
+ *
+ * A user message was a bare `<p>`: no markdown, no structure rendering, nothing. Assistant text got
+ * the whole chemistry pipeline and the human's got none, which had a slightly perverse consequence.
+ * The drawing `StructureInput` shows in order to satisfy "a chemist must never send a structure
+ * they have not seen" was discarded at the moment of sending, and the durable record they scroll
+ * back through three weeks later showed `COc1ccc(Br)cc1` as a bare string.
+ *
+ * This is deliberately **not** markdown. A chemist typed this text; running it through a parser
+ * would turn their asterisks into emphasis and their underscores into italics in the middle of a
+ * compound name. So the only transformation is the one that is safe on plain text: split on
+ * whitespace, and hand each token that could be a structure to the same renderer the answers use.
+ * Everything else, including the whitespace, is preserved exactly.
+ */
+export function StructureText({ text }: { text: string }): React.JSX.Element {
+  // Split *keeping* the separators, so the original spacing and line breaks survive verbatim.
+  const parts = text.split(/(\s+)/);
+  return (
+    <>
+      {parts.map((part, i) =>
+        mightBeStructure(part) ? <InlineSmiles key={i} smiles={part} /> : part,
+      )}
+    </>
   );
 }

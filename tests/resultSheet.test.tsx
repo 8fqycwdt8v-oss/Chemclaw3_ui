@@ -225,3 +225,158 @@ describe('ResultSheet', () => {
     expect(await screen.findByText('turn-9')).toBeTruthy();
   });
 });
+
+/**
+ * The three searches whose entire output is structures.
+ *
+ * They used to fall through to `AutoTable`, so the one question a bench chemist asks that is purely
+ * about chemistry — "have we made anything like this" — answered with a column of SMILES strings
+ * and a decimal.
+ *
+ * The empty case is the one that matters most, and it is why `FingerprintSearch` is not a bare
+ * list: a live run answered `{"result": []}` off an index that had never been backfilled, and it
+ * was read as "we have never made anything like this".
+ */
+describe('a fingerprint search', () => {
+  it('draws each hit, with its score and the note it cites', async () => {
+    open(
+      'similar_molecules',
+      JSON.stringify({
+        subject: 'molecule',
+        verdict: '2 indexed molecule(s) matched this query.',
+        index_empty: false,
+        hits: [
+          { compound_note_id: 'compound-ethanol', smiles: 'CCO', similarity: 0.82 },
+          {
+            compound_note_id: 'compound-4-bromoanisole',
+            smiles: 'COc1ccc(Br)cc1',
+            similarity: 0.4,
+          },
+        ],
+      }),
+    );
+
+    await waitFor(() => expect(document.querySelector('[data-smiles="CCO"]')).toBeTruthy());
+    expect(document.querySelector('[data-smiles="COc1ccc(Br)cc1"]')).toBeTruthy();
+    expect(screen.getByText('0.82')).toBeTruthy();
+    expect(screen.getByText('compound-ethanol')).toBeTruthy();
+  });
+
+  it('hands a hit back to the composer rather than leaving it a picture', async () => {
+    const seen: string[] = [];
+    const listener = (e: Event): void => {
+      seen.push((e as CustomEvent<{ smiles: string }>).detail.smiles);
+    };
+    window.addEventListener('chemclaw:insert-structure', listener);
+    try {
+      open(
+        'similar_molecules',
+        JSON.stringify({
+          subject: 'molecule',
+          verdict: '1 indexed molecule(s) matched this query.',
+          index_empty: false,
+          hits: [{ compound_note_id: 'compound-ethanol', smiles: 'CCO', similarity: 0.82 }],
+        }),
+      );
+
+      const use = await screen.findByLabelText('Use CCO in my message');
+      fireEvent.click(use);
+      expect(seen).toEqual(['CCO']);
+    } finally {
+      window.removeEventListener('chemclaw:insert-structure', listener);
+    }
+  });
+
+  it('says the index was empty, and does not write a softer sentence of its own', async () => {
+    open(
+      'similar_reactions',
+      JSON.stringify({
+        subject: 'reaction',
+        verdict:
+          'SEARCH NOT RUN: the reaction fingerprint index is empty — it holds no searchable record.',
+        index_empty: true,
+        hits: [],
+      }),
+    );
+
+    // The service's own sentence, verbatim and above the data it qualifies.
+    await waitFor(() => expect(screen.getByText(/SEARCH NOT RUN/)).toBeTruthy());
+    expect(screen.getByText(/The question was not answered/)).toBeTruthy();
+    // And nothing anywhere that reads as a negative finding.
+    expect(document.body.textContent).not.toMatch(/no (analogue|precedent|similar)/i);
+  });
+
+  it('marks a truncated hit list as a floor rather than a total', async () => {
+    open(
+      'similar_molecules',
+      JSON.stringify({
+        subject: 'molecule',
+        verdict: 'PARTIAL RESULT: 1 indexed molecule(s) matched this query.',
+        index_empty: false,
+        hits_truncated: true,
+        hits: [{ compound_note_id: 'compound-ethanol', smiles: 'CCO', similarity: 0.9 }],
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText(/a lower bound, not a total/)).toBeTruthy());
+  });
+
+  it('renders a substructure match without inventing a score for it', async () => {
+    // A substructure match is a yes/no question and carries no similarity. Rendering 0.00 there
+    // would be a number that means nothing.
+    open(
+      'substructure_matches',
+      JSON.stringify({
+        subject: 'molecule',
+        verdict: '1 indexed molecule(s) matched this query.',
+        index_empty: false,
+        hits: [{ compound_note_id: 'compound-ethanol', smiles: 'CCO', similarity: null }],
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByText('match')).toBeTruthy());
+    expect(screen.queryByText('0.00')).toBeNull();
+  });
+});
+
+describe('the charge table', () => {
+  it('draws each species, because that is what a chemist is weighing out', async () => {
+    open(
+      'stoichiometry_table',
+      JSON.stringify({
+        basis_name: '4-bromoanisole',
+        basis_mass_g: 1.87,
+        unresolved: [],
+        rows: [
+          {
+            name: '4-bromoanisole',
+            smiles: 'COc1ccc(Br)cc1',
+            role: 'basis',
+            equivalents: 1,
+            molecular_weight: 187.03,
+            moles_mmol: 10,
+            mass_g: 1.87,
+          },
+          {
+            name: 'ethanol',
+            smiles: 'CCO',
+            role: 'solvent',
+            equivalents: 17.1,
+            molecular_weight: 46.07,
+            moles_mmol: 171,
+            mass_g: 7.89,
+            volume_ml: 10,
+          },
+        ],
+      }),
+    );
+
+    // ChargeRow has carried `smiles` all along and this renderer read every other field of it.
+    await waitFor(() =>
+      expect(document.querySelector('[data-smiles="COc1ccc(Br)cc1"]')).toBeTruthy(),
+    );
+    expect(document.querySelector('[data-smiles="CCO"]')).toBeTruthy();
+    // And the numbers a chemist charges against are still there.
+    expect(screen.getByText('187.03')).toBeTruthy();
+  });
+});

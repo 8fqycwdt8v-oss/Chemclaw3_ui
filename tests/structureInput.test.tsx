@@ -136,6 +136,7 @@ describe('<StructureInput>', () => {
     fireEvent.click(screen.getByText('Insert'));
 
     expect(onAccept).toHaveBeenCalledWith({
+      moreRecords: false,
       canonical: 'COc1ccc(Br)cc1',
       raw: 'BrC1=CC=C(OC)C=C1',
       source: 'paste',
@@ -164,11 +165,36 @@ describe('<StructureInput>', () => {
 
     fireEvent.change(field(), { target: { value: '4-bromoanisole' } });
 
-    // `resolve_compound` exists but is an agent tool with no HTTP route, so the honest answer is a
-    // sentence, not a lookup.
+    // `resolve_compound` exists but is an agent tool with no HTTP route, so the panel still cannot
+    // look a name up — it hands the question to the thing that can.
     const message = await screen.findByText(/a name is not a structure/i);
-    expect(message.textContent).toContain('ask the agent to resolve it');
+    expect(message.textContent).toContain('the agent does');
     expect(screen.queryByText('Insert')).toBeNull();
+    expect(screen.getByText('Ask the agent for the SMILES')).toBeTruthy();
+  });
+
+  it('asks the agent to resolve a name, rather than telling the chemist to retype the question', async () => {
+    const onClose = vi.fn();
+    const prefilled: unknown[] = [];
+    const listener = (e: Event): void => {
+      prefilled.push((e as CustomEvent).detail);
+    };
+    window.addEventListener('chemclaw:prefill', listener);
+
+    try {
+      render(<StructureInput onAccept={vi.fn()} onClose={onClose} />);
+      fireEvent.change(field(), { target: { value: '4-bromoanisole' } });
+      await screen.findByText('Ask the agent for the SMILES');
+      fireEvent.click(screen.getByText('Ask the agent for the SMILES'));
+
+      // A plain string, not the autoSend shape: the chemist should see the question before it
+      // goes, because they may want to add "…and screen it for hazards" to the same turn.
+      expect(prefilled).toEqual(['Give me the canonical SMILES for 4-bromoanisole.']);
+      // And the panel gets out of the way — the composer now holds the question.
+      expect(onClose).toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('chemclaw:prefill', listener);
+    }
   });
 
   it('reads a dropped MOL file through RDKit and shows what it understood', async () => {
@@ -182,7 +208,12 @@ describe('<StructureInput>', () => {
     await waitFor(() => expect(container.querySelector('[data-smiles="CCO"]')).toBeTruthy());
     fireEvent.click(screen.getByText('Insert'));
 
-    expect(onAccept).toHaveBeenCalledWith({ canonical: 'CCO', raw: 'CCO', source: 'file' });
+    expect(onAccept).toHaveBeenCalledWith({
+      canonical: 'CCO',
+      raw: 'CCO',
+      source: 'file',
+      moreRecords: false,
+    });
   });
 
   it('shows every structure in a multi-record SDF and inserts one at a time', async () => {
@@ -210,7 +241,13 @@ describe('<StructureInput>', () => {
       canonical: 'COc1ccc(Br)cc1',
       raw: 'COc1ccc(Br)cc1',
       source: 'file',
+      // The panel must stay open for a record set, so the composer is told there are more. Every
+      // record after the first used to cost a full reopen.
+      moreRecords: true,
     });
+    // And it says which records are already taken, because record 2 looks identical before and
+    // after it was inserted.
+    expect(screen.getByText(/1 inserted/)).toBeTruthy();
   });
 
   it('starts the stepper over when a second file is loaded', async () => {
@@ -276,7 +313,12 @@ describe('<StructureInput>', () => {
     await waitFor(() => expect(document.querySelector('[data-smiles="CCO"]')).toBeTruthy());
 
     fireEvent.click(screen.getByText('Insert'));
-    expect(onAccept).toHaveBeenCalledWith({ canonical: 'CCO', raw: 'CCO', source: 'sketch' });
+    expect(onAccept).toHaveBeenCalledWith({
+      canonical: 'CCO',
+      raw: 'CCO',
+      source: 'sketch',
+      moreRecords: false,
+    });
     // The editor was torn down when the dialog closed; a live one behind a closed dialog is a leak
     // of a worker and a WASM heap, not just a stray node.
     expect(destroyCount()).toBe(1);

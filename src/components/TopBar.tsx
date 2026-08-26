@@ -1,5 +1,6 @@
 /**
- * Header: service health, auth state, and the error banner.
+ * Header: service health, auth state, the error banner, and the two controls that have nowhere
+ * else to live — the draw-structures preference and, below `lg`, the entity rail's drawer.
  *
  * The health poll stays unauthenticated and local so it cannot acquire a token on every tick, and
  * it now pauses while the tab is hidden — a backgrounded tab used to keep hitting the BFF every
@@ -18,11 +19,13 @@ import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { resetSession } from '../state/sendMessage.ts';
 import { SidebarBody } from './Sidebar.tsx';
+import { EntityRailTrigger } from './EntityRail.tsx';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 import { Badge } from '@/components/ui/badge';
 import { StatusDot, type Status } from '@/components/chem/StatusDot';
 import { ThemeToggle } from '@/components/chem/ThemeToggle';
+import { DrawStructuresToggle } from '@/components/chem/DrawStructuresToggle';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -41,7 +44,15 @@ const HEALTH: Record<Health, { status: Status; label: string }> = {
   down: { status: 'down', label: 'unreachable' },
 };
 
-export function TopBar({ onRetry }: { onRetry?: () => void }): React.JSX.Element {
+export function TopBar({
+  onRetry,
+  conversationId,
+}: {
+  onRetry?: () => void;
+  /** The conversation the shell is showing, for the small-screen entity-rail drawer. Absent on
+   *  `/review` and `/jobs`, which are not conversations and have no subjects to index. */
+  conversationId?: string;
+}): React.JSX.Element {
   const { auth, refresh } = useAuth();
   const [health, setHealth] = useState<Health>('checking');
   const [drawer, setDrawer] = useState(false);
@@ -111,6 +122,10 @@ export function TopBar({ onRetry }: { onRetry?: () => void }): React.JSX.Element
         )}
 
         <div className="ml-auto flex items-center gap-1">
+          {/* Before the theme toggle: this one changes what a chemist can read, and the other
+              changes how it looks. */}
+          {conversationId && <EntityRailTrigger conversationId={conversationId} />}
+          <DrawStructuresToggle />
           <ThemeToggle />
 
           {auth.mode === 'msal' && !account && (

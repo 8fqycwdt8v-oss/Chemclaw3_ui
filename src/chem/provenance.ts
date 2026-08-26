@@ -544,6 +544,36 @@ const TOOL_METHOD: Partial<Record<KnownTool, ToolMethod>> = {
 export const methodFor = (tool: string): ToolMethod | null =>
   (TOOL_METHOD as Record<string, ToolMethod | undefined>)[tool] ?? null;
 
+/**
+ * The distinct methods a turn's tools used, in the order they were first used.
+ *
+ * Why a turn-level list exists at all: provenance was inverted relative to risk. The number is in
+ * the answer at depth 0; the method that produced it was four disclosures down — behind "Show the
+ * agent's work", then the row, then the badge. A chemist should never have to ask whether 4.76 is
+ * DFT or a semiempirical estimate, and in practice one at that depth never does.
+ *
+ * The answer is not to move the caveats up. `TOOL_METHOD`'s caveats are two to four lines each and
+ * five of them stacked is the annotation clutter this module's own header warns trains people to
+ * stop reading. It is to move *one line* up: which methods, deduplicated, once per answer. The
+ * caveat stays exactly where it is, one disclosure into the trace, which is now a drill-down from
+ * something rather than the only place the question is answerable.
+ *
+ * Deduplicated by the method *string*, not by tool: a turn that called `predict_pka` and
+ * `predict_logd` used one method twice, and saying "GFN2-xTB · semiempirical" twice says nothing
+ * the once did not. A tool this map has no sourced method for contributes nothing — a confidently
+ * wrong method label is worse than a missing one, and that rule does not change with the altitude.
+ */
+export function methodsUsed(trace: readonly TraceEntry[]): string[] {
+  const seen: string[] = [];
+  for (const entry of trace) {
+    const tool = entry.toolCall?.tool;
+    if (!tool) continue;
+    const method = methodFor(tool)?.method;
+    if (method && !seen.includes(method)) seen.push(method);
+  }
+  return seen;
+}
+
 /* ---------------------------------------------------------- lost capability */
 
 /**

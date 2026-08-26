@@ -15,7 +15,7 @@ import { useMemo, type ComponentProps } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { remarkCitations } from '../lib/citations.ts';
-import { looksLikeSmiles } from '../chem/recognise.ts';
+import { mightBeStructure } from '../chem/structure.ts';
 import { FIGURE_HREF, remarkGrounding } from '../chem/provenance.ts';
 import { CitationChip } from './CitationChip.tsx';
 import { InlineSmiles } from './Molecule.tsx';
@@ -115,9 +115,14 @@ const components: Components = {
   code({ className, children, ...props }) {
     const text = String(children ?? '');
     const isBlock = Boolean(className?.startsWith('language-'));
-    // An inline code span that looks like a molecule gets a render affordance. Block code is
+    // An inline code span that looks like a structure gets a render affordance. Block code is
     // left alone — a fenced block is a recipe or a script, not a structure.
-    if (!isBlock && looksLikeSmiles(text)) {
+    //
+    // `mightBeStructure`, not `looksLikeSmiles`: the latter rejects everything containing `>` so
+    // that it cannot disagree with the reaction recogniser, which meant every inline reaction
+    // SMILES in every answer fell through to plain text — including the ones `similar_reactions`
+    // exists to return.
+    if (!isBlock && mightBeStructure(text)) {
       return <InlineSmiles smiles={text} />;
     }
     return (

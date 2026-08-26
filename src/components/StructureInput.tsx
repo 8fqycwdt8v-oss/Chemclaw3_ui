@@ -28,13 +28,20 @@
  * name up, and the two tempting fixes are both worse than saying so. Inventing an endpoint puts a
  * capability in the BFF whitelist that the service does not expose; shipping a name table to the
  * browser means a second, smaller, drifting copy of the dataset answering questions the agent would
- * answer differently. What is left is one sentence that tells the truth and points at the thing
- * that can actually do it.
+ * answer differently.
+ *
+ * There is a third option, and it is the one taken here. The agent can answer, and this app already
+ * knows how to make it answer: `chemclaw:prefill` composes a message on the chemist's behalf, which
+ * is what a citation chip does when a note will not resolve. So the panel offers the question as a
+ * button instead of instructing a chemist to retype it. That is not a name lookup — the agent still
+ * does the resolving, and the answer still comes back in the conversation — it just stops charging
+ * the chemist a sentence for it. The return leg is the `Use in my message` control on the structure
+ * the answer draws (`src/components/chem/UseStructure.tsx`).
  */
 
 import { useEffect, useRef, useState } from 'react';
 import { Dialog } from 'radix-ui';
-import { ChevronLeft, ChevronRight, FileUp, PenLine, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, FileUp, PenLine, Sparkles, X } from 'lucide-react';
 import {
   canonicalSmiles,
   canonicalSmilesFromMolblock,
@@ -43,6 +50,7 @@ import {
 import { looksLikeCompoundName } from '../chem/recognise.ts';
 import type { UserStructureSource } from '../chem/entities.ts';
 import { loadSketcher, type SketcherSession } from '../chem/sketcher.ts';
+import { prefill } from '../state/composerEvents.ts';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Loading } from '@/components/chem/Feedback';
@@ -96,14 +104,33 @@ export interface AcceptedStructure {
    *  string they recognise beside the one RDKit prefers. */
   raw: string;
   source: UserStructureSource;
+  /**
+   * The file this came from holds more than one structure, so the panel should stay open.
+   *
+   * Carried out with the structure rather than left for the composer to work out, because the
+   * composer has no idea a file was involved. Inserting record 2 of 12 used to cost a full reopen
+   * — hexagon, re-drop, step, Insert — once per record.
+   */
+  moreRecords: boolean;
 }
 
 interface StructureInputProps {
   onAccept: (structure: AcceptedStructure) => void;
   onClose: () => void;
+  /**
+   * A structure file dropped on the composer, to be read as if it had been dropped here.
+   *
+   * Wrapped with the drop it arrived on rather than passed bare: two drops of the same `File`
+   * object are two intentions, and an effect keyed on the file alone would ignore the second.
+   */
+  initialFile?: { at: number; file: File } | null;
 }
 
-export function StructureInput({ onAccept, onClose }: StructureInputProps): React.JSX.Element {
+export function StructureInput({
+  onAccept,
+  onClose,
+  initialFile = null,
+}: StructureInputProps): React.JSX.Element {
   const [raw, setRaw] = useState('');
   const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [drawing, setDrawing] = useState(false);
@@ -118,6 +145,8 @@ export function StructureInput({ onAccept, onClose }: StructureInputProps): Reac
    * structures, so the identity of the load is the counter and not the contents.
    */
   const [records, setRecords] = useState<{ load: number; smiles: string[] } | null>(null);
+  /** Canonical strings already inserted from the record set on screen. See `accept`. */
+  const [inserted, setInserted] = useState<string[]>([]);
   const loads = useRef(0);
 
   // How the current candidate arrived. A ref rather than state because it never affects the
@@ -161,22 +190,42 @@ export function StructureInput({ onAccept, onClose }: StructureInputProps): Reac
   const typed = (text: string): void => {
     source.current = 'paste';
     setRecords(null);
+    setInserted([]);
     setFileNote(null);
     setRaw(text);
   };
 
-  const takeFile = async (file: File): Promise<void> => {
-    setRecords(null);
-    setFileNote(`Reading ${file.name}…`);
+  /**
+   * Everything a molfile turns into, worked out without touching state.
+   *
+   * Split from applying it so the dropped-file effect below can `await` this before it writes
+   * anything — an effect whose body calls setState synchronously is a cascading render, and the
+   * React Compiler lint is right to refuse it. The split earns its place twice over: the reading
+   * is the part worth testing, and it has no React in it.
+   */
+  const readMolfile = async (
+    file: File,
+  ): Promise<{ smiles: string[]; unreadable: number } | null> => {
     let text: string;
     try {
       text = await file.text();
     } catch {
+      return null;
+    }
+    return moleculesFromMolfile(text);
+  };
+
+  /** Put a read file on screen. */
+  const applyMolfile = (
+    file: File,
+    outcome: { smiles: string[]; unreadable: number } | null,
+  ): void => {
+    if (!outcome) {
       setFileNote(`Could not read ${file.name}.`);
       return;
     }
+    const { smiles, unreadable } = outcome;
 
-    const { smiles, unreadable } = await moleculesFromMolfile(text);
     if (smiles.length === 0) {
       // Clear the field only if a *file* put the current candidate there. Otherwise a chemist who
       // typed a SMILES and then dropped the wrong file loses their own input; leaving it would
@@ -196,6 +245,7 @@ export function StructureInput({ onAccept, onClose }: StructureInputProps): Reac
     source.current = 'file';
     loads.current += 1;
     setRecords(smiles.length > 1 ? { load: loads.current, smiles } : null);
+    setInserted([]);
     setRaw(smiles[0] ?? '');
     setFileNote(
       [
@@ -206,9 +256,54 @@ export function StructureInput({ onAccept, onClose }: StructureInputProps): Reac
     );
   };
 
+  const takeFile = async (file: File): Promise<void> => {
+    setRecords(null);
+    setInserted([]);
+    setFileNote(`Reading ${file.name}…`);
+    applyMolfile(file, await readMolfile(file));
+  };
+
+  // A file dropped on the composer, read as if it had been dropped here. Keyed on the drop's
+  // timestamp rather than the File, so dropping the same file twice reads it twice — the second
+  // drop is a second intention, usually after the chemist changed their mind about a record.
+  //
+  // The read is awaited before anything is written, which is why `readMolfile` and `applyMolfile`
+  // are two functions: `takeFile` would set three pieces of state in this effect's body.
+  const dropAt = initialFile?.at ?? null;
+  const dropFile = initialFile?.file ?? null;
+  useEffect(() => {
+    if (dropAt === null || !dropFile) return;
+    let cancelled = false;
+    void readMolfile(dropFile).then((outcome) => {
+      if (!cancelled) applyMolfile(dropFile, outcome);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Only the drop. The two helpers are redeclared every render and listing them would re-read
+    // the file on every keystroke; nothing else about a drop changes after it has happened.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dropAt]);
+
   const accept = (): void => {
     if (check.status !== 'ok') return;
-    onAccept({ canonical: check.canonical, raw: raw.trim(), source: source.current });
+    const moreRecords = (records?.smiles.length ?? 0) > 1;
+    onAccept({
+      canonical: check.canonical,
+      raw: raw.trim(),
+      source: source.current,
+      moreRecords,
+    });
+    // Only meaningful while the panel survives the insert, which is exactly when `moreRecords`
+    // is true. It tells a chemist stepping through a screening file which records they have
+    // already taken, because the field alone cannot — record 3 looks identical before and after.
+    if (moreRecords) setInserted((taken) => [...new Set([...taken, check.canonical])]);
+  };
+
+  /** Hand the name to the agent, which is the only thing here that can resolve one. */
+  const askAgentToResolve = (): void => {
+    prefill(`Give me the canonical SMILES for ${raw.trim()}.`);
+    onClose();
   };
 
   return (
@@ -281,12 +376,24 @@ export function StructureInput({ onAccept, onClose }: StructureInputProps): Reac
         )}
         {check.status === 'name' && (
           <span className="text-warn-ink">
-            That looks like a compound name, and a name is not a structure — this panel has no name
-            lookup, so ask the agent to resolve it (“give me the SMILES for {raw.trim()}”) and paste
-            what it returns.
+            That looks like a compound name, and a name is not a structure. This panel has no name
+            lookup — the agent does.
           </span>
         )}
       </p>
+
+      {check.status === 'name' && (
+        <div className="mt-1 flex flex-wrap items-center gap-2">
+          <Button size="xs" onClick={askAgentToResolve}>
+            <Sparkles />
+            Ask the agent for the SMILES
+          </Button>
+          <span className="text-2xs text-ink-subtle">
+            It answers in the conversation; the structure it draws has a “use in my message”
+            control.
+          </span>
+        </div>
+      )}
 
       {check.status === 'ok' && (
         <div className="mt-1 flex items-start gap-3">
@@ -295,9 +402,14 @@ export function StructureInput({ onAccept, onClose }: StructureInputProps): Reac
                 confirmation, so it has to depict the thing that will actually be sent. */}
             <Molecule smiles={check.canonical} maxWidth={200} />
           </div>
-          <Button size="sm" onClick={accept}>
-            Insert
-          </Button>
+          <div className="flex flex-col items-start gap-1">
+            <Button size="sm" onClick={accept}>
+              Insert
+            </Button>
+            {inserted.includes(check.canonical) && (
+              <span className="text-2xs text-ok-ink">Already in the message</span>
+            )}
+          </div>
         </div>
       )}
 
@@ -306,7 +418,14 @@ export function StructureInput({ onAccept, onClose }: StructureInputProps): Reac
           {/* Outside the preview block on purpose: stepping to the next record puts the field back
               into "checking" for a moment, and a stepper that unmounted there would lose its place
               on every press. */}
-          {records && <RecordStepper key={records.load} records={records.smiles} onPick={setRaw} />}
+          {records && (
+            <RecordStepper
+              key={records.load}
+              records={records.smiles}
+              inserted={inserted.length}
+              onPick={setRaw}
+            />
+          )}
           {fileNote && <p className="text-xs text-ink-muted">{fileNote}</p>}
         </div>
       )}
@@ -355,12 +474,20 @@ export function StructureInput({ onAccept, onClose }: StructureInputProps): Reac
  * The whole file is parsed (see `moleculesFromMolfile` for why taking only the first record was
  * rejected), but one structure goes into a message at a time — a message that carried forty SMILES
  * would defeat the confirmation this panel exists to provide, since nobody checks forty drawings.
+ *
+ * The panel now stays open while a record set is on screen, so stepping and inserting is a loop
+ * rather than a reopen per record, and the count of what has already been taken is shown here
+ * because record 3 looks exactly the same before and after it was inserted.
  */
 function RecordStepper({
   records,
+  inserted,
   onPick,
 }: {
   records: string[];
+  /** How many of them are already in the message. A chemist working through a screening file
+   *  needs to know where they are in it, and the record index alone does not say. */
+  inserted: number;
   onPick: (smiles: string) => void;
 }): React.JSX.Element {
   const [index, setIndex] = useState(0);
@@ -383,6 +510,7 @@ function RecordStepper({
       </Button>
       <span className="tabular-nums">
         {index + 1} / {records.length}
+        {inserted > 0 && <span className="ml-1 text-ok-ink">· {inserted} inserted</span>}
       </span>
       <Button
         variant="outline"

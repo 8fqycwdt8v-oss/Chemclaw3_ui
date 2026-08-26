@@ -22,6 +22,11 @@
  * The typed renderers cover the results where a table changes a decision. Everything else falls
  * through to a generic table when the shape allows and to raw text when it does not — which is
  * still strictly more than the 200 characters this panel replaces.
+ *
+ * One of them is keyed on **shape** rather than on tool name: `StructureHits`, for the three
+ * searches whose entire output is structures. They used to fall through to the generic table, so
+ * the one question a bench chemist asks that is purely about chemistry answered with a column of
+ * SMILES strings.
  */
 
 import { useState } from 'react';
@@ -30,6 +35,8 @@ import { useAuth } from '../auth/AuthContext.tsx';
 import { api, type StoredToolResult } from '../api/client.ts';
 import { toolLabel } from '../lib/format.ts';
 import { Molecule } from './Molecule.tsx';
+import { UseStructure } from '@/components/chem/UseStructure';
+import { mightBeStructure } from '../chem/structure.ts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
@@ -161,7 +168,7 @@ function Cell({
  * dangerous reading of this result is the empty one. The service says it in the payload for the
  * same reason; repeating it here is not redundancy, it is the sentence the chemist acts on.
  */
-function HazardScreen({ data }: { data: Json }): React.JSX.Element {
+function HazardScreen({ data, onUsed }: { data: Json; onUsed: () => void }): React.JSX.Element {
   const flags = rows(data.flags);
   const screened = Array.isArray(data.screened) ? data.screened.map(String) : [];
 
@@ -182,8 +189,9 @@ function HazardScreen({ data }: { data: Json }): React.JSX.Element {
           </h3>
           <ul className="flex flex-wrap gap-3">
             {screened.map((smiles) => (
-              <li key={smiles}>
+              <li key={smiles} className="flex flex-col items-end gap-1">
                 <Molecule smiles={smiles} maxWidth={180} />
+                <UseStructure smiles={smiles} onUsed={onUsed} />
               </li>
             ))}
           </ul>
@@ -266,7 +274,19 @@ function ImpurityLimit({ data }: { data: Json }): React.JSX.Element {
   );
 }
 
-/** `stoichiometry_table` — the charge table, with what it could not resolve stated. */
+/**
+ * `stoichiometry_table` — the charge table, with what it could not resolve stated.
+ *
+ * **Each row draws its species.** `ChargeRow` has carried `smiles` all along and this renderer read
+ * every other field of it, so the one column saying *what* you are weighing out was on the wire and
+ * dropped. This is the table a chemist reads at the bench while charging a vessel, and it is the
+ * one where confusing two species has a physical consequence — a name is what a reagent is called,
+ * a structure is what it is.
+ *
+ * Drawn small and inside the species cell rather than in a column of its own: a full-size depiction
+ * per row would make a ten-reagent table taller than the sheet, and the structure belongs beside
+ * the name it qualifies rather than at the other end of seven columns.
+ */
 function ChargeTable({ data }: { data: Json }): React.JSX.Element {
   const unresolved = Array.isArray(data.unresolved) ? data.unresolved.map(String) : [];
   return (
@@ -292,7 +312,14 @@ function ChargeTable({ data }: { data: Json }): React.JSX.Element {
         headers={['Species', 'Role', 'Equiv', 'MW', 'mmol', 'Mass (g)', 'Volume (mL)']}
         body={rows(data.rows).map((row, i) => (
           <tr key={`${str(row.name)}-${i}`}>
-            <Cell>{str(row.name)}</Cell>
+            <Cell>
+              <span className="block">{str(row.name)}</span>
+              {/* Absent for a species the table could not resolve — which is the `unresolved`
+                  list above, so a missing drawing here is never silent. */}
+              {mightBeStructure(str(row.smiles)) && (
+                <Molecule smiles={str(row.smiles)} maxWidth={132} className="mt-1" />
+              )}
+            </Cell>
             <Cell>
               <Badge tone={str(row.role) === 'basis' ? 'brand' : 'neutral'}>{str(row.role)}</Badge>
             </Cell>
@@ -305,6 +332,134 @@ function ChargeTable({ data }: { data: Json }): React.JSX.Element {
           </tr>
         ))}
       />
+    </>
+  );
+}
+
+/**
+ * A search whose answer *is* structures — `similar_molecules`, `substructure_matches`,
+ * `similar_reactions`.
+ *
+ * These three were the sharpest gap in this panel. Their entire output is chemistry, and they fell
+ * through to `AutoTable`, which rendered a note id, a SMILES and a decimal as three text cells. The
+ * one question a bench chemist asks that is purely about structures — "have we made anything like
+ * this" — was answered with a table of strings.
+ *
+ * ## Keyed on shape, with two field names
+ *
+ * `docs/chemistry-aware-frontend.md` predicted the renderers should key on result *shape* rather
+ * than on tool name, and that held for the four already here. It holds for this one too, with one
+ * concession: the two fingerprint domains spell the same two fields differently, because their hits
+ * are genuinely different models upstream — `MoleculeHit` carries `smiles` and cites a compound
+ * note, `Match` carries `label` and an index id the reaction tool rewrites into a note id. So the
+ * shape test is "a `hits` array whose rows carry a structure-shaped string", and the alias table is
+ * two entries rather than a tool list that would need editing for the next search tool.
+ *
+ * ## The empty result is the dangerous one, and it is not this component's to interpret
+ *
+ * `FingerprintSearch` exists so that "we have no precedent for this structure" and "nothing has
+ * been indexed" cannot arrive as the same empty list — a live run answered `{"result": []}` off an
+ * unbackfilled index and it was read as "we have never made anything like this". The payload
+ * carries `verdict` as a computed field for exactly that reason, and `<Verdict>` above renders it
+ * verbatim.
+ *
+ * So this renders the flags rather than re-deriving a sentence from them. Writing our own "no
+ * analogue found" here would be the same failure with a nicer typeface: the service already says
+ * the true thing, and a second, softer sentence beside it is the one a reader would believe.
+ */
+function StructureHits({
+  data,
+  tool,
+  onUsed,
+}: {
+  data: Json;
+  tool: string;
+  onUsed: () => void;
+}): React.JSX.Element {
+  const hits = rows(data.hits);
+  const subject = str(data.subject) || 'record';
+  const structureOf = (hit: Json): string => str(hit.smiles) || str(hit.label);
+  const citationOf = (hit: Json): string => str(hit.compound_note_id) || str(hit.id);
+
+  return (
+    <>
+      {data.index_empty === true && (
+        <p
+          role="alert"
+          className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
+        >
+          The {subject} index holds no searchable record, so the query was compared against nothing.{' '}
+          <strong>The question was not answered</strong> — this is not a finding that nothing
+          similar exists.
+        </p>
+      )}
+
+      {data.scan_truncated === true && (
+        <p className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink">
+          Not every stored {subject} was examined — the scan stopped at its record cap, or a stored
+          record could not be read. What is below is not the complete picture.
+        </p>
+      )}
+
+      {hits.length === 0 ? (
+        // No sentence of our own. `<Verdict>` above carries the service's, which distinguishes the
+        // three ways this can be empty; a friendlier second one here is the one a reader believes.
+        <p className="text-sm text-ink-muted">Nothing to draw.</p>
+      ) : (
+        <>
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-2xs tracking-wide text-ink-subtle uppercase">
+              {hits.length} hit{hits.length === 1 ? '' : 's'}
+              {data.hits_truncated === true && ' — a lower bound, not a total'}
+            </p>
+            <DownloadCsv
+              headers={[...new Set(hits.flatMap((h) => Object.keys(h)))]}
+              records={hits}
+              name={tool}
+            />
+          </div>
+
+          <ul className="grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-3">
+            {hits.map((hit, i) => {
+              const structure = structureOf(hit);
+              const citation = citationOf(hit);
+              const similarity = num(hit.similarity);
+              return (
+                <li
+                  key={`${citation}-${i}`}
+                  className="flex flex-col gap-1.5 rounded-lg border border-border-subtle bg-surface-raised p-2"
+                >
+                  {structure ? (
+                    <Molecule smiles={structure} maxWidth={176} />
+                  ) : (
+                    <span className="font-mono text-2xs break-all">{'\u2014'}</span>
+                  )}
+
+                  <div className="flex items-center justify-between gap-1.5">
+                    {/* Null for a substructure match, which is a yes/no question and has no
+                        score. Rendering 0.00 there would be a number that means nothing. */}
+                    {similarity !== null ? (
+                      <Badge tone="neutral">
+                        <span className="font-mono tabular-nums">{similarity.toFixed(2)}</span>
+                        <span className="font-normal opacity-80">Tanimoto</span>
+                      </Badge>
+                    ) : (
+                      <Badge tone="neutral">match</Badge>
+                    )}
+                    {structure && <UseStructure smiles={structure} onUsed={onUsed} />}
+                  </div>
+
+                  {citation && (
+                    <span className="truncate font-mono text-2xs text-ink-muted" title={citation}>
+                      {citation}
+                    </span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
     </>
   );
 }
@@ -376,7 +531,32 @@ function Verdict({ data }: { data: Json }): React.JSX.Element | null {
   return <p className="text-sm font-medium">{line}</p>;
 }
 
-function Body({ result }: { result: StoredToolResult }): React.JSX.Element {
+/**
+ * Is this a fingerprint search — a `hits` list whose rows carry a structure?
+ *
+ * Shape, not tool name, so a fourth search tool renders without an edit here. The structure test is
+ * syntactic on purpose: `Molecule` is the arbiter and shows the string it refused rather than an
+ * empty box, so a row whose label is not really a structure degrades to visible text rather than to
+ * a lie. What this must not do is claim a `hits` list of something else — a job listing, a set of
+ * candidates — so an empty `hits` array only counts when the payload also carries the fingerprint
+ * search's own flags.
+ */
+function isStructureSearch(parsed: Json): boolean {
+  if (!Array.isArray(parsed.hits)) return false;
+  const hits = rows(parsed.hits);
+  if (hits.length === 0) return 'index_empty' in parsed;
+  return hits.every((hit) => mightBeStructure(str(hit.smiles) || str(hit.label)));
+}
+
+function Body({
+  result,
+  onUsed,
+}: {
+  result: StoredToolResult;
+  /** Called when a structure in here was put into the message — the sheet closes, because the
+   *  message being edited is behind it. */
+  onUsed: () => void;
+}): React.JSX.Element {
   let parsed: unknown;
   try {
     parsed = JSON.parse(result.text);
@@ -398,11 +578,13 @@ function Body({ result }: { result: StoredToolResult }): React.JSX.Element {
 
   const typed =
     result.tool === 'screen_hazards' || result.tool === 'screen_genotoxic_alerts' ? (
-      <HazardScreen data={parsed} />
+      <HazardScreen data={parsed} onUsed={onUsed} />
     ) : result.tool === 'ich_impurity_limit' ? (
       <ImpurityLimit data={parsed} />
     ) : result.tool === 'stoichiometry_table' ? (
       <ChargeTable data={parsed} />
+    ) : isStructureSearch(parsed) ? (
+      <StructureHits data={parsed} tool={result.tool} onUsed={onUsed} />
     ) : null;
 
   if (typed) {
@@ -488,7 +670,7 @@ export function ResultSheet({
 
           {state.status === 'ready' && (
             <>
-              <Body result={state.result} />
+              <Body result={state.result} onUsed={() => onOpenChange(false)} />
               {/* The join a GxP reviewer asks for, and the one a reference alone cannot make. */}
               <p className="border-t border-border-subtle pt-3 text-2xs text-ink-subtle">
                 {state.result.byte_size.toLocaleString()} bytes · correlation{' '}

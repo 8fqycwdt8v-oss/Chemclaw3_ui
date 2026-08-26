@@ -19,6 +19,7 @@
 import { useState } from 'react';
 import { cn } from '../lib/cn.ts';
 import { NoteSheet } from './NoteSheet.tsx';
+import { prefill } from '../state/composerEvents.ts';
 
 /**
  * One tone per kind `remarkCitations` can emit, and no more.
@@ -35,11 +36,7 @@ const PALETTE: Record<string, string> = {
 
 /** The pre-route behaviour: hand the composer a question about the reference. */
 function ask(id: string): void {
-  window.dispatchEvent(
-    new CustomEvent('chemclaw:prefill', {
-      detail: `Expand ${id} — what are the conditions, outcomes, and caveats?`,
-    }),
-  );
+  prefill(`Expand ${id} — what are the conditions, outcomes, and caveats?`);
 }
 
 export function CitationChip({ kind, id }: { kind: string; id: string }): React.JSX.Element {

@@ -4,8 +4,7 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
-    // No `baseUrl`: TypeScript deprecated it (TS5101) and, since 4.4, resolves `paths`
-    // relative to this file when it is absent — which is what the mapping below already assumed.
+    "baseUrl": ".",
     "paths": { "@/*": ["./src/*"] },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,

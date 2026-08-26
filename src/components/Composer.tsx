@@ -16,22 +16,64 @@
  * The draft lives in the store, keyed by conversation. As component state on a component that does
  * not unmount when `conversationId` changes, it leaked: you could type in one conversation, switch
  * to another, and send the first one's text into the second.
+ *
+ * ## The paste is confirmed, because the paste is what people do
+ *
+ * `StructureInput` is built on one rule — a chemist must never send a structure they have not seen
+ * — and for a while the fastest way in went round it. Pasting a SMILES out of ChemDraw, an Excel
+ * column or a colleague's mail put an unchecked string straight into the message: no
+ * canonicalisation, no drawing, no rail row. The safest path was behind an unlabelled hexagon and
+ * the unguarded one was the muscle memory everybody already had.
+ *
+ * `PasteConfirmation` closes that. It is deliberately **not** a dialog: the paste itself is never
+ * intercepted, the text lands exactly as pasted, and a strip appears above the composer a beat
+ * later showing what RDKit made of it. A chemist who pasted the right thing loses nothing and can
+ * keep typing; one who pasted the wrong thing sees it before they press Send. Blocking the caret
+ * to demand an acknowledgement would tax the correct case to catch the rare one.
+ *
+ * ## Dropping a file anywhere here used to navigate the browser away
+ *
+ * A page with no drop handler hands a dropped file to the browser, which opens it — losing the
+ * draft and the whole app with it. So the composer is a drop target for structures and working
+ * files alike, and a window-level guard turns a *missed* drop into nothing at all rather than into
+ * a navigation.
  */
 
-import { useEffect, useId, useRef, useState } from 'react';
-import { Hexagon, Paperclip, Send, Square } from 'lucide-react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { Hexagon, Paperclip, Send, Square, X } from 'lucide-react';
 import { MAX_MESSAGE_CHARS } from '../../shared/events.ts';
 import { api } from '../api/client.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { sendMessage, stopStreaming, warmSession } from '../state/sendMessage.ts';
+import {
+  INSERT_STRUCTURE_EVENT,
+  PREFILL_EVENT,
+  type InsertStructureDetail,
+  type PrefillDetail,
+} from '../state/composerEvents.ts';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Label, Switch } from '@/components/ui/misc';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Loading } from '@/components/chem/Feedback';
 import { useEntityStore } from '../chem/entities.ts';
+import { readStructure } from '../chem/structure.ts';
+import { Molecule } from './Molecule.tsx';
 import { StructureInput, type AcceptedStructure } from './StructureInput.tsx';
+
+/** Extensions the structure panel can read. Everything else a chemist drops here is a working
+ *  file for the attachment route, which is the other thing this composer already accepts. */
+const STRUCTURE_FILE = /\.(mol|sdf|mdl)$/i;
+
+/** What a paste turned out to be, once RDKit had looked at it. */
+interface PastedStructure {
+  kind: 'molecule' | 'reaction';
+  /** What was pasted, verbatim. */
+  raw: string;
+  /** RDKit's reading of it. Equal to `raw` for a reaction, which is not canonicalised. */
+  canonical: string;
+}
 
 const MAX_TEXTAREA_PX = 200;
 
@@ -40,11 +82,88 @@ type Upload =
   | { state: 'ok' | 'failed'; text: string }
   | null;
 
+/**
+ * "This is what I understood you to paste."
+ *
+ * The confirmation `StructureInput` gives a typed or drawn structure, given to a pasted one — and
+ * given the way a paste can afford, which is quietly. It appears above the composer, it does not
+ * take focus, it does not block the caret, and it stays until it is used or dismissed.
+ *
+ * What it shows is decided by whether RDKit's reading matches the chemist's spelling. When it does
+ * — the overwhelmingly common case, because most SMILES a chemist copies are already canonical —
+ * there is nothing to offer and the strip is purely a picture saying "yes, that one". When it does
+ * not, the difference is the whole point: `BrC1=CC=C(OC)C=C1` and `COc1ccc(Br)cc1` are one compound
+ * with two spellings, and only one of them is the entity key the rest of this app will file it
+ * under.
+ *
+ * Replacing is offered, never performed. The chemist's own spelling is valid input — the backend
+ * canonicalises everything it is given — so rewriting their message under them would be taking a
+ * decision that is not this component's to take.
+ */
+function PasteConfirmation({
+  pasted,
+  onReplace,
+  onDismiss,
+}: {
+  pasted: PastedStructure;
+  onReplace: () => void;
+  onDismiss: () => void;
+}): React.JSX.Element {
+  const differs = pasted.canonical !== pasted.raw;
+  return (
+    <div
+      // "status", not "alert": nothing is wrong, and interrupting a chemist who pasted the right
+      // structure to tell them it was the right structure is how a signal gets trained away.
+      role="status"
+      className="mb-2 flex items-start gap-3 rounded-xl border border-border-subtle bg-surface-raised p-2.5"
+    >
+      <div className="shrink-0 rounded-lg border border-border-subtle bg-surface p-1">
+        <Molecule smiles={pasted.canonical} maxWidth={128} />
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <p className="text-xs text-ink-muted">
+          {pasted.kind === 'reaction' ? 'Pasted reaction' : 'Pasted structure'} — RDKit read this as{' '}
+          <span className="font-mono break-all text-ink">{pasted.canonical}</span>
+        </p>
+        {differs && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="xs" onClick={onReplace}>
+              Use the canonical form
+            </Button>
+            <span className="text-2xs text-ink-subtle">
+              Your spelling works too — the service canonicalises either way.
+            </span>
+          </div>
+        )}
+      </div>
+
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        aria-label="Dismiss the structure check"
+        onClick={onDismiss}
+      >
+        <X />
+      </Button>
+    </div>
+  );
+}
+
 export function Composer({ conversationId }: { conversationId: string }): React.JSX.Element {
   const { auth, ready } = useAuth();
   const [dryRun, setDryRun] = useState(false);
   const [upload, setUpload] = useState<Upload>(null);
   const [structureOpen, setStructureOpen] = useState(false);
+  /** A structure file dropped on the composer, handed to the panel to read. Carries the drop it
+   *  came from, so dropping the same file twice re-reads it — the panel keys its own reset on
+   *  this object's identity, and two drops of one file are two intentions. */
+  const [droppedFile, setDroppedFile] = useState<{ at: number; file: File } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  /** What the last paste turned out to be, or null. Cleared by the next paste, by using it, and
+   *  by dismissing it — never on a timer, because a strip that vanishes while a chemist is
+   *  reading it is worse than no strip. */
+  const [pasted, setPasted] = useState<PastedStructure | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   /** Where the caret was when the structure panel took focus. Captured on open rather than read
    *  back on insert, because by then the caret belongs to the panel's own input. */
@@ -103,7 +222,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
 
   useEffect(() => {
     const onPrefill = (event: Event): void => {
-      const raw = (event as CustomEvent<string | { text: string; autoSend?: boolean }>).detail;
+      const raw = (event as CustomEvent<PrefillDetail>).detail;
       const message = typeof raw === 'string' ? raw : raw.text;
       const autoSend = typeof raw === 'object' && raw.autoSend === true;
       setDraft(conversationId, message);
@@ -113,9 +232,90 @@ export function Composer({ conversationId }: { conversationId: string }): React.
         textareaRef.current?.focus();
       }
     };
-    window.addEventListener('chemclaw:prefill', onPrefill);
-    return () => window.removeEventListener('chemclaw:prefill', onPrefill);
+    window.addEventListener(PREFILL_EVENT, onPrefill);
+    return () => window.removeEventListener(PREFILL_EVENT, onPrefill);
   }, [conversationId, setDraft]);
+
+  /**
+   * Put a structure into the draft at the caret.
+   *
+   * The single implementation, reached three ways: the structure panel's Insert, the
+   * `chemclaw:insert-structure` event that every rendered structure in the app now dispatches, and
+   * the paste strip's "replace with the canonical form". They must agree about padding and about
+   * where the caret lands afterwards, and the only way to guarantee that is for there to be one of
+   * them.
+   *
+   * `caretAt` is read from the ref when the panel captured it and from the live textarea otherwise
+   * — an event arriving from a rail row has no captured caret, and appending at `text.length` would
+   * put a structure at the end of a sentence the chemist was writing in the middle of.
+   */
+  const putStructure = useCallback(
+    (canonical: string, caretAt: number): void => {
+      const draft = useChatStore.getState().drafts[conversationId] ?? '';
+      const at = Math.min(Math.max(caretAt, 0), draft.length);
+      const before = draft.slice(0, at);
+      const after = draft.slice(at);
+      // A SMILES glued to the previous word is a different token, and `looksLikeSmiles` would be
+      // right to refuse it. Pad only where padding is missing, so the chemist's own spacing
+      // survives.
+      const fragment = `${before && !/\s$/.test(before) ? ' ' : ''}${canonical}${after && !/^\s/.test(after) ? ' ' : ''}`;
+
+      setDraft(conversationId, `${before}${fragment}${after}`);
+
+      const caret = before.length + fragment.length;
+      // After the state has been committed and the textarea is back on screen; setting the range
+      // against the pre-update value would put the caret in the wrong place.
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        el?.focus();
+        el?.setSelectionRange(caret, caret);
+      });
+    },
+    [conversationId, setDraft],
+  );
+
+  /**
+   * A structure somewhere in the app was handed back to be used.
+   *
+   * Inserted at the *live* caret rather than at `caretRef`, which only holds a position when the
+   * structure panel captured one. The dispatcher is a rail row, a search hit or an inline span,
+   * none of which took focus off the textarea, so `selectionStart` is still the chemist's own
+   * cursor — and appending at the end would drop a structure after a sentence they were editing
+   * in the middle of.
+   *
+   * Not promoted to the rail: every structure that can dispatch this is one the rail either
+   * already holds or has deliberately declined to hold, so admitting it here would either be a
+   * no-op or a way round the promotion rule.
+   */
+  useEffect(() => {
+    const onInsert = (event: Event): void => {
+      const { smiles } = (event as CustomEvent<InsertStructureDetail>).detail;
+      if (!smiles) return;
+      putStructure(smiles, textareaRef.current?.selectionStart ?? Number.MAX_SAFE_INTEGER);
+    };
+    window.addEventListener(INSERT_STRUCTURE_EVENT, onInsert);
+    return () => window.removeEventListener(INSERT_STRUCTURE_EVENT, onInsert);
+  }, [putStructure]);
+
+  /**
+   * A file dropped anywhere else on the window is swallowed.
+   *
+   * Without this the browser's default takes over and *navigates to the file* — the draft, the
+   * conversation and the whole app go with it. A chemist dragging a `.mol` and missing the
+   * composer by ten pixels should get nothing, not a lost afternoon.
+   */
+  useEffect(() => {
+    const swallow = (event: DragEvent): void => {
+      if (!event.dataTransfer?.types.includes('Files')) return;
+      event.preventDefault();
+    };
+    window.addEventListener('dragover', swallow);
+    window.addEventListener('drop', swallow);
+    return () => {
+      window.removeEventListener('dragover', swallow);
+      window.removeEventListener('drop', swallow);
+    };
+  }, []);
 
   // The profiles this deployment offers, if more than one. Fetched once and cached in component
   // state rather than the store: it is a property of the service, not of a conversation, and the
@@ -179,28 +379,62 @@ export function Composer({ conversationId }: { conversationId: string }): React.
    * out strings the UI *guessed* were molecules, and there is no guess here (see the
    * promotion-rule docstring in `src/chem/entities.ts`).
    */
-  const insertStructure = ({ canonical, raw, source }: AcceptedStructure): void => {
+  /**
+   * Accept a structure from the panel — into the message, and nowhere else.
+   *
+   * It is inserted at the caret rather than sent, because a structure is almost never the whole
+   * question: "screen this for hazards" and "what is the pKa of this" are what a chemist is
+   * actually writing, and a panel that sent the SMILES on its own would force them to describe the
+   * molecule twice.
+   *
+   * It is also promoted into the entity rail. A structure a human drew or dropped and confirmed
+   * satisfies the rail's structured-source rule rather than weakening it — the rule exists to keep
+   * out strings the UI *guessed* were molecules, and there is no guess here (see the
+   * promotion-rule docstring in `src/chem/entities.ts`).
+   *
+   * The panel stays open when the file it is showing holds more than one structure. Closing it was
+   * right for the single-structure case and made inserting record 2 of 12 cost a full reopen —
+   * hexagon, re-drop, step, Insert — for every record after the first.
+   */
+  const insertStructure = ({ canonical, raw, source, moreRecords }: AcceptedStructure): void => {
     // The raw spelling, not the canonical one: the store canonicalises for the key and keeps what
     // was typed as an alias, so the rail can show a chemist the string they recognise.
     void useEntityStore.getState().ingestUserStructure(conversationId, raw, source);
+    putStructure(canonical, caretRef.current ?? text.length);
+    if (!moreRecords) setStructureOpen(false);
+  };
 
-    const at = caretRef.current ?? text.length;
-    const before = text.slice(0, at);
-    const after = text.slice(at);
-    // A SMILES glued to the previous word is a different token, and `looksLikeSmiles` would be
-    // right to refuse it. Pad only where padding is missing, so the chemist's own spacing survives.
-    const fragment = `${before && !/\s$/.test(before) ? ' ' : ''}${canonical}${after && !/^\s/.test(after) ? ' ' : ''}`;
+  /**
+   * Look at what was just pasted, and say what RDKit made of it.
+   *
+   * The paste is **never** intercepted — `preventDefault` is not called and the text lands exactly
+   * as pasted. Only a paste that is one whitespace-free token is even asked about, which is what
+   * keeps this off the path of somebody pasting a paragraph of a procedure: a structure arrives as
+   * a token, and prose does not.
+   *
+   * A molecule is promoted into the rail here, and that is the same door `ingestUserStructure`
+   * opens for the panel rather than a way round it. Read the promotion rule for what it defends
+   * against — *inference*. There is none here: a human put this exact string on their clipboard,
+   * and the strip draws it back to them at the moment it is admitted.
+   *
+   * A reaction is drawn and not promoted. `ingestUserStructure` canonicalises, a molecule toolkit
+   * cannot canonicalise a reaction, and inventing a second user-supplied door for a case nobody has
+   * asked for would be surface without a caller.
+   */
+  const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>): void => {
+    const clip = event.clipboardData.getData('text').trim();
+    setPasted(null);
+    if (!clip || /\s/.test(clip)) return;
 
-    setDraft(conversationId, `${before}${fragment}${after}`);
-    setStructureOpen(false);
-
-    const caret = before.length + fragment.length;
-    // After the state has been committed and the textarea is back on screen; setting the range
-    // against the pre-update value would put the caret in the wrong place.
-    requestAnimationFrame(() => {
-      const el = textareaRef.current;
-      el?.focus();
-      el?.setSelectionRange(caret, caret);
+    void readStructure(clip).then((read) => {
+      if (!read) return;
+      // The draft may have moved on while the WASM loaded. The strip describes a string, not a
+      // moment, so it is still true — but it must not appear for a paste that was undone.
+      if (!(useChatStore.getState().drafts[conversationId] ?? '').includes(clip)) return;
+      if (read.kind === 'molecule') {
+        void useEntityStore.getState().ingestUserStructure(conversationId, read.raw, 'paste');
+      }
+      setPasted({ kind: read.kind, raw: read.raw, canonical: read.canonical });
     });
   };
 
@@ -236,16 +470,61 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     }
   };
 
+  /**
+   * Route a dropped file to the surface that can read it.
+   *
+   * A `.mol`/`.sdf` opens the structure panel already holding it; anything else goes to the
+   * attachment route, which is what the paperclip beside this does and what a dropped CSV almost
+   * certainly means. Neither destination is new — the drop is just a second way to reach them.
+   */
+  const takeDroppedFile = (file: File): void => {
+    if (STRUCTURE_FILE.test(file.name)) {
+      setDroppedFile({ at: Date.now(), file });
+      setStructureOpen(true);
+      return;
+    }
+    void onUpload(file);
+  };
+
   return (
     <div
       id="composer"
       className={cn(
-        'border-t border-border-subtle bg-surface-raised px-4 py-3',
+        'relative border-t border-border-subtle bg-surface-raised px-4 py-3 transition-colors',
         // env() clears the home indicator; --viewport-offset clears the iOS software keyboard,
         // which does not resize the layout viewport and so is invisible to dvh on its own.
         'pb-[calc(0.75rem+env(safe-area-inset-bottom)+var(--viewport-offset,0px))]',
+        dragging && 'bg-brand-soft',
       )}
+      // The whole composer region is the target, not the little box inside it: a drag carrying a
+      // file is aimed roughly, and a 40px strip would be a target most drops miss.
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes('Files')) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        // Only when the pointer has actually left the region. `dragleave` also fires as the
+        // pointer crosses onto a child, which made the highlight strobe across the buttons.
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+        setDragging(false);
+      }}
+      onDrop={(e) => {
+        if (!e.dataTransfer.types.includes('Files')) return;
+        e.preventDefault();
+        setDragging(false);
+        const file = e.dataTransfer.files[0];
+        if (file) takeDroppedFile(file);
+      }}
     >
+      {dragging && (
+        <p
+          role="status"
+          className="pointer-events-none absolute inset-x-0 -top-7 mx-auto w-fit rounded-md border border-brand bg-surface-raised px-2.5 py-1 text-xs text-brand-ink shadow-sm"
+        >
+          Drop a .mol or .sdf to read the structure — anything else is attached to the conversation
+        </p>
+      )}
       <div className="mx-auto w-full max-w-prose">
         {composerLock === 'turn_in_flight' && !isStreaming && (
           <p role="status" className="mb-2 text-xs text-warn-ink">
@@ -301,8 +580,30 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           </div>
         )}
 
+        {pasted && (
+          <PasteConfirmation
+            pasted={pasted}
+            onReplace={() => {
+              const draft = useChatStore.getState().drafts[conversationId] ?? '';
+              // Replace the pasted spelling in place rather than appending the canonical one:
+              // the chemist pasted it into a sentence, and the sentence should keep its shape.
+              setDraft(conversationId, draft.replace(pasted.raw, pasted.canonical));
+              setPasted(null);
+              textareaRef.current?.focus();
+            }}
+            onDismiss={() => setPasted(null)}
+          />
+        )}
+
         {structureOpen && (
-          <StructureInput onAccept={insertStructure} onClose={() => setStructureOpen(false)} />
+          <StructureInput
+            initialFile={droppedFile}
+            onAccept={insertStructure}
+            onClose={() => {
+              setStructureOpen(false);
+              setDroppedFile(null);
+            }}
+          />
         )}
 
         <div
@@ -328,6 +629,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
             autoCapitalize="sentences"
             spellCheck
             onChange={(e) => setDraft(conversationId, e.target.value)}
+            onPaste={onPaste}
             onKeyDown={(e) => {
               if (e.key !== 'Enter') return;
               if (e.metaKey || e.ctrlKey) {
@@ -360,13 +662,18 @@ export function Composer({ conversationId }: { conversationId: string }): React.
               e.target.value = '';
             }}
           />
+          {/* Named, not just tooltipped. This is the domain-defining control of a chemistry app
+              and it was an unlabelled hexagon — a tooltip does not exist on touch, which is the
+              pointer a bench chemist has. The word appears wherever there is room for it, on the
+              same icon-at-narrow pattern Send uses. */}
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
                 size="icon-sm"
                 aria-label="Insert a structure"
-                className="tap-target"
+                aria-expanded={structureOpen}
+                className="tap-target sm:w-auto sm:px-2.5"
                 onClick={() => {
                   // Read here, while the textarea still owns the selection. Once the panel opens
                   // it takes focus and `selectionStart` becomes the panel's own field.
@@ -375,6 +682,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
                 }}
               >
                 <Hexagon />
+                <span className="hidden text-xs sm:inline">Structure</span>
               </Button>
             </TooltipTrigger>
             <TooltipContent>Paste, draw or drop a structure into this message</TooltipContent>

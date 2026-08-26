@@ -28,15 +28,7 @@ import { useAuth } from '../auth/AuthContext.tsx';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/chem/ConfirmDialog';
 import { Loading } from '@/components/chem/Feedback';
-
-const prefill = (text: string): void => {
-  window.dispatchEvent(new CustomEvent('chemclaw:prefill', { detail: text }));
-};
-
-/** Prefill the composer AND immediately submit — used for one-tap approval. */
-const prefillAndSend = (text: string): void => {
-  window.dispatchEvent(new CustomEvent('chemclaw:prefill', { detail: { text, autoSend: true } }));
-};
+import { prefill, prefillAndSend } from '../state/composerEvents.ts';
 
 export function QuestionPrompt({
   question,

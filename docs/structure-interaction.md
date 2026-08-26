@@ -40,6 +40,12 @@ docstring states an intention the code does not carry out, which is the specific
 > Measured, since §5 quotes costs: the entry chunk went 498.34 kB → 510.67 kB. That is application
 > code; RDKit's 6.9 MB and Ketcher's 11.8 MB stay in their own chunks and `index.html` preloads
 > neither.
+>
+> One claim from the first draft of this study is **withdrawn**: it said CI was red on `main` over a
+> deprecated `baseUrl` (TS5101). It was not. That error comes from TypeScript 7, and this project
+> pins `~5.9.0`; the run that produced it was `npm run typecheck` before `npm ci`, which sent npx to
+> fetch `typescript@latest`. It is recorded here rather than deleted because the shape is the one
+> this repo keeps naming — a measurement taken in the wrong environment reads exactly like a finding.
 
 ---
 

@@ -38,6 +38,21 @@
 const BARE_SMILES_LETTERS = /^[BCNOPSFIHbcnopslr]+$/;
 
 /**
+ * The longest string worth guessing about.
+ *
+ * A **cost** bound, not a chemical one, and it has to be far above anything a chemist can write or
+ * it becomes a refusal: at 400 it rejected a 60-residue peptide (421 characters, RDKit-valid),
+ * along with the macrocycles, PEG chains and glycans that routinely pass it — and it sat in front
+ * of the paste confirmation, the inline draw toggle and the entity rail while the structure panel,
+ * which never consulted this, accepted the same string. Parsing one long string in RDKit is far
+ * cheaper than the surfaces the cap was disabling.
+ */
+const MAX_SMILES_CHARS = 4000;
+
+/** The same bound for a reaction, which is several molecules plus an agents field. */
+const MAX_REACTION_CHARS = 3 * MAX_SMILES_CHARS;
+
+/**
  * Does this look like a SMILES string?
  *
  * Conservative, because chemistry prose is full of tokens that superficially resemble SMILES
@@ -60,7 +75,7 @@ export function looksLikeSmiles(text: string): boolean {
   const s = text.trim();
   // Three, not four: `CCO` is three characters. Below that, `NO` and `CO` collide with ordinary
   // prose far too often to be worth the one real molecule they would catch.
-  if (s.length < 3 || s.length > 400) return false;
+  if (s.length < 3 || s.length > MAX_SMILES_CHARS) return false;
   if (/\s/.test(s)) return false;
   if (!/^[A-Za-z0-9@+\-[\]()=#$%/\\.*]+$/.test(s)) return false;
   // Must contain an atom from the organic subset at all.
@@ -110,7 +125,7 @@ export function looksLikeCompoundName(text: string): boolean {
  */
 export function looksLikeReactionSmiles(text: string): boolean {
   const s = text.trim();
-  if (s.length > 800) return false;
+  if (s.length > MAX_REACTION_CHARS) return false;
   if (/\s/.test(s)) return false;
   const parts = s.split('>');
   if (parts.length !== 3) return false;
@@ -121,6 +136,24 @@ export function looksLikeReactionSmiles(text: string): boolean {
     const components = side.split('.').filter(Boolean);
     return components.length > 0 && components.every(looksLikeSmiles);
   });
+}
+
+/**
+ * Does this look like an MDL molblock?
+ *
+ * The header is four *fixed* lines — title, program, comment, counts — and the counts line ends in
+ * the dialect tag. That is the whole test: positional, cheap, and it cannot fire on prose, because
+ * line 4 of a pasted paragraph does not end in `V2000`.
+ *
+ * Here rather than in `rdkit.ts` for the reason everything in this file is here: it decides
+ * whether asking the toolkit is worth it, so it must not need the toolkit to decide. What it is
+ * for is the paste path — a molblock is multi-line by definition, so it is the one structure
+ * payload the whitespace guard would throw away before RDKit ever saw it, while being what
+ * ChemDraw, Ketcher and Marvin actually put on the clipboard.
+ */
+export function looksLikeMolblock(text: string): boolean {
+  const counts = text.split(/\r?\n/)[3];
+  return counts !== undefined && /V[23]000\s*$/.test(counts);
 }
 
 /**

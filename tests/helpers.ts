@@ -1,12 +1,16 @@
 /**
  * Test helpers.
  *
- * These stub `fetch` with canned SSE bytes. That is not a mock backend — no process is started —
- * it is the only practical way to exercise paths a healthy service will not produce on demand:
- * a frame split across chunk boundaries, a malformed frame, a stream that ends without an answer,
- * and each error status.
+ * Most of these stub `fetch` with canned SSE bytes. That is not a mock backend — no process is
+ * started — it is the only practical way to exercise paths a healthy service will not produce on
+ * demand: a frame split across chunk boundaries, a malformed frame, a stream that ends without an
+ * answer, and each error status.
+ *
+ * The two at the bottom are for the chemistry surfaces, and they are here rather than in one test
+ * file because both the composer's paste tests and the structure panel's need them.
  */
 
+import { fireEvent } from '@testing-library/react';
 import type { AnswerEvent, ChemclawEvent, ErrorEvent, ToolResultEvent } from '../shared/events.ts';
 
 /**
@@ -111,4 +115,50 @@ export function stubFetch(
       globalThis.fetch = original;
     },
   };
+}
+
+/**
+ * Paste `clip` into a text control the way a browser does — **in that order**.
+ *
+ * The order is the whole point and it is not the obvious one. A `paste` event fires *before* the
+ * text is inserted, with the caret still at the insertion point, and the composer reads that caret
+ * to record where the pasted token landed. A test that sets the value first and fires `paste`
+ * afterwards is describing a paste that never happened: happy-dom (like a browser) leaves the
+ * caret at the end of a programmatically set value, so the composer would be told the token was
+ * pasted somewhere it was not.
+ *
+ * `at` defaults to the control's current caret. The insertion itself is the browser's default
+ * action, which the composer deliberately does not prevent.
+ */
+export function pasteInto(
+  el: HTMLTextAreaElement | HTMLInputElement,
+  clip: string,
+  at?: number,
+): void {
+  const caret = at ?? el.selectionStart ?? el.value.length;
+  el.setSelectionRange(caret, caret);
+  fireEvent.paste(el, { clipboardData: { getData: () => clip } });
+  fireEvent.change(el, {
+    target: { value: `${el.value.slice(0, caret)}${clip}${el.value.slice(caret)}` },
+  });
+}
+
+/**
+ * An MDL V2000 molblock with the given atoms.
+ *
+ * Written out at the real column offsets rather than approximated, because the element symbol
+ * lives at columns 32-34 and a fixture that got that wrong would be testing the fixture. Bonds are
+ * omitted — the RDKit fake keys on atom composition and says so.
+ *
+ * `title` defaults to a non-empty string only because most fixtures read better that way. The
+ * **blank** title is the normal case in the wild — `MolToMolBlock`, ChemDraw and most exporters
+ * leave line 1 empty — and it is the one every fixture here used to get wrong.
+ */
+export function molblock(symbols: string[], title = 'stub'): string {
+  const zero = (0).toFixed(4).padStart(10, ' ');
+  const counts = `${String(symbols.length).padStart(3, ' ')}  0  0  0  0  0  0  0  0999 V2000`;
+  const atoms = symbols.map(
+    (symbol) => `${zero}${zero}${zero} ${symbol.padEnd(3, ' ')} 0  0  0  0  0  0  0  0  0  0  0  0`,
+  );
+  return [title, '  stub-suite', '', counts, ...atoms, 'M  END'].join('\n');
 }

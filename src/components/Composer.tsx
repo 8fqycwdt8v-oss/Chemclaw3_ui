@@ -58,22 +58,63 @@ import { Label, Switch } from '@/components/ui/misc';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Loading } from '@/components/chem/Feedback';
 import { useEntityStore } from '../chem/entities.ts';
-import { readStructure } from '../chem/structure.ts';
+import { canonicalSmilesFromMolblock, rdkitAvailable } from '../chem/rdkit.ts';
+import { looksLikeMolblock } from '../chem/recognise.ts';
+import { mightBeStructure, readStructure } from '../chem/structure.ts';
 import { Molecule } from './Molecule.tsx';
-import { StructureInput, type AcceptedStructure } from './StructureInput.tsx';
+// `STRUCTURE_FILE` from the panel itself: a file dropped here goes to the panel or to the
+// attachment route, and which one is the panel's rule about what it can read.
+import { STRUCTURE_FILE, StructureInput, type AcceptedStructure } from './StructureInput.tsx';
 
-/** Extensions the structure panel can read. Everything else a chemist drops here is a working
- *  file for the attachment route, which is the other thing this composer already accepts. */
-const STRUCTURE_FILE = /\.(mol|sdf|mdl)$/i;
-
-/** What a paste turned out to be, once RDKit had looked at it. */
-interface PastedStructure {
-  kind: 'molecule' | 'reaction';
-  /** What was pasted, verbatim. */
+/**
+ * What a paste turned out to be, once RDKit had looked at it — and **where it landed**.
+ *
+ * The span is the load-bearing part. A confirmation that knows only its own text cannot say which
+ * occurrence of that text it is about, and SMILES collide constantly because every one of them is
+ * an infix of larger ones: with `compare OCCO with ` in the box, pasting `OCC` and accepting the
+ * canonical form rewrote the *glycol* to `CCOO` — ethyl hydroperoxide, a real and different
+ * compound — and left the pasted token alone, with nothing on screen saying anything had changed.
+ *
+ * So a check names a span, `raw` at `at`, and both the write-back and the invalidation below ask
+ * the same question of it: does the draft still say exactly this, exactly there?
+ */
+type PasteCheck = {
+  /** What was pasted, as it lands in the draft. */
   raw: string;
-  /** RDKit's reading of it. Equal to `raw` for a reaction, which is not canonicalised. */
-  canonical: string;
-}
+  /** Where it starts. The caret at paste time, read before the browser inserted anything. */
+  at: number;
+} & (
+  | {
+      status: 'read';
+      kind: 'molecule' | 'reaction' | 'molblock';
+      /** RDKit's reading. Equal to `raw` for a reaction, which is not canonicalised. */
+      canonical: string;
+    }
+  /** Structure-shaped, and RDKit said no. */
+  | { status: 'refused' }
+  /** RDKit itself never loaded, so nothing here is a claim about the string. */
+  | { status: 'unavailable' }
+);
+
+/**
+ * Does the draft still hold this check's text, at its position, as a whole token?
+ *
+ * Asked in one place so the write-back and the invalidation cannot answer it differently. All
+ * three clauses earn their place: the text, or the strip is about something else; the position,
+ * or `OCC` matches inside `OCCO`; and the boundaries, because typing `Cl` onto a pasted `OCC`
+ * leaves the span itself untouched while the message now names 2-chloroethanol.
+ */
+const spanHolds = (draft: string, check: PasteCheck): boolean => {
+  const end = check.at + check.raw.length;
+  if (draft.slice(check.at, end) !== check.raw) return false;
+  const before = draft.slice(0, check.at).slice(-1);
+  const after = draft.slice(end, end + 1);
+  return (!before || /\s/.test(before)) && (!after || /\s/.test(after));
+};
+
+/** Enough of a pasted payload to recognise it by — a refused molblock is ten lines of MDL, and
+ *  none of them belong in a strip above the composer. */
+const shortly = (raw: string): string => (raw.length > 80 ? `${raw.slice(0, 80)}…` : raw);
 
 const MAX_TEXTAREA_PX = 200;
 
@@ -81,6 +122,14 @@ type Upload =
   | { state: 'busy'; text: string; progress: number; abort: AbortController }
   | { state: 'ok' | 'failed'; text: string }
   | null;
+
+/** What the strip calls each thing it can be handed. A molblock is named as one because the
+ *  chemist pasted ten lines of MDL and needs to see that it was understood as a structure. */
+const PASTE_LABEL: Record<'molecule' | 'reaction' | 'molblock', string> = {
+  molecule: 'Pasted structure',
+  reaction: 'Pasted reaction',
+  molblock: 'Pasted molfile',
+};
 
 /**
  * "This is what I understood you to paste."
@@ -99,40 +148,69 @@ type Upload =
  * Replacing is offered, never performed. The chemist's own spelling is valid input — the backend
  * canonicalises everything it is given — so rewriting their message under them would be taking a
  * decision that is not this component's to take.
+ *
+ * ## It says the negative cases too
+ *
+ * It used to be asymmetric in exactly the wrong direction: a picture when the paste was fine, and
+ * nothing whatsoever when the app already knew the string was not a molecule or that RDKit had
+ * never loaded. Those are the two the chemist needed, and they are the two that reached the
+ * message unremarked, which is the silence this whole control exists to close.
  */
 function PasteConfirmation({
   pasted,
   onReplace,
   onDismiss,
 }: {
-  pasted: PastedStructure;
+  pasted: PasteCheck;
   onReplace: () => void;
   onDismiss: () => void;
 }): React.JSX.Element {
-  const differs = pasted.canonical !== pasted.raw;
+  const differs = pasted.status === 'read' && pasted.canonical !== pasted.raw;
   return (
     <div
-      // "status", not "alert": nothing is wrong, and interrupting a chemist who pasted the right
-      // structure to tell them it was the right structure is how a signal gets trained away.
-      role="status"
+      // "status" while nothing is wrong: interrupting a chemist who pasted the right structure to
+      // tell them it was the right structure is how a signal gets trained away. The other two
+      // states are something being wrong about the message they are holding, and an assertive
+      // announcement is what a screen-reader user gets instead of a picture they cannot see.
+      role={pasted.status === 'read' ? 'status' : 'alert'}
       className="mb-2 flex items-start gap-3 rounded-xl border border-border-subtle bg-surface-raised p-2.5"
     >
-      <div className="shrink-0 rounded-lg border border-border-subtle bg-surface p-1">
-        <Molecule smiles={pasted.canonical} maxWidth={128} />
-      </div>
+      {pasted.status === 'read' && (
+        <div className="shrink-0 rounded-lg border border-border-subtle bg-surface p-1">
+          <Molecule smiles={pasted.canonical} maxWidth={128} />
+        </div>
+      )}
 
       <div className="min-w-0 flex-1">
-        <p className="text-xs text-ink-muted">
-          {pasted.kind === 'reaction' ? 'Pasted reaction' : 'Pasted structure'} — RDKit read this as{' '}
-          <span className="font-mono break-all text-ink">{pasted.canonical}</span>
-        </p>
-        {differs && (
+        {pasted.status === 'read' && (
+          <p className="text-xs text-ink-muted">
+            {PASTE_LABEL[pasted.kind]} — RDKit read this as{' '}
+            <span className="font-mono break-all text-ink">{pasted.canonical}</span>
+          </p>
+        )}
+        {pasted.status === 'refused' && (
+          // The panel's own wording, because the two surfaces must not disagree about the same
+          // string — and this is the one on the muscle-memory path.
+          <p className="text-xs text-danger-ink">
+            Pasted <span className="font-mono break-all text-ink">{shortly(pasted.raw)}</span> —
+            RDKit could not read this as a molecule.
+          </p>
+        )}
+        {pasted.status === 'unavailable' && (
+          <p className="text-xs text-warn-ink">
+            The structure toolkit could not be loaded, so nothing pasted here can be checked. This
+            is not a verdict about what you pasted.
+          </p>
+        )}
+        {differs && pasted.status === 'read' && (
           <div className="mt-1.5 flex flex-wrap items-center gap-2">
             <Button variant="outline" size="xs" onClick={onReplace}>
-              Use the canonical form
+              {pasted.kind === 'molblock' ? 'Use the SMILES instead' : 'Use the canonical form'}
             </Button>
             <span className="text-2xs text-ink-subtle">
-              Your spelling works too — the service canonicalises either way.
+              {pasted.kind === 'molblock'
+                ? 'Otherwise the message carries the whole molfile.'
+                : 'Your spelling works too — the service canonicalises either way.'}
             </span>
           </div>
         )}
@@ -160,10 +238,25 @@ export function Composer({ conversationId }: { conversationId: string }): React.
    *  this object's identity, and two drops of one file are two intentions. */
   const [droppedFile, setDroppedFile] = useState<{ at: number; file: File } | null>(null);
   const [dragging, setDragging] = useState(false);
-  /** What the last paste turned out to be, or null. Cleared by the next paste, by using it, and
-   *  by dismissing it — never on a timer, because a strip that vanishes while a chemist is
-   *  reading it is worse than no strip. */
-  const [pasted, setPasted] = useState<PastedStructure | null>(null);
+  /** What the last paste turned out to be, or null. Cleared by the next paste, by using it, by
+   *  dismissing it, and by the draft moving out from under it — never on a timer, because a strip
+   *  that vanishes while a chemist is reading it is worse than no strip. */
+  const [pasted, setPasted] = useState<PasteCheck | null>(null);
+  /** Every paste gets a number and only the newest may write the strip. Two pastes start two
+   *  independent reads, and a reaction resolves later than a molecule — it awaits every component
+   *  of both sides — so the slower, older one used to win and its button then acted on that older
+   *  string. */
+  const pasteSeq = useRef(0);
+  /**
+   * The two facts that tell "the paste has not landed yet" from "the chemist edited it".
+   *
+   * The read can finish on a microtask that runs *before* the browser has inserted the pasted
+   * text, so a draft that does not hold the span is not evidence of an edit while it is still
+   * exactly the draft the paste started from. Once it is anything else — or once the span has
+   * been seen to hold and then stopped holding, which is what an undo looks like — it is.
+   */
+  const pasteBefore = useRef('');
+  const pasteLanded = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   /** Where the caret was when the structure panel took focus. Captured on open rather than read
    *  back on insert, because by then the caret belongs to the panel's own input. */
@@ -367,19 +460,6 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   };
 
   /**
-   * Put an accepted structure into the message being written — and nowhere else.
-   *
-   * It is inserted at the caret rather than sent, because a structure is almost never the whole
-   * question: "screen this for hazards" and "what is the pKa of this" are what a chemist is
-   * actually writing, and a panel that sent the SMILES on its own would force them to describe the
-   * molecule twice.
-   *
-   * It is also promoted into the entity rail. A structure a human drew or dropped and confirmed
-   * satisfies the rail's structured-source rule rather than weakening it — the rule exists to keep
-   * out strings the UI *guessed* were molecules, and there is no guess here (see the
-   * promotion-rule docstring in `src/chem/entities.ts`).
-   */
-  /**
    * Accept a structure from the panel — into the message, and nowhere else.
    *
    * It is inserted at the caret rather than sent, because a structure is almost never the whole
@@ -420,23 +500,89 @@ export function Composer({ conversationId }: { conversationId: string }): React.
    * A reaction is drawn and not promoted. `ingestUserStructure` canonicalises, a molecule toolkit
    * cannot canonicalise a reaction, and inventing a second user-supplied door for a case nobody has
    * asked for would be surface without a caller.
+   *
+   * What is recorded is a **span** — the text and the caret it went in at — because the strip's
+   * one button rewrites the draft, and a rewrite that only knows its own text cannot say which
+   * occurrence of it to touch.
    */
   const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>): void => {
-    const clip = event.clipboardData.getData('text').trim();
+    // What the browser is about to insert, and where. CRLF is normalised because a textarea does
+    // the same on the way in, and a span that did not match the text that lands would be dropped.
+    const clip = event.clipboardData.getData('text').replace(/\r\n/g, '\n');
+    const caret = event.currentTarget.selectionStart ?? 0;
+    const seq = (pasteSeq.current += 1);
+    pasteBefore.current = useChatStore.getState().drafts[conversationId] ?? '';
+    pasteLanded.current = false;
     setPasted(null);
-    if (!clip || /\s/.test(clip)) return;
+    if (!clip.trim()) return;
 
-    void readStructure(clip).then((read) => {
-      if (!read) return;
-      // The draft may have moved on while the WASM loaded. The strip describes a string, not a
-      // moment, so it is still true — but it must not appear for a paste that was undone.
-      if (!(useChatStore.getState().drafts[conversationId] ?? '').includes(clip)) return;
-      if (read.kind === 'molecule') {
-        void useEntityStore.getState().ingestUserStructure(conversationId, read.raw, 'paste');
+    /** Show a finished check, unless a newer paste has started since. */
+    const show = (check: PasteCheck): void => {
+      if (seq === pasteSeq.current) setPasted(check);
+    };
+
+    /** RDKit said no — but to the string, or because it is not here at all? Only the first is a
+     *  chemical claim, and saying it about a molecule the toolkit never read is the worse error. */
+    const refusal = async (raw: string, at: number): Promise<PasteCheck> => ({
+      status: (await rdkitAvailable()) ? 'refused' : 'unavailable',
+      raw,
+      at,
+    });
+
+    // A molblock is looked at *before* the whitespace guard below, because it is multi-line by
+    // definition: the most common copy-out of a drawing package was the one payload no paste path
+    // handled, while the file-drop path parsed byte-identical content happily. It is kept
+    // verbatim — a molblock's header is four fixed lines and the first is routinely blank, so
+    // trimming it would shift the counts line and destroy the file.
+    if (looksLikeMolblock(clip)) {
+      void canonicalSmilesFromMolblock(clip).then(async (canonical) => {
+        if (!canonical) {
+          show(await refusal(clip, caret));
+          return;
+        }
+        void useEntityStore.getState().ingestUserStructure(conversationId, canonical, 'paste');
+        show({ status: 'read', kind: 'molblock', raw: clip, at: caret, canonical });
+      });
+      return;
+    }
+
+    const token = clip.trim();
+    if (/\s/.test(token)) return;
+    // Where the *token* lands: the clipboard may carry whitespace around it, and the span is about
+    // the token rather than about the payload.
+    const at = caret + (clip.length - clip.trimStart().length);
+
+    void readStructure(token).then(async (read) => {
+      if (read) {
+        if (read.kind === 'molecule') {
+          void useEntityStore.getState().ingestUserStructure(conversationId, read.raw, 'paste');
+        }
+        show({ status: 'read', kind: read.kind, raw: token, at, canonical: read.canonical });
+        return;
       }
-      setPasted({ kind: read.kind, raw: read.raw, canonical: read.canonical });
+      // Only for a token that looked like chemistry. A refusal on anything else would fire on
+      // ordinary words, which is the noise the syntactic recogniser exists to keep out.
+      if (!mightBeStructure(token)) return;
+      show(await refusal(token, at));
     });
   };
+
+  /**
+   * A confirmation that outlives its subject is worse than none.
+   *
+   * The strip is bound to a span of the draft, not to a string, so editing that span withdraws it:
+   * it used to keep drawing ethanol over `OCCCl` — 2-chloroethanol — and its button then spliced
+   * the canonical form into the middle of the edited token, producing `CCOCl`. Displayed: ethanol.
+   * Transmitted: ethyl hypochlorite.
+   */
+  useEffect(() => {
+    if (!pasted) return;
+    if (spanHolds(text, pasted)) {
+      pasteLanded.current = true;
+      return;
+    }
+    if (pasteLanded.current || text !== pasteBefore.current) setPasted(null);
+  }, [text, pasted]);
 
   const onUpload = async (file: File): Promise<void> => {
     if (!sessionId) {
@@ -585,9 +731,17 @@ export function Composer({ conversationId }: { conversationId: string }): React.
             pasted={pasted}
             onReplace={() => {
               const draft = useChatStore.getState().drafts[conversationId] ?? '';
-              // Replace the pasted spelling in place rather than appending the canonical one:
-              // the chemist pasted it into a sentence, and the sentence should keep its shape.
-              setDraft(conversationId, draft.replace(pasted.raw, pasted.canonical));
+              // Spliced at the recorded span rather than replaced by value: the chemist pasted it
+              // into a sentence and the sentence should keep its shape, but `String.replace` with
+              // a string pattern rewrites the *first* match anywhere in the draft, which is a
+              // different molecule whenever the pasted one is an infix of something already
+              // there. If the span has moved under us the strip is stale, and the right thing to
+              // do is drop it without writing anything.
+              if (pasted.status === 'read' && spanHolds(draft, pasted)) {
+                const before = draft.slice(0, pasted.at);
+                const after = draft.slice(pasted.at + pasted.raw.length);
+                setDraft(conversationId, `${before}${pasted.canonical}${after}`);
+              }
               setPasted(null);
               textareaRef.current?.focus();
             }}

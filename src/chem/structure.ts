@@ -17,7 +17,11 @@
  * molecules. So every surface that asked "can I draw this" via `isMolecule` alone said no to every
  * reaction, while `Molecule` has been able to draw them all along. `readStructure` asks the right
  * question of each kind: a molecule is canonicalised, and a reaction is accepted when *every*
- * component on both sides is one RDKit can read.
+ * component is one RDKit can read — **the agents field included**. That last word is not a
+ * refinement: the recogniser checks the two ends only, so `CCO>ZZZZ>CC=O` was accepted, the strip
+ * said "RDKit read this as CCO>ZZZZ>CC=O", and `Reaction` printed `ZZZZ` over the arrow as a
+ * reagent. Either everything in the string is checked or the claim has to be withdrawn, and the
+ * agents are chemistry a chemist reads off that arrow.
  *
  * ## A reaction is not canonicalised, and that is deliberate
  *
@@ -50,10 +54,13 @@ export async function readStructure(text: string): Promise<ReadStructure | null>
   if (!raw) return null;
 
   if (looksLikeReactionSmiles(raw)) {
-    const [reactants = '', , products = ''] = raw.split('>');
-    const components = [reactants, products].flatMap((side) => side.split('.')).filter(Boolean);
+    const [reactants = '', agents = '', products = ''] = raw.split('>');
+    const components = [reactants, agents, products]
+      .flatMap((side) => side.split('.'))
+      .filter(Boolean);
     // Every component, not just one: a reaction with an unreadable product would draw as a
-    // half-reaction with a silently missing side, which is worse than not drawing it.
+    // half-reaction with a silently missing side, which is worse than not drawing it. The agents
+    // are in this list because they are rendered over the arrow and claimed as read.
     const readable = await Promise.all(components.map(isMolecule));
     return readable.every(Boolean) ? { kind: 'reaction', canonical: raw, raw } : null;
   }

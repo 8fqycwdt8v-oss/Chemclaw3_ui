@@ -22,6 +22,7 @@ import type { MountSketcher, SketcherSession } from '../../src/chem/sketcher.ts'
 let drawing: string | null = null;
 let mountShouldFail = false;
 let destroyed = 0;
+let initial: string | undefined;
 
 /** What `read()` will answer — an MDL molblock, or `null` for an untouched canvas. */
 export const setDrawing = (molblock: string | null): void => {
@@ -36,14 +37,21 @@ export const setMountFailure = (fails: boolean): void => {
 /** How many mounted editors have been torn down. */
 export const destroyCount = (): number => destroyed;
 
+/** What the last mount was asked to open with — `undefined` for a blank canvas. The seam is
+ *  write-only without this, which is what made "draw, insert, notice a missing methyl, press Draw"
+ *  end at an empty editor. */
+export const mountedWith = (): string | undefined => initial;
+
 export const resetSketcherStub = (): void => {
   drawing = null;
   mountShouldFail = false;
   destroyed = 0;
+  initial = undefined;
 };
 
-export const mountKetcher: MountSketcher = async (host) => {
+export const mountKetcher: MountSketcher = async (host, structure) => {
   if (mountShouldFail) throw new Error('stub sketcher refused to mount');
+  initial = structure;
 
   host.setAttribute('data-sketcher', 'mounted');
 

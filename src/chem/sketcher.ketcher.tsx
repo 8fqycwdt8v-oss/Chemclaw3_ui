@@ -61,6 +61,8 @@ import type { MountSketcher, SketcherSession } from './sketcher.ts';
  *  contract a replacement would have to satisfy. */
 interface KetcherInstance {
   getMolfile: () => Promise<string>;
+  /** Takes any format Indigo reads, SMILES included — which is what the panel has. */
+  setMolecule: (structure: string) => Promise<void>;
 }
 
 /** Toolbar entries that cannot work here. `recognize` uploads an image to a structure-recognition
@@ -76,11 +78,12 @@ const HIDDEN_BUTTONS = {
  *  fetch, and the caller's fallback (paste, drop) is better than that. */
 const INIT_TIMEOUT_MS = 60_000;
 
-export const mountKetcher: MountSketcher = async (host) => {
+export const mountKetcher: MountSketcher = async (host, initial) => {
   const root = createRoot(host);
-  let instance: KetcherInstance | null = null;
 
-  const ready = new Promise<void>((resolve, reject) => {
+  // Resolved *with* the editor rather than beside it, so everything after the await has a live
+  // instance rather than a `| null` nothing can narrow.
+  const ready = new Promise<KetcherInstance>((resolve, reject) => {
     const timer = setTimeout(
       () => reject(new Error('The structure editor did not finish loading.')),
       INIT_TIMEOUT_MS,
@@ -97,18 +100,29 @@ export const mountKetcher: MountSketcher = async (host) => {
         errorHandler={(message) => console.warn('[ketcher]', message)}
         onInit={(ketcher) => {
           clearTimeout(timer);
-          instance = ketcher as unknown as KetcherInstance;
-          resolve();
+          resolve(ketcher as unknown as KetcherInstance);
         }}
       />,
     );
   });
 
+  let instance: KetcherInstance;
   try {
-    await ready;
+    instance = await ready;
   } catch (err) {
     root.unmount();
     throw err;
+  }
+
+  if (initial) {
+    try {
+      // After `onInit`, because the editor has no document to put a structure into before it. A
+      // structure Indigo refuses is not a reason to fail the mount: an empty canvas is a working
+      // editor, and a dialog that would not open is not.
+      await instance.setMolecule(initial);
+    } catch (err) {
+      console.warn('[ketcher] could not open on the current structure', err);
+    }
   }
 
   const session: SketcherSession = {
@@ -117,8 +131,8 @@ export const mountKetcher: MountSketcher = async (host) => {
       // Both mean "nothing drawn", and both have to reach the caller as the same `null` — a
       // difference in how Ketcher declines is not a difference a chemist should ever see.
       try {
-        const molblock = await instance?.getMolfile();
-        return molblock?.trim() ? molblock : null;
+        const molblock = await instance.getMolfile();
+        return molblock.trim() ? molblock : null;
       } catch {
         return null;
       }

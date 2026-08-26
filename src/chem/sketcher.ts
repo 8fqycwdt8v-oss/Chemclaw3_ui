@@ -47,7 +47,19 @@ export interface SketcherSession {
   destroy: () => void;
 }
 
-export type MountSketcher = (host: HTMLElement) => Promise<SketcherSession>;
+/**
+ * Mount an editor into `host`, optionally opening it on `initial`.
+ *
+ * `initial` is anything the editor's own chemistry engine can read — this application passes the
+ * canonical SMILES the panel has already confirmed. Without it the seam was write-only in one
+ * direction and the round trip the panel implies did not exist: draw, insert, press Draw again,
+ * blank canvas. A chemist correcting one bond redrew the whole molecule, and the two drawings were
+ * then two independent chances to get it wrong.
+ *
+ * Loading it is best-effort *inside* the adapter: an editor that came up empty is worth more than
+ * a dialog that failed to open, so a structure the editor refuses must not take the mount with it.
+ */
+export type MountSketcher = (host: HTMLElement, initial?: string) => Promise<SketcherSession>;
 
 /** Resolved once, then reused. `null` once loading has failed, so a browser that cannot run the
  *  editor degrades to the paste and drop paths instead of retrying on every click. */

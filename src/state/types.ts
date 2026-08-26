@@ -17,6 +17,7 @@ export type TraceKind =
   | 'plan'
   | 'tool_call'
   | 'tool_failed'
+  | 'evidence_source'
   | 'job_started'
   | 'job_completed'
   | 'job_failed'
@@ -99,7 +100,25 @@ export interface TraceEntry {
      */
     numbers?: number[];
   };
-  toolFailure?: { tool: string; message: string };
+  toolFailure?: {
+    tool: string;
+    message: string;
+    /**
+     * `'plan_gate'` when the pre-execution approval refused a state-changing call.
+     *
+     * A refusal is the control working, and rendering it in the same red as a database outage
+     * reports a correctly-gated turn as a broken one. Absent for an ordinary failure.
+     */
+    reason?: 'plan_gate' | null;
+  };
+  /**
+   * One retrieval source's own report of what it contributed to a sweep.
+   *
+   * Carried because `failed` is the only thing that distinguishes a source that raised from one
+   * that was asked and had nothing — the merged evidence list collapses the two, which is a defect
+   * the backend has already paid for once.
+   */
+  evidenceSource?: { source: string; chunks: number; failed: boolean };
   /**
    * A durable job.
    *
@@ -168,9 +187,32 @@ export interface AssistantMessage {
    * is also the truthful record: this turn *was* queued.
    */
   queued: boolean;
+  /**
+   * The turn hit a guard and stopped with work still open, so the answer below is partial.
+   *
+   * Carries the service's own sentence, which names the limit that fired and the session. On the
+   * message rather than in `error`, and that distinction is the whole point: `error` means the turn
+   * failed and there is nothing to read, while this arrives BEFORE the answer it qualifies and the
+   * answer is still worth showing.
+   *
+   * Null for every turn that ran to its own conclusion, which is nearly all of them.
+   */
+  partialReason: string | null;
   trace: TraceEntry[];
   /** Newest `plan` snapshot, for the header checklist. Full history stays in `trace`. */
   latestPlan: string[] | null;
+  /**
+   * The identity of `latestPlan`, as the event that carried it stated.
+   *
+   * What binds an approval to the plan a human actually read. Without it the approval card had to
+   * `GET /sessions/{id}/plan` for a hash — a round trip that races the revision the hash exists to
+   * catch, and which showed whatever the service was proposing at fetch time rather than what this
+   * message rendered.
+   *
+   * Empty string for a service that predates the field, which the card must read as "fetch it",
+   * never as a hash that will match. Null when no plan has been seen at all.
+   */
+  latestPlanHash: string | null;
   error: { kind: ApiErrorKind; message: string } | null;
 }
 

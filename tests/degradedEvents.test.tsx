@@ -53,6 +53,9 @@ describe('normalizeEvent', () => {
       message: 'timeout',
       // Empty is the main agent; a specialist's failure carries its name here (backend M9).
       agent: '',
+      // `null` is an ordinary failure. The only other value is `'plan_gate'`, which says the
+      // pre-execution approval refused the call — a control working, not a fault.
+      reason: null,
     });
   });
 
@@ -117,7 +120,11 @@ describe('tool_failed', () => {
     const trace = assistantOf(cid, mid).trace;
     expect(trace).toHaveLength(1);
     expect(trace[0]?.kind).toBe('tool_failed');
-    expect(trace[0]?.toolFailure).toEqual({ tool: 'predict_pka', message: 'connector timed out' });
+    expect(trace[0]?.toolFailure).toEqual({
+      tool: 'predict_pka',
+      message: 'connector timed out',
+      reason: null,
+    });
   });
 
   it('shows the tool and its reason in the trace panel', () => {

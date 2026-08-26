@@ -43,7 +43,7 @@
 
 import { useEffect, useId, useState } from 'react';
 import { cn } from '../lib/cn.ts';
-import { moleculeSvg } from '../chem/rdkit.ts';
+import { moleculeSvg, rdkitAvailable } from '../chem/rdkit.ts';
 import { mightBeStructure, readStructure, type ReadStructure } from '../chem/structure.ts';
 import { useThemeStore } from '../state/themeStore.ts';
 import { usePrefsStore } from '../state/prefsStore.ts';
@@ -115,7 +115,9 @@ function Reaction({ smiles, className, maxWidth }: Required<MoleculeProps>): Rea
 
 function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): React.JSX.Element {
   const [svg, setSvg] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
+  /** Why there is no drawing, when there is none. The two are different facts and only one of them
+   *  is about the structure. */
+  const [problem, setProblem] = useState<'unreadable' | 'unavailable' | null>(null);
   // Subscribing to the app's resolved theme, so a structure re-draws when the user flips the
   // toggle — not only when the OS preference changes.
   const theme = useThemeStore((s) => s.resolved);
@@ -127,14 +129,23 @@ function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): R
       width: CANVAS_WIDTH,
       height: CANVAS_HEIGHT,
       dark: theme === 'dark',
-    }).then((drawn) => {
+    }).then(async (drawn) => {
       // The await crossed a render boundary; a structure that has since been replaced must not
       // overwrite the one now on screen.
       if (cancelled) return;
       // Cleared on success rather than at the top of the effect: resetting synchronously made a
       // re-render of an already-failed structure flash its fallback away and back.
-      setFailed(drawn === null);
-      setSvg(drawn);
+      if (drawn !== null) {
+        setProblem(null);
+        setSvg(drawn);
+        return;
+      }
+      // Nothing was drawn — but "this string is not a molecule" is a claim, and it is the wrong
+      // one to make about every structure on the page when the toolkit simply never loaded.
+      const available = await rdkitAvailable();
+      if (cancelled) return;
+      setProblem(available ? 'unreadable' : 'unavailable');
+      setSvg(null);
     });
 
     return () => {
@@ -142,7 +153,7 @@ function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): R
     };
   }, [smiles, theme]);
 
-  if (failed) {
+  if (problem) {
     return (
       <div
         className={cn('rounded-lg border border-border-subtle bg-surface-sunken p-3', className)}
@@ -151,7 +162,9 @@ function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): R
             chemist can still read and copy it. */}
         <code className="block font-mono text-xs break-all">{smiles}</code>
         <p className="mt-1.5 text-xs text-ink-muted">
-          Could not render this structure. The SMILES string is shown as written.
+          {problem === 'unavailable'
+            ? 'The structure toolkit could not be loaded, so nothing on this page can be drawn. The SMILES string is shown as written.'
+            : 'Could not render this structure. The SMILES string is shown as written.'}
         </p>
       </div>
     );

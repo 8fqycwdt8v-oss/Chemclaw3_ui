@@ -46,8 +46,10 @@ import {
   canonicalSmiles,
   canonicalSmilesFromMolblock,
   moleculesFromMolfile,
+  rdkitAvailable,
+  type MolfileRecords,
 } from '../chem/rdkit.ts';
-import { looksLikeCompoundName } from '../chem/recognise.ts';
+import { looksLikeCompoundName, looksLikeMolblock } from '../chem/recognise.ts';
 import type { UserStructureSource } from '../chem/entities.ts';
 import { loadSketcher, type SketcherSession } from '../chem/sketcher.ts';
 import { prefill } from '../state/composerEvents.ts';
@@ -68,7 +70,7 @@ import { Molecule } from './Molecule.tsx';
  */
 interface Verdict {
   of: string;
-  status: 'ok' | 'name' | 'invalid';
+  status: 'ok' | 'name' | 'invalid' | 'unavailable';
   canonical?: string;
 }
 
@@ -78,7 +80,9 @@ type Check =
   | { status: 'ok'; canonical: string }
   /** Refused, and shaped like a compound name — the one refusal worth explaining differently. */
   | { status: 'name' }
-  | { status: 'invalid' };
+  | { status: 'invalid' }
+  /** RDKit never loaded. Not a refusal: nothing here read the string at all. */
+  | { status: 'unavailable' };
 
 function checkOf(raw: string, verdict: Verdict | null): Check {
   const text = raw.trim();
@@ -94,6 +98,50 @@ function checkOf(raw: string, verdict: Verdict | null): Check {
 const DEBOUNCE_MS = 180;
 
 export const FIELD_PLACEHOLDER = 'Paste SMILES, drop a .mol or .sdf, or draw it';
+
+/**
+ * What this panel can read.
+ *
+ * Exported because the composer routes a dropped file by the same rule — anything else is a
+ * working file for the attachment route — and two lists of extensions would be one rule with two
+ * spellings, of which the stale one is free to drift.
+ *
+ * The check belongs here rather than on the controls: the picker's `accept=` filters the picker
+ * only, and the panel takes anything dropped on it.
+ */
+export const STRUCTURE_FILE = /\.(mol|sdf|mdl)$/i;
+
+/**
+ * The most a structure file may weigh.
+ *
+ * The whole file is materialised as a string and every record is parsed in WASM on this thread —
+ * there is no worker and nothing cancels it — so an unbounded read is an unbounded freeze. The
+ * bound is stated to the chemist rather than enforced silently, because "split it" is a thing they
+ * can act on and a hung tab is not.
+ */
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
+
+const mb = (bytes: number): string => `${(bytes / 1_048_576).toFixed(1).replace(/\.0$/, '')} MB`;
+
+/** Why this file cannot be read here, or `null`. Pure, so the picker and the two drop targets
+ *  cannot disagree about it. */
+function fileRefusal(file: File): string | null {
+  if (!STRUCTURE_FILE.test(file.name)) {
+    return `${file.name} is not a structure file — this panel reads .mol, .sdf or .mdl.`;
+  }
+  if (file.size > MAX_FILE_BYTES) {
+    return `${file.name} is ${mb(file.size)}, and this panel reads structure files up to ${mb(MAX_FILE_BYTES)} — the whole file is parsed here, on this thread. Split it, or drop the records you need.`;
+  }
+  return null;
+}
+
+/** The three ways reading a structure file can end. Named rather than collapsed into `| null`,
+ *  because "this is not a file I read", "I could not read it" and "here is what was in it" are
+ *  three different sentences to a chemist. */
+type FileOutcome =
+  | { kind: 'records'; records: MolfileRecords }
+  | { kind: 'refused'; why: string }
+  | { kind: 'unreadable' };
 
 /** A structure the chemist has seen drawn and accepted. */
 export interface AcceptedStructure {
@@ -148,6 +196,17 @@ export function StructureInput({
   /** Canonical strings already inserted from the record set on screen. See `accept`. */
   const [inserted, setInserted] = useState<string[]>([]);
   const loads = useRef(0);
+  /**
+   * Which claim on the field is the newest one.
+   *
+   * Every source that writes the field takes a number first — typing, the picker, either drop, a
+   * pasted molblock — and an asynchronous one drops its result when the number has moved on. A
+   * file read is a file-system round trip plus a full RDKit pass, and nothing cancelled it: drop a
+   * large `.sdf`, get bored, type your own structure, and the read landed on top of it. The field
+   * is the confirmation surface, so a write from a source the chemist has moved on from replaces
+   * the structure under review.
+   */
+  const claim = useRef(0);
 
   // How the current candidate arrived. A ref rather than state because it never affects the
   // rendering — it is carried out with the accepted structure so the rail can say where it came
@@ -172,11 +231,20 @@ export function StructureInput({
 
     let cancelled = false;
     const timer = setTimeout(() => {
-      void canonicalSmiles(text).then((canonical) => {
+      void canonicalSmiles(text).then(async (canonical) => {
         // The await crossed a keystroke: a later string may already be in the field, and letting
         // this answer land would report on text nobody can see any more.
         if (cancelled) return;
-        if (canonical) setVerdict({ of: text, status: 'ok', canonical });
+        if (canonical) {
+          setVerdict({ of: text, status: 'ok', canonical });
+          return;
+        }
+        // "Not a molecule" is a claim about the string, and it is only ours to make if the toolkit
+        // that would have read it is here at all. It was not, once, and this panel told a chemist
+        // that `CCO` is not a molecule.
+        const available = await rdkitAvailable();
+        if (cancelled) return;
+        if (!available) setVerdict({ of: text, status: 'unavailable' });
         else setVerdict({ of: text, status: looksLikeCompoundName(text) ? 'name' : 'invalid' });
       });
     }, DEBOUNCE_MS);
@@ -188,6 +256,7 @@ export function StructureInput({
   }, [raw]);
 
   const typed = (text: string): void => {
+    claim.current += 1;
     source.current = 'paste';
     setRecords(null);
     setInserted([]);
@@ -202,29 +271,49 @@ export function StructureInput({
    * anything — an effect whose body calls setState synchronously is a cascading render, and the
    * React Compiler lint is right to refuse it. The split earns its place twice over: the reading
    * is the part worth testing, and it has no React in it.
+   *
+   * Async all the way through, including the refusals, for the same reason: a caller that got an
+   * answer without suspending would be back to writing state inside the effect body.
    */
-  const readMolfile = async (
-    file: File,
-  ): Promise<{ smiles: string[]; unreadable: number } | null> => {
+  const readMolfile = async (file: File): Promise<FileOutcome> => {
+    const why = fileRefusal(file);
+    if (why) return { kind: 'refused', why };
     let text: string;
     try {
       text = await file.text();
     } catch {
-      return null;
+      return { kind: 'unreadable' };
     }
-    return moleculesFromMolfile(text);
+    try {
+      return { kind: 'records', records: await moleculesFromMolfile(text) };
+    } catch {
+      // A file that got past the size bound can still exhaust the heap in WASM. `file.text()` was
+      // guarded and this was not, so the failure arrived as an unhandled rejection and the panel
+      // sat on "Reading …" for ever.
+      return { kind: 'unreadable' };
+    }
   };
 
   /** Put a read file on screen. */
-  const applyMolfile = (
-    file: File,
-    outcome: { smiles: string[]; unreadable: number } | null,
-  ): void => {
-    if (!outcome) {
+  const applyMolfile = (file: File, outcome: FileOutcome): void => {
+    if (outcome.kind === 'refused') {
+      setFileNote(outcome.why);
+      return;
+    }
+    if (outcome.kind === 'unreadable') {
       setFileNote(`Could not read ${file.name}.`);
       return;
     }
-    const { smiles, unreadable } = outcome;
+    const { smiles, unreadable, skipped, unavailable } = outcome.records;
+
+    if (unavailable) {
+      // Not "none of which RDKit could read": RDKit read nothing at all, and the file is very
+      // probably fine.
+      setFileNote(
+        `Could not check ${file.name} — the structure toolkit could not be loaded. Nothing is wrong with the file.`,
+      );
+      return;
+    }
 
     if (smiles.length === 0) {
       // Clear the field only if a *file* put the current candidate there. Otherwise a chemist who
@@ -251,16 +340,54 @@ export function StructureInput({
       [
         `${file.name}: ${smiles.length} structure${smiles.length === 1 ? '' : 's'}`,
         unreadable > 0 ? `, ${unreadable} record${unreadable === 1 ? '' : 's'} unreadable` : '',
+        // Named rather than dropped: a file read down to its cap and a file read whole are
+        // different facts, and only one of them means "this is everything in it".
+        skipped > 0 ? `, ${skipped} past the first ${smiles.length + unreadable} not read` : '',
         smiles.length > 1 ? '. One goes into the message at a time.' : '.',
       ].join(''),
     );
   };
 
   const takeFile = async (file: File): Promise<void> => {
+    const mine = (claim.current += 1);
     setRecords(null);
     setInserted([]);
     setFileNote(`Reading ${file.name}…`);
-    applyMolfile(file, await readMolfile(file));
+    const outcome = await readMolfile(file);
+    if (mine !== claim.current) return;
+    applyMolfile(file, outcome);
+  };
+
+  /**
+   * A molblock pasted into the field.
+   *
+   * The field is an `<input type="text">`, so a browser strips the newlines out of a multi-line
+   * paste and leaves one unparseable line of MDL. That made the second door a dead end for exactly
+   * the payload ChemDraw, Ketcher and Marvin put on the clipboard — while the drop path reads
+   * byte-identical content happily — so the paste is taken over rather than allowed through.
+   */
+  const takeMolblock = async (molblock: string): Promise<void> => {
+    const mine = (claim.current += 1);
+    setFileNote('Reading the pasted molfile…');
+    const canonical = await canonicalSmilesFromMolblock(molblock);
+    if (!canonical) {
+      const available = await rdkitAvailable();
+      if (mine !== claim.current) return;
+      setFileNote(
+        available
+          ? 'That looks like a molfile, but RDKit could not read a structure from it.'
+          : 'That looks like a molfile, but the structure toolkit could not be loaded to read it.',
+      );
+      return;
+    }
+    if (mine !== claim.current) return;
+    // 'file' rather than 'paste': what lands in the field is RDKit's canonical form, not a
+    // spelling the chemist typed, which is exactly the distinction `raw` carries out of here.
+    source.current = 'file';
+    setRecords(null);
+    setInserted([]);
+    setRaw(canonical);
+    setFileNote('Read the pasted molfile.');
   };
 
   // A file dropped on the composer, read as if it had been dropped here. Keyed on the drop's
@@ -273,9 +400,10 @@ export function StructureInput({
   const dropFile = initialFile?.file ?? null;
   useEffect(() => {
     if (dropAt === null || !dropFile) return;
+    const mine = (claim.current += 1);
     let cancelled = false;
     void readMolfile(dropFile).then((outcome) => {
-      if (!cancelled) applyMolfile(dropFile, outcome);
+      if (!cancelled && mine === claim.current) applyMolfile(dropFile, outcome);
     });
     return () => {
       cancelled = true;
@@ -346,6 +474,14 @@ export function StructureInput({
         value={raw}
         spellCheck={false}
         onChange={(e) => typed(e.target.value)}
+        onPaste={(e) => {
+          // CRLF normalised the way a control does on the way in, so the sniff sees the same four
+          // header lines the parser will.
+          const clip = e.clipboardData.getData('text').replace(/\r\n/g, '\n');
+          if (!looksLikeMolblock(clip)) return;
+          e.preventDefault();
+          void takeMolblock(clip);
+        }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' && check.status === 'ok') {
             e.preventDefault();
@@ -373,6 +509,12 @@ export function StructureInput({
         )}
         {check.status === 'invalid' && (
           <span className="text-danger-ink">RDKit could not read this as a molecule.</span>
+        )}
+        {check.status === 'unavailable' && (
+          <span className="text-warn-ink">
+            The structure toolkit could not be loaded, so nothing here can be checked. Nothing is
+            wrong with what you typed — reopen this panel to try again.
+          </span>
         )}
         {check.status === 'name' && (
           <span className="text-warn-ink">
@@ -456,7 +598,13 @@ export function StructureInput({
       <SketcherDialog
         open={drawing}
         onOpenChange={setDrawing}
+        // What the panel has already confirmed, so "draw, insert, notice a missing methyl, press
+        // Draw" continues the drawing instead of starting a second one. Correcting one bond in a
+        // thirty-atom molecule used to mean redrawing it from scratch, and two drawings are two
+        // independent chances to get it wrong.
+        initial={check.status === 'ok' ? check.canonical : undefined}
         onDrawn={(smiles) => {
+          claim.current += 1;
           source.current = 'sketch';
           setRecords(null);
           setFileNote(null);
@@ -548,10 +696,13 @@ function SketcherDialog({
   open,
   onOpenChange,
   onDrawn,
+  initial,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onDrawn: (smiles: string) => void;
+  /** The structure to open the canvas on, if there is one. */
+  initial?: string;
 }): React.JSX.Element {
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
@@ -566,14 +717,20 @@ function SketcherDialog({
         >
           {/* Mounted only while open, so closing the dialog tears the editor down through the
               effect cleanup rather than leaving a live WASM heap behind a hidden node. */}
-          {open && <SketcherBody onDrawn={onDrawn} />}
+          {open && <SketcherBody onDrawn={onDrawn} initial={initial} />}
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
   );
 }
 
-function SketcherBody({ onDrawn }: { onDrawn: (smiles: string) => void }): React.JSX.Element {
+function SketcherBody({
+  onDrawn,
+  initial,
+}: {
+  onDrawn: (smiles: string) => void;
+  initial?: string;
+}): React.JSX.Element {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const sessionRef = useRef<SketcherSession | null>(null);
   const [state, setState] = useState<SketcherState>('loading');
@@ -591,7 +748,7 @@ function SketcherBody({ onDrawn }: { onDrawn: (smiles: string) => void }): React
         return;
       }
       try {
-        const session = await mount(host);
+        const session = await mount(host, initial);
         // Closed while a 12 MB WASM editor was loading. Mount it and immediately tear it down
         // rather than leaving a live editor attached to a detached node.
         if (cancelled) {
@@ -610,6 +767,9 @@ function SketcherBody({ onDrawn }: { onDrawn: (smiles: string) => void }): React
       sessionRef.current?.destroy();
       sessionRef.current = null;
     };
+    // Mount-time only: the dialog remounts this per open, so the structure to start from is read
+    // once, and re-running on it would tear a live editor down mid-drawing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const use = async (): Promise<void> => {

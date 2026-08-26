@@ -53,12 +53,11 @@
 
 import type { JSMol, RDKitLoader, RDKitModule } from '@rdkit/rdkit';
 
-/** Resolved once, then reused. `null` once loading has failed, so a broken WASM fetch degrades to
- *  "no structures" rather than retrying on every render. */
+/** Resolved once, then reused. Only a *success* is cached — see the catch below. */
 let modulePromise: Promise<RDKitModule | null> | null = null;
 
 export function loadRDKit(): Promise<RDKitModule | null> {
-  modulePromise ??= (async () => {
+  const pending = (modulePromise ??= (async () => {
     try {
       const [loader, { default: wasmUrl }] = await Promise.all([
         // The package's own typings declare types only — the loader is advertised as a global
@@ -71,10 +70,34 @@ export function loadRDKit(): Promise<RDKitModule | null> {
       ]);
       return await loader.default({ locateFile: () => wasmUrl });
     } catch {
+      // The failure is deliberately **not** memoised. A missing `wasm-unsafe-eval`, a chunk that
+      // did not arrive, a network blip — none of them is a property of the input, and caching the
+      // `null` meant one bad first fetch left the page unable to read a structure for its whole
+      // lifetime with no retry and nothing on screen to say so. Clearing it here makes the next
+      // thing a chemist does try again.
+      modulePromise = null;
       return null;
     }
-  })();
-  return modulePromise;
+  })());
+  return pending;
+}
+
+/**
+ * Is the toolkit actually here?
+ *
+ * The helpers below all answer chemistry questions, and `null`/`false` is their answer for "not a
+ * molecule". That is the right shape for them and the wrong shape for "RDKit never loaded", which
+ * is not a fact about the string at all. Collapsing the two is how the panel came to tell a
+ * chemist that `CCO` is not a molecule, and how the composer's paste check went silent for the
+ * page's lifetime.
+ *
+ * So the distinction lives here, and the rule is: **anything about to make a chemical claim on a
+ * negative answer asks this first.** Not the helpers themselves — threading a third value through
+ * every one of them puts the question at every call site instead of at the three that make a
+ * claim, and `entities.ts` would have to handle a case it can do nothing about.
+ */
+export async function rdkitAvailable(): Promise<boolean> {
+  return (await loadRDKit()) !== null;
 }
 
 /**
@@ -164,20 +187,50 @@ export interface MolfileRecords {
   smiles: string[];
   /** Records present in the file that RDKit could not read. */
   unreadable: number;
+  /** Records past `MAX_SDF_RECORDS`, which were not read at all. */
+  skipped: number;
+  /** The toolkit itself never loaded. `unreadable` is then not a verdict about the file, and a
+   *  caller that reported one would be telling a chemist their good `.sdf` holds no structures. */
+  unavailable: boolean;
 }
 
+/**
+ * The most records read from one file.
+ *
+ * Each one is a synchronous WASM parse — measured at ~0.9 ms after warm-up — and a screening
+ * `.sdf` routinely holds tens of thousands, which is ~45 s of a frozen tab with "Reading …" as the
+ * only feedback and no way to cancel. The cap is high enough for the files this panel is for (a
+ * chemist steps through the records one at a time) and low enough that the wait stays about a
+ * second. What is past it is counted and named rather than dropped in silence.
+ */
+export const MAX_SDF_RECORDS = 1000;
+
+/** Records parsed between two turns of the event loop. The `await` between records drains
+ *  microtasks only, so without a real yield the browser cannot paint for the whole file. */
+const YIELD_EVERY = 25;
+
 export async function moleculesFromMolfile(text: string): Promise<MolfileRecords> {
+  // Asked once, up front. Without it every record comes back unreadable and the count becomes a
+  // claim about the file rather than about the page.
+  if (!(await rdkitAvailable())) {
+    return { smiles: [], unreadable: 0, skipped: 0, unavailable: true };
+  }
+
   const records = splitSdfRecords(text);
+  const read = records.slice(0, MAX_SDF_RECORDS);
   const smiles: string[] = [];
   let unreadable = 0;
 
-  for (const record of records) {
+  for (const [index, record] of read.entries()) {
+    if (index > 0 && index % YIELD_EVERY === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
     const canonical = await canonicalSmilesFromMolblock(record);
     if (canonical) smiles.push(canonical);
     else unreadable += 1;
   }
 
-  return { smiles, unreadable };
+  return { smiles, unreadable, skipped: records.length - read.length, unavailable: false };
 }
 
 /**

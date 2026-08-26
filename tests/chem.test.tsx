@@ -20,6 +20,7 @@ import {
   smilesFromArguments,
 } from '../src/chem/recognise.ts';
 import { canonicalSmiles, isMolecule, moleculeSvg } from '../src/chem/rdkit.ts';
+import { mightBeStructure, readStructure } from '../src/chem/structure.ts';
 import { Molecule } from '../src/components/Molecule.tsx';
 import { liveHandles, resetHandles } from './stubs/rdkit.ts';
 
@@ -48,6 +49,22 @@ describe('looksLikeSmiles', () => {
       expect(looksLikeSmiles(s), s).toBe(false);
     }
   });
+
+  it('accepts a molecule that is merely long', () => {
+    // A 60-residue glycine peptide: 421 characters, RDKit-valid, MW 3439.3. Peptides, macrocycles,
+    // PEG chains and glycans routinely pass 400 characters, and the old cap turned a cost
+    // heuristic into a chemical refusal — one that sat in front of the paste confirmation, the
+    // inline toggle and the rail, while the structure panel (which never consulted this) accepted
+    // the same string happily. Two surfaces, two answers about one molecule.
+    const peptide = `${'NCC(=O)'.repeat(60)}O`;
+    expect(peptide).toHaveLength(421);
+    expect(looksLikeSmiles(peptide)).toBe(true);
+    expect(mightBeStructure(peptide)).toBe(true);
+
+    // Still bounded: this runs over every inline code span in every answer, and nothing a chemist
+    // draws reaches thousands of characters.
+    expect(looksLikeSmiles('C'.repeat(5000))).toBe(false);
+  });
 });
 
 describe('looksLikeReactionSmiles', () => {
@@ -60,6 +77,28 @@ describe('looksLikeReactionSmiles', () => {
     // A reaction is not a licence to relax the check that stops arbitrary punctuation being drawn.
     expect(looksLikeReactionSmiles('a>>b')).toBe(false);
     expect(looksLikeReactionSmiles('>>')).toBe(false);
+  });
+});
+
+describe('readStructure', () => {
+  it('refuses a reaction whose agents field is not chemistry', async () => {
+    // The recogniser only ever looked at the two ends, and the arbiter only ever validated them —
+    // while the composer's strip said "RDKit read this as …" about the whole string and `Reaction`
+    // printed the agents verbatim over the arrow. `ZZZZ` was a reagent as far as a chemist reading
+    // the screen could tell.
+    expect(await readStructure('CCO>ZZZZ>CC=O')).toBeNull();
+
+    // The two forms that are chemistry still read: no agents at all, and agents RDKit can.
+    expect(await readStructure('CCO>>CC=O')).toEqual({
+      kind: 'reaction',
+      canonical: 'CCO>>CC=O',
+      raw: 'CCO>>CC=O',
+    });
+    expect(await readStructure('CCO>O>CC=O')).toEqual({
+      kind: 'reaction',
+      canonical: 'CCO>O>CC=O',
+      raw: 'CCO>O>CC=O',
+    });
   });
 });
 

@@ -16,39 +16,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { FIELD_PLACEHOLDER, StructureInput } from '../src/components/StructureInput.tsx';
 import { Composer } from '../src/components/Composer.tsx';
-import { moleculesFromMolfile, splitSdfRecords } from '../src/chem/rdkit.ts';
+import { MAX_SDF_RECORDS, moleculesFromMolfile, splitSdfRecords } from '../src/chem/rdkit.ts';
 import { entitiesOf, useEntityStore } from '../src/chem/entities.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { liveHandles, resetHandles } from './stubs/rdkit.ts';
-import { destroyCount, resetSketcherStub, setDrawing, setMountFailure } from './stubs/sketcher.tsx';
+import {
+  destroyCount,
+  mountedWith,
+  resetSketcherStub,
+  setDrawing,
+  setMountFailure,
+} from './stubs/sketcher.tsx';
+import { molblock } from './helpers.ts';
 
 vi.mock('../src/auth/AuthContext.tsx', () => ({
   useAuth: () => ({ auth: { getAccessToken: async () => null, mode: 'dev' }, ready: true }),
 }));
 
-/**
- * An MDL V2000 molblock with the given atoms.
- *
- * Written out at the real column offsets rather than approximated, because the element symbol
- * lives at columns 32–34 and a fixture that got that wrong would be testing the fixture. Bonds are
- * omitted — the RDKit fake keys on atom composition and says so.
- *
- * `title` defaults to a non-empty string only because most fixtures read better that way. The
- * **blank** title is the normal case in the wild — `MolToMolBlock`, ChemDraw and most exporters
- * leave line 1 empty — and it is the one every fixture here used to get wrong, which is why
- * `UNTITLED_ETHANOL` below exists.
- */
-function molblock(symbols: string[], title = 'stub'): string {
-  const zero = (0).toFixed(4).padStart(10, ' ');
-  const counts = `${String(symbols.length).padStart(3, ' ')}  0  0  0  0  0  0  0  0999 V2000`;
-  const atoms = symbols.map(
-    (symbol) => `${zero}${zero}${zero} ${symbol.padEnd(3, ' ')} 0  0  0  0  0  0  0  0  0  0  0  0`,
-  );
-  return [title, '  stub-suite', '', counts, ...atoms, 'M  END'].join('\n');
-}
-
 const ETHANOL = molblock(['C', 'C', 'O']);
-/** The same file as any exporter actually writes it: line 1 empty. */
+/** The same file as any exporter actually writes it: line 1 empty. `MolToMolBlock`, ChemDraw and
+ *  most exporters leave the title blank, and it is the case every fixture here used to get wrong. */
 const UNTITLED_ETHANOL = molblock(['C', 'C', 'O'], '');
 const BROMOANISOLE = molblock([...Array<string>(7).fill('C'), 'Br', 'O']);
 /** The counts line promises three atoms and two are present — what a half-written file looks like. */
@@ -58,6 +45,35 @@ const sdf = (records: string[]): string => records.map((r) => `${r}\n$$$$`).join
 
 const molfile = (name: string, text: string): File =>
   new File([text], name, { type: 'chemical/x-mdl-molfile' });
+
+/**
+ * A file whose `text()` does not resolve until it is released.
+ *
+ * A real `.sdf` read is a file-system round trip plus a full RDKit pass over every record, which
+ * is where the race lives: nothing about the read is instantaneous and nothing cancelled it.
+ * `release` waits out the macrotasks the read needs afterwards, so the assertion that follows it
+ * is about a finished read rather than about a lucky order.
+ */
+function gatedMolfile(name: string, text: string): { file: File; release: () => Promise<void> } {
+  let open = (): void => undefined;
+  const gate = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  const file = molfile(name, text);
+  Object.defineProperty(file, 'text', {
+    value: async () => {
+      await gate;
+      return text;
+    },
+  });
+  return {
+    file,
+    release: async () => {
+      open();
+      for (let i = 0; i < 3; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    },
+  };
+}
 
 beforeEach(() => {
   cleanup();
@@ -111,6 +127,18 @@ describe('molfile reading', () => {
     const { smiles, unreadable } = await moleculesFromMolfile(sdf([ETHANOL, TRUNCATED]));
     expect(smiles).toEqual(['CCO']);
     expect(unreadable).toBe(1);
+  });
+
+  it('stops at the record cap and says how many it did not read', async () => {
+    // ~0.9 ms of blocking WASM per record after warm-up, so an uncapped read of a 50k screening
+    // set is ~45 s of a tab that cannot paint. What is past the cap is counted, not dropped in
+    // silence: "1000 structures" and "1000 of 1002" are different facts about a file.
+    const many = sdf(Array<string>(MAX_SDF_RECORDS + 2).fill(ETHANOL));
+    const { smiles, skipped, unreadable } = await moleculesFromMolfile(many);
+
+    expect(smiles).toHaveLength(MAX_SDF_RECORDS);
+    expect(skipped).toBe(2);
+    expect(unreadable).toBe(0);
   });
 
   it('frees every handle, including for the records it refused', async () => {
@@ -340,6 +368,87 @@ describe('<StructureInput>', () => {
     fireEvent.click(screen.getByText('Use this structure'));
     expect(await screen.findByText(/Nothing on the canvas/)).toBeTruthy();
     expect(screen.queryByText('Insert')).toBeNull();
+  });
+
+  it('lets what the chemist typed win over a file read that is still in flight', async () => {
+    const { container } = render(<StructureInput onAccept={vi.fn()} onClose={vi.fn()} />);
+    const gated = gatedMolfile('screening.sdf', sdf([ETHANOL]));
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [gated.file] } });
+    await screen.findByText(/Reading screening\.sdf/);
+
+    // Bored waiting, so they type their own structure. The field is the confirmation surface: a
+    // write into it from a source the chemist has moved on from replaces the structure under
+    // review, and Insert would then insert the file's first record.
+    fireEvent.change(field(), { target: { value: 'CC(=O)O' } });
+    await gated.release();
+
+    expect(field().value).toBe('CC(=O)O');
+    expect(screen.queryByText(/screening\.sdf: 1 structure/)).toBeNull();
+  });
+
+  it('refuses a file too big to read on the main thread, and names the limit', async () => {
+    const { container } = render(<StructureInput onAccept={vi.fn()} onClose={vi.fn()} />);
+
+    const huge = molfile('screen.sdf', ETHANOL);
+    const read = vi.fn(async () => ETHANOL);
+    Object.defineProperty(huge, 'size', { value: 40 * 1024 * 1024 });
+    Object.defineProperty(huge, 'text', { value: read });
+
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [huge] } });
+
+    // Named, because "too big" without the number is a dead end: the whole file used to be
+    // materialised as a string and parsed record by record in WASM on the main thread, with
+    // "Reading …" as the only feedback and no way to cancel.
+    expect(await screen.findByText(/40 MB.*8 MB/)).toBeTruthy();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('refuses a dropped file it could never read, instead of parsing a video as text', async () => {
+    const { container } = render(<StructureInput onAccept={vi.fn()} onClose={vi.fn()} />);
+
+    const video = new File(['not text at all'], 'clip.mp4', { type: 'video/mp4' });
+    const read = vi.fn(async () => '');
+    Object.defineProperty(video, 'text', { value: read });
+    // The panel takes anything dropped on it — the `accept=` on the picker only filters the
+    // picker — so this door was the one with no extension check behind it.
+    fireEvent.drop(container.firstElementChild as HTMLElement, {
+      dataTransfer: { files: [video], types: ['Files'] },
+    });
+
+    expect(await screen.findByText(/\.mol, \.sdf or \.mdl/)).toBeTruthy();
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('reads a molblock pasted into the field, which the field itself cannot hold', async () => {
+    render(<StructureInput onAccept={vi.fn()} onClose={vi.fn()} />);
+
+    // What ChemDraw puts on the clipboard. This is an `<input type="text">`: a browser strips the
+    // newlines on paste and leaves one unparseable line of MDL, so the paste has to be taken over
+    // rather than allowed through.
+    fireEvent.paste(field(), {
+      clipboardData: { getData: () => molblock(['C', 'C', 'O'], '') },
+    });
+
+    await waitFor(() => expect(field().value).toBe('CCO'));
+    expect(await screen.findByText(/Read the pasted molfile/)).toBeTruthy();
+  });
+
+  it('opens the sketcher on the structure already in the field', async () => {
+    render(<StructureInput onAccept={vi.fn()} onClose={vi.fn()} />);
+
+    fireEvent.change(field(), { target: { value: 'BrC1=CC=C(OC)C=C1' } });
+    await waitFor(() => expect(screen.queryByText('Insert')).toBeTruthy());
+
+    fireEvent.click(screen.getByText('Draw'));
+    await waitFor(() => expect(document.querySelector('[data-sketcher="mounted"]')).toBeTruthy());
+
+    // Correcting one bond in a thirty-atom molecule used to mean redrawing it from scratch, which
+    // is two independent chances to get it wrong. The canonical form, because that is the
+    // structure the panel confirmed.
+    expect(mountedWith()).toBe('COc1ccc(Br)cc1');
   });
 
   it('falls back to the paste and drop paths when the editor will not load', async () => {

@@ -17,6 +17,7 @@ import { Composer } from '../src/components/Composer.tsx';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { useEntityStore, entitiesOf } from '../src/chem/entities.ts';
 import { insertStructure } from '../src/state/composerEvents.ts';
+import { pasteInto } from './helpers.ts';
 
 vi.mock('../src/auth/AuthContext.tsx', () => ({
   useAuth: () => ({ auth: { getAccessToken: async () => null, mode: 'dev' }, ready: true }),
@@ -35,8 +36,14 @@ function fileDrop(files: File[]): { dataTransfer: unknown } {
   return { dataTransfer: { files, types: ['Files'], items: files } };
 }
 
-function paste(text: string): void {
-  fireEvent.paste(box(), { clipboardData: { getData: () => text } });
+/**
+ * Paste `text` at `at`, the way a browser does it — the paste event first, with the caret still at
+ * the insertion point, and the insertion afterwards. The composer records that caret as the span
+ * the confirmation is about, so the order is not a detail: setting the value first and firing
+ * `paste` afterwards describes a paste that landed at the end of the draft, wherever it went.
+ */
+function paste(text: string, at?: number): void {
+  pasteInto(box(), text, at);
 }
 
 // Unmount before the environment is torn down, not merely before the next test. The composer
@@ -79,8 +86,7 @@ describe('a pasted structure', () => {
 
     // The paste itself lands normally — the component never calls preventDefault, so the browser
     // has already inserted the text by the time we look.
-    fireEvent.change(box(), { target: { value: 'BrC1=CC=C(OC)C=C1' } });
-    paste('BrC1=CC=C(OC)C=C1');
+    paste('BrC1=CC=C(OC)C=C1', 0);
 
     const strip = await screen.findByRole('status');
     expect(strip.textContent).toContain('Pasted structure');
@@ -93,8 +99,7 @@ describe('a pasted structure', () => {
   it('admits the compound to the rail under its canonical key', async () => {
     render(<Composer conversationId={CONVERSATION} />);
 
-    fireEvent.change(box(), { target: { value: 'BrC1=CC=C(OC)C=C1' } });
-    paste('BrC1=CC=C(OC)C=C1');
+    paste('BrC1=CC=C(OC)C=C1', 0);
 
     await waitFor(() => {
       const slice = entitiesOf(useEntityStore.getState(), CONVERSATION);
@@ -108,8 +113,8 @@ describe('a pasted structure', () => {
   it('replaces the pasted spelling in place, keeping the sentence around it', async () => {
     render(<Composer conversationId={CONVERSATION} />);
 
-    fireEvent.change(box(), { target: { value: 'screen BrC1=CC=C(OC)C=C1 for hazards' } });
-    paste('BrC1=CC=C(OC)C=C1');
+    fireEvent.change(box(), { target: { value: 'screen  for hazards' } });
+    paste('BrC1=CC=C(OC)C=C1', 7);
     await screen.findByText('Use the canonical form');
 
     fireEvent.click(screen.getByText('Use the canonical form'));
@@ -119,8 +124,7 @@ describe('a pasted structure', () => {
   it('offers nothing to replace when the paste was already canonical', async () => {
     render(<Composer conversationId={CONVERSATION} />);
 
-    fireEvent.change(box(), { target: { value: 'CCO' } });
-    paste('CCO');
+    paste('CCO', 0);
 
     const strip = await screen.findByRole('status');
     expect(strip.textContent).toContain('CCO');
@@ -133,9 +137,9 @@ describe('a pasted structure', () => {
 
     // Multi-token: a structure arrives as one token and a pasted procedure does not, which is what
     // keeps the WASM off the path of somebody pasting half an SOP.
-    fireEvent.change(box(), { target: { value: 'add the bromide slowly' } });
-    paste('add the bromide slowly');
-    // Single token, passes the syntactic recogniser, and is not a molecule.
+    paste('add the bromide slowly', 0);
+    // Single token, and one the syntactic recogniser refuses outright — so RDKit is never asked,
+    // and there is nothing for the strip to report either way.
     paste('CCXQ');
 
     // Nothing to wait *for*, so wait for the thing that would have appeared and assert it did

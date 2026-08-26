@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { normalizeEvent } from '../shared/events.ts';
 import type { ChemclawEvent } from '../shared/events.ts';
@@ -89,49 +91,54 @@ describe('the event contract admits every member of its own union', () => {
  * This asserts value-for-value rather than key presence, because a normalizer that defaults a field
  * to a constant passes a presence check while discarding what arrived.
  */
-describe('the event contract carries every field of every member', () => {
-  // One frame per member, every declared field populated with a value distinguishable from the
-  // default it would fall back to. Transcribed from `src/chemclaw/api/events.py`; when the backend
-  // adds a field, it is added here in the same change, and this is the assertion that makes
-  // "same change" mean something.
-  const full: Array<[string, Record<string, unknown>]> = [
-    ['plan', { todos: ['step one'], plan_hash: 'abc123' }],
-    ['tool_call', { tool: 'find_notes', arguments: '{"q":1}', agent: 'safety' }],
-    ['token', { text: 'hello' }],
-    ['job_started', { job_id: 'j1', kind: 'qm' }],
-    ['job_completed', { job_id: 'j1', summary: { converged: true } }],
-    ['job_failed', { job_id: 'j1', reason: 'the solver diverged' }],
-    ['capability_degraded', { connectors: ['eln'] }],
-    ['tool_failed', { tool: 'submit_qm_job', message: 'refused', reason: 'plan_gate', agent: 'x' }],
-    [
-      'tool_result',
-      {
-        tool: 'find_notes',
-        preview: 'p',
-        result_ref: 'a'.repeat(64),
-        note_ids: ['note-x'],
-        numbers: [1.5],
-        agent: 'x',
-      },
-    ],
-    ['evidence_source', { source: 'graph', chunks: 4, failed: true }],
-    ['handoff', { to: 'safety', reason: 'hazard' }],
-    ['question', { question: 'which?', options: ['a'] }],
-    ['note_proposed', { note_id: 'n1', reference: 'branch/x' }],
-    ['approval_request', { prompt: 'ok?', approval_id: 'a1' }],
-    [
-      'answer',
-      {
-        text: 'done',
-        confidence: 0.75,
-        unsupported_claims: ['c'],
-        review_required: true,
-        verified_by: 'judge',
-      },
-    ],
-    ['error', { message: 'bad', code: 'loop_cap_reached', retryable: false, correlation_id: 'c1' }],
-  ];
+// One frame per member, every declared field populated with a value distinguishable from the
+// default it would fall back to. Transcribed from `src/chemclaw/api/events.py`; when the backend
+// adds a field, it is added here in the same change, and this is the assertion that makes
+// "same change" mean something.
+const full: Array<[string, Record<string, unknown>]> = [
+  // Deliberately present with an empty frame rather than omitted. It declares no fields today, so
+  // the value-for-value test has nothing to assert — but a field added to `QueuedEvent` later is
+  // exactly the case this fixture exists to catch, and an absent member cannot catch it. Found by
+  // the declaration check below on its first run.
+  ['queued', {}],
+  ['plan', { todos: ['step one'], plan_hash: 'abc123' }],
+  ['tool_call', { tool: 'find_notes', arguments: '{"q":1}', agent: 'safety' }],
+  ['token', { text: 'hello' }],
+  ['job_started', { job_id: 'j1', kind: 'qm' }],
+  ['job_completed', { job_id: 'j1', summary: { converged: true } }],
+  ['job_failed', { job_id: 'j1', reason: 'the solver diverged' }],
+  ['capability_degraded', { connectors: ['eln'] }],
+  ['tool_failed', { tool: 'submit_qm_job', message: 'refused', reason: 'plan_gate', agent: 'x' }],
+  [
+    'tool_result',
+    {
+      tool: 'find_notes',
+      preview: 'p',
+      result_ref: 'a'.repeat(64),
+      note_ids: ['note-x'],
+      numbers: [1.5],
+      agent: 'x',
+    },
+  ],
+  ['evidence_source', { source: 'graph', chunks: 4, failed: true }],
+  ['handoff', { to: 'safety', reason: 'hazard' }],
+  ['question', { question: 'which?', options: ['a'] }],
+  ['note_proposed', { note_id: 'n1', reference: 'branch/x' }],
+  ['approval_request', { prompt: 'ok?', approval_id: 'a1' }],
+  [
+    'answer',
+    {
+      text: 'done',
+      confidence: 0.75,
+      unsupported_claims: ['c'],
+      review_required: true,
+      verified_by: 'judge',
+    },
+  ],
+  ['error', { message: 'bad', code: 'loop_cap_reached', retryable: false, correlation_id: 'c1' }],
+];
 
+describe('the event contract carries every field of every member', () => {
   it.each(full)('carries every field of %s', (type, frame) => {
     const parsed = normalizeEvent({ type, ...frame }) as Record<string, unknown> | null;
     expect(parsed, `${type} did not survive the gate at all`).not.toBeNull();
@@ -153,4 +160,107 @@ describe('the event contract carries every field of every member', () => {
     const parsed = normalizeEvent({ type: 'plan', todos: ['a'] });
     expect(parsed).toMatchObject({ plan_hash: '' });
   });
+});
+
+/**
+ * And the fixture above covers every field the union declares — checked against the source.
+ *
+ * The two tests above are only as good as `full`, and `full` is written by hand. That is the same
+ * weakness one level up that let three fields go missing in the first place: `EVENT_TYPES` was the
+ * gate, `EVENT_TYPES` was written by hand, and prose in a docstring asking people to remember did
+ * not hold for six members and then for three fields.
+ *
+ * So the fixture is checked against the *declarations* rather than trusted. `shared/events.ts` is
+ * parsed with the TypeScript compiler API — the same compiler that type-checks it, so there is no
+ * second idea of what the file says — and every property of every member of `ChemclawEvent` must
+ * appear in `full`. Adding a field to an interface and nowhere else now fails here, and the two
+ * tests above then prove `normalizeEvent` actually carries it.
+ *
+ * What this closes and what it does not: it makes this repository unable to gain a field in the
+ * mirror without proving the normaliser preserves it. It cannot see the service, so a field added
+ * *there* and never mirrored here is still invisible to this suite — that half is
+ * `Chemclaw3`'s `tests/test_event_contract.py`, which fails on the side that makes the change and
+ * names this file.
+ */
+describe('the fixture is checked against the declarations, not trusted', () => {
+  /** Every member of `ChemclawEvent`, as `discriminator -> declared field names`. */
+  const declared = (): Map<string, Set<string>> => {
+    // Repo-root relative, as `tests/delivery.test.ts` reads the Jenkinsfile: vitest runs from the
+    // root, and `import.meta.url` is not a file: URL under this environment.
+    const file = 'shared/events.ts';
+    const source = ts.createSourceFile(
+      file,
+      readFileSync(file, 'utf8'),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+
+    const interfaces = new Map<string, ts.InterfaceDeclaration>();
+    let union: ts.TypeAliasDeclaration | undefined;
+    for (const statement of source.statements) {
+      if (ts.isInterfaceDeclaration(statement)) interfaces.set(statement.name.text, statement);
+      if (ts.isTypeAliasDeclaration(statement) && statement.name.text === 'ChemclawEvent') {
+        union = statement;
+      }
+    }
+    if (!union || !ts.isUnionTypeNode(union.type)) {
+      throw new Error(
+        'ChemclawEvent is no longer a union of interfaces; this check needs updating',
+      );
+    }
+
+    const members = new Map<string, Set<string>>();
+    for (const node of union.type.types) {
+      if (!ts.isTypeReferenceNode(node) || !ts.isIdentifier(node.typeName)) continue;
+      const declaration = interfaces.get(node.typeName.text);
+      if (!declaration) throw new Error(`no interface found for ${node.typeName.text}`);
+
+      const fields = new Set<string>();
+      let discriminator: string | undefined;
+      for (const member of declaration.members) {
+        if (!ts.isPropertySignature(member) || !member.name) continue;
+        const name = member.name.getText(source);
+        // The discriminator is the key, not a field: `normalizeEvent` takes it as an argument and
+        // sets it, so it is never something the fixture has to carry.
+        if (name === 'type') {
+          const literal = member.type?.getText(source) ?? '';
+          discriminator = literal.replace(/['"]/g, '');
+          continue;
+        }
+        fields.add(name);
+      }
+      if (!discriminator) throw new Error(`${node.typeName.text} declares no literal \`type\``);
+      members.set(discriminator, fields);
+    }
+    return members;
+  };
+
+  const fixture = new Map(full.map(([type, frame]) => [type, new Set(Object.keys(frame))]));
+
+  it('covers every member the union declares', () => {
+    const missing = [...declared().keys()].filter((type) => !fixture.has(type));
+    expect(
+      missing,
+      `these members of ChemclawEvent have no frame in the fixture: ${missing}`,
+    ).toEqual([]);
+  });
+
+  it.each([...declared()].map(([type, fields]) => [type, fields] as const))(
+    'covers every field of %s',
+    (type, fields) => {
+      const covered = fixture.get(type);
+      expect(covered, `${type} is declared but has no fixture frame`).toBeDefined();
+      const absent = [...fields].filter((field) => !covered?.has(field));
+      expect(
+        absent,
+        `${type} declares ${absent} but the fixture does not populate them, so nothing proves ` +
+          'normalizeEvent carries them — add them to `full` above',
+      ).toEqual([]);
+      const stray = [...(covered ?? [])].filter((field) => !fields.has(field));
+      expect(
+        stray,
+        `the fixture populates ${stray} on ${type}, which the interface does not declare`,
+      ).toEqual([]);
+    },
+  );
 });

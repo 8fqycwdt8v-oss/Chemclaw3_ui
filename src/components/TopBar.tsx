@@ -23,6 +23,7 @@ import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 import { Badge } from '@/components/ui/badge';
 import { StatusDot, type Status } from '@/components/chem/StatusDot';
 import { ThemeToggle } from '@/components/chem/ThemeToggle';
+import { DrawStructuresToggle } from '@/components/chem/DrawStructuresToggle';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -111,6 +112,9 @@ export function TopBar({ onRetry }: { onRetry?: () => void }): React.JSX.Element
         )}
 
         <div className="ml-auto flex items-center gap-1">
+          {/* Before the theme toggle: this one changes what a chemist can read, and the other
+              changes how it looks. */}
+          <DrawStructuresToggle />
           <ThemeToggle />
 
           {auth.mode === 'msal' && !account && (

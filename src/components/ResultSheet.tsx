@@ -30,6 +30,7 @@ import { useAuth } from '../auth/AuthContext.tsx';
 import { api, type StoredToolResult } from '../api/client.ts';
 import { toolLabel } from '../lib/format.ts';
 import { Molecule } from './Molecule.tsx';
+import { UseStructure } from '@/components/chem/UseStructure';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
@@ -161,7 +162,7 @@ function Cell({
  * dangerous reading of this result is the empty one. The service says it in the payload for the
  * same reason; repeating it here is not redundancy, it is the sentence the chemist acts on.
  */
-function HazardScreen({ data }: { data: Json }): React.JSX.Element {
+function HazardScreen({ data, onUsed }: { data: Json; onUsed: () => void }): React.JSX.Element {
   const flags = rows(data.flags);
   const screened = Array.isArray(data.screened) ? data.screened.map(String) : [];
 
@@ -182,8 +183,9 @@ function HazardScreen({ data }: { data: Json }): React.JSX.Element {
           </h3>
           <ul className="flex flex-wrap gap-3">
             {screened.map((smiles) => (
-              <li key={smiles}>
+              <li key={smiles} className="flex flex-col items-end gap-1">
                 <Molecule smiles={smiles} maxWidth={180} />
+                <UseStructure smiles={smiles} onUsed={onUsed} />
               </li>
             ))}
           </ul>
@@ -376,7 +378,15 @@ function Verdict({ data }: { data: Json }): React.JSX.Element | null {
   return <p className="text-sm font-medium">{line}</p>;
 }
 
-function Body({ result }: { result: StoredToolResult }): React.JSX.Element {
+function Body({
+  result,
+  onUsed,
+}: {
+  result: StoredToolResult;
+  /** Called when a structure in here was put into the message — the sheet closes, because the
+   *  message being edited is behind it. */
+  onUsed: () => void;
+}): React.JSX.Element {
   let parsed: unknown;
   try {
     parsed = JSON.parse(result.text);
@@ -398,7 +408,7 @@ function Body({ result }: { result: StoredToolResult }): React.JSX.Element {
 
   const typed =
     result.tool === 'screen_hazards' || result.tool === 'screen_genotoxic_alerts' ? (
-      <HazardScreen data={parsed} />
+      <HazardScreen data={parsed} onUsed={onUsed} />
     ) : result.tool === 'ich_impurity_limit' ? (
       <ImpurityLimit data={parsed} />
     ) : result.tool === 'stoichiometry_table' ? (
@@ -488,7 +498,7 @@ export function ResultSheet({
 
           {state.status === 'ready' && (
             <>
-              <Body result={state.result} />
+              <Body result={state.result} onUsed={() => onOpenChange(false)} />
               {/* The join a GxP reviewer asks for, and the one a reference alone cannot make. */}
               <p className="border-t border-border-subtle pt-3 text-2xs text-ink-subtle">
                 {state.result.byte_size.toLocaleString()} bytes · correlation{' '}

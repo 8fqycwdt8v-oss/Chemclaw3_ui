@@ -21,6 +21,7 @@ import { useAuth } from '../auth/AuthContext.tsx';
 import { api, type NoteRef, type NoteView } from '../api/client.ts';
 import { Markdown } from './LazyMarkdown.tsx';
 import { Molecule } from './Molecule.tsx';
+import { UseStructure } from '@/components/chem/UseStructure';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
@@ -177,7 +178,20 @@ export function NoteSheet({
               )}
 
               {state.view.note.compound_smiles && (
-                <Molecule smiles={state.view.note.compound_smiles} />
+                <div>
+                  <Molecule smiles={state.view.note.compound_smiles} />
+                  {/* The compound a note is about is very often the next thing a chemist wants to
+                      ask about, and copying it out of a panel by hand was the only way. Closing
+                      the sheet is part of the action: the message they are now editing is behind
+                      it. */}
+                  <div className="mt-1 flex justify-end">
+                    <UseStructure
+                      smiles={state.view.note.compound_smiles}
+                      label
+                      onUsed={() => onOpenChange(false)}
+                    />
+                  </div>
+                </div>
               )}
 
               <div className="border-t border-border-subtle pt-4 text-sm">

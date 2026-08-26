@@ -25,6 +25,7 @@ import { ChevronUp, FlaskConical } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { AssistantMessage, ChatMessage } from '../state/types.ts';
 import { Markdown } from './LazyMarkdown.tsx';
+import { StructureText } from './Molecule.tsx';
 import { TracePanel } from './TracePanel.tsx';
 import { AnswerFooter, CapabilityDegradedPill, ReviewRequiredPill } from './AnswerBadges.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
@@ -196,7 +197,12 @@ function BubbleBody({
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%] rounded-2xl rounded-br-md bg-brand px-4 py-2.5 text-brand-fg shadow-xs">
-          <p className="text-base whitespace-pre-wrap">{message.text}</p>
+          {/* Plain text, with its structures drawable — see `StructureText`. Not markdown: a
+              chemist typed this, and a parser would turn their asterisks into emphasis in the
+              middle of a compound name. */}
+          <p className="text-base whitespace-pre-wrap">
+            <StructureText text={message.text} />
+          </p>
         </div>
       </div>
     );

@@ -26,7 +26,7 @@ import { Button } from '@/components/ui/button';
 import type { AssistantMessage, ChatMessage } from '../state/types.ts';
 import { Markdown } from './LazyMarkdown.tsx';
 import { TracePanel } from './TracePanel.tsx';
-import { AnswerFooter, CapabilityDegradedPill, ReviewRequiredPill } from './AnswerBadges.tsx';
+import { AnswerFooter, CapabilityDegradedPill, PartialAnswerPill, ReviewRequiredPill } from './AnswerBadges.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { useChatStore } from '../state/chatStore.ts';
@@ -84,6 +84,10 @@ const AssistantBubble = memo(function AssistantBubble({
   return (
     <div className="max-w-none" aria-busy={streaming || undefined}>
       <CapabilityDegradedPill message={message} />
+      {/* Above the text and above the review notice, matching the order the service emits them in:
+          both qualify the whole answer, and "this was cut short" is the one that changes how the
+          rest is read. */}
+      <PartialAnswerPill message={message} />
       <ReviewRequiredPill message={message} />
       {message.latestPlan && <PlanChecklist todos={message.latestPlan} />}
 
@@ -146,6 +150,10 @@ const AssistantBubble = memo(function AssistantBubble({
           prompt={approval.prompt}
           approvalId={approval.approvalId}
           sessionId={sessionId}
+          // Stable identities: both come off the store's message and are replaced only by a new
+          // `plan` event, so passing them straight through does not re-run the card's effect.
+          planTodos={message.latestPlan}
+          planHash={message.latestPlanHash}
         />
       )}
 

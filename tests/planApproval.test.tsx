@@ -117,3 +117,45 @@ describe('plan approval', () => {
     expect(getPlan).not.toHaveBeenCalled();
   });
 });
+
+describe('the plan the stream already carried', () => {
+  it('binds to the streamed hash without a second read', async () => {
+    // The service puts `plan_hash` on the `plan` event precisely so a client does not have to ask
+    // again — and the ask is not merely a round trip, it races the revision the hash exists to
+    // catch: between rendering the plan and fetching its identity the agent may revise it, and the
+    // fetch answers with what is current rather than with what this card is showing.
+    const getPlan = vi.spyOn(api, 'getPlan');
+    const decide = vi.spyOn(api, 'decidePlan').mockResolvedValue();
+    render(
+      <ApprovalPrompt
+        prompt="Approve this plan?"
+        approvalId=""
+        sessionId={SID}
+        planTodos={['Run xTB on the aryl bromide']}
+        planHash="streamed-hash"
+      />,
+    );
+
+    expect(await screen.findByText('Run xTB on the aryl bromide')).toBeTruthy();
+    await decideVia(/approve/i);
+    await waitFor(() => expect(decide).toHaveBeenCalledWith(SID, true, 'streamed-hash', expect.anything()));
+    expect(getPlan).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the fetch when the service sent no hash', async () => {
+    // An older service defaults the field to '', which a client must read as "go and fetch it" and
+    // never as a hash that will match. This is that path, unchanged.
+    const getPlan = vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('h1'));
+    render(
+      <ApprovalPrompt
+        prompt="Approve this plan?"
+        approvalId=""
+        sessionId={SID}
+        planTodos={['Run xTB on the aryl bromide']}
+        planHash=""
+      />,
+    );
+
+    await waitFor(() => expect(getPlan).toHaveBeenCalled());
+  });
+});

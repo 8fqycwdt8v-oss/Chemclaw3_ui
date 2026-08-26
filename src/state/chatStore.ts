@@ -189,9 +189,11 @@ function newAssistantMessage(): AssistantMessage {
     reviewRequired: false,
     verifiedBy: null,
     degradedConnectors: [],
+    partialReason: null,
     queued: false,
     trace: [],
     latestPlan: null,
+    latestPlanHash: null,
     error: null,
   };
 }
@@ -271,8 +273,19 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
       return {
         ...base,
         kind: 'tool_failed',
-        toolFailure: { tool: event.tool, message: event.message },
+        toolFailure: { tool: event.tool, message: event.message, reason: event.reason ?? null },
       };
+    // Only the failures. A source that was asked and had nothing is the normal case and belongs in
+    // an evidence summary, not in a trace of what went wrong — but a source whose retriever
+    // *raised* reads identically in the merged list, and this is the one place that can say so.
+    case 'evidence_source':
+      return event.failed
+        ? {
+            ...base,
+            kind: 'evidence_source',
+            evidenceSource: { source: event.source, chunks: event.chunks, failed: true },
+          }
+        : null;
     case 'job_started':
       return { ...base, kind: 'job_started', job: { jobId: event.job_id, kind: event.kind } };
     case 'job_completed':
@@ -617,6 +630,20 @@ export const useChatStore = create<ChatState>()(
           return;
         }
 
+        if (event.type === 'error') {
+          // The only `error` that reaches here: `streamTurn` throws on every other code, and this
+          // one arrives BEFORE the answer it qualifies (the backend calls `loop_cap_reached` "the
+          // only member that shares its turn with an answer"). So it marks the answer partial
+          // rather than failing the message — `failTurn` is still what a real failure calls.
+          set((s) =>
+            updateAssistant(s, conversationId, messageId, (m) => ({
+              ...m,
+              partialReason: event.message,
+            })),
+          );
+          return;
+        }
+
         if (event.type === 'tool_result') {
           // Not its own row: it closes the `tool_call` row already in the trace. The result ref
           // rides along on that row so the "see the full result" affordance sits next to the
@@ -659,6 +686,9 @@ export const useChatStore = create<ChatState>()(
               ...m,
               trace: [...base, entry].slice(-MAX_TRACE_ENTRIES),
               latestPlan: event.type === 'plan' ? event.todos : m.latestPlan,
+              // The hash of the plan as rendered, so the approval card can bind a decision to
+              // exactly what was shown without a second round trip that races the next revision.
+              latestPlanHash: event.type === 'plan' ? event.plan_hash : m.latestPlanHash,
             };
           }),
         );

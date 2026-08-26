@@ -31,7 +31,7 @@
  */
 
 import { memo, useState } from 'react';
-import { ChevronRight, CircleX, Table2 } from 'lucide-react';
+import { ChevronRight, CircleX, ShieldAlert, Table2, Unplug } from 'lucide-react';
 import type { TraceEntry } from '../state/types.ts';
 import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
@@ -265,19 +265,58 @@ function Row({
       );
     }
 
-    case 'tool_failed':
+    case 'tool_failed': {
+      // A gate refusal is not a fault, and rendering it in the failure red says it is. The service
+      // classifies it for exactly this reason: a correctly-gated turn read as a broken one is the
+      // mistake its own live evaluation made before the field existed.
+      const gated = entry.toolFailure?.reason === 'plan_gate';
       return (
-        <div className="rounded-md border border-danger/40 bg-danger-soft px-3 py-2">
-          <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-danger-ink">
-            <CircleX aria-hidden className="size-3.5 shrink-0" />
+        <div
+          className={
+            gated
+              ? 'rounded-md border border-warn/40 bg-warn-soft px-3 py-2'
+              : 'rounded-md border border-danger/40 bg-danger-soft px-3 py-2'
+          }
+        >
+          <p
+            className={`flex flex-wrap items-center gap-x-2 gap-y-1 text-sm ${
+              gated ? 'text-warn-ink' : 'text-danger-ink'
+            }`}
+          >
+            {gated ? (
+              <ShieldAlert aria-hidden className="size-3.5 shrink-0" />
+            ) : (
+              <CircleX aria-hidden className="size-3.5 shrink-0" />
+            )}
             <span className="font-medium">{toolLabel(entry.toolFailure?.tool ?? 'tool')}</span>
             <span className="font-mono text-2xs">{entry.toolFailure?.tool}</span>
-            <span className="text-2xs">failed</span>
+            <span className="text-2xs">{gated ? 'needs plan approval' : 'failed'}</span>
           </p>
           {entry.toolFailure?.message && (
-            <p className="mt-1 text-2xs text-danger-ink">{entry.toolFailure.message}</p>
+            <p className={`mt-1 text-2xs ${gated ? 'text-warn-ink' : 'text-danger-ink'}`}>
+              {entry.toolFailure.message}
+            </p>
           )}
         </div>
+      );
+    }
+
+    case 'evidence_source':
+      return (
+        <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+          <Unplug aria-hidden className="size-3.5 shrink-0 text-warn-ink" />
+          <span>
+            Evidence source <span className="font-medium">{entry.evidenceSource?.source}</span>{' '}
+            failed
+          </span>
+          {/* The distinction the event exists for: a source that was asked and had nothing is not
+              in this panel at all, so a row here always means the retriever raised. Said in words
+              rather than left to the icon, because "no results" and "no answer" are the two
+              readings a chemist has to be able to tell apart. */}
+          <span className="text-2xs text-ink-muted">
+            it contributed nothing, and that is a fault rather than an empty corpus
+          </span>
+        </p>
       );
 
     case 'job_started':

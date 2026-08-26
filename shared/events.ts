@@ -27,6 +27,17 @@
  * can add a member and stay green, and so can this. Until something checks the two against each
  * other, the only defence is that a backend change is not finished until it lands here.
  *
+ * Then it happened three more times on FIELDS rather than members, which the count above cannot
+ * catch at all: `plan.plan_hash`, `tool_failed.reason` and `evidence_source.failed` were each added
+ * upstream with an explicit note that this shape "is a contract two other repositories read", and
+ * none of them arrived. Each was dropped silently by `normalizeEvent`, which rebuilds every event
+ * field by field — so an unmirrored field is not merely untyped here, it is deleted in transit. The
+ * cost was the specific thing each was added for: a plan answerable only after a second round trip
+ * that races it, a correctly-gated refusal rendered as a fault, and a broken retriever rendered as
+ * an empty one. `tests/eventContract.test.ts` now drives a fixture of every member carrying every
+ * field through `normalizeEvent` and asserts nothing is lost, which is the closest thing to a
+ * mechanical connection this side can have on its own.
+ *
  * The same release added a field rather than a member: `agent` on `tool_call`, `tool_failed` and
  * `tool_result`, naming the specialist that raised the event. Empty means the main agent, so it is
  * additive by construction and an existing reader is unaffected.
@@ -47,6 +58,19 @@ export interface PlanEvent {
   /** The harness's current todo list. Emitted only when the list CHANGED, so each one is a
    *  genuine revision rather than a repeat. Absent entirely unless harness mode is on. */
   todos: string[];
+  /**
+   * The identity of THIS plan, which is what `POST /sessions/{id}/plan/decision` requires.
+   *
+   * Without it the event cannot be acted on: answering the plan just rendered meant a second
+   * `GET /sessions/{id}/plan` round trip, which races the very change the hash exists to catch —
+   * between the render and the fetch the agent may revise the plan, and the client would post back
+   * a hash for a plan its user never saw.
+   *
+   * Empty means "this event predates the field", which a consumer must treat as "go and fetch it",
+   * never as a hash that will match. The backend defaults it for exactly that reason, so an older
+   * service degrades to the round trip rather than to a wrong answer.
+   */
+  plan_hash: string;
 }
 
 export interface ToolCallEvent {
@@ -218,6 +242,17 @@ export interface ToolFailedEvent {
    *  can route around a failed call, and when it cannot, this is the only event that says why. */
   tool: string;
   message: string;
+  /**
+   * What KIND of failure this is, where the kind is a decision somebody made rather than a fault.
+   *
+   * Exactly one member today: `plan_gate`, the pre-execution approval refusing a state-changing
+   * call. That refusal is the control working, and a surface that renders it beside a database
+   * outage reports a correctly-gated turn as a broken one — the mistake the backend's own
+   * `evals/live.py` made, by matching one phrase of the refusal sentence.
+   *
+   * `null` is "an ordinary failure", which is every failure emitted before the field existed.
+   */
+  reason?: 'plan_gate' | null;
   /** The specialist that raised this event; **empty means the main agent**, which is what every
    *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
    *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
@@ -281,6 +316,18 @@ export interface EvidenceSourceEvent {
   /** What the source FOUND, before the cross-source cap. So "had nothing to say" and "was crowded
    *  out of the budget" stay distinguishable; they are different problems with different fixes. */
   chunks: number;
+  /**
+   * Whether this source's retriever RAISED, rather than being asked and having nothing.
+   *
+   * The third case, and the one the other two collapse into without it: a branch that fails
+   * degrades to an empty list, so it reports `chunks: 0` and reads exactly like a source that was
+   * consulted and was silent. The remedies do not overlap — a dark source is a question about the
+   * corpus, a broken one is a page for whoever owns the index.
+   *
+   * Optional in the type and always populated by `normalizeEvent`, for the same reason `agent` is:
+   * the backend defaults it so an existing consumer is unaffected.
+   */
+  failed?: boolean;
 }
 
 export interface HandoffEvent {
@@ -445,7 +492,7 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
     case 'queued':
       return { type: 'queued' };
     case 'plan':
-      return { type: 'plan', todos: asStringArray(o.todos) };
+      return { type: 'plan', todos: asStringArray(o.todos), plan_hash: asString(o.plan_hash) };
     case 'tool_call':
       return {
         type: 'tool_call',
@@ -476,6 +523,10 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         type: 'tool_failed',
         tool: asString(o.tool, 'unknown'),
         message: asString(o.message, 'The tool call failed.'),
+        // A closed set upstream, so an unrecognised value normalises to `null` rather than passing
+        // through: "a reason this build does not know" must read as an ordinary failure, never as
+        // a refusal it cannot render.
+        reason: o.reason === 'plan_gate' ? 'plan_gate' : null,
         agent: asString(o.agent),
       };
     case 'tool_result':
@@ -493,6 +544,7 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         type: 'evidence_source',
         source: asString(o.source, 'unknown'),
         chunks: asCount(o.chunks),
+        failed: o.failed === true,
       };
     case 'handoff':
       // `to` falls back to '' deliberately — that is the hand-back, a declared value, so there is

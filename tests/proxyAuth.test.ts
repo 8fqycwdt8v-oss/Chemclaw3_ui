@@ -96,6 +96,25 @@ describe('what reaches the Chemclaw service', () => {
     expect(upstreamHeaders['proxy-authorization']).toBeUndefined();
   });
 
+  it("drops the service's own X-Chemclaw-* headers, which a browser has no business setting", async () => {
+    const upstreamHeaders = await post({
+      authorization: 'Bearer t',
+      'x-chemclaw-actor': 'somebody-else',
+      'x-chemclaw-session': 'not-mine',
+      'x-chemclaw-dry-run': 'true',
+    });
+
+    // Not a live hole and that is exactly why it is worth closing now: the front door derives the
+    // actor from the validated bearer token, and these headers are stamped by the service on its
+    // way OUT to a connector. What this removes is the trap — a header arriving from a browser
+    // under a name the system trusts elsewhere, waiting for the first reader that assumes it did
+    // not come from outside.
+    expect(upstreamHeaders.authorization).toBe('Bearer t');
+    expect(upstreamHeaders['x-chemclaw-actor']).toBeUndefined();
+    expect(upstreamHeaders['x-chemclaw-session']).toBeUndefined();
+    expect(upstreamHeaders['x-chemclaw-dry-run']).toBeUndefined();
+  });
+
   it('sends no authorization at all when the caller had none', async () => {
     const upstreamHeaders = await post({});
 

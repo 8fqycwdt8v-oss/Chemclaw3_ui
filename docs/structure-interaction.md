@@ -13,6 +13,36 @@ below was read off the code, not off a docstring — three of the findings are c
 docstring states an intention the code does not carry out, which is the specific failure mode
 `CLAUDE.md` names ("prose is evidence about what its author believed").
 
+> **Status — read this first.**
+>
+> **All fourteen proposals in §5 are built**, on `claude/ui-ux-molecular-interaction-v68er3`. The
+> body below is **kept as written**, in the present tense of `5cbe51f`, for the same reason the
+> first study's is: the analysis of what was missing is the argument for what was built, and
+> rewriting it in the past tense would leave every decision looking unmotivated.
+>
+> So every claim below still describes `5cbe51f`. What changed, and where, is in §5's table — each
+> row now names the module that answers it. Four things came out differently from the plan and are
+> worth reading before the body, because in each case the code is right and this document was not:
+>
+> - **P6 landed global rather than per-conversation.** A per-conversation preference asks the same
+>   chemist the same question in every new thread, which is the per-token failure at a coarser
+>   grain.
+> - **P1 confirms reactions as well as molecules**, and only molecules reach the rail —
+>   `ingestUserStructure` canonicalises, and a molecule toolkit cannot canonicalise a reaction.
+> - **P7 turned out to be fixing a way to lose the app**, not only a missing convenience: a page
+>   with no drop handler hands a dropped file to the browser, which navigates to it and takes the
+>   draft with it. A window-level guard makes a missed drop a no-op.
+> - **A defect this study did not find** fell out of routing every "can I draw this" question
+>   through one function: `looksLikeSmiles` rejects anything containing `>` and `isMolecule`
+>   refuses a reaction, so every inline reaction SMILES in every answer fell through to plain
+>   text — including the ones `similar_reactions` exists to return, which §3.1 is about.
+>
+> Measured, since §5 quotes costs: the entry chunk went 498.34 kB → 510.67 kB. That is application
+> code; RDKit's 6.9 MB and Ketcher's 11.8 MB stay in their own chunks and `index.html` preloads
+> neither.
+
+---
+
 Nothing here is a defect report. The structure work is good and most of what follows is a
 consequence of it having been built one surface at a time.
 
@@ -305,22 +335,28 @@ button can be removed outright rather than relabelled — which is the better ou
 Nothing here needs a backend change. Every item is reachable from data already on the wire or from a
 function already in this repo.
 
-| #       | Change                                                                                                                                        | Fixes      | Cost | Risk                                                                                            |
-| ------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ---- | ----------------------------------------------------------------------------------------------- |
-| **P1**  | Recognise a pasted structure in the composer: a non-blocking confirmation strip above the message box with the drawing and the canonical form | §2.1       | S    | false positives — mitigated by requiring the whole paste to be one token, with RDKit as arbiter |
-| **P2**  | An "insert into the message" action on any rendered structure — inline, rail, hit, note                                                       | §3.5, §2.3 | S    | none; it composes a message, never a tool call                                                  |
-| **P3**  | A structure-hit renderer for `similar_molecules` / `substructure_matches` / `similar_reactions`, carrying the empty-index distinction         | §3.1       | M    | must not render "index empty" as "no analogue"                                                  |
-| **P4**  | Draw `ChargeRow.smiles` in the charge table                                                                                                   | §3.2       | S    | column width on a narrow sheet                                                                  |
-| **P5**  | Render the user's message through the chemistry pipeline                                                                                      | §3.3       | S    | none — same gate as the answer path                                                             |
-| **P6**  | Per-conversation "draw structures in answers" preference; drop the per-token toggle                                                           | §3.6, §4.4 | S    | none                                                                                            |
-| **P7**  | Hoist the file drop to the composer; open the panel pre-loaded                                                                                | §2.2       | S    | none — `takeFile` is written                                                                    |
-| **P8**  | Draw the molecule a tool was called on, in its trace row, via `smilesFromArguments`                                                           | §3.4, §4.2 | S    | none — the extractor's JSON-parse gate is what makes the source safe                            |
-| **P9**  | One method line in `AnswerFooter`: the distinct methods this turn used                                                                        | §4.1       | S    | none                                                                                            |
-| **P10** | "Ask the agent to resolve this name" button in the structure panel, via `chemclaw:prefill`                                                    | §2.3       | S    | none                                                                                            |
-| **P11** | The rail as a Sheet below `lg`, sharing its body                                                                                              | §3.7       | M    | none — the sidebar's pattern, reused                                                            |
-| **P12** | Attach returned values to rail molecules, labelled by the tool that returned them                                                             | §3.8       | M    | `numbers` has no units; the surface must say so                                                 |
-| **P13** | Label the structure button (icon at narrow, "Structure" at ≥sm)                                                                               | §2         | XS   | none                                                                                            |
-| **P14** | Keep the panel open after Insert when the source was a multi-record SDF                                                                       | §2.4       | XS   | none                                                                                            |
+| #       | Change                                                                                                                                        | Fixes      | Cost | Built in                                   |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ---- | ------------------------------------------ |
+| **P1**  | Recognise a pasted structure in the composer: a non-blocking confirmation strip above the message box with the drawing and the canonical form | §2.1       | S    | `Composer.tsx` — `PasteConfirmation`       |
+| **P2**  | An "insert into the message" action on any rendered structure — inline, rail, hit, note                                                       | §3.5, §2.3 | S    | `components/chem/UseStructure.tsx`         |
+| **P3**  | A structure-hit renderer for the three fingerprint searches, carrying the empty-index distinction                                             | §3.1       | M    | `ResultSheet.tsx` — `StructureHits`        |
+| **P4**  | Draw `ChargeRow.smiles` in the charge table                                                                                                   | §3.2       | S    | `ResultSheet.tsx` — `ChargeTable`          |
+| **P5**  | Render the user's message through the chemistry pipeline                                                                                      | §3.3       | S    | `Molecule.tsx` — `StructureText`           |
+| **P6**  | A "draw structures in answers" preference; drop the per-token toggle                                                                          | §3.6, §4.4 | S    | `state/prefsStore.ts` + the top-bar toggle |
+| **P7**  | Hoist the file drop to the composer; open the panel pre-loaded                                                                                | §2.2       | S    | `Composer.tsx` — the drop zone             |
+| **P8**  | Draw the molecule a tool was called on, in its trace row                                                                                      | §3.4, §4.2 | S    | `TracePanel.tsx` — `CalledOn`              |
+| **P9**  | One method line in `AnswerFooter`: the distinct methods this turn used                                                                        | §4.1       | S    | `AnswerBadges.tsx` — `MethodLine`          |
+| **P10** | "Ask the agent to resolve this name", via `chemclaw:prefill`                                                                                  | §2.3       | S    | `StructureInput.tsx`                       |
+| **P11** | The rail as a Sheet below `lg`, sharing its body                                                                                              | §3.7       | M    | `EntityRail.tsx` — `EntityRailTrigger`     |
+| **P12** | Attach returned values to rail molecules, labelled by the tool that returned them                                                             | §3.8       | M    | `chem/entities.ts` — `Mention.values`      |
+| **P13** | Label the structure button (icon at narrow, "Structure" at ≥sm)                                                                               | §2         | XS   | `Composer.tsx`                             |
+| **P14** | Keep the panel open after Insert when the source was a multi-record SDF                                                                       | §2.4       | XS   | `StructureInput.tsx`                       |
+
+The risks the last column displaced are all still live and all still handled in the code: P1's
+false positives (a paste must be one whitespace-free token, and RDKit is the arbiter), P3's
+obligation not to render "the index is empty" as "no analogue exists" (the service's own `verdict`
+is rendered verbatim rather than paraphrased), and P12's missing units (`numbers` carries neither
+labels nor units, and the rail says only what the tool returned).
 
 **If only three are taken: P1, P2, P5.** Together they close the loop the current design leaves
 open — a structure that arrives by the fastest route is confirmed, a structure that is drawn can be

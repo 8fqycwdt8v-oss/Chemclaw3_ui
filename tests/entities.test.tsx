@@ -131,27 +131,27 @@ describe('the promotion rule', () => {
 
 describe('jobs', () => {
   it('closes a running job when the push-back stream reports it', async () => {
-    await ingest('m1', { type: 'job_started', job_id: 'qm-1', kind: 'qm' });
-    expect((entity('job:qm-1') as JobEntity).status).toBe('running');
+    await ingest('m1', { type: 'job_started', job_id: 'calc-1', kind: 'calc' });
+    expect((entity('job:calc-1') as JobEntity).status).toBe('running');
 
-    await ingest('m1', { type: 'job_failed', job_id: 'qm-1', reason: 'walltime' });
-    const job = entity('job:qm-1') as JobEntity;
+    await ingest('m1', { type: 'job_failed', job_id: 'calc-1', reason: 'walltime' });
+    const job = entity('job:calc-1') as JobEntity;
     expect(job.status).toBe('failed');
     expect(job.reason).toBe('walltime');
     // The kind survives the merge — a failure event does not carry one, and losing it would
-    // relabel a DFT run as a generic job at the moment it most needs naming.
-    expect(job.jobKind).toBe('qm');
+    // relabel a conformer search as a generic job at the moment it most needs naming.
+    expect(job.jobKind).toBe('calc');
   });
 
   it('promotes the molecule a completed job computed', async () => {
     await ingest('m1', {
       type: 'job_completed',
-      job_id: 'qm-2',
+      job_id: 'calc-2',
       summary: { molecule_smiles: 'OCC', converged: true },
     });
     // Canonicalised on the way in, so it joins the entity a tool call would have created.
     expect(entity('CCO')?.kind).toBe('molecule');
-    expect((entity('job:qm-2') as JobEntity).moleculeSmiles).toBe('CCO');
+    expect((entity('job:calc-2') as JobEntity).moleculeSmiles).toBe('CCO');
   });
 });
 
@@ -185,8 +185,8 @@ describe('switching conversation', () => {
     useChatStore.getState().appendUserMessage(c2, 'asked in the second conversation');
 
     // A selection in the first conversation. Its mention list names `a1` and nothing else.
-    await store().ingest(C1, 'a1', { type: 'job_started', job_id: 'qm-1', kind: 'qm' });
-    store().select(C1, 'job:qm-1');
+    await store().ingest(C1, 'a1', { type: 'job_started', job_id: 'calc-1', kind: 'calc' });
+    store().select(C1, 'job:calc-1');
 
     // The failure this replaces: `selected` was global, so the second conversation's messages were
     // filtered against the first conversation's mentions, matched nothing, and the transcript
@@ -201,8 +201,8 @@ describe('switching conversation', () => {
   it('drops a conversation’s index when the conversation is deleted', async () => {
     const chat = useChatStore.getState();
     const id = chat.createConversation();
-    await store().ingest(id, 'm1', { type: 'job_started', job_id: 'qm-9', kind: 'qm' });
-    expect(entitiesOf(useEntityStore.getState(), id).order).toEqual(['job:qm-9']);
+    await store().ingest(id, 'm1', { type: 'job_started', job_id: 'calc-9', kind: 'calc' });
+    expect(entitiesOf(useEntityStore.getState(), id).order).toEqual(['job:calc-9']);
 
     useChatStore.getState().deleteConversation(id);
     // An index for a transcript that no longer exists is a rail nobody can ever reach.
@@ -222,7 +222,7 @@ describe('<EntityRail>', () => {
       tool: 'predict_pka',
       arguments: JSON.stringify({ smiles: 'CCO' }),
     });
-    await ingest('m1', { type: 'job_started', job_id: 'qm-1', kind: 'qm' });
+    await ingest('m1', { type: 'job_started', job_id: 'calc-1', kind: 'calc' });
 
     render(<EntityRail conversationId={C1} />);
     await waitFor(() => expect(screen.getByText('Molecules (1)')).toBeTruthy());

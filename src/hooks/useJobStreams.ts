@@ -3,7 +3,7 @@
  *
  * This is the channel that tells the UI a durable QM job finished, without polling. It used to
  * watch only the conversation that happened to be open, which is the one case where the chemist
- * would have noticed anyway: a DFT run takes minutes to days, so the completion almost always
+ * would have noticed anyway: a conformer search takes minutes to hours, so the completion almost always
  * lands while they are somewhere else. Now the recently-active conversations are watched too.
  *
  * Three backend constraints shape this, all of them still true:

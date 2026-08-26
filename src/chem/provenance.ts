@@ -7,7 +7,7 @@
  * 1. **Grounding.** `tool_result.numbers` is the untruncated, deduplicated list of every numeric
  *    value a turn's tools actually returned. Matching the answer's figures against it is the only
  *    structured check the wire currently affords.
- * 2. **Method.** A tool name is the only thing that says whether a value is semiempirical, DFT, a
+ * 2. **Method.** A tool name is the only thing that says whether a value is semiempirical, a
  *    cited table row or a surrogate's guess. The map below is the lookup.
  * 3. **Lost capability.** A connector name means nothing to a chemist; "no hazard screen" does.
  *
@@ -321,10 +321,12 @@ const RETRIEVAL = 'Knowledge-graph retrieval';
  *  belongs here as an absence: `methodFor` returns null and no badge renders. */
 const TOOL_METHOD: Partial<Record<KnownTool, ToolMethod>> = {
   // calc — inline GFN2-xTB calculators. Bundle manifest: "Fast cached property calculators …
-  // heavy QM goes through the durable compute_dft_energy instead."
+  // Every method here is semiempirical (GFN2-xTB via tblite, CREST) — there is no DFT tier."
   compute_xtb_energy: {
     method: XTB,
-    caveat: 'A fast semiempirical single point; heavy QM goes through compute_dft_energy instead.',
+    caveat:
+      'A fast semiempirical single point. There is no DFT tier above it, so where the decision ' +
+      'turns on a difference inside its error bar the number cannot settle it.',
   },
   compute_electronic_properties: {
     method: XTB,
@@ -423,14 +425,6 @@ const TOOL_METHOD: Partial<Record<KnownTool, ToolMethod>> = {
     caveat:
       'Semiempirical and in continuum solvent, so treat it as a ranking between candidate ' +
       'partners, not an absolute binding energy.',
-  },
-
-  // qm
-  compute_dft_energy: {
-    method: 'DFT on the HPC cluster',
-    caveat:
-      'The heavy path: a durable single-point at a named level of theory, minutes to days. Used ' +
-      'when semiempirical xTB is not accurate enough for the decision at hand.',
   },
 
   // safety — three cited tables, each with the limit its own manifest states.
@@ -550,7 +544,7 @@ export const methodFor = (tool: string): ToolMethod | null =>
  * Why a turn-level list exists at all: provenance was inverted relative to risk. The number is in
  * the answer at depth 0; the method that produced it was four disclosures down — behind "Show the
  * agent's work", then the row, then the badge. A chemist should never have to ask whether 4.76 is
- * DFT or a semiempirical estimate, and in practice one at that depth never does.
+ * a semiempirical estimate or a cited table, and in practice one at that depth never does.
  *
  * The answer is not to move the caveats up. `TOOL_METHOD`'s caveats are two to four lines each and
  * five of them stacked is the annotation clutter this module's own header warns trains people to
@@ -591,7 +585,6 @@ export function methodsUsed(trace: readonly TraceEntry[]): string[] {
 const CAPABILITY_LOSS: Record<string, string> = {
   safety: 'no hazard screen, no genotoxicity alerts and no ICH impurity limits',
   calc: 'no computed properties — no xTB energies, pKa, solubility, logD or thermochemistry',
-  qm: 'no DFT',
   molfp: 'no molecule precedent search — no similarity and no substructure lookup',
   rxnfp: 'no reaction precedent search',
   chem: 'no structure resolution, no charge table and no green metrics',

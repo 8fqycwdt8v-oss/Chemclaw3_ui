@@ -218,14 +218,14 @@ describe('a durable job’s ending reaches the trace', () => {
     id: `s-${jobId}`,
     at: 0,
     kind: 'job_started',
-    job: { jobId, kind: 'qm', ...(settled ? { settled: true } : {}) },
+    job: { jobId, kind: 'calc', ...(settled ? { settled: true } : {}) },
   });
 
   it('takes the "runs asynchronously" badge off a job that has ended', () => {
     const { cid, mid } = startTurn();
     const store = useChatStore.getState();
-    store.applyEvent(cid, mid, { type: 'job_started', job_id: 'qm-1', kind: 'qm' });
-    store.applyEvent(cid, mid, { type: 'job_failed', job_id: 'qm-1', reason: 'cluster evicted' });
+    store.applyEvent(cid, mid, { type: 'job_started', job_id: 'calc-1', kind: 'calc' });
+    store.applyEvent(cid, mid, { type: 'job_failed', job_id: 'calc-1', reason: 'cluster evicted' });
 
     const trace = assistantOf(cid, mid).trace;
     expect(trace[0]?.job?.settled).toBe(true);
@@ -235,8 +235,8 @@ describe('a durable job’s ending reaches the trace', () => {
   it('leaves a different job’s launch row alone', () => {
     const { cid, mid } = startTurn();
     const store = useChatStore.getState();
-    store.applyEvent(cid, mid, { type: 'job_started', job_id: 'qm-1', kind: 'qm' });
-    store.applyEvent(cid, mid, { type: 'job_failed', job_id: 'qm-2', reason: 'other' });
+    store.applyEvent(cid, mid, { type: 'job_started', job_id: 'calc-1', kind: 'calc' });
+    store.applyEvent(cid, mid, { type: 'job_failed', job_id: 'calc-2', reason: 'other' });
 
     expect(assistantOf(cid, mid).trace[0]?.job?.settled).toBeUndefined();
   });
@@ -245,17 +245,17 @@ describe('a durable job’s ending reaches the trace', () => {
     // Both endings, not just the bad one: the badge is a claim in the present tense either way.
     const { cid, mid } = startTurn();
     const store = useChatStore.getState();
-    store.applyEvent(cid, mid, { type: 'job_started', job_id: 'qm-1', kind: 'qm' });
-    store.applyEvent(cid, mid, { type: 'job_completed', job_id: 'qm-1', summary: {} });
+    store.applyEvent(cid, mid, { type: 'job_started', job_id: 'calc-1', kind: 'calc' });
+    store.applyEvent(cid, mid, { type: 'job_completed', job_id: 'calc-1', summary: {} });
 
     expect(assistantOf(cid, mid).trace[0]?.job?.settled).toBe(true);
   });
 
   it('renders the badge while a job is running and drops it once it is not', () => {
-    openTrace([launch('qm-1')]);
+    openTrace([launch('calc-1')]);
     expect(screen.getByText('runs asynchronously')).toBeTruthy();
     cleanup();
-    openTrace([launch('qm-1', true)]);
+    openTrace([launch('calc-1', true)]);
     expect(screen.queryByText('runs asynchronously')).toBeNull();
   });
 });

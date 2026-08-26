@@ -127,8 +127,8 @@ so a SMARTS query is still typed into a chat box.
 
 | #      | Persona and story                                                 | Aim                                                                                | Backend                                                                       | Verdict           |
 | ------ | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ----------------- |
-| **C1** | Chemist: submit a DFT or conformer job and get on with the day    | Know it landed, be told when it finishes — **and be told when it fails**           | `job_started` / `job_completed` / `job_failed` on `GET /sessions/{id}/events` | **`SERVED`**      |
-| **C2** | Chemist: _"what is running, and can I stop it?"_                  | Kill a mis-launched HPC job before it burns a queue slot                           | `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` (reviewer role)            | **`SERVED`**      |
+| **C1** | Chemist: submit a conformer or scan job and get on with the day   | Know it landed, be told when it finishes — **and be told when it fails**           | `job_started` / `job_completed` / `job_failed` on `GET /sessions/{id}/events` | **`SERVED`**      |
+| **C2** | Chemist: _"what is running, and can I stop it?"_                  | Kill a mis-launched durable job before it burns a worker slot                      | `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` (reviewer role)            | **`SERVED`**      |
 | **C3** | Chemist: _"what did we run three months ago, and why?"_           | Reuse a result instead of re-running it — `job_records` keeps the launch rationale | `find_past_jobs`, `GET /jobs?text=&connector=`                                | **`SERVED`**      |
 | **C4** | Computational chemist: download the optimized geometry or Hessian | Take it into another package                                                       | `list_artifacts` / `fetch_artifact` — text only, refuses binaries             | `BLOCKED-BACKEND` |
 

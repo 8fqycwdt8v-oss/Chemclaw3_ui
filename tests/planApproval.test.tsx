@@ -85,7 +85,7 @@ describe('plan approval', () => {
     const getPlan = vi
       .spyOn(api, 'getPlan')
       .mockResolvedValueOnce(planStatus('h1'))
-      .mockResolvedValueOnce(planStatus('h2', ['Run DFT on the aryl bromide']));
+      .mockResolvedValueOnce(planStatus('h2', ['Search conformers of the aryl bromide']));
     vi.spyOn(api, 'decidePlan').mockRejectedValue(
       new ApiError('plan_changed', 'the plan changed since it was shown', 409),
     );
@@ -93,7 +93,7 @@ describe('plan approval', () => {
 
     await decideVia(/approve plan/i);
 
-    expect(await screen.findByText('Run DFT on the aryl bromide')).toBeTruthy();
+    expect(await screen.findByText('Search conformers of the aryl bromide')).toBeTruthy();
     expect(getPlan).toHaveBeenCalledTimes(2);
   });
 

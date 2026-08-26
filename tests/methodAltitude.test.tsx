@@ -4,7 +4,7 @@
  * The defect these cover is not a bug; it is a depth. The value sat in the answer at depth 0 and
  * the method that produced it was four disclosures down — behind "Show the agent's work", then the
  * row for the call, then the badge on it. A chemist should never have to ask whether 4.76 came
- * from DFT or from a semiempirical estimate, and at that depth nobody does.
+ * from a cited table or from a semiempirical estimate, and at that depth nobody does.
  *
  * So two things are asserted here and they pull against each other on purpose: the method must be
  * *up*, and the caveat must stay *down*. A footer carrying five three-line caveats is the

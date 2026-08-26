@@ -519,7 +519,7 @@ function attachValues(
 }
 
 /** The kind an already-known job was started as. A completion and a failure both carry no `kind`,
- *  and losing it would relabel a DFT run as a generic job at the moment it most needs naming. */
+ *  and losing it would relabel a conformer search as a generic job when it most needs naming. */
 function existingJobKind(conversationId: string, jobId: string): string {
   const existing = entitiesOf(useEntityStore.getState(), conversationId).entities[`job:${jobId}`];
   return existing?.kind === 'job' ? existing.jobKind : 'job';

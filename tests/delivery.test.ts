@@ -12,6 +12,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 
@@ -50,5 +51,36 @@ describe('the Jenkins pipeline', () => {
 
   it('defaults DRY_RUN to true, because a first run happens against a real registry', () => {
     expect(pipeline).toContain("booleanParam(name: 'DRY_RUN', defaultValue: true");
+  });
+});
+
+describe('the pipeline shell', () => {
+  /**
+   * Resolve a Groovy GString to the text bash is actually handed: `${...}` is interpolated by
+   * Jenkins before the shell sees anything, while `\${...}` and `\$(...)` reach it verbatim —
+   * that escape is how a pipeline writes a shell variable inside an interpolated string, and
+   * getting it backwards is the most common way one of these files breaks.
+   */
+  const asShellReceivesIt = (block: string): string =>
+    block
+      .replace(/(?<!\\)\$\{[^}]*\}/g, 'PLACEHOLDER')
+      .replaceAll('\\$', '$')
+      .replaceAll('\\\\', '\\');
+
+  const blocks = [
+    ...[...pipeline.matchAll(/"""([\s\S]*?)"""/g)].map((m) => asShellReceivesIt(m[1] ?? '')),
+    ...[...pipeline.matchAll(/sh '''([\s\S]*?)'''/g)].map((m) => m[1] ?? ''),
+  ];
+
+  it('has blocks to check', () => {
+    // Guard the guard: a regex that matched nothing would pass every assertion below.
+    expect(blocks.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it.each(blocks.map((block, index) => [index, block]))('block %i parses', (_index, block) => {
+    // The only thing about a pipeline nobody here can run that can actually be executed.
+    const result = spawnSync('bash', ['-n'], { input: block as string, encoding: 'utf8' });
+    expect(result.stderr, `shell block does not parse: ${result.stderr}`).toBe('');
+    expect(result.status).toBe(0);
   });
 });

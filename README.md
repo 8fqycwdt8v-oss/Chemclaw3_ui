@@ -175,6 +175,29 @@ malformed frames, unknown event types, a stream that ends without an answer, and
 
 Everything else is verified against the real service.
 
+## Delivery
+
+GitHub Actions is the gate — typecheck, lint, format, unit tests, contrast, the three bundle-shape
+checks, Playwright, and a container job. `Jenkinsfile` is the half it cannot do: publish the image
+to a registry and roll it out. It does not re-run the gate (`RUN_GATE` is an opt-in for a
+Jenkins-only estate), and it publishes **by digest** — a tag is a pointer, and a rollback that
+follows one fetches bytes nobody reviewed.
+
+Two checks there are deliberately _not_ copies of the GitHub job, because they run against the
+**published image** rather than this workspace's `dist/`:
+
+- **the bundle carries no dev auth provider** — the image builds its own bundle inside the
+  Dockerfile with `ALLOW_DEV_AUTH` defaulting to false, so it is a different artifact from the one
+  `npm run check:no-dev-auth` reads locally, and it is the one served to a chemist;
+- **the container serves** `/healthz`, `/config.js`, the SPA fallback, and refuses `/api/metrics` —
+  the proxy whitelist being the only thing between the browser and every route the BFF could
+  otherwise forward.
+
+This repository ships no chart, so a rollout is `oc set image` against a Deployment an operator
+created. The four-repository release, its ordering (the UI last — it is useless before the API it
+proxies answers) and the reasoning are in Chemclaw3: `deploy/jenkins/README.md` and
+`D-2026-08-26-a-release-is-a-descriptor-and-a-target`.
+
 ## Backend requirements
 
 The UI reads more of the service than it used to, and the degradation is deliberately split in two.

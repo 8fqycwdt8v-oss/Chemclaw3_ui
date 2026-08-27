@@ -284,4 +284,11 @@ export interface Banner {
   kind: 'error' | 'warn' | 'info';
   text: string;
   action?: 'reauth' | 'reset' | 'retry';
+  /**
+   * Seconds the service asked the caller to wait, from a `Retry-After`. Counted down in the
+   * banner so a pause reads as a pause: the number is the whole difference between "come back in
+   * twenty seconds" and "this is over", and without it a rate limit looks exactly like a spent
+   * budget.
+   */
+  retryAfterSeconds?: number;
 }

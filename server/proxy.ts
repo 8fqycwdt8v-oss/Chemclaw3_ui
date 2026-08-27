@@ -248,12 +248,19 @@ export function proxy(
   /**
    * Propagate a client disconnect into the upstream request.
    *
-   * This is the single most important line in the file. The backend serialises turns per session
-   * and there is no cancel endpoint: if the user presses Stop (or closes the tab) and we leave the
-   * upstream request open, the turn keeps running, keeps spending budget, and keeps holding the
-   * session's turn slot — so the next message comes back 409 "a turn is already running". FastAPI
-   * cancels the handler on client disconnect, so destroying the socket here is what actually
-   * releases that lock.
+   * This used to be the single most important line in the file, and the reason given for it is now
+   * wrong: destroying the socket does not cancel anything.
+   * `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` separated the two meanings a closed stream
+   * carried, because the backend could not tell Stop from a Wi-Fi handoff and killed ten-minute
+   * turns for the latter. A disconnect **detaches** — the turn runs to completion on the
+   * service's own pump task and writes its transcript — and cancelling is an explicit
+   * `POST /sessions/{id}/turn/stop`, which the SPA sends before it aborts the fetch
+   * (`src/state/sendMessage.ts`) and which `server/routes.ts` whitelists.
+   *
+   * It stays, for what it does do. The service discards events once its reader is gone, so the
+   * detach is what stops it buffering for nobody; and leaving a half-read upstream response open
+   * holds a socket and a `pipe` in this process for as long as the turn lasts. Neither is the turn
+   * lock — a session stays 409-busy now for exactly as long as a turn is genuinely running.
    */
   res.on('close', () => {
     if (!res.writableFinished) upstreamReq.destroy();

@@ -321,12 +321,15 @@ describe('signing in and out', () => {
     // the data the credential was protecting — on a shared analytical-development workstation,
     // the next chemist to sign in read the previous one's unpublished route out of the sidebar,
     // before any token was involved.
-    const { useChatStore } = await import('../src/state/chatStore.ts');
+    const { useChatStore, flushChatPersistence } = await import('../src/state/chatStore.ts');
     const { createMsalAuth } = await import('../src/auth/msalAuth.ts');
 
     const cid = useChatStore.getState().createConversation();
     useChatStore.getState().appendUserMessage(cid, 'the unpublished route');
     sessionStorage.setItem('chemclaw.lastReauth', String(Date.now()));
+    // The disk write is throttled and may have been coalesced with an earlier test's write in
+    // this same module instance; force it out before asserting on what actually persisted.
+    flushChatPersistence();
     expect(localStorage.getItem('chemclaw3.chat.v2')).toContain('the unpublished route');
 
     const auth = await createMsalAuth();

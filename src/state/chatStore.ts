@@ -475,19 +475,66 @@ function shedOldest(state: PersistedState): PersistedState | null {
 }
 
 /**
- * `localStorage`, with the two things `createJSONStorage(() => localStorage)` does not do.
+ * `localStorage`, with the three things `createJSONStorage(() => localStorage)` does not do.
  *
  * `persist` re-serialises the whole slice on EVERY store write — one per animation-frame token
- * flush — and hands the failure straight back to the action that caused it. `appendUserMessage`
- * runs before `sendMessage`'s try/catch, so a `QuotaExceededError` there left the turn as an
- * unhandled rejection: no bubble, no answer, no banner, no lock. Send did nothing, for ever,
- * because a reload does not empty the store that is full.
+ * flush, for as long as an answer is streaming — and hands the failure straight back to the
+ * action that caused it. `appendUserMessage` runs before `sendMessage`'s try/catch, so a
+ * `QuotaExceededError` there left the turn as an unhandled rejection: no bubble, no answer, no
+ * banner, no lock. Send did nothing, for ever, because a reload does not empty the store that is
+ * full.
  *
- * So: a refused write sheds the oldest conversations and tries again, and a write that cannot
- * succeed at all is swallowed the way `prefsStore` already swallows its own. History stops being
- * durable; the app keeps working, which is the right way round.
+ * So: a refused write sheds the oldest conversations and tries again, a write that cannot succeed
+ * at all is swallowed the way `prefsStore` already swallows its own, and the actual
+ * `JSON.stringify` + `localStorage.setItem` is throttled to once every `PERSIST_THROTTLE_MS`
+ * rather than once per frame — a full slice of history is up to a few hundred KB, and stringifying
+ * it 60 times a second is main-thread work competing with the token render it is trying not to
+ * jank. The in-memory store itself is never throttled, only the disk write; `flushChatPersistence`
+ * forces the latest value out immediately, called on `pagehide`/`beforeunload` so a closed tab
+ * never loses more than one throttle window's worth of history.
  */
 let storageWritable = true;
+
+const PERSIST_THROTTLE_MS = 750;
+let scheduledName: string | null = null;
+let scheduledValue: StorageValue<PersistedState> | null = null;
+let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+let lastWriteAt = 0;
+
+function writeChatStorageNow(name: string, value: StorageValue<PersistedState>): void {
+  if (!storageWritable) return;
+  let state: PersistedState | null = value.state;
+  while (state) {
+    try {
+      localStorage.setItem(name, JSON.stringify({ ...value, state }));
+      return;
+    } catch {
+      state = shedOldest(state);
+    }
+  }
+  storageWritable = false;
+  console.warn('chemclaw3: local history could not be saved (storage is full or unavailable).');
+}
+
+/** Force the most recently coalesced write out immediately, bypassing the throttle window. */
+export function flushChatPersistence(): void {
+  if (throttleTimer !== null) {
+    clearTimeout(throttleTimer);
+    throttleTimer = null;
+  }
+  if (scheduledName === null || scheduledValue === null) return;
+  const name = scheduledName;
+  const value = scheduledValue;
+  scheduledName = null;
+  scheduledValue = null;
+  lastWriteAt = Date.now();
+  writeChatStorageNow(name, value);
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', flushChatPersistence);
+  window.addEventListener('beforeunload', flushChatPersistence);
+}
 
 const chatStorage: PersistStorage<PersistedState> = {
   getItem(name) {
@@ -503,20 +550,21 @@ const chatStorage: PersistStorage<PersistedState> = {
 
   setItem(name, value) {
     // Latched off after a write that could not land even with a single conversation in it. That
-    // is storage being denied rather than full — shedding cannot help, and retrying it once per
-    // animation frame would burn a `JSON.stringify` of the whole slice on every token.
+    // is storage being denied rather than full — shedding cannot help.
     if (!storageWritable) return;
-    let state: PersistedState | null = value.state;
-    while (state) {
-      try {
-        localStorage.setItem(name, JSON.stringify({ ...value, state }));
-        return;
-      } catch {
-        state = shedOldest(state);
-      }
+    scheduledName = name;
+    scheduledValue = value;
+    const elapsed = Date.now() - lastWriteAt;
+    if (elapsed >= PERSIST_THROTTLE_MS) {
+      flushChatPersistence();
+      return;
     }
-    storageWritable = false;
-    console.warn('chemclaw3: local history could not be saved (storage is full or unavailable).');
+    if (throttleTimer === null) {
+      throttleTimer = setTimeout(() => {
+        throttleTimer = null;
+        flushChatPersistence();
+      }, PERSIST_THROTTLE_MS - elapsed);
+    }
   },
 
   removeItem(name) {

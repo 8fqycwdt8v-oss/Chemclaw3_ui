@@ -119,7 +119,13 @@ export function BestSoFarChart({
         Best {objective} so far, over {n} evaluation(s)
       </title>
       <desc id={descId}>
-        A step chart of the running best {objective} ({directionMark(direction)}), rising from{' '}
+        {/*
+          "improving from", not "rising from". A running best only rises when the objective is
+          maximized; on a minimize objective — an impurity, a cost — it falls, and the sentence
+          said so backwards while `directionMark` three words earlier said it correctly. A
+          screen-reader user got the one description that contradicted the chart.
+        */}
+        A step chart of the running best {objective} ({directionMark(direction)}), improving from{' '}
         {sig(series[0] ?? best)} to {sig(best)}. The shaded band spans ±{sig(noise)} around the
         current best — the assay&rsquo;s own reproducibility, so any value inside it is not
         distinguishable from the best already in hand.

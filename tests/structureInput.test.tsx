@@ -14,7 +14,11 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { FIELD_PLACEHOLDER, StructureInput } from '../src/components/StructureInput.tsx';
+import {
+  FIELD_PLACEHOLDER,
+  SKETCHER_ALTERNATIVE,
+  StructureInput,
+} from '../src/components/StructureInput.tsx';
 import { Composer } from '../src/components/Composer.tsx';
 import { MAX_SDF_RECORDS, moleculesFromMolfile, splitSdfRecords } from '../src/chem/rdkit.ts';
 import { entitiesOf, useEntityStore } from '../src/chem/entities.ts';
@@ -297,6 +301,26 @@ describe('<StructureInput>', () => {
     });
     await waitFor(() => expect(screen.getByText('1 / 2')).toBeTruthy());
     expect(field().value).toBe('CCO');
+  });
+
+  it('tells a screen reader the canvas has a text alternative, on open', async () => {
+    // The canvas is a third-party WASM editor and nothing here can make it navigable; what this
+    // application owes a keyboard or screen-reader user is therefore not a navigable canvas but
+    // the fact that two other doors reach the same place. Radix announces `Dialog.Description` as
+    // the dialog's accessible description when it opens, so this is the assertion that the
+    // alternative is *told* rather than merely existing behind the modal.
+    render(<StructureInput onAccept={vi.fn()} onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByText('Draw'));
+
+    const dialog = await screen.findByRole('dialog');
+    const describedBy = dialog.getAttribute('aria-describedby');
+    expect(describedBy, 'the sketcher dialog has no accessible description').toBeTruthy();
+    expect(document.getElementById(describedBy as string)?.textContent).toBe(SKETCHER_ALTERNATIVE);
+
+    // And the alternative it names is genuinely there behind the dialog: the same labelled field
+    // every other door writes into.
+    expect(screen.getByLabelText('SMILES')).toBeTruthy();
   });
 
   it('closes the sketcher on Escape without being clicked into first', async () => {

@@ -51,7 +51,8 @@ const sseWith = (body: string, headers: Record<string, string> = {}): Response =
 describe('errorFromStatus', () => {
   it('carries the id it is given onto every status it knows', () => {
     for (const status of [401, 404, 409, 422, 429, 503, 500]) {
-      expect(errorFromStatus(status, undefined, 'corr-1').correlationId).toBe('corr-1');
+      // Fourth argument: the third is the response's `Retry-After`, which splits the two 429s.
+      expect(errorFromStatus(status, undefined, null, 'corr-1').correlationId).toBe('corr-1');
     }
   });
 

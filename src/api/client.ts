@@ -85,7 +85,12 @@ async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {
     // Read back rather than sent: the service issues the id and stamps it on its own log records,
     // so quoting it is what joins a banner a chemist screenshotted to one line in the logs.
     const failure = await readFailure(res);
-    throw errorFromStatus(res.status, failure.detail, failure.correlationId);
+    throw errorFromStatus(
+      res.status,
+      failure.detail,
+      res.headers.get('retry-after'),
+      failure.correlationId,
+    );
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -331,7 +336,8 @@ function upload(
           ? (xhr.response as { detail?: unknown; correlation_id?: unknown })
           : {};
       // The same read-back as `request` above, through XHR's own accessor — an upload that fails
-      // is exactly as worth joining to the service's logs as a turn that does.
+      // is exactly as worth joining to the service's logs as a turn that does, and it is refused
+      // by the same per-principal limiter, so it honours the same `Retry-After`.
       const correlationId =
         xhr.getResponseHeader(CORRELATION_HEADER)?.trim() ||
         (typeof body.correlation_id === 'string' ? body.correlation_id : '');
@@ -339,6 +345,7 @@ function upload(
         errorFromStatus(
           xhr.status,
           typeof body.detail === 'string' ? body.detail : undefined,
+          xhr.getResponseHeader('retry-after'),
           correlationId,
         ),
       );

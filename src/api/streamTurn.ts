@@ -12,13 +12,7 @@
  * back 409. Retry policy belongs to the caller, which knows whether a retry is safe.
  */
 
-import { EventSourceParserStream } from 'eventsource-parser/stream';
-import {
-  normalizeEvent,
-  type AnswerEvent,
-  type ChemclawEvent,
-  type ErrorCode,
-} from '../../shared/events.ts';
+import type { AnswerEvent, ChemclawEvent, ErrorCode } from '../../shared/events.ts';
 import {
   ApiError,
   correlationFrom,
@@ -27,6 +21,7 @@ import {
   readFailure,
 } from './errors.ts';
 import { config } from '../env.ts';
+import { readEventStream } from '../lib/sse.ts';
 
 /**
  * How long a turn may produce nothing before the reader is told the chain may be broken.
@@ -128,7 +123,12 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
 
   if (!res.ok) {
     const failure = await readFailure(res);
-    throw errorFromStatus(res.status, failure.detail, failure.correlationId);
+    throw errorFromStatus(
+      res.status,
+      failure.detail,
+      res.headers.get('retry-after'),
+      failure.correlationId,
+    );
   }
 
   // Known before the first frame, so every error below can quote it — including the ones that
@@ -155,11 +155,6 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       withReference(),
     );
   }
-
-  const reader = res.body
-    .pipeThrough(new TextDecoderStream())
-    .pipeThrough(new EventSourceParserStream())
-    .getReader();
 
   let answer: AnswerEvent | null = null;
 
@@ -198,22 +193,23 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
   markFrame();
 
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      // A comment frame — the BFF's own heartbeat — never reaches here, and that is what makes
-      // the watch honest: the heartbeat is injected by this app's proxy whether or not the service
-      // is still alive, so counting one as activity would report a dead backend as a healthy one.
-      if (!value.data) continue;
+    // `readEventStream`'s own `finally` cancels the reader on the way out — including when this
+    // loop `break`s below, since breaking a `for await` calls the generator's `return()`. That
+    // cancel is what turns a client Stop into a disconnect the BFF and FastAPI can act on to
+    // release the session's turn lock; without it, Stop would leave the next message 409-ing.
+    for await (const frame of readEventStream(res.body)) {
+      // The BFF's heartbeat is an SSE *comment* and never becomes a frame at all (`lib/sse.ts`
+      // says why), and that is what makes the watch honest: the heartbeat is injected by this
+      // app's proxy whether or not the service is still alive, so counting one as activity would
+      // report a dead backend as a healthy one. A frame with no payload is no more evidence of a
+      // live turn than a heartbeat is, so it is skipped on the same grounds.
+      if (frame.drop === 'empty') continue;
       markFrame();
 
-      let raw: unknown;
-      try {
-        raw = JSON.parse(value.data);
-      } catch {
+      if (frame.drop === 'malformed') {
         // Tolerate a single malformed frame rather than killing an otherwise good turn — and
         // count it, because a turn where EVERY frame is malformed is a different fault.
-        opts.onFrameDropped?.({ reason: 'malformed', type: value.event ?? '' });
+        opts.onFrameDropped?.({ reason: 'malformed', type: frame.type });
         continue;
       }
 
@@ -221,32 +217,26 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       // makes a `turn_started` the service may start sending backwards-compatible in both
       // directions: it is used when present and nothing waits for it.
       let carriedCorrelation = false;
-      if (typeof raw === 'object' && raw !== null) {
-        const carried = (raw as { correlation_id?: unknown }).correlation_id;
+      if (typeof frame.raw === 'object' && frame.raw !== null) {
+        const carried = (frame.raw as { correlation_id?: unknown }).correlation_id;
         if (typeof carried === 'string' && carried) {
           carriedCorrelation = true;
           noteCorrelation(carried);
         }
       }
 
-      const event = normalizeEvent(raw, value.event);
       // Unknown event type: ignore it. The backend's union is explicitly designed to grow, and
       // an older frontend must degrade rather than break. Counted for the same reason a malformed
       // frame is — one is forward compatibility, every one is a version skew nobody was told about.
-      if (!event) {
+      if (!frame.event) {
         // A frame we took the turn's id out of is not a frame we failed to understand — counting
         // it as a version skew would report one on every turn the moment the service starts
         // sending a `turn_started`, which is precisely the change this path exists to absorb.
         if (carriedCorrelation) continue;
-        const name =
-          (typeof raw === 'object' &&
-          raw !== null &&
-          typeof (raw as { type?: unknown }).type === 'string'
-            ? String((raw as { type?: unknown }).type)
-            : value.event) ?? '';
-        opts.onFrameDropped?.({ reason: 'unknown', type: name });
+        opts.onFrameDropped?.({ reason: 'unknown', type: frame.type });
         continue;
       }
+      const event = frame.event;
 
       // An `error` event ends the turn — with exactly one exception, which the backend names and
       // this client used to ignore. See `PARTIAL_ANSWER_CODES`.
@@ -258,6 +248,7 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
           ? failure
           : new ApiError(failure.kind, failure.message, failure.status, {
               retryable: failure.retryable,
+              retryAfterSeconds: failure.retryAfterSeconds,
               correlationId,
             });
       }
@@ -279,11 +270,9 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       withReference(),
     );
   } finally {
+    // The socket is closed by `readEventStream`'s own `finally`; what is left to undo here is the
+    // idle timer, which must not outlive the turn it was watching.
     if (stallTimer) clearTimeout(stallTimer);
-    // Cancelling the body closes the socket, which the BFF turns into a destroyed upstream
-    // request, which FastAPI sees as a client disconnect and uses to cancel the turn and release
-    // the session's turn lock. Without this, Stop would leave the next message 409-ing.
-    await reader.cancel().catch(() => undefined);
   }
 
   if (!answer) {

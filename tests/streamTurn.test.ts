@@ -171,10 +171,11 @@ describe('streamTurn', () => {
       expect(err.retryable).toBe(true);
     });
 
-    it('reports an answerless turn as a stream failure, not a service failure', async () => {
-      // `empty_answer` means the turn ran and produced nothing, which is what `stream` already
-      // means here. Calling it an agent error would imply something broke.
-      expect((await failWith({ code: 'empty_answer' })).kind).toBe('stream');
+    it('reports an answerless turn as its own kind, not a stream drop or a service failure', async () => {
+      // `empty_answer` means the turn ran to completion and produced nothing — calling it `agent`
+      // would imply something broke, and calling it `stream` would make callers poll the
+      // transcript for an answer the server has already said will never arrive.
+      expect((await failWith({ code: 'empty_answer' })).kind).toBe('empty_answer');
     });
 
     it('carries the correlation id, which is the only thing support can act on', async () => {

@@ -31,6 +31,8 @@ export interface RuntimeConfig {
    * also drag the browser's `config` into the BFF bundle.
    */
   logLevel: 'silent' | 'error' | 'warn' | 'info' | 'debug';
+  /** The service's message-length cap, so the composer refuses where the service refuses. */
+  maxMessageChars: number;
 }
 
 const LOG_LEVELS = ['silent', 'error', 'warn', 'info', 'debug'] as const;
@@ -51,6 +53,7 @@ export function runtimeConfig(): RuntimeConfig {
     warmSessions: cfg.warmSessions,
     reviewerRoles: cfg.reviewerRoles,
     logLevel: clientLogLevel(),
+    maxMessageChars: cfg.maxMessageChars,
   };
 }
 

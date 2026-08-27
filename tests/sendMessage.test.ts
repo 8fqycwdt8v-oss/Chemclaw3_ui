@@ -5,6 +5,7 @@ import type { AuthProvider } from '../src/auth/types.ts';
 import {
   answerEvent,
   brokenSseResponse,
+  errorEvent,
   jsonError,
   sseFrames,
   sseResponse,
@@ -358,6 +359,120 @@ describe('sendMessage', () => {
       const message = useChatStore.getState().conversations[cid]?.messages[1];
       expect(message).toMatchObject({ role: 'assistant', status: 'aborted' });
       expect(useChatStore.getState().banner).toBeNull();
+    });
+  });
+
+  describe('a repeated identical question, mid detach-recovery', () => {
+    it('does not return the earlier answer to the same question as this turn’s recovered answer', async () => {
+      // The chemist asks 'dup?', gets an answer, then asks the exact same text again (e.g. via
+      // the failure banner's Retry, which refills the same draft) and this second attempt's
+      // connection drops. Detach recovery must find the *second* exchange, not re-serve the
+      // first — `lastIndexOf` on question text alone used to return the first one the moment it
+      // saw it, before the second turn's own copy had even committed.
+      let turnCalls = 0;
+      let getCalls = 0;
+      const stub = stubFetch((url, init) => {
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          return new Response(JSON.stringify({ session_id: 'm'.repeat(32) }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/messages') && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1;
+          const first = [
+            { role: 'user' as const, text: 'dup?' },
+            { role: 'assistant' as const, text: 'first answer' },
+          ];
+          // The second turn's own exchange only shows up after a few polls, simulating the real
+          // lag between the drop and the backend committing the detached turn.
+          const body =
+            getCalls < 3
+              ? first
+              : [
+                  ...first,
+                  { role: 'user' as const, text: 'dup?' },
+                  { role: 'assistant' as const, text: 'second answer' },
+                ];
+          return new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        turnCalls += 1;
+        if (turnCalls === 1) {
+          return sseResponse(
+            sseFrames([
+              { type: 'token', text: 'first answer' },
+              answerEvent({ text: 'first answer' }),
+            ]),
+          );
+        }
+        return brokenSseResponse(sseFrames([{ type: 'token', text: 'still working' }]));
+      });
+      restore = stub.restore;
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({ conversationId: cid, text: 'dup?', auth: devAuth });
+      expect(useChatStore.getState().conversations[cid]?.messages).toHaveLength(2);
+
+      vi.useFakeTimers();
+      try {
+        const turn = sendMessage({ conversationId: cid, text: 'dup?', auth: devAuth });
+        await vi.advanceTimersByTimeAsync(12_000);
+        await turn;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      const messages = useChatStore.getState().conversations[cid]?.messages ?? [];
+      expect(messages).toHaveLength(4);
+      const secondAnswer = messages[3];
+      expect(secondAnswer).toMatchObject({ role: 'assistant', status: 'done' });
+      expect(secondAnswer && 'finalText' in secondAnswer && secondAnswer.finalText).toBe(
+        'second answer',
+      );
+    }, 20_000);
+  });
+
+  describe('an in-stream empty_answer', () => {
+    it('is reported as an immediate failure, not a connection-drop recovery', async () => {
+      // `empty_answer` is a well-formed, fully-read stream ending in a terminal event the server
+      // sent on purpose — the opposite of a drop. Recovering it the way a broken socket is
+      // recovered would poll GET /sessions/{id}/messages for an answer the server has already
+      // said will never arrive.
+      const stub = stubFetch((url, init) => {
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          return new Response(JSON.stringify({ session_id: 'k'.repeat(32) }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/messages') && (init?.method ?? 'GET') === 'GET') {
+          throw new Error('must not poll for a detached answer on empty_answer');
+        }
+        return sseResponse(
+          sseFrames([
+            errorEvent({ code: 'empty_answer', message: 'The turn produced no answer.' }),
+          ]),
+        );
+      });
+      restore = stub.restore;
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({
+        conversationId: cid,
+        text: 'what is the meaning of life',
+        auth: devAuth,
+      });
+
+      const message = useChatStore.getState().conversations[cid]?.messages[1];
+      expect(message && 'error' in message && message.error?.kind).toBe('empty_answer');
+
+      const banner = useChatStore.getState().banner;
+      expect(banner?.kind).toBe('error');
+      expect(banner?.text).not.toContain('Connection lost');
+      expect(useChatStore.getState().composerLock).toBe(false);
     });
   });
 

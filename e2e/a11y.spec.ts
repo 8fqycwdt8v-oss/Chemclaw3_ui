@@ -34,8 +34,20 @@ async function expectTheme(page: Page, theme: 'light' | 'dark'): Promise<void> {
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
 }
 
-async function scan(page: Page): Promise<void> {
-  const { violations } = await new AxeBuilder({ page }).withTags(RULES).analyze();
+/**
+ * `exclude` is a deliberate hole in the scan, and there is exactly one.
+ *
+ * Excluding a region is how a scan stops meaning anything, so the only selector ever passed here
+ * is `[data-sketcher-canvas]` — a third-party WASM structure editor whose markup this repository
+ * does not write and cannot fix. Scanning it would produce violations no commit here can close,
+ * and a permanently red gate is one everybody learns to skip. What the exclusion costs is written
+ * down in `ISSUES.md` rather than absorbed, and what it does not excuse is asserted directly: the
+ * dialog around the canvas still gets scanned, and the text alternative it offers is checked.
+ */
+async function scan(page: Page, exclude?: string): Promise<void> {
+  let builder = new AxeBuilder({ page }).withTags(RULES);
+  if (exclude) builder = builder.exclude(exclude);
+  const { violations } = await builder.analyze();
   // Name the rule and the node, or a red CI run tells you nothing about what to open.
   const detail = violations
     .map(
@@ -105,6 +117,34 @@ for (const theme of ['light', 'dark'] as const) {
       await page.goto('/c/does-not-exist');
       await expect(page.getByText(/isn’t on this device/)).toBeVisible();
       await scan(page);
+    });
+
+    test('the structure sketcher, and the alternative it names', async ({ page }) => {
+      // The one state in this app with an inaccessible core: a pointer-driven canvas inside a
+      // modal. The honest position — argued in `ISSUES.md` and stated in the dialog itself — is
+      // that drawing is one of three doors and the other two are text, so what is asserted here is
+      // that a screen-reader user is *told* that on open rather than meeting an unlabelled canvas.
+      //
+      // Ketcher is a multi-megabyte lazily-imported chunk, so this deliberately does not wait for
+      // the editor: every assertion below is about the dialog chrome, which renders immediately
+      // and is identical whether the editor loads, is still loading, or failed.
+      await page.goto('/');
+      await page.getByRole('button', { name: 'Insert a structure' }).click();
+
+      // The alternative, before the modal: labelled, and reachable by keyboard like any input.
+      await expect(page.getByLabel('SMILES')).toBeVisible();
+
+      // `exact`, because the answer-rendering preference toggle is called "Draw structures in
+      // answers" and a substring match resolves to both.
+      await page.getByRole('button', { name: 'Draw', exact: true }).click();
+      const dialog = page.getByRole('dialog');
+      await expect(dialog).toBeVisible();
+      // Radix wires this to `aria-describedby`, so it is what a screen reader reads out with the
+      // dialog's name. `tests/structureInput.test.tsx` pins the wiring; this pins that it survives
+      // into a real browser with the real editor mounting underneath it.
+      await expect(dialog).toContainText(/Cancel to paste SMILES or drop a MOL or SDF file/);
+
+      await scan(page, '[data-sketcher-canvas]');
     });
 
     test('the conversation drawer', async ({ page, isMobile }) => {

@@ -89,7 +89,23 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
       if (cancelled || remote.length === 0) return;
       const messages = transcriptToMessages(remote);
       if (messages.length === 0) return;
+      // The plan is session state the transcript does not carry — `latestPlan` was stream-only,
+      // so a reload dropped the checklist while the session was still proposing (and possibly
+      // still blocked on) a plan. Read it back *before* hydrating: hydration raises
+      // `messageCount`, which re-runs this effect and flips `cancelled` on this continuation,
+      // so a read placed after it would always be discarded. Silent on any failure: an older
+      // service has no plan route, and a session with no plan is the ordinary case, not an
+      // error worth a banner.
+      let plan: { todos: string[]; hash: string } | null = null;
+      try {
+        const status = await api.getPlan(sessionId, auth);
+        if (status.plan.length > 0) plan = { todos: status.plan, hash: status.plan_hash };
+      } catch {
+        // No plan to restore; the checklist simply stays absent.
+      }
+      if (cancelled) return;
       useChatStore.getState().hydrateTranscript(conversationId, messages);
+      if (plan) useChatStore.getState().attachPlan(conversationId, plan.todos, plan.hash);
     })();
     return () => {
       cancelled = true;

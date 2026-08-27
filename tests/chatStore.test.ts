@@ -226,3 +226,52 @@ describe('removing conversations does not strand live state', () => {
     expect(Object.keys(useChatStore.getState().conversations)).toHaveLength(1);
   });
 });
+
+describe('plan approval reaching the message', () => {
+  it('records an approval_request with an empty id as a plan approval', () => {
+    // The service marks a plan approval by an *empty* approval_id (a durable hold always carries
+    // one), and the assistant bubble mounts its plan card on exactly that shape. The id must
+    // survive the store as the empty string, not be dropped or defaulted.
+    const store = useChatStore.getState();
+    const cid = store.createConversation();
+    const mid = useChatStore.getState().startAssistantMessage(cid);
+    useChatStore
+      .getState()
+      .applyEvent(cid, mid, { type: 'plan', todos: ['[ ] compute the pKa'], plan_hash: 'h' });
+    useChatStore.getState().applyEvent(cid, mid, {
+      type: 'approval_request',
+      prompt: 'This plan is waiting for your decision.',
+      approval_id: '',
+    });
+    const message = assistantOf(cid, mid);
+    const approval = message.trace.findLast((e) => e.kind === 'approval_request')?.approval;
+    expect(approval?.approvalId).toBe('');
+    expect(approval?.prompt).toBe('This plan is waiting for your decision.');
+    expect(message.latestPlan).toEqual(['[ ] compute the pKa']);
+    expect(message.latestPlanHash).toBe('h');
+  });
+
+  it('attaches a rehydrated plan to the newest assistant message only', () => {
+    const store = useChatStore.getState();
+    const cid = store.createConversation();
+    const first = useChatStore.getState().startAssistantMessage(cid);
+    useChatStore.getState().finishTurn(cid, first, 'done');
+    const second = useChatStore.getState().startAssistantMessage(cid);
+    useChatStore.getState().finishTurn(cid, second, 'done');
+
+    useChatStore.getState().attachPlan(cid, ['compute the pKa'], 'h-2');
+
+    expect(assistantOf(cid, first).latestPlan).toBeNull();
+    expect(assistantOf(cid, second).latestPlan).toEqual(['compute the pKa']);
+    expect(assistantOf(cid, second).latestPlanHash).toBe('h-2');
+  });
+
+  it('attaches no empty plan', () => {
+    const store = useChatStore.getState();
+    const cid = store.createConversation();
+    const mid = useChatStore.getState().startAssistantMessage(cid);
+    useChatStore.getState().finishTurn(cid, mid, 'done');
+    useChatStore.getState().attachPlan(cid, [], 'h');
+    expect(assistantOf(cid, mid).latestPlan).toBeNull();
+  });
+});

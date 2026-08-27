@@ -138,7 +138,17 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   const messageId = store.startAssistantMessage(conversationId);
 
   const abort = new AbortController();
-  store.setStreaming({ conversationId, messageId, abort });
+  const stop = (): void => {
+    // Server first, then socket: the backend detaches on disconnect
+    // (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so aborting the fetch alone would
+    // leave the turn running — and the session 409-busy — for its whole remaining duration.
+    // Fire-and-forget: the abort below is what the UI reacts to, and a stop that raced the
+    // turn's own completion resolves `false` harmlessly.
+    const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
+    if (sessionId) void api.stopTurn(sessionId, () => auth.getAccessToken()).catch(() => undefined);
+    abort.abort();
+  };
+  store.setStreaming({ conversationId, messageId, abort, stop });
   store.setComposerLock('turn_in_flight');
   store.setBanner(null);
 
@@ -222,11 +232,52 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
 
     batcher.flush();
 
-    if (apiError.kind === 'aborted') {
+    // The signal, not only the error kind: a Stop pressed just as the server ends the stream
+    // surfaces as a `stream` error with the abort already set, and that is a stop, not a drop —
+    // recovering it would poll for an answer the user just cancelled.
+    if (apiError.kind === 'aborted' || abort.signal.aborted) {
       useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
       useChatStore.getState().setComposerLock(false);
       announceStatus('Stopped before the answer was complete.');
       return;
+    }
+
+    // An accidental drop is not a stop: the backend detaches and the turn runs to completion
+    // server-side (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so a broken stream is a
+    // *recoverable* state — the answer will land in the session transcript. Poll it back rather
+    // than surfacing a dead-end banner for work that is still happening.
+    if (apiError.kind === 'stream' || apiError.kind === 'network') {
+      const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
+      if (sessionId) {
+        useChatStore.getState().setBanner({
+          kind: 'info',
+          text: 'Connection lost — the turn is still running on the server; recovering the answer…',
+        });
+        announceStatus('Connection lost; waiting for the server to finish the turn.');
+        const recovered = await recoverDetachedAnswer(sessionId, opts.text, abort.signal, auth);
+        if (recovered !== null) {
+          useChatStore.getState().applyEvent(conversationId, messageId, {
+            type: 'answer',
+            text: recovered,
+            confidence: null,
+            unsupported_claims: [],
+            review_required: false,
+            verified_by: null,
+          });
+          useChatStore.getState().finishTurn(conversationId, messageId, 'done');
+          useChatStore.getState().setComposerLock(false);
+          useChatStore.getState().setBanner(null);
+          announceStatus(describeAnswer(recovered));
+          return;
+        }
+        if (abort.signal.aborted) {
+          useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
+          useChatStore.getState().setComposerLock(false);
+          useChatStore.getState().setBanner(null);
+          announceStatus('Stopped before the answer was complete.');
+          return;
+        }
+      }
     }
 
     // Failures are NOT announced here. `failTurn` raises a banner that already carries
@@ -271,22 +322,60 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
 }
 
 /**
+ * Read a detached turn's answer back from the transcript, or `null` when it never appears.
+ *
+ * The detached turn writes its exchange to `session_messages` at its true end, so the recovery
+ * signal is an assistant entry following the last transcript entry that carries this turn's own
+ * question. Bounded — the server's turn deadline is 600 s, and polling much past it would wait
+ * on a turn that can no longer exist — and abandoned early if the user presses Stop, whose
+ * `stop()` both cancels the server turn and flips this signal.
+ */
+async function recoverDetachedAnswer(
+  sessionId: string,
+  question: string,
+  signal: AbortSignal,
+  auth: AuthProvider,
+): Promise<string | null> {
+  const deadline = Date.now() + 630_000;
+  while (Date.now() < deadline && !signal.aborted) {
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    let transcript;
+    try {
+      transcript = await api.getMessages(sessionId, () => auth.getAccessToken());
+    } catch {
+      continue; // the network that dropped the stream may still be flapping — keep trying
+    }
+    const asked = transcript.map((m) => (m.role === 'user' ? m.text : null)).lastIndexOf(question);
+    if (asked === -1) continue; // the turn has not committed its exchange yet
+    const answer = transcript
+      .slice(asked + 1)
+      .find((m) => m.role === 'assistant' && m.text.trim() !== '');
+    if (answer) return answer.text;
+  }
+  return null;
+}
+
+/**
  * Stop the in-flight turn.
  *
- * Aborting the fetch cancels the response body, which closes the socket to the BFF, which
- * destroys its upstream request, which FastAPI sees as a client disconnect — releasing the
- * session's turn slot. That chain is why the next message does not come back 409.
+ * Two acts now, in order: `POST /sessions/{id}/turn/stop` cancels the turn on the server, and
+ * aborting the fetch closes the local stream. The socket close alone used to be the whole stop —
+ * the backend read any disconnect as cancellation — but a disconnect only *detaches* now
+ * (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so without the explicit request the turn
+ * would run on and the next message would 409 until it finished.
  */
 export function stopStreaming(): void {
   const { streaming } = useChatStore.getState();
-  streaming?.abort.abort();
+  streaming?.stop();
 }
 
 /**
  * Abandon the current server session and start a fresh one for the same conversation.
  *
- * The escape hatch from a stuck 409: the backend has no cancel endpoint, so if a turn is wedged
- * server-side the only way forward is a new session. Marks the conversation context-lost.
+ * The escape hatch from a stuck 409. The backend has a cancel endpoint now
+ * (`stopStreaming` uses it), so this is for the narrower case it cannot reach: a turn wedged on
+ * a *different* front-door replica, whose pump only that process can cancel. Marks the
+ * conversation context-lost.
  */
 export async function resetSession(conversationId: string, auth: AuthProvider): Promise<void> {
   const { session_id } = await api.createSession(auth, profileFor(conversationId));

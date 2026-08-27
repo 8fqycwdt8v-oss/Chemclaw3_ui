@@ -107,6 +107,15 @@ export const ROUTES: readonly Route[] = [
     target: (m) => `/sessions/${m[1]}/messages`,
     sse: true,
   },
+  // The explicit stop. A disconnect only *detaches* from a running turn now
+  // (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop in the backend), so pressing Stop is a
+  // request of its own rather than a closed socket.
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/sessions/${SID}/turn/stop$`),
+    target: (m) => `/sessions/${m[1]}/turn/stop`,
+    sse: false,
+  },
   // Async job push-back. Long-lived and legitimately silent for minutes at a time.
   {
     method: 'GET',

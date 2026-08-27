@@ -12,15 +12,10 @@
  * back 409. Retry policy belongs to the caller, which knows whether a retry is safe.
  */
 
-import { EventSourceParserStream } from 'eventsource-parser/stream';
-import {
-  normalizeEvent,
-  type AnswerEvent,
-  type ChemclawEvent,
-  type ErrorCode,
-} from '../../shared/events.ts';
+import type { AnswerEvent, ChemclawEvent, ErrorCode } from '../../shared/events.ts';
 import { ApiError, errorFromEvent, errorFromStatus, readDetail } from './errors.ts';
 import { config } from '../env.ts';
+import { readEventStream } from '../lib/sse.ts';
 
 /**
  * Error codes that qualify the answer still to come, rather than replacing it.
@@ -88,31 +83,15 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
     throw new ApiError('stream', `Expected an event stream but received "${contentType}".`);
   }
 
-  const reader = res.body
-    .pipeThrough(new TextDecoderStream())
-    .pipeThrough(new EventSourceParserStream())
-    .getReader();
-
   let answer: AnswerEvent | null = null;
 
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value.data) continue; // heartbeat comments never reach here
-
-      let raw: unknown;
-      try {
-        raw = JSON.parse(value.data);
-      } catch {
-        // Tolerate a single malformed frame rather than killing an otherwise good turn.
-        continue;
-      }
-
-      const event = normalizeEvent(raw, value.event);
-      // Unknown event type: ignore it. The backend's union is explicitly designed to grow, and
-      // an older frontend must degrade rather than break.
-      if (!event) continue;
+    // `readEventStream`'s own `finally` cancels the reader on the way out — including when this
+    // loop `break`s below, since breaking a `for await` calls the generator's `return()`. That
+    // cancel is what turns a client Stop into a disconnect the BFF and FastAPI can act on to
+    // release the session's turn lock; without it, Stop would leave the next message 409-ing.
+    for await (const event of readEventStream(res.body)) {
+      if (!event) continue; // heartbeat, malformed frame, or an event type this frontend doesn't know
 
       // An `error` event ends the turn — with exactly one exception, which the backend names and
       // this client used to ignore. See `PARTIAL_ANSWER_CODES`.
@@ -131,11 +110,6 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
     if (opts.signal.aborted) throw new ApiError('aborted', 'Stopped.');
     if (err instanceof ApiError) throw err;
     throw new ApiError('stream', err instanceof Error ? err.message : 'The stream failed.');
-  } finally {
-    // Cancelling the body closes the socket, which the BFF turns into a destroyed upstream
-    // request, which FastAPI sees as a client disconnect and uses to cancel the turn and release
-    // the session's turn lock. Without this, Stop would leave the next message 409-ing.
-    await reader.cancel().catch(() => undefined);
   }
 
   if (!answer) {

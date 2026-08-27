@@ -135,6 +135,14 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   if (store.composerLock) return;
   if (!text.trim()) return;
 
+  // Snapshotted before `appendUserMessage` below adds this turn's own copy, so a repeated
+  // identical question can still be told apart from its own prior appearances once detach
+  // recovery has to find it in the *backend's* transcript by text alone (see
+  // `recoverDetachedAnswer`).
+  const priorOccurrences = (store.conversations[conversationId]?.messages ?? []).filter(
+    (m) => m.role === 'user' && m.text === text,
+  ).length;
+
   store.appendUserMessage(conversationId, text);
   const messageId = store.startAssistantMessage(conversationId);
 
@@ -274,7 +282,13 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           text: 'Connection lost — the turn is still running on the server; recovering the answer…',
         });
         announceStatus('Connection lost; waiting for the server to finish the turn.');
-        const recovered = await recoverDetachedAnswer(sessionId, opts.text, abort.signal, auth);
+        const recovered = await recoverDetachedAnswer(
+          sessionId,
+          opts.text,
+          priorOccurrences,
+          abort.signal,
+          auth,
+        );
         if (recovered !== null) {
           useChatStore.getState().applyEvent(conversationId, messageId, {
             type: 'answer',
@@ -355,14 +369,23 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
  * Read a detached turn's answer back from the transcript, or `null` when it never appears.
  *
  * The detached turn writes its exchange to `session_messages` at its true end, so the recovery
- * signal is an assistant entry following the last transcript entry that carries this turn's own
+ * signal is an assistant entry following the transcript entry that carries this turn's own
  * question. Bounded — the server's turn deadline is 600 s, and polling much past it would wait
  * on a turn that can no longer exist — and abandoned early if the user presses Stop, whose
  * `stop()` both cancels the server turn and flips this signal.
+ *
+ * The wire carries no turn id, so the question text is all there is to match on — but a chemist
+ * retrying an identical failed question (the banner's own "Retry" refills the same text) makes
+ * that text non-unique. `priorOccurrences` is how many times this exact question already sat in
+ * the transcript *before this turn started*; skipping that many matches finds this turn's own
+ * copy instead of an older, already-answered one. Until the backend commits this turn's copy,
+ * that many occurrences is all there is, so the search correctly keeps polling rather than
+ * returning a stale answer.
  */
 async function recoverDetachedAnswer(
   sessionId: string,
   question: string,
+  priorOccurrences: number,
   signal: AbortSignal,
   auth: AuthProvider,
 ): Promise<string | null> {
@@ -375,8 +398,18 @@ async function recoverDetachedAnswer(
     } catch {
       continue; // the network that dropped the stream may still be flapping — keep trying
     }
-    const asked = transcript.map((m) => (m.role === 'user' ? m.text : null)).lastIndexOf(question);
-    if (asked === -1) continue; // the turn has not committed its exchange yet
+    let seen = 0;
+    let asked = -1;
+    for (let i = 0; i < transcript.length; i += 1) {
+      const entry = transcript[i];
+      if (!entry || entry.role !== 'user' || entry.text !== question) continue;
+      if (seen === priorOccurrences) {
+        asked = i;
+        break;
+      }
+      seen += 1;
+    }
+    if (asked === -1) continue; // this turn's own copy has not committed yet
     const answer = transcript
       .slice(asked + 1)
       .find((m) => m.role === 'assistant' && m.text.trim() !== '');

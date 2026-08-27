@@ -1,0 +1,214 @@
+/**
+ * The two strips above an answer, and the rail below it.
+ *
+ * All three replace surfaces that were correct and unreadable: three equal amber boxes, a plan card
+ * printed in full above every answer, and a flat list of steps at one visual weight. What is
+ * asserted here is the *ranking*, because that is the whole of the change and none of it is visible
+ * to a type checker.
+ *
+ * The rule the first group pins: a qualifier that stops a reader acting keeps a bar and its
+ * `role="alert"`; one they merely consult becomes a chip. Nothing is dropped and nothing is
+ * softened — a test that only counted elements would pass on a version that quietly lost the
+ * review notice.
+ */
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { StatusStrip } from '../src/components/StatusStrip.tsx';
+import { PlanStrip } from '../src/components/PlanStrip.tsx';
+import { TracePanel } from '../src/components/TracePanel.tsx';
+import type { AssistantMessage, TraceEntry } from '../src/state/types.ts';
+
+vi.mock('../src/auth/AuthContext.tsx', () => ({
+  useAuth: () => ({ auth: { getAccessToken: async () => null, mode: 'dev' }, ready: true }),
+}));
+
+afterEach(cleanup);
+
+let seq = 0;
+const entry = (over: Partial<TraceEntry> & Pick<TraceEntry, 'kind'>): TraceEntry => ({
+  id: `e${(seq += 1)}`,
+  at: 0,
+  ...over,
+});
+
+const message = (over: Partial<AssistantMessage> = {}): AssistantMessage =>
+  ({
+    id: 'a1',
+    role: 'assistant',
+    at: 0,
+    status: 'done',
+    streamedText: '',
+    finalText: 'an answer',
+    confidence: null,
+    unsupportedClaims: [],
+    reviewRequired: false,
+    verifiedBy: null,
+    degradedConnectors: [],
+    partialReason: null,
+    queued: false,
+    trace: [],
+    latestPlan: null,
+    latestPlanHash: null,
+    error: null,
+    ...over,
+  }) as AssistantMessage;
+
+describe('the status strip ranks by what the reader has to do', () => {
+  it('gives an alert to what stops the reader acting on the answer', () => {
+    render(<StatusStrip message={message({ reviewRequired: true })} />);
+    const alerts = screen.getAllByRole('alert');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.textContent).toContain('Needs expert review');
+  });
+
+  it('gives an alert to a turn that was cut short, and keeps the service’s own sentence', () => {
+    render(<StatusStrip message={message({ partialReason: 'the model-call cap was reached' })} />);
+    expect(screen.getByRole('alert').textContent).toContain('the model-call cap was reached');
+  });
+
+  it('gives a chip — not an alert — to a connector that did not come up', () => {
+    render(<StatusStrip message={message({ degradedConnectors: ['safety'] })} />);
+    expect(screen.queryByRole('alert')).toBeNull();
+    // The chemistry, not the pod: what the chemist now has to do about it.
+    expect(screen.getByText(/hazard screen/)).toBeTruthy();
+  });
+
+  it('holds the unsupported claims one click in, and lets them out', () => {
+    render(
+      <StatusStrip
+        message={message({ confidence: 0.4, unsupportedClaims: ['the yield was 82%'] })}
+      />,
+    );
+    expect(screen.queryByText('the yield was 82%')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /1 unsupported claim/ }));
+    expect(screen.getByText('the yield was 82%')).toBeTruthy();
+  });
+
+  it('names which verifier produced a score, because the two are not comparable', () => {
+    render(<StatusStrip message={message({ confidence: 0.91, verifiedBy: 'citation-gate' })} />);
+    fireEvent.click(screen.getByRole('button', { name: /0.91/ }));
+    expect(screen.getByText(/scored against this turn/)).toBeTruthy();
+  });
+});
+
+describe('the plan strip', () => {
+  const trace: TraceEntry[] = [];
+
+  it('states where the plan has got to without printing it', () => {
+    render(
+      <PlanStrip
+        message={message({ latestPlan: ['[x] screen', '[ ] estimate the pKa'] })}
+        trace={trace}
+      />,
+    );
+    expect(screen.getByText(/1 of 2 steps done/)).toBeTruthy();
+    expect(screen.queryByText('estimate the pKa')).toBeNull();
+  });
+
+  it('opens on click', () => {
+    render(
+      <PlanStrip
+        message={message({ latestPlan: ['[x] screen', '[ ] estimate the pKa'] })}
+        trace={trace}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button'));
+    expect(screen.getByText('estimate the pKa')).toBeTruthy();
+  });
+
+  it('opens itself when the turn is waiting on a plan approval', () => {
+    // A decision is bound to the hash of the plan that was SHOWN, so a reader being asked to
+    // approve one must not have to go looking for it.
+    render(
+      <PlanStrip
+        message={message({ latestPlan: ['[ ] screen'] })}
+        trace={[
+          entry({
+            kind: 'approval_request',
+            approval: { prompt: 'Approve the plan?', approvalId: '' },
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText('screen')).toBeTruthy();
+  });
+
+  it('renders nothing at all when the turn had no plan', () => {
+    const { container } = render(<PlanStrip message={message()} trace={trace} />);
+    expect(container.firstChild).toBeNull();
+  });
+});
+
+describe('the step rail', () => {
+  it('summarises the work rather than counting it', () => {
+    render(
+      <TracePanel
+        trace={[
+          entry({
+            kind: 'tool_call',
+            toolCall: { tool: 'predict_pka', arguments: '{}', result: 'ok' },
+          }),
+          entry({ kind: 'job_started', job: { jobId: 'calc-1', kind: 'calc' } }),
+        ]}
+        durationMs={4200}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /2 steps · 1 tool · 1 job · 4s/ })).toBeTruthy();
+  });
+
+  it('names a gate refusal as held rather than counting it among the failures', () => {
+    render(
+      <TracePanel
+        trace={[
+          entry({
+            kind: 'tool_failed',
+            toolFailure: { tool: 'submit_qm_job', message: 'held', reason: 'plan_gate' },
+          }),
+        ]}
+      />,
+    );
+    const trigger = screen.getByRole('button');
+    expect(trigger.textContent).toContain('1 held for approval');
+    expect(trigger.textContent).not.toContain('problem');
+  });
+
+  it('says how long a call took, and says nothing when it never saw it end', () => {
+    render(
+      <TracePanel
+        trace={[
+          {
+            id: 'timed',
+            at: 1000,
+            kind: 'tool_call',
+            toolCall: { tool: 'predict_pka', arguments: '{}', result: 'ok', endedAt: 5000 },
+          },
+          {
+            id: 'rehydrated',
+            at: 1000,
+            kind: 'tool_call',
+            toolCall: { tool: 'predict_logd', arguments: '{}', unresolved: true },
+          },
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button'));
+    expect(screen.getByText('4s')).toBeTruthy();
+    // A reloaded transcript has no clock of ours on it, so the row says the one true thing.
+    expect(screen.getByText('outcome not recorded')).toBeTruthy();
+  });
+
+  it('states what a plan revision changed instead of repeating the plan', () => {
+    render(
+      <TracePanel
+        trace={[
+          entry({ kind: 'plan', plan: { todos: ['[ ] screen'] } }),
+          entry({ kind: 'plan', plan: { todos: ['[x] screen', '[ ] estimate the pKa'] } }),
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button'));
+    expect(screen.getByText('1 step')).toBeTruthy();
+    expect(screen.getByText('1 added · 1 ticked off')).toBeTruthy();
+  });
+});

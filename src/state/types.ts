@@ -81,6 +81,15 @@ export interface TraceEntry {
      */
     unresolved?: boolean;
     /**
+     * When the ending arrived, by our clock.
+     *
+     * Paired with the entry's own `at` this is the duration of the call — the one number that
+     * turns a list of tool names into a reading of where a turn's time went. Our clock and not
+     * the service's, because nothing on the wire carries one; a reloaded transcript therefore has
+     * no duration at all, which the rail renders as a dash rather than as zero.
+     */
+    endedAt?: number;
+    /**
      * Content address of the untruncated result, when the service stored one.
      *
      * Carried on the trace rather than fetched eagerly: the point of the backend's split is that
@@ -137,6 +146,8 @@ export interface TraceEntry {
     summary?: JobSummary;
     settled?: boolean;
     planStep?: string;
+    /** When the ending reached us, for the same reason `toolCall.endedAt` exists. */
+    endedAt?: number;
   };
   /** `reason` may legitimately be empty; the service does not always have one. */
   jobFailure?: { jobId: string; reason: string };
@@ -224,6 +235,19 @@ export interface AssistantMessage {
    * never as a hash that will match. Null when no plan has been seen at all.
    */
   latestPlanHash: string | null;
+  /**
+   * When the turn stopped, however it stopped — answered, aborted or failed.
+   *
+   * What makes the summary line able to say how long the turn took. Deliberately *our* clock and
+   * not the service's: nothing on the wire carries a turn duration, so this is the wait the reader
+   * actually had, which is the number they would have counted themselves.
+   *
+   * Optional rather than required, and absent on every message written before it existed — a
+   * persisted transcript is read back by this same type, and a required field would make every
+   * stored turn structurally invalid for the sake of a duration nobody recorded. Absent means
+   * "not known", and the summary simply omits the time.
+   */
+  endedAt?: number | null;
   error: { kind: ApiErrorKind; message: string } | null;
 }
 

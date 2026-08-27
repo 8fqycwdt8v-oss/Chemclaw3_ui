@@ -14,9 +14,22 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { normalizeEvent } from '../shared/events.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
-import { CapabilityDegradedPill } from '../src/components/AnswerBadges.tsx';
+import { StatusStrip } from '../src/components/StatusStrip.tsx';
 import { TracePanel } from '../src/components/TracePanel.tsx';
 import type { AssistantMessage } from '../src/state/types.ts';
+
+/** A settled answer that lost some connectors and carries nothing else worth qualifying, so the
+ *  strip's only content is what this test is about. */
+const degraded = (connectors: string[]): AssistantMessage =>
+  ({
+    degradedConnectors: connectors,
+    confidence: null,
+    unsupportedClaims: [],
+    verifiedBy: null,
+    reviewRequired: false,
+    partialReason: null,
+    trace: [],
+  }) as unknown as AssistantMessage;
 
 const assistantOf = (conversationId: string, messageId: string): AssistantMessage => {
   const message = useChatStore
@@ -85,23 +98,14 @@ describe('capability_degraded', () => {
     // about a pod that a chemist cannot act on. What they can act on is "no molecule precedent
     // search". The raw name still rides along for whoever has to check the deployment, and a name
     // this repo has never seen degrades to naming it rather than guessing at its chemistry.
-    render(
-      <CapabilityDegradedPill
-        message={{ degradedConnectors: ['eln', 'molfp'] } as unknown as AssistantMessage}
-      />,
-    );
+    render(<StatusStrip message={degraded(['eln', 'molfp'])} />);
     expect(screen.getByText(/precedent search/)).toBeTruthy();
     expect(screen.getByText(/nothing only eln can reach/)).toBeTruthy();
     expect(screen.getByText('(molfp)')).toBeTruthy();
-    expect(screen.getByText(/fewer tools/i)).toBeTruthy();
   });
 
   it('renders nothing when every connector came up', () => {
-    const { container } = render(
-      <CapabilityDegradedPill
-        message={{ degradedConnectors: [] } as unknown as AssistantMessage}
-      />,
-    );
+    const { container } = render(<StatusStrip message={degraded([])} />);
     expect(container.firstChild).toBeNull();
   });
 });

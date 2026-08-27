@@ -203,6 +203,7 @@ function newAssistantMessage(): AssistantMessage {
     trace: [],
     latestPlan: null,
     latestPlanHash: null,
+    endedAt: null,
     error: null,
   };
 }
@@ -225,6 +226,9 @@ function closeToolCall(
   tool: string,
   ending: { result: string; resultRef?: string; numbers?: number[] } | { failed: true },
 ): TraceEntry[] {
+  // Our clock, at the moment the ending reached this process. Nothing on the wire carries a tool
+  // duration, so this is the only honest one available — and it is the wait the reader had.
+  const endedAt = Date.now();
   const index = trace.findIndex(
     (entry) =>
       entry.kind === 'tool_call' &&
@@ -234,7 +238,7 @@ function closeToolCall(
   );
   const target = trace[index];
   if (index === -1 || !target?.toolCall) return trace;
-  const updated: TraceEntry = { ...target, toolCall: { ...target.toolCall, ...ending } };
+  const updated: TraceEntry = { ...target, toolCall: { ...target.toolCall, ...ending, endedAt } };
   return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
 }
 
@@ -256,7 +260,10 @@ function settleJob(trace: TraceEntry[], jobId: string): TraceEntry[] {
   );
   const target = trace[index];
   if (index === -1 || !target?.job) return trace;
-  const updated: TraceEntry = { ...target, job: { ...target.job, settled: true } };
+  const updated: TraceEntry = {
+    ...target,
+    job: { ...target.job, settled: true, endedAt: Date.now() },
+  };
   return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
 }
 
@@ -860,7 +867,15 @@ export const useChatStore = create<ChatState>()(
       },
 
       finishTurn(conversationId, messageId, status) {
-        set((s) => updateAssistant(s, conversationId, messageId, (m) => ({ ...m, status })));
+        // Stamped on every ending, not just the successful one: an aborted turn took as long as
+        // it took, and the summary line has no other way to say so.
+        set((s) =>
+          updateAssistant(s, conversationId, messageId, (m) => ({
+            ...m,
+            status,
+            endedAt: Date.now(),
+          })),
+        );
       },
 
       failTurn(conversationId, messageId, error) {
@@ -868,6 +883,7 @@ export const useChatStore = create<ChatState>()(
           updateAssistant(s, conversationId, messageId, (m) => ({
             ...m,
             status: 'error',
+            endedAt: Date.now(),
             error,
           })),
         );

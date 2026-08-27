@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { useChatStore, newConversation } from '../src/state/chatStore.ts';
 import { AuthGate } from '../src/auth/AuthContext.tsx';
@@ -228,6 +228,11 @@ describe('the plan behind a rehydrated transcript', () => {
 
     const cid = seed('server');
     renderShell(cid);
+    // The strip states how much plan there is; the steps themselves are one click in. A restored
+    // plan carries no `[x] `/`[ ] ` status — `GET /sessions/{id}/plan` returns bare step text —
+    // so the strip counts the steps rather than claiming a position nobody reported.
+    const strip = await screen.findByRole('button', { name: /plan\s+2 steps/i });
+    fireEvent.click(strip);
     expect(await screen.findByText('compute the pKa')).toBeTruthy();
 
     const assistant = useChatStore

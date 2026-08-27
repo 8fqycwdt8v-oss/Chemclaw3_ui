@@ -61,7 +61,7 @@ test('the trace panel reports its own expanded state', async ({ page }) => {
   await page.getByPlaceholder(/Ask about a reaction/).fill('What is the pKa of acetic acid?');
   await page.getByRole('button', { name: 'Send' }).click();
 
-  const toggle = page.getByRole('button', { name: /Show the agent’s work/ });
+  const toggle = page.getByRole('button', { name: /The agent’s work/ });
   await expect(toggle).toBeVisible({ timeout: 15_000 });
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
 
@@ -70,18 +70,24 @@ test('the trace panel reports its own expanded state', async ({ page }) => {
   await expect(page.getByText('Screen hazards')).toBeVisible();
 });
 
-test('the full result is reachable from the trace, as data rather than a preview', async ({
-  page,
-}) => {
-  // The turn streams a 200-character preview and a content-addressed ref. This is the path that
-  // turns the ref into the hazard table the chemist has to act on — the severity, the rule that
-  // fired, and the citation behind it, none of which survive the truncation.
+test('the result reaches the answer as data, and the panel behind it agrees', async ({ page }) => {
+  // The turn streams a 200-character preview and a content-addressed ref. The block under the
+  // answer turns that ref into the hazard table the chemist has to act on — the severity, the rule
+  // that fired, and the citation behind it, none of which survive the truncation — and the panel
+  // it opens is the same registry at full size.
   await page.goto('/');
   await page.getByPlaceholder(/Ask about a reaction/).fill('Screen this azide before I order it.');
   await page.getByRole('button', { name: 'Send' }).click();
 
-  await page.getByRole('button', { name: /Show the agent’s work/ }).click();
-  await page.getByRole('button', { name: 'See the full result' }).click();
+  const block = page.locator('[data-result-block="hazard"]');
+  await expect(block).toBeVisible({ timeout: 15_000 });
+  await expect(block.getByText('organic-azide')).toBeVisible();
+
+  // A second stored result of a different shape, so the registry's dispatch is exercised in a
+  // browser rather than only in the unit tier: named scalars become a value strip, not a table.
+  await expect(page.locator('[data-result-block="values"]')).toBeVisible();
+
+  await block.getByRole('button', { name: 'Open full result' }).click();
 
   const panel = page.getByRole('dialog', { name: /full result/ });
   await expect(panel.getByText('organic-azide')).toBeVisible();

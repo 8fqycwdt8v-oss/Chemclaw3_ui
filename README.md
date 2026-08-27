@@ -18,16 +18,26 @@ bearer token.
 
 - **Streams a turn** and renders every event in the service's contract — tokens, plan revisions,
   tool calls, launched jobs, proposed notes, questions, approvals, and the final answer.
-- **Shows the agent's work** in a collapsible trace panel. Honest about its limits: the service
-  streams tool _invocations_ only, so the panel says what was called, never what came back.
+- **Shows what the turn is doing, on one line.** A row that mutates rather than a log that grows:
+  the plan step it is on, the tool that is out, the durable job it is waiting on, and how long it
+  has been going. When the turn settles the same row becomes the summary — `6 steps · 2 tools ·
+1 job · 4s` — which is also the disclosure that opens the work.
+- **Shows the agent's work** as a rail rather than a list: one line per step, its state in the dot,
+  how long it took on the right, and what it returned one disclosure in. A refused call is amber
+  and counted as _held_, not as a failure — the gate working is not the gate breaking.
 - **Renders structures** from SMILES — the `molecule_smiles` a finished QM job pushes back, plus an
   opt-in toggle on inline SMILES in answers.
-- **Surfaces verifier signals** — a "needs expert review" pill at the _top_ of a low-confidence
-  answer, plus the confidence score and any unsupported claims.
-- **Renders what a tool returned**, not only the model's paraphrase of it. The turn streams a
-  200-character preview and a content address; a trace row offers to fetch the rest, and renders it
-  as a hazard table, an ICH limit with its guideline, a charge table, or a generic table — with the
-  result's own `verdict` above the data, because an empty screen is explicitly not a clearance.
+- **Ranks what qualifies an answer** rather than stacking it. What stops a reader acting on the
+  answer — "needs expert review", "cut short" — keeps a full-width alert above the text; what they
+  merely consult — a connector that did not come up, the verifier's score, the methods behind the
+  numbers — is a chip that expands in place.
+- **Renders what a tool returned in the answer itself**, not only the model's paraphrase of it. The
+  turn streams a 200-character preview and a content address; a block under the answer fetches the
+  rest when it scrolls into view and draws it as a hazard table, an ICH limit with its guideline, a
+  charge table, a grid of structures, a series or a generic table — with the result's own `verdict`
+  above the data, because an empty screen is explicitly not a clearance. The renderers are a
+  shape-keyed registry (`src/results/`), so the block in the answer and the panel behind it are one
+  component in two sizes, and a tool the service adds tomorrow is legible without a release here.
 - **Resolves citations.** A `note-…` chip opens the note with its provenance and its validity
   window, so a citation in an old answer that points at a superseded note says so.
 - **Reviews machine-written knowledge.** `/review` is the PR gate in the browser: what a proposal
@@ -126,6 +136,7 @@ server/     the BFF — route whitelist, streaming proxy, static host, /config.j
 src/        the SPA — api/ auth/ state/ components/
   components/ui/    primitives (button, sheet, alert-dialog, …) on Radix + cva
   components/chem/  composites built from them (StatusDot, ConfirmDialog, …)
+  results/          the tool-result renderers, keyed on payload shape, and their registry
 shared/     the event contract, mirrored from the service's api/events.py
 scripts/    dev launcher, server bundler, smoke test, contrast gate
 e2e/        Playwright specs and the SSE fixture service
@@ -135,8 +146,10 @@ docs/       concept studies — what the chemistry surface is for, and what it s
 
 Three files carry most of the difficulty and are commented accordingly:
 
-- **`src/index.css`** — the design tokens, and one trap worth knowing before you add a
-  theme-dependent one. **`@theme` cannot be nested to express a theme.** Tailwind v4 merges every
+- **`src/index.css`** — the design tokens. The palette is cool near-neutrals at hue 264 with the
+  chroma spent on semantics (258 brand, 158 ok, 72 warn, 22 danger), and `npm run check:contrast` is
+  what proves each pair rather than the eye. There is one trap worth knowing before you add a
+  theme-dependent token. **`@theme` cannot be nested to express a theme.** Tailwind v4 merges every
   `@theme` block into one map regardless of the at-rule around it, hoists the first into `:root` and
   deletes the rest, so last write wins unconditionally. This file used to carry a second `@theme`
   inside `@media (prefers-color-scheme: dark)`; it compiled to a single `:root` holding the _dark_

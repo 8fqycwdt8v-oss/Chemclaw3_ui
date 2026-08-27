@@ -674,12 +674,21 @@ function CampaignProgressReading({ data }: { data: Json }): React.JSX.Element {
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
+        {/*
+          "Not plateaued", not "Still improving" — the third state is the absence of a plateau
+          finding, not the presence of a progress one. Upstream computes
+          `plateaued = enough and since >= window`, so `since == window - 1` is `false` while its
+          own summary says only "the last gain was N evaluation(s) ago". Rendering that as a green
+          "Still improving" upgrades a negative into a positive, one notch along from the
+          over-claim the withheld state exists to prevent. The `since` count sits in the stats
+          below, which is where a chemist reads how the campaign is actually doing.
+        */}
         {!enough ? (
           <Badge tone="neutral">Plateau verdict withheld</Badge>
         ) : plateaued ? (
           <Badge tone="warn">Plateaued</Badge>
         ) : (
-          <Badge tone="ok">Still improving</Badge>
+          <Badge tone="ok">Not plateaued</Badge>
         )}
         {noise !== null && (
           <span className="text-2xs text-ink-subtle">judged against ±{sig(noise)} assay noise</span>
@@ -723,20 +732,28 @@ function CampaignProgressReading({ data }: { data: Json }): React.JSX.Element {
           its face — whenever the history holds a run an exclusion later forbade, which is the
           ordinary case of a pairing excluded after being run once. The note says so when the two
           counts disagree, rather than silently dropping the run from the headline.
+
+          The ratio is rendered only when `n_distinct_in_space` is actually present. Falling back
+          to `n_distinct` there would print the exact "4 / 3" this comment claims to prevent —
+          against an older service that predates the field, which is the one case where nobody
+          would be looking for it. The field is required on `CampaignProgress`, so the fallback
+          shows the bare count instead of a ratio it cannot compute honestly.
         */}
         <Stat
           label="Distinct conditions"
           value={
-            designSpace === null
+            designSpace === null || inSpace === null
               ? (distinct ?? '—')
-              : `${inSpace ?? distinct ?? '—'} / ${designSpace}`
+              : `${inSpace} / ${designSpace}`
           }
           note={
             designSpace === null
               ? 'the grid is infinite — a continuous parameter'
-              : inSpace !== null && distinct !== null && distinct > inSpace
-                ? `of the feasible grid — ${distinct - inSpace} further run(s) are outside it, excluded by a constraint`
-                : 'of the feasible grid'
+              : inSpace === null
+                ? 'distinct conditions run'
+                : distinct !== null && distinct > inSpace
+                  ? `of the feasible grid — ${distinct - inSpace} further run(s) are outside it, excluded by a constraint`
+                  : 'of the feasible grid'
           }
         />
         <Stat
@@ -832,7 +849,13 @@ function SuggestionResult({ data }: { data: Json }): React.JSX.Element {
           <ul className="flex flex-col gap-2">
             {candidates.map((candidate, index) => {
               const predicted = predictedOf(candidate, scales);
-              const isSeed = predicted.every((entry) => entry.sd === null);
+              // A seed is a candidate the surrogate had no *opinion* about — no predicted value.
+              // Keyed on `value`, not on `sd`, because upstream fills the two from independent
+              // column probes (`{name}_pred` and `{name}_sd` in `engine.py::_frame_to_candidates`),
+              // so a mean with no sd is representable. Keying on `sd` badged such a candidate
+              // "no surrogate opinion" *and* suppressed the `<dl>` below, dropping the very number
+              // the chemist is being asked to act on.
+              const isSeed = predicted.every((entry) => entry.value === null);
               return (
                 <li
                   key={index}

@@ -94,8 +94,11 @@ const ResultBlocks = memo(function ResultBlocks({
   const stored = useMemo(
     () =>
       trace.filter(
-        (e): e is TraceEntry & { toolCall: { tool: string; resultRef: string } } =>
-          e.kind === 'tool_call' && Boolean(e.toolCall?.resultRef),
+        (
+          e,
+        ): e is TraceEntry & {
+          toolCall: { tool: string; resultRef: string; resultInline?: string };
+        } => e.kind === 'tool_call' && Boolean(e.toolCall?.resultRef),
       ),
     [trace],
   );
@@ -109,6 +112,7 @@ const ResultBlocks = memo(function ResultBlocks({
           sessionId={sessionId}
           tool={entry.toolCall.tool}
           resultRef={entry.toolCall.resultRef}
+          inline={entry.toolCall.resultInline}
         />
       ))}
       {stored.length > shown.length && (

@@ -166,6 +166,41 @@ describe('a stored result becomes a block in the answer', () => {
     expect(block?.textContent).toContain(`${HAZARD.length.toLocaleString()} B`);
   });
 
+  it('renders a small result with no fetch at all, from the event itself', async () => {
+    // The preview/ref split is a rule about LARGE results, and it was costing a 300-byte ICH limit
+    // a second round trip for a payload smaller than the preview beside it. Under the service's
+    // inline cap the text rides along, and the block draws it immediately.
+    const cid = seed(1);
+    const store = useChatStore.getState();
+    const conversation = store.conversations[cid]!;
+    const assistant = conversation.messages.findLast((m) => m.role === 'assistant');
+    if (assistant?.role !== 'assistant') throw new Error('no assistant message');
+    useChatStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        [cid]: {
+          ...conversation,
+          messages: conversation.messages.map((m) =>
+            m.id === assistant.id
+              ? {
+                  ...assistant,
+                  trace: assistant.trace.map((e) =>
+                    e.kind === 'tool_call' && e.toolCall
+                      ? { ...e, toolCall: { ...e.toolCall, resultInline: HAZARD } }
+                      : e,
+                  ),
+                }
+              : m,
+          ),
+        },
+      },
+    }));
+
+    render(<MessageList conversationId={cid} />);
+    expect(await screen.findByText('organic-azide')).toBeTruthy();
+    expect(calls.filter((u) => u.includes('tool-results'))).toHaveLength(0);
+  });
+
   it('offers nothing for a transcript with no session to fetch against', () => {
     // A rehydrated transcript has the calls and no session handle; the route is session-scoped, so
     // asking would be asking for a 404.

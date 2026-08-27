@@ -302,6 +302,57 @@ describe('the step rail', () => {
     expect(screen.getByText('418 words')).toBeTruthy();
   });
 
+  it('prints a returned value under the name the tool gave it', () => {
+    // `numbers` alone could only ever say "predict_pka returned 4.76, 1.6". What it still must not
+    // say is "4.76 ± 1.6": that the second is an uncertainty on the first is a relationship no
+    // tool has stated, so the two are printed as the two values they are.
+    render(
+      <TracePanel
+        trace={[
+          entry({
+            kind: 'tool_call',
+            toolCall: {
+              tool: 'predict_pka',
+              arguments: '{}',
+              result: '{"pka": 4.76}',
+              numbers: [4.76, 1.6],
+              values: [
+                { label: 'pka', value: 4.76, unit: '' },
+                { label: 'sd', value: 1.6, unit: '' },
+              ],
+            },
+          }),
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /The agent’s work/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }));
+    expect(screen.getByText(/pka 4\.76/)).toBeTruthy();
+    expect(screen.getByText(/sd 1\.6/)).toBeTruthy();
+  });
+
+  it('falls back to the bare figures when the result had no names to give', () => {
+    render(
+      <TracePanel
+        trace={[
+          entry({
+            kind: 'tool_call',
+            toolCall: {
+              tool: 'find_notes',
+              arguments: '{}',
+              result: 'the pKa is about 4.76',
+              numbers: [4.76],
+            },
+          }),
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /The agent’s work/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }));
+    // A prose result has no names, and a guessed one would be the invention the service refuses.
+    expect(screen.getByText('4.76')).toBeTruthy();
+  });
+
   it('states what a plan revision changed instead of repeating the plan', () => {
     render(
       <TracePanel

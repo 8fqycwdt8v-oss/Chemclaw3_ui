@@ -137,14 +137,30 @@ function MethodCaveat({ tool }: { tool: string }): React.JSX.Element | null {
  * also what the figure marks in the answer above were checked against, so a reader who distrusts a
  * mark can see the evidence rather than take it on faith.
  */
-function ReturnedNumbers({ numbers }: { numbers: number[] }): React.JSX.Element | null {
-  if (numbers.length === 0) return null;
+function ReturnedNumbers({
+  numbers,
+  values,
+}: {
+  numbers: number[];
+  /** The same figures under the tool's own keys, when the result was structured. */
+  values?: { label: string; value: number; unit: string }[];
+}): React.JSX.Element | null {
+  if (numbers.length === 0 && !values?.length) return null;
+  // Named where the service could name them, bare where it could not. The bare form is not a
+  // degradation to hide: a result that was not JSON has no names, and printing a guessed one would
+  // be the invention both fields exist on opposite sides of.
+  const named = values ?? [];
+  const count = named.length || numbers.length;
   return (
     <div className="mt-1.5">
       <p className="text-2xs text-ink-subtle">
-        {numbers.length} value{numbers.length === 1 ? '' : 's'} returned, untruncated
+        {count} value{count === 1 ? '' : 's'} returned, untruncated
       </p>
-      <Pre label="Values returned, untruncated">{numbers.join(', ')}</Pre>
+      <Pre label="Values returned, untruncated">
+        {named.length > 0
+          ? named.map((v) => `${v.label} ${v.value}${v.unit ? ` ${v.unit}` : ''}`).join('\n')
+          : numbers.join(', ')}
+      </Pre>
     </div>
   );
 }
@@ -369,7 +385,7 @@ function Row({
                   {/* Exactly the word, on its own node: the panel's tests match it. */}
                   <p className="mt-1.5 text-2xs text-ink-subtle">returned</p>
                   <Pre label={`Result preview from ${call.tool}`}>{call.result}</Pre>
-                  <ReturnedNumbers numbers={call.numbers ?? []} />
+                  <ReturnedNumbers numbers={call.numbers ?? []} values={call.values} />
                   {call.resultRef && (
                     <FullResult sessionId={sessionId} tool={call.tool} resultRef={call.resultRef} />
                   )}

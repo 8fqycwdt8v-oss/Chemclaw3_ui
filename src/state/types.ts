@@ -108,6 +108,25 @@ export interface TraceEntry {
      * are different facts and the second of which switches the check off.
      */
     numbers?: number[];
+    /**
+     * The same figures, each under the key the tool filed it under.
+     *
+     * Beside `numbers` rather than replacing it, because the two answer different questions: the
+     * bare list is what `provenance.ts` checks the answer's written figures against, where a name
+     * is noise, and this is what a surface *prints*, where a number with no name is not a
+     * measurement. Empty for a result that was not JSON — the service refuses to guess a label out
+     * of prose, and so does everything downstream of it.
+     */
+    values?: { label: string; value: number; unit: string }[];
+    /**
+     * The whole result, when it was small enough for the service to send with the event.
+     *
+     * An optimisation and never a presence check: `resultRef` is still what says a result was
+     * stored, and a result over the service's inline cap arrives with this empty and is fetched
+     * exactly as before. What it buys is the common case — an ICH limit, a pKa — rendering with
+     * the turn instead of paying a round trip for a payload smaller than the preview beside it.
+     */
+    resultInline?: string;
   };
   toolFailure?: {
     tool: string;

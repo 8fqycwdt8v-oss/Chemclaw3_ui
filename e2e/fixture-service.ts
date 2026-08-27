@@ -163,10 +163,19 @@ const TURN: readonly Frame[] = [
       tool: 'predict_pka',
       preview: JSON.stringify(PKA_RESULT).slice(0, 200),
       result_ref: VALUES_REF,
+      // Small enough to ride along, which is the ordinary case for a property lookup — so the
+      // browser tier exercises the path where a block renders with NO fetch at all.
+      result_inline: JSON.stringify(PKA_RESULT),
       note_ids: [],
       // Untruncated beside a truncated preview, and what the answer's figure marks are checked
       // against.
       numbers: [4.76, 1.6],
+      // The same figures under the tool's own keys. `sd` is not an uncertainty on `pka` as far as
+      // anything here knows, and the surfaces print them as the two values they are.
+      values: [
+        { label: 'pka', value: 4.76, unit: '' },
+        { label: 'sd', value: 1.6, unit: '' },
+      ],
       agent: '',
     },
     40,

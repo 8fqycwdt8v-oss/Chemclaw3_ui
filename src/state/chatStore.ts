@@ -224,7 +224,15 @@ function newAssistantMessage(): AssistantMessage {
 function closeToolCall(
   trace: TraceEntry[],
   tool: string,
-  ending: { result: string; resultRef?: string; numbers?: number[] } | { failed: true },
+  ending:
+    | {
+        result: string;
+        resultRef?: string;
+        resultInline?: string;
+        numbers?: number[];
+        values?: { label: string; value: number; unit: string }[];
+      }
+    | { failed: true },
 ): TraceEntry[] {
   // Our clock, at the moment the ending reached this process. Nothing on the wire carries a tool
   // duration, so this is the only honest one available — and it is the wait the reader had.
@@ -835,6 +843,13 @@ export const useChatStore = create<ChatState>()(
               trace: closeToolCall(m.trace, event.tool, {
                 result: event.preview,
                 ...(event.result_ref ? { resultRef: event.result_ref } : {}),
+                // Omitted rather than stored empty, the same rule the ref takes: absent means "the
+                // service did not send the result with the event", and a block then fetches it.
+                ...(event.result_inline ? { resultInline: event.result_inline } : {}),
+                // The named figures, when the result was structured enough to have names. Kept
+                // beside `numbers` rather than instead of it — the grounding check reads one and
+                // the surfaces read the other.
+                ...(event.values?.length ? { values: event.values } : {}),
                 // Kept whole. This is the untruncated list beside a truncated preview, and it is
                 // the only structured chemistry the stream carries — `provenance.ts` checks the
                 // answer's figures against it, so dropping it here is what made every figure in

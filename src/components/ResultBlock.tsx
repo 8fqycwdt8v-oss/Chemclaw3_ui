@@ -29,7 +29,7 @@
  * already offers it to whoever wants it.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Table2 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { api, type StoredToolResult } from '../api/client.ts';
@@ -77,17 +77,43 @@ export function ResultBlock({
   sessionId,
   tool,
   resultRef,
+  inline,
   className,
 }: {
   sessionId: string;
   tool: string;
   resultRef: string;
+  /**
+   * The result the service sent with the event, when it was small enough to ride along.
+   *
+   * When it is here there is no fetch at all — the common case, since an ICH limit and a pKa are
+   * both an order of magnitude under the service's inline cap. Absent is not "no result": the ref
+   * is still what says one was stored, and the block falls back to fetching exactly as before.
+   */
+  inline?: string;
   className?: string;
 }): React.JSX.Element | null {
   const { auth } = useAuth();
   const ref = useRef<HTMLDivElement | null>(null);
   const visible = useVisible(ref);
   const [state, setState] = useState<State>({ status: 'idle' });
+  // Memoised because the effect below depends on it: rebuilt every render, its identity would
+  // change every render, and the effect that skips the fetch would re-run for nothing.
+  const preloaded = useMemo(
+    () =>
+      inline
+        ? {
+            // A `StoredToolResult` built from what the event already carried. The byte size is measured
+            // here rather than guessed: it is the same string the service sized, and the footer showing
+            // it is the same claim whichever way the text arrived.
+            tool,
+            text: inline,
+            byte_size: new TextEncoder().encode(inline).length,
+            correlation_id: '',
+          }
+        : null,
+    [inline, tool],
+  );
   const [sheet, setSheet] = useState(false);
   /** Which ref we have already asked for, so a re-render cannot ask twice. */
   const requested = useRef<string | null>(null);
@@ -101,6 +127,8 @@ export function ResultBlock({
   // cancels the fetch its own previous run had just started. The request completes, the 200 comes
   // back, and the block renders nothing for ever.
   useEffect(() => {
+    // Nothing to fetch: the service sent the result with the event.
+    if (preloaded) return;
     if (!visible || requested.current === resultRef) return;
     requested.current = resultRef;
     setState({ status: 'loading' });
@@ -115,16 +143,17 @@ export function ResultBlock({
         // still offers the same result, and says so properly when it cannot be read either.
         if (mounted.current) setState({ status: 'failed' });
       });
-  }, [visible, sessionId, resultRef, auth]);
+  }, [preloaded, visible, sessionId, resultRef, auth]);
 
+  const result = preloaded ?? (state.status === 'ready' ? state.result : null);
   // The anchor has to exist before the fetch, or nothing can become visible.
-  if (state.status !== 'ready') {
+  if (!result) {
     return <div ref={ref} aria-hidden className="h-px" />;
   }
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(state.result.text);
+    parsed = JSON.parse(result.text);
   } catch {
     return null;
   }
@@ -190,7 +219,7 @@ export function ResultBlock({
         </Button>
         {/* The join a reviewer asks for, and the one a card without it cannot make. */}
         <span className="ml-auto font-mono text-2xs text-ink-subtle">
-          {state.result.byte_size.toLocaleString()} B
+          {result.byte_size.toLocaleString()} B
         </span>
       </div>
 

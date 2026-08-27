@@ -110,9 +110,14 @@ function JobRow({ entity }: { entity: JobEntity }): React.JSX.Element {
  * What the tools returned for this structure.
  *
  * One line per tool that returned anything, naming the tool — a number whose method is unnamed is
- * the failure this whole repo is arranged against. No units and no labels, because they are not on
- * the wire (see `Mention.values`), and a call that named several structures is marked, because the
- * same figures are attached to each of them.
+ * the failure this whole repo is arranged against. A call that named several structures is marked,
+ * because the same figures are attached to each of them.
+ *
+ * Each figure carries the key the tool filed it under, and its unit where the payload stated one
+ * (`tool_result.values`). Where the result was not JSON there are no names, and the row falls back
+ * to the bare figures rather than guessing — see `Mention.values`, which is also where the rule
+ * that survives the names is written: `pka 4.76` and `sd 1.6` are two values, and nothing here may
+ * render them as one measurement with an uncertainty.
  */
 function ValueList({ mentions }: { mentions: readonly Mention[] }): React.JSX.Element | null {
   const withValues = mentions.filter((m) => m.tool && (m.values?.length ?? 0) > 0);
@@ -121,7 +126,10 @@ function ValueList({ mentions }: { mentions: readonly Mention[] }): React.JSX.El
   return (
     <span className="mt-1.5 block border-t border-border-subtle pt-1.5">
       {withValues.map((mention, i) => {
+        const named = mention.named ?? [];
         const values = mention.values ?? [];
+        const total = named.length || values.length;
+        const shownNamed = named.slice(0, VALUES_SHOWN);
         const shown = values.slice(0, VALUES_SHOWN);
         return (
           <span key={`${mention.messageId}-${mention.tool}-${i}`} className="mt-0.5 block">
@@ -129,8 +137,14 @@ function ValueList({ mentions }: { mentions: readonly Mention[] }): React.JSX.El
               {mention.tool}
             </span>
             <span className="block font-mono text-2xs tabular-nums text-ink-muted">
-              {shown.map((v) => v.toLocaleString()).join(', ')}
-              {values.length > shown.length && ` … +${values.length - shown.length}`}
+              {named.length > 0
+                ? shownNamed
+                    .map(
+                      (v) => `${v.label} ${v.value.toLocaleString()}${v.unit ? ` ${v.unit}` : ''}`,
+                    )
+                    .join(' · ')
+                : shown.map((v) => v.toLocaleString()).join(', ')}
+              {total > VALUES_SHOWN && ` … +${total - VALUES_SHOWN}`}
             </span>
             {mention.shared && (
               <span className="block text-2xs text-ink-subtle">

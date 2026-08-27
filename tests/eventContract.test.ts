@@ -118,8 +118,15 @@ const full: Array<[string, Record<string, unknown>]> = [
       tool: 'find_notes',
       preview: 'p',
       result_ref: 'a'.repeat(64),
+      // The whole result when it is small enough to ride along. A consumer must treat it as an
+      // optimisation and never as the presence check — `result_ref` is still what says a result
+      // was stored — so both are populated here, together, as the service sends them.
+      result_inline: '{"pka": 1.5}',
       note_ids: ['note-x'],
       numbers: [1.5],
+      // The same figure under the key the tool filed it under. Dropped in transit, the entity rail
+      // is back to "find_notes returned 1.5" and the value strip has no names to print.
+      values: [{ label: 'pka', value: 1.5, unit: '' }],
       agent: 'x',
     },
   ],

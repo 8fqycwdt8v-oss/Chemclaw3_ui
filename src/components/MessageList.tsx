@@ -34,6 +34,7 @@ import {
   ReviewRequiredPill,
 } from './AnswerBadges.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
+import { PlanItems } from './PlanItems.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { entitiesOf, messagesFor, useEntityStore } from '../chem/entities.ts';
@@ -51,17 +52,7 @@ const PlanChecklist = memo(function PlanChecklist({
   return (
     <div className="mb-3 rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2.5">
       <p className="mb-1.5 text-2xs font-medium tracking-wide text-ink-subtle uppercase">Plan</p>
-      <ul className="space-y-1">
-        {todos.map((todo, i) => (
-          <li key={i} className="flex gap-2 text-sm">
-            <span
-              aria-hidden
-              className="mt-1.5 size-1.5 shrink-0 rounded-[1px] border border-ink-subtle"
-            />
-            <span>{todo}</span>
-          </li>
-        ))}
-      </ul>
+      <PlanItems todos={todos} />
     </div>
   );
 });

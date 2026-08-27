@@ -354,6 +354,7 @@ export interface ChatState {
   clearAll: () => void;
   setSessionId: (conversationId: string, sessionId: string, contextLost?: boolean) => void;
   hydrateTranscript: (conversationId: string, messages: ChatMessage[]) => void;
+  attachPlan: (conversationId: string, todos: string[], planHash: string) => void;
 
   appendUserMessage: (conversationId: string, text: string) => string;
   startAssistantMessage: (conversationId: string) => string;
@@ -532,6 +533,30 @@ export const useChatStore = create<ChatState>()(
                 ...(first ? { title: titleFrom(first.text) } : {}),
                 messages,
               },
+            },
+          };
+        });
+      },
+
+      attachPlan(conversationId, todos, planHash) {
+        // The session's current plan, read back after a reload. `latestPlan` is stream-only state
+        // — the transcript stores the messages, not the plan — so a rehydrated conversation lost
+        // its checklist while the session, per `GET /sessions/{id}/plan`, was still proposing one.
+        // Attached to the newest assistant message because that is where the live stream would
+        // have left it: the latest plan belongs to the latest turn.
+        set((s) => {
+          const conversation = s.conversations[conversationId];
+          if (!conversation || todos.length === 0) return {};
+          const index = conversation.messages.findLastIndex((m) => m.role === 'assistant');
+          if (index < 0) return {};
+          const target = conversation.messages[index];
+          if (!target || target.role !== 'assistant') return {};
+          const messages = conversation.messages.slice();
+          messages[index] = { ...target, latestPlan: todos, latestPlanHash: planHash };
+          return {
+            conversations: {
+              ...s.conversations,
+              [conversationId]: { ...conversation, messages },
             },
           };
         });

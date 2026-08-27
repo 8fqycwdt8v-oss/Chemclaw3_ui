@@ -33,12 +33,44 @@ const STATUS_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'brand'> = {
   running: 'brand',
 };
 
+/**
+ * The one durable job whose *shape* a reader has to know before reading the row.
+ *
+ * Every run in this list is a Temporal job, so "durable" separates none of them. What separates this
+ * one is that it is a **loop**: it proposes, evaluates against a registered objective, and repeats
+ * for as many rounds as its spec asked for — so it runs for hours or days where a conformer search
+ * runs for minutes, and it is the only kind here that ends by opening a recommendation for human
+ * review. A campaign and an xTB job rendered identically, and the difference decides whether a
+ * reader waits for it or goes home.
+ *
+ * Keyed on `JobRecordSummary.job`, which is the launch job's own name (`JobSpec.name` upstream) —
+ * `job_started.kind` is a turn-stream field and does not reach this registry.
+ */
+const CAMPAIGN_JOB = 'start_optimization_campaign';
+
+/**
+ * What the campaign kind is, in the words of the manifest that declares it.
+ *
+ * Quoted from the `bo` bundle's `connector.yaml` (`jobs[].description`) rather than written here:
+ * a sentence this frontend invented about how an optimisation behaves would be indistinguishable,
+ * to a reader, from one the job's authors wrote.
+ */
+const CAMPAIGN_DESCRIPTION =
+  'A multi-round optimisation campaign: it proposes candidates, evaluates them through the named ' +
+  'objective, and opens its recommendation as a PR-gated note for human review. It runs for as ' +
+  'many rounds as its spec asked for, so expect hours rather than the minutes a single calculation ' +
+  'takes.';
+
 function JobSheet({
   jobId,
+  jobName,
   open,
   onOpenChange,
 }: {
   jobId: string;
+  /** `JobRecordSummary.job` — the launch job's own name. Empty when the row it was opened from is
+   *  no longer in the list, which costs the kind badge and nothing else. */
+  jobName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }): React.JSX.Element {
@@ -94,6 +126,13 @@ function JobSheet({
       <SheetContent side="right" title={`Job ${jobId}`} className="w-[min(40rem,95vw)]">
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-5">
           <p className="font-mono text-xs break-all">{jobId}</p>
+
+          {jobName === CAMPAIGN_JOB && (
+            <div className="flex flex-col gap-1.5">
+              <Badge tone="brand">optimisation campaign</Badge>
+              <p className="text-xs text-ink-muted">{CAMPAIGN_DESCRIPTION}</p>
+            </div>
+          )}
 
           {notice && (
             <p
@@ -250,6 +289,10 @@ export function JobsPanel(): React.JSX.Element {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium">{job.job}</span>
                     <Badge tone="neutral">{job.connector}</Badge>
+                    {/* A badge and nothing more in the list: the sentence explaining what a
+                        campaign is belongs in the sheet, where it is read once rather than
+                        repeated down every row of a search result. */}
+                    {job.job === CAMPAIGN_JOB && <Badge tone="brand">campaign</Badge>}
                     {job.completed_at && (
                       <span className="text-2xs text-ink-subtle">
                         finished {relativeTime(new Date(job.completed_at).getTime())}
@@ -267,7 +310,12 @@ export function JobsPanel(): React.JSX.Element {
         )}
 
         {openId !== null && (
-          <JobSheet jobId={openId} open onOpenChange={(next) => !next && setOpenId(null)} />
+          <JobSheet
+            jobId={openId}
+            jobName={jobs?.find((job) => job.job_id === openId)?.job ?? ''}
+            open
+            onOpenChange={(next) => !next && setOpenId(null)}
+          />
         )}
       </div>
     </div>

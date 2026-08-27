@@ -196,6 +196,36 @@ describe('JobsPanel', () => {
     expect(jobReads).toBe(2);
   });
 
+  it('tells a multi-hour campaign apart from a calculation, in the list and in the sheet', async () => {
+    // Every row here is a durable job, so "durable" separates none of them. A campaign is a *loop* —
+    // it proposes, evaluates and repeats for as many rounds as its spec asked for — so it runs for
+    // hours where a conformer search runs for minutes, and it rendered identically to one.
+    const campaign: JobRecordSummary = {
+      job_id: 'bo-7c31',
+      connector: 'bo',
+      job: 'start_optimization_campaign',
+      rationale: 'Push the amination past 85% without losing selectivity.',
+      summary: '12 rounds, best 88.1%.',
+      note_id: 'bo-candidate-7c31',
+      completed_at: null,
+    };
+    serve([campaign, RECORD]);
+    render(<JobsPanel />);
+
+    // The badge is in the list, where a reader is scanning rows.
+    const row = await screen.findByRole('button', { name: /start_optimization_campaign/ });
+    expect(within(row).getByText('campaign')).toBeTruthy();
+    // And the calculation beside it does not get one, which is what makes the badge mean something.
+    const calc = screen.getByRole('button', { name: /compare_solvents/ });
+    expect(within(calc).queryByText('campaign')).toBeNull();
+
+    // The sentence explaining what a campaign *is* belongs in the sheet: read once, rather than
+    // repeated down every row of a search result.
+    fireEvent.click(row);
+    expect(await screen.findByText('optimisation campaign')).toBeTruthy();
+    expect(screen.getByText(/hours rather than the minutes/)).toBeTruthy();
+  });
+
   it('distinguishes an empty registry from an empty search', async () => {
     serve([]);
     render(<JobsPanel />);

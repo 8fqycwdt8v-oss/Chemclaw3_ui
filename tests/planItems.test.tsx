@@ -61,4 +61,31 @@ describe('PlanItems', () => {
     expect(screen.queryByText('Done:')).toBeNull();
     expect(screen.queryByText('To do:')).toBeNull();
   });
+
+  it('badges the step a durable job runs for, matched on the bare text', () => {
+    // The service stamps the todo's bare content on the job, while the streamed line carries the
+    // `[ ] ` prefix — the join only lines up because the prefix is parsed off first.
+    const jobs = new Map([['run the conformer search', 'running' as const]]);
+    render(
+      <PlanItems todos={['[ ] run the conformer search', '[ ] propose a note']} jobs={jobs} />,
+    );
+    expect(screen.getByText('job running')).toBeTruthy();
+    // The unbadged step wears nothing — one running job must not read as two.
+    expect(screen.getAllByText(/job running/)).toHaveLength(1);
+  });
+
+  it('shows how a step’s job ended, in words', () => {
+    const jobs = new Map<string, 'done' | 'failed'>([
+      ['step A', 'done'],
+      ['step B', 'failed'],
+    ]);
+    render(<PlanItems todos={['[x] step A', '[ ] step B']} jobs={jobs} />);
+    expect(screen.getByText('job done')).toBeTruthy();
+    expect(screen.getByText('job failed')).toBeTruthy();
+  });
+
+  it('wears no chip when no jobs map is given at all', () => {
+    render(<PlanItems todos={['[ ] run the conformer search']} />);
+    expect(screen.queryByText(/job (running|done|failed)/)).toBeNull();
+  });
 });

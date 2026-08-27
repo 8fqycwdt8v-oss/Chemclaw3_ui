@@ -107,7 +107,7 @@ const full: Array<[string, Record<string, unknown>]> = [
   // consumer "concatenates only the unattributed ones", so a dropped field here splices a
   // subagent's working notes into the answer.
   ['token', { text: 'hello', agent: 'subagent' }],
-  ['job_started', { job_id: 'j1', kind: 'qm' }],
+  ['job_started', { job_id: 'j1', kind: 'qm', plan_step: 'run the conformer search' }],
   ['job_completed', { job_id: 'j1', summary: { converged: true } }],
   ['job_failed', { job_id: 'j1', reason: 'the solver diverged' }],
   ['capability_degraded', { connectors: ['eln'] }],

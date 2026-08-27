@@ -23,7 +23,8 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChevronUp, FlaskConical } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import type { AssistantMessage, ChatMessage } from '../state/types.ts';
+import type { AssistantMessage, ChatMessage, TraceEntry } from '../state/types.ts';
+import { planStepJobs } from '../state/planJobs.ts';
 import { Markdown } from './LazyMarkdown.tsx';
 import { StructureText } from './Molecule.tsx';
 import { TracePanel } from './TracePanel.tsx';
@@ -45,14 +46,22 @@ import { cn } from '@/lib/utils';
 
 const PlanChecklist = memo(function PlanChecklist({
   todos,
+  trace,
 }: {
   todos: string[];
+  /** The message's own trace — where `job_started` rows carry the step a launch served. */
+  trace: TraceEntry[];
 }): React.JSX.Element | null {
+  // The global feed, because a durable job's ending usually arrives *after* the turn, through the
+  // session's event stream — reading only the trace would leave a chip spinning forever for
+  // exactly the jobs the chip matters for (see `planStepJobs`).
+  const jobFeed = useChatStore((s) => s.jobFeed);
+  const jobs = useMemo(() => planStepJobs(trace, jobFeed), [trace, jobFeed]);
   if (todos.length === 0) return null;
   return (
     <div className="mb-3 rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2.5">
       <p className="mb-1.5 text-2xs font-medium tracking-wide text-ink-subtle uppercase">Plan</p>
-      <PlanItems todos={todos} />
+      <PlanItems todos={todos} jobs={jobs} />
     </div>
   );
 });
@@ -91,7 +100,7 @@ const AssistantBubble = memo(function AssistantBubble({
           rest is read. */}
       <PartialAnswerPill message={message} />
       <ReviewRequiredPill message={message} />
-      {message.latestPlan && <PlanChecklist todos={message.latestPlan} />}
+      {message.latestPlan && <PlanChecklist todos={message.latestPlan} trace={message.trace} />}
 
       {body ? (
         streaming ? (

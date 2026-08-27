@@ -80,7 +80,9 @@ async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {
     res = await send(path, auth, init);
   }
 
-  if (!res.ok) throw errorFromStatus(res.status, await readDetail(res));
+  if (!res.ok) {
+    throw errorFromStatus(res.status, await readDetail(res), res.headers.get('retry-after'));
+  }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
@@ -303,7 +305,13 @@ function upload(
         typeof xhr.response === 'object' && xhr.response !== null
           ? (xhr.response as { detail?: unknown }).detail
           : undefined;
-      reject(errorFromStatus(xhr.status, typeof detail === 'string' ? detail : undefined));
+      reject(
+        errorFromStatus(
+          xhr.status,
+          typeof detail === 'string' ? detail : undefined,
+          xhr.getResponseHeader('retry-after'),
+        ),
+      );
     };
     xhr.onerror = () => reject(new ApiError('network', 'Could not reach the Chemclaw service.'));
     xhr.onabort = () => reject(new ApiError('aborted', 'Upload cancelled.'));

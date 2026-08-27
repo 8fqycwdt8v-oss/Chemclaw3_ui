@@ -145,9 +145,14 @@ Three files carry most of the difficulty and are commented accordingly:
 
 - **`server/proxy.ts`** — every SSE trap. Chiefly: it forces `accept-encoding: identity` (a
   compressed event stream buffers until the compressor's window fills), and it destroys the upstream
-  request when the client disconnects. That last line is what makes **Stop** work: the service has
-  no cancel endpoint, so propagating the disconnect is the only way it releases the session's turn
-  lock — without it, the next message comes back 409.
+  request when the client disconnects. That last line used to be what made **Stop** work, and no
+  longer is. `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` split the two meanings the closed
+  socket carried: a disconnect now only **detaches** — the turn runs to completion on the service's
+  own pump task, and its answer lands in the transcript whether anyone is watching or not — while
+  cancelling is a request, `POST /sessions/{id}/turn/stop`. So Stop is two acts in order
+  (`stopStreaming` → `api.stopTurn`, then abort the fetch), and propagating the disconnect is still
+  worth doing for a different reason: it tells the service its reader is gone, so events are
+  discarded rather than buffered for nobody, and it frees this process's upstream socket.
 - **`src/components/MessageList.tsx`** — `Bubble` is memoised because `updateAssistant` replaces
   the messages array every animation frame while returning the same object for messages it did not
   touch. Never give anything on this path a custom `areEqual`: one forgotten field and a streaming

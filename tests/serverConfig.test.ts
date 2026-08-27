@@ -35,6 +35,7 @@ const base: BffConfig = {
   maxUploadBytes: 32 * 1024 * 1024,
   warmSessions: true,
   reviewerRoles: [],
+  maxMessageChars: 100_000,
   csp: '',
   logLevel: 'error',
 };

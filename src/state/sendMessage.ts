@@ -336,6 +336,26 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       useChatStore.getState().setDraft(conversationId, opts.text);
     }
 
+    // A rate limit is a pause with a number on it, and the number is the service's own: the
+    // per-principal limiter computes how long until one token refills and sends it as
+    // `Retry-After` precisely so a client waits the right amount. So the composer stays open, the
+    // question is already back in the draft above, and the banner counts the wait down.
+    //
+    // Deliberately not an automatic re-send. Nothing in this app has ever re-posted a turn on the
+    // user's behalf — the banner's Retry re-reads the transcript — and a client that resends on a
+    // timer turns one refused request into a queue of them against the very budget it is waiting
+    // on. The countdown says when; the human still presses Send.
+    if (apiError.kind === 'rate_limited') {
+      releaseComposer(false);
+      const seconds = Math.ceil(apiError.retryAfterSeconds);
+      useChatStore.getState().setBanner({
+        kind: 'warn',
+        text: `${text} Try again in ${seconds} s.`,
+        retryAfterSeconds: seconds,
+      });
+      return;
+    }
+
     // A budget that is genuinely gone is terminal — it does not replenish because somebody
     // pressed a button — so leave the composer locked and say so. A turn the service *shed*
     // carries the same code and `retryable`, and falls through to the ordinary branch below,

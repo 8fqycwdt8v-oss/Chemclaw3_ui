@@ -2,7 +2,7 @@
  * `/config.js` — the runtime-auth bridge — and the seam it sits on.
  *
  * `server/runtimeConfig.ts` declares `interface RuntimeConfig`. `src/env.ts` declares a second
- * `interface RuntimeConfig` with the same eight fields. Neither imports the other and nothing
+ * `interface RuntimeConfig` with the same fields. Neither imports the other and nothing
  * checked them against each other, so they are two hand-written mirrors of one wire shape — exactly
  * the structure `tests/eventContract.test.ts` exists to police for events, and here it was
  * unpoliced. Renaming one field on the server side (`reviewerRoles` -> `reviewer_roles`, the shape
@@ -52,6 +52,7 @@ const ENV: Record<string, string> = {
   APP_VERSION: '9.9.9-from-the-server',
   WARM_SESSIONS: 'false',
   REVIEWER_ROLES: 'Chemclaw.Reviewer,Chemclaw.Approver',
+  MAX_MESSAGE_CHARS: '250000',
 };
 
 /** Boot the server half against `ENV` and hand back its config plus the script it would serve. */
@@ -108,9 +109,9 @@ describe('what /config.js actually delivers', () => {
 
   it('delivers the values a rename would silently turn into defaults', async () => {
     // Spelled out one by one as well, because `toEqual` above names the whole object when it fails
-    // and these three are the ones with a deployment-wide consequence: an empty `reviewerRoles`
-    // hides the approve/reject controls from every reviewer, a wrong `apiScope` 401s every request
-    // with a valid-looking token, and a wrong `entraTenantId` points MSAL at the wrong tenant.
+    // and each of these has a deployment-wide consequence: an empty `reviewerRoles` hides the
+    // approve/reject controls from every reviewer, a wrong `apiScope` 401s every request with a
+    // valid-looking token, and a wrong `entraTenantId` points MSAL at the wrong tenant.
     const { script } = await renderFromEnv();
     const client = await loadClientConfig(script);
 
@@ -118,6 +119,10 @@ describe('what /config.js actually delivers', () => {
     expect(client.apiScope).toBe('api://api-client-id/Chat.Access');
     expect(client.entraTenantId).toBe('tenant-from-the-server');
     expect(client.authMode).toBe('msal');
+    // Same shape of consequence: the message cap is the deployment's own
+    // (`CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`), so one that fails to cross leaves the composer
+    // refusing at the built-in default while the service would have accepted the message.
+    expect(client.maxMessageChars).toBe(250_000);
     // `false` and not the `true` default: a boolean that failed to cross reads as its fallback,
     // which for this one is the *on* state and therefore invisible.
     expect(client.warmSessions).toBe(false);
@@ -147,6 +152,7 @@ describe('what /config.js actually delivers', () => {
       appVersion: 'dev',
       warmSessions: true,
       reviewerRoles: [],
+      maxMessageChars: 100_000,
     });
 
     expect(script).not.toContain('</script>');

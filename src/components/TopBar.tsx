@@ -199,6 +199,9 @@ export function TopBar({
           className="flex flex-wrap items-center gap-2 border-t border-border-subtle bg-danger-soft px-4 py-2"
         >
           <p className="text-sm text-danger-ink">{banner.text}</p>
+          {banner.retryAfterSeconds !== undefined && (
+            <Countdown seconds={banner.retryAfterSeconds} />
+          )}
 
           {banner.action === 'retry' && onRetry && (
             <Button variant="outline-destructive" size="xs" onClick={onRetry}>
@@ -233,6 +236,42 @@ export function TopBar({
         </div>
       )}
     </header>
+  );
+}
+
+/**
+ * The remaining wait on a `Retry-After`, ticking to zero.
+ *
+ * `aria-hidden`, and that is the point rather than an oversight: the banner around it is
+ * `role="alert"`, so a number that changes every second would be re-announced every second. The
+ * wait is already in `banner.text`, which is announced once — this is the same fact for the eye.
+ */
+function Countdown({ seconds }: { seconds: number }): React.JSX.Element | null {
+  // Restarted on a new wait rather than on a remount: a second refusal replaces the banner
+  // without unmounting this. React's documented render-phase adjustment rather than an effect,
+  // because an effect that calls `setState` paints the previous banner's number first and then
+  // corrects it.
+  const [wait, setWait] = useState(seconds);
+  const [remaining, setRemaining] = useState(seconds);
+  if (wait !== seconds) {
+    setWait(seconds);
+    setRemaining(seconds);
+  }
+
+  useEffect(() => {
+    if (seconds <= 0) return;
+    // Left running once it reaches zero: the updater is pure and idempotent there, so it stops
+    // re-rendering on its own, and clearing from inside a state updater would be a side effect in
+    // the one place React requires there not to be one.
+    const timer = setInterval(() => setRemaining((left) => Math.max(0, left - 1)), 1_000);
+    return () => clearInterval(timer);
+  }, [seconds]);
+
+  if (remaining <= 0) return null;
+  return (
+    <span aria-hidden className="text-sm tabular-nums text-danger-ink">
+      {remaining}s
+    </span>
   );
 }
 

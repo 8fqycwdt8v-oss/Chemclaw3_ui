@@ -21,6 +21,8 @@ export interface RuntimeConfig {
   warmSessions: boolean;
   /** The service's privileged app-role names, so the SPA can hide what would 403. */
   reviewerRoles: string[];
+  /** The service's message-length cap, so the composer refuses where the service refuses. */
+  maxMessageChars: number;
 }
 
 export function runtimeConfig(): RuntimeConfig {
@@ -33,6 +35,7 @@ export function runtimeConfig(): RuntimeConfig {
     appVersion: cfg.appVersion,
     warmSessions: cfg.warmSessions,
     reviewerRoles: cfg.reviewerRoles,
+    maxMessageChars: cfg.maxMessageChars,
   };
 }
 

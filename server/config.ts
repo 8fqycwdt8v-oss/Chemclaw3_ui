@@ -6,6 +6,8 @@
  * at BUILD time, which is exactly what we are working around).
  */
 
+import { MAX_MESSAGE_CHARS } from '../shared/events.ts';
+
 export type AuthMode = 'dev' | 'msal';
 
 const str = (name: string, fallback = ''): string => process.env[name]?.trim() || fallback;
@@ -138,6 +140,8 @@ export interface BffConfig {
   maxUploadBytes: number;
   warmSessions: boolean;
   reviewerRoles: string[];
+  /** The service's `CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`, told to this process rather than guessed. */
+  maxMessageChars: number;
   csp: string;
   logLevel: string;
 }
@@ -180,6 +184,14 @@ export const cfg: BffConfig = {
     .split(',')
     .map((role) => role.trim())
     .filter(Boolean),
+  // The backend's message cap, which is a *setting* there and was a compile-time constant here:
+  // a site that raised `CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS` got a composer still refusing at the
+  // old default, and one that lowered it got a composer inviting a message the service rejects
+  // with a 422 after the whole body has been uploaded. Same rule as `REVIEWER_ROLES` above — the
+  // value is the backend's and there is no route that publishes it, so it is told to this process
+  // per deployment. The shared constant is the fallback, so an unset variable keeps today's
+  // behaviour exactly.
+  maxMessageChars: Math.max(1, Math.floor(num('MAX_MESSAGE_CHARS', MAX_MESSAGE_CHARS))),
   sseHeartbeatMs: num('SSE_HEARTBEAT_MS', 15_000),
   upstreamConnectTimeoutMs: num('UPSTREAM_CONNECT_TIMEOUT_MS', 10_000),
   // Time to RECEIVE a request, not to answer one, so this bounds nothing about a 600 s turn or a

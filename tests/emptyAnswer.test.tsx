@@ -15,7 +15,7 @@
  * a blank card is indistinguishable from a backend that answered nothing, and from a UI bug.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { MessageList } from '../src/components/MessageList.tsx';
 import { useChatStore } from '../src/state/chatStore.ts';
@@ -27,6 +27,12 @@ vi.mock('../src/auth/AuthContext.tsx', () => ({
 }));
 
 const ANSWER = 'The pKa is approximately 4.76 in water.';
+
+// Without this, the last test's render stays mounted until the worker recycles — and its lazy
+// markdown Suspense boundary can still have scheduler work pending then, which fires against a
+// jsdom `window` that is already gone (`ReferenceError: window is not defined`, uncaught after
+// teardown). Every other component test in this suite unmounts on this same convention.
+afterEach(cleanup);
 
 beforeEach(() => {
   cleanup();

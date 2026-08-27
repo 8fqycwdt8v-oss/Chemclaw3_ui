@@ -365,7 +365,18 @@ export interface ChatState {
   /** Opt-in, and deliberately separate from `Notification.permission` — a browser-level
    *  revocation must read as "blocked", not as "off". */
   notifyOnJobComplete: boolean;
-  streaming: { conversationId: string; messageId: string; abort: AbortController } | null;
+  streaming: {
+    conversationId: string;
+    messageId: string;
+    abort: AbortController;
+    /**
+     * Stop the turn on the server, then abort the local stream. Built by the send path, which
+     * is the one place that holds the auth provider — the backend detaches on disconnect now,
+     * so aborting the fetch alone would leave the turn running (and the session 409-busy) for
+     * its whole remaining duration.
+     */
+    stop: () => void;
+  } | null;
 
   createConversation: () => string;
   selectConversation: (id: string) => void;

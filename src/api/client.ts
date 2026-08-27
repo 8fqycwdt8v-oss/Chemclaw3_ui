@@ -361,6 +361,27 @@ export const api = {
     }
   },
 
+  /**
+   * Stop the session's running turn — the explicit act a closed stream no longer performs.
+   *
+   * The backend detaches on disconnect (its turn runs to completion unwatched), so Stop is a
+   * request of its own. `false` when there was nothing to stop: the turn may have finished in
+   * the race between pressing Stop and the request landing, which is an outcome, not an error —
+   * and an older backend without the route answers the same way, degrading Stop to the old
+   * disconnect-only behaviour rather than surfacing a banner.
+   */
+  async stopTurn(sessionId: string, getToken: TokenGetter): Promise<boolean> {
+    try {
+      await request<{ stopped: boolean }>(`/sessions/${sessionId}/turn/stop`, getToken, {
+        method: 'POST',
+      });
+      return true;
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'session_not_found') return false;
+      throw err;
+    }
+  },
+
   /** A session's transcript. Same graceful degradation as `listSessions`: a backend without this
    *  route, or a session whose history is gone, yields an empty transcript rather than an error. */
   async getMessages(sessionId: string, getToken: TokenGetter): Promise<TranscriptMessage[]> {

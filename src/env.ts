@@ -9,6 +9,7 @@
  * bytes than the rest of this module.
  */
 
+import type { LogLevel } from './lib/logger.ts';
 import { MAX_MESSAGE_CHARS } from '../shared/events.ts';
 
 export type AuthMode = 'dev' | 'msal';
@@ -43,6 +44,15 @@ export interface RuntimeConfig {
    */
   reviewerRoles: string[];
   /**
+   * How much this browser records through `src/lib/logger.ts`.
+   *
+   * Runtime rather than build-time for the same reason everything else here is: one image, any
+   * tenant. A deployment that wants its UI quiet sets `silent`; the usual posture is `info`, and
+   * `?debug=1` raises one chemist's browser to `debug` without a redeploy — which is the case
+   * support is actually in when a single user is the one seeing the fault.
+   */
+  logLevel: LogLevel;
+  /**
    * The longest message the service will accept, in characters.
    *
    * Runtime rather than compile-time for the same reason `reviewerRoles` is: the value belongs to
@@ -76,6 +86,12 @@ const fromVite = (): Partial<RuntimeConfig> => {
   };
 };
 
+/** A level the logger will accept, or `info` — a typo must not silence the record. */
+const asLevel = (value: unknown): LogLevel | undefined => {
+  const known: LogLevel[] = ['silent', 'error', 'warn', 'info', 'debug'];
+  return known.find((level) => level === value);
+};
+
 const pick = (...values: (string | undefined)[]): string => {
   for (const value of values) if (value && value.trim()) return value.trim();
   return '';
@@ -93,6 +109,7 @@ function resolve(): RuntimeConfig {
     appVersion: pick(w.appVersion, 'dev'),
     warmSessions: w.warmSessions !== false,
     reviewerRoles: Array.isArray(w.reviewerRoles) ? w.reviewerRoles.map(String) : [],
+    logLevel: asLevel(w.logLevel) ?? 'info',
     // A cap of zero, a negative one or a non-number is not a stricter limit — it is a composer
     // that refuses every message, including the one the chemist is typing when the bad value
     // ships. Only a usable number displaces the default.

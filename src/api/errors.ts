@@ -54,12 +54,19 @@ export class ApiError extends Error {
   /** Whether a bare retry of the same request could plausibly succeed. */
   readonly retryable: boolean;
   /**
-   * The service's own id for the turn that failed, when it sent one.
+   * The service's own id for the request or turn that failed, when it sent one.
    *
-   * Only in-stream errors carry it — an HTTP failure has no correlation id to give — so this is
-   * empty far more often than not. It is shown to the user rather than only logged, because the
-   * browser console is not somewhere a chemist looks and this string is the entire content of a
-   * useful support message.
+   * It used to come only from an in-stream `error` event, so every HTTP-level failure — a 401, a
+   * 409, a dropped connection — reached the banner with nothing to quote, and "it broke at 14:32"
+   * could not be joined to a single line of the service's logs. The service stamps this id on
+   * every JSON log record it writes, so the join key exists; what was missing was reading it back.
+   * Now `errorFromStatus` takes it from the response (the `X-Chemclaw-Correlation-Id` header, or
+   * `correlation_id` in the error body) and `streamTurn` carries the turn's own.
+   *
+   * Still empty when the service did not send one — an older deployment, or a `fetch` that never
+   * reached it — and empty is the honest reading, never a placeholder. It is shown to the user
+   * rather than only logged, because the browser console is not somewhere a chemist looks and this
+   * string is the entire content of a useful support message.
    */
   readonly correlationId: string;
   /**
@@ -87,6 +94,20 @@ export class ApiError extends Error {
     this.retryAfterSeconds = options?.retryAfterSeconds ?? 0;
   }
 }
+
+/**
+ * The response header the service stamps its per-request correlation id on.
+ *
+ * Read, never sent. Sending one is a dead end twice over: the BFF strips every `x-chemclaw-*`
+ * request header deliberately (`server/proxy.ts`, a trap removed before somebody adds a reader),
+ * and the service mints the id itself and has no reader for a client-supplied one. The id is the
+ * service's to issue and this app's to quote back.
+ */
+export const CORRELATION_HEADER = 'x-chemclaw-correlation-id';
+
+/** The correlation id this response carries, or `''` when it carries none. */
+export const correlationFrom = (res: { headers: Headers }): string =>
+  res.headers.get(CORRELATION_HEADER)?.trim() ?? '';
 
 /**
  * Seconds a `Retry-After` asks for, or `null` when there is no usable one.
@@ -121,28 +142,45 @@ export function retryAfterSeconds(header: string | null | undefined): number | n
  *
  * (The event-stream cap does not come through here at all — `useJobStreams` reads that status
  * itself, and honours a `Retry-After` for the same reason.)
+ *
+ * `correlationId` is threaded onto every branch so that EVERY banner can carry a reference, not
+ * only the ones raised by an in-stream `error` event. Both trailing arguments are read off the
+ * same failed response, which is why `readFailure` hands back the id and the caller passes the
+ * header straight through.
  */
 export function errorFromStatus(
   status: number,
   detail?: string,
+  /** The response's `Retry-After`, verbatim — parsed here, not at the call site. */
   retryAfter?: string | null,
+  /** The service's id for the request that failed — `correlationFrom`, or the error body's
+   *  `correlation_id`. */
+  correlationId?: string,
 ): ApiError {
+  const options = correlationId ? { correlationId } : undefined;
   switch (status) {
     case 401:
-      return new ApiError('unauthorized', 'Your session has expired. Please sign in again.', 401);
+      return new ApiError(
+        'unauthorized',
+        'Your session has expired. Please sign in again.',
+        401,
+        options,
+      );
     case 404:
-      return new ApiError('session_not_found', detail || 'unknown session', 404);
+      return new ApiError('session_not_found', detail || 'unknown session', 404, options);
     case 409:
       return new ApiError(
         'turn_in_flight',
         detail || 'A turn is already running for this conversation.',
         409,
+        options,
       );
     case 422:
       return new ApiError(
         'message_too_long',
         detail || 'That message exceeds the service’s length limit.',
         422,
+        options,
       );
     case 429: {
       const wait = retryAfterSeconds(retryAfter);
@@ -154,22 +192,29 @@ export function errorFromStatus(
           'rate_limited',
           'The service is limiting how fast requests can be made.',
           429,
-          { retryAfterSeconds: wait },
+          { ...options, retryAfterSeconds: wait },
         );
       }
       return new ApiError(
         'budget_exhausted',
         detail || 'The usage budget for this service is exhausted.',
         429,
+        options,
       );
     }
     case 503:
-      return new ApiError('capacity', detail || 'The service is at capacity. Retry shortly.', 503);
+      return new ApiError(
+        'capacity',
+        detail || 'The service is at capacity. Retry shortly.',
+        503,
+        options,
+      );
     default:
       return new ApiError(
         'network',
         detail || `The service returned an unexpected status (${status}).`,
         status,
+        options,
       );
   }
 }
@@ -215,13 +260,26 @@ export function errorFromEvent(event: {
   }
 }
 
-/** Best-effort extraction of FastAPI's `{"detail": "..."}` without letting a parse failure mask
- *  the real error — an error page or an empty body is common on the failure paths. */
-export async function readDetail(res: Response): Promise<string | undefined> {
+/**
+ * What a failed response says about itself: FastAPI's `{"detail": …}` and the correlation id.
+ *
+ * Both halves are best-effort and neither may mask the real error — an error page, an empty body
+ * or a gateway's HTML is common on exactly these paths. The header is read first because it is
+ * present on every response the service writes, including the ones with no body at all; the body's
+ * `correlation_id` is the fallback for a response that carries one there instead.
+ */
+export async function readFailure(
+  res: Response,
+): Promise<{ detail?: string; correlationId: string }> {
+  const fromHeader = correlationFrom(res);
   try {
-    const body = (await res.json()) as { detail?: unknown };
-    return typeof body?.detail === 'string' ? body.detail : undefined;
+    const body = (await res.json()) as { detail?: unknown; correlation_id?: unknown };
+    return {
+      detail: typeof body?.detail === 'string' ? body.detail : undefined,
+      correlationId:
+        fromHeader || (typeof body?.correlation_id === 'string' ? body.correlation_id : ''),
+    };
   } catch {
-    return undefined;
+    return { correlationId: fromHeader };
   }
 }

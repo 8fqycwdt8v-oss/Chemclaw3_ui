@@ -65,6 +65,35 @@ function stubImmediateClose(): void {
   };
 }
 
+/** A stream the server refuses outright, for ever. The other half of the same hazard. */
+function stubAlwaysFailing(): void {
+  const original = globalThis.fetch;
+  globalThis.fetch = (() => {
+    connects += 1;
+    return Promise.resolve(new Response('nope', { status: 502 }));
+  }) as typeof fetch;
+  restore = () => {
+    globalThis.fetch = original;
+  };
+}
+
+const watchOneSession = (): void => {
+  useChatStore.setState({
+    conversations: {
+      c1: {
+        id: 'c1',
+        sessionId: SID,
+        title: 'x',
+        messages: [{ id: 'm1', role: 'user', text: 'hi' }],
+        updatedAt: 1,
+      } as never,
+    },
+    activeId: 'c1',
+    jobStreamsThrottled: false,
+    jobStreamsFailing: [],
+  });
+};
+
 beforeEach(() => {
   connects = 0;
   stubImmediateClose();
@@ -79,7 +108,45 @@ afterEach(() => {
 describe('a stream the server closes cleanly', () => {
   it('is reconnected with a backoff rather than in a tight loop', async () => {
     const { useJobStreams } = await import('../src/hooks/useJobStreams.ts');
-    useChatStore.setState({
+    watchOneSession();
+    const { unmount } = renderHook(() => useJobStreams());
+
+    // The window the measurement used. The first backoff is 1–2 s, so a paced client connects
+    // once here and waits; the tight loop managed 200.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    unmount();
+
+    expect(connects).toBeLessThanOrEqual(2);
+  });
+});
+
+/**
+ * The failure the module docstring named and the code did not act on.
+ *
+ * It says, at the 429 branch, that "a silent retry loop is exactly how this failure hides" — and
+ * then only the 429 branch said anything. A 500, a 502, a TLS failure and a DNS failure all fell
+ * into two identical silent branches: an infinite retry, capped at 30 s, with no banner, no
+ * counter, no log and no store flag. Durable job completions quietly stopped arriving and nothing
+ * recorded that they had.
+ */
+describe('a stream that keeps failing to connect', () => {
+  beforeEach(() => {
+    restore?.();
+    connects = 0;
+    stubAlwaysFailing();
+  });
+
+  /**
+   * The hook and the store from ONE module graph.
+   *
+   * `vi.resetModules()` in the afterEach above means a dynamically imported hook gets a fresh
+   * `chatStore` — so setting state through this file's top-level import would write to a store
+   * nothing under test is reading, and the hook would watch nothing at all.
+   */
+  const load = async () => {
+    const { useJobStreams } = await import('../src/hooks/useJobStreams.ts');
+    const { useChatStore: store } = await import('../src/state/chatStore.ts');
+    store.setState({
       conversations: {
         c1: {
           id: 'c1',
@@ -91,14 +158,46 @@ describe('a stream the server closes cleanly', () => {
       },
       activeId: 'c1',
       jobStreamsThrottled: false,
+      jobStreamsFailing: [],
     });
-    const { unmount } = renderHook(() => useJobStreams());
+    return { useJobStreams, store };
+  };
 
-    // The window the measurement used. The first backoff is 1–2 s, so a paced client connects
-    // once here and waits; the tight loop managed 200.
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    unmount();
+  it('is reported after several attempts instead of retrying in silence for ever', async () => {
+    const { useJobStreams, store } = await load();
+    // Fake timers AFTER the imports: a dynamic import does not settle under them.
+    vi.useFakeTimers();
+    try {
+      const { unmount } = renderHook(() => useJobStreams());
 
-    expect(connects).toBeLessThanOrEqual(2);
+      // Past the fourth attempt the backoff has already spent about half a minute, which is the
+      // point at which "the service is redeploying" stops being the likely explanation.
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(connects).toBeGreaterThanOrEqual(4);
+      expect(store.getState().jobStreamsFailing).toEqual([SID]);
+
+      unmount();
+      // A stream nobody is watching cannot be failing — otherwise the indicator would outlive the
+      // conversation that raised it.
+      expect(store.getState().jobStreamsFailing).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('says nothing about the first failure or two — a rollout is not an outage', async () => {
+    const { useJobStreams, store } = await load();
+    vi.useFakeTimers();
+    try {
+      const { unmount } = renderHook(() => useJobStreams());
+
+      // One backoff's worth: two attempts at most, well under the threshold.
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(store.getState().jobStreamsFailing).toEqual([]);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

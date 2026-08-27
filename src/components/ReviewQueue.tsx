@@ -217,7 +217,7 @@ function ProposalSheet({
                       title="Sign this note into the record?"
                       description="It will be merged into the knowledge graph and cited by future answers. The decision is attributable to you and cannot be undone here."
                       confirmLabel="Approve"
-                      onConfirm={decide(true)}
+                      onConfirm={() => void decide(true)()}
                     />
                     <ConfirmDialog
                       trigger={
@@ -233,7 +233,7 @@ function ProposalSheet({
                       description="The proposal is closed and the note does not enter the graph. Your reason is recorded with the decision."
                       confirmLabel="Reject"
                       variant="destructive"
-                      onConfirm={decide(false)}
+                      onConfirm={() => void decide(false)()}
                     />
                   </div>
                 </div>

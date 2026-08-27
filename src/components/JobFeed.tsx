@@ -129,7 +129,7 @@ export function JobFeed(): React.JSX.Element | null {
                         variant="link"
                         size="xs"
                         className="h-auto p-0 text-2xs"
-                        onClick={() => navigate(`/c/${item.conversationId}`)}
+                        onClick={() => void navigate(`/c/${item.conversationId}`)}
                       >
                         from “{title}”
                       </Button>

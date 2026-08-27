@@ -541,6 +541,62 @@ describe('detach and stop (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop)', (
     expect(message?.role === 'assistant' && message.status).toBe('aborted');
   });
 
+  it('says the stop was not confirmed when the server refuses it, so the next 409 is expected', async () => {
+    // `api.stopTurn` resolves `false` when there is no route and THROWS on a 500/503; both used to
+    // be discarded with `.catch(() => undefined)`. The user was then reliably told "Stopped before
+    // the answer was complete" while the turn kept running server-side — holding the session's
+    // turn lock and spending budget — so their next message came back 409, which `sendMessage`
+    // maps to a "reset" banner: an app bug to a chemist and nothing at all to an operator.
+    const { stopStreaming } = await import('../src/state/sendMessage.ts');
+    let releaseStream: (() => void) | null = null;
+    const hanging = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode('event: token\ndata: {"type":"token","text":"hi"}\n\n'),
+        );
+        releaseStream = () => controller.close();
+      },
+    });
+    const stub = stubFetch((url, init) => {
+      if (url.endsWith('/sessions') && init?.method === 'POST') {
+        return new Response(JSON.stringify({ session_id: 'c'.repeat(32) }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/turn/stop')) {
+        // The server cannot take the request. The local stream still ends, because Stop's local
+        // half is unconditional — that part of the UX is right and is unchanged.
+        releaseStream?.();
+        return jsonError(503, 'at capacity');
+      }
+      return new Response(hanging, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+    restore = stub.restore;
+
+    const cid = useChatStore.getState().createConversation();
+    const turn = sendMessage({ conversationId: cid, text: 'long question', auth: devAuth });
+    const firstToken = () => {
+      const message = useChatStore.getState().conversations[cid]?.messages.at(-1);
+      return message?.role === 'assistant' && message.streamedText.length > 0;
+    };
+    while (!firstToken()) await new Promise((r) => setTimeout(r, 5));
+    stopStreaming();
+    await turn;
+
+    // The local stop still happened...
+    const message = useChatStore.getState().conversations[cid]?.messages.at(-1);
+    expect(message?.role === 'assistant' && message.status).toBe('aborted');
+    // ...and the reader is told the server did not confirm it, which is what makes the 409 their
+    // next message may get an expected consequence rather than a mystery.
+    const banner = useChatStore.getState().banner;
+    expect(banner?.kind).toBe('warn');
+    expect(banner?.text).toContain('did not confirm');
+  });
+
   it('a dropped stream recovers the answer from the transcript instead of failing the turn', async () => {
     const broken = new ReadableStream<Uint8Array>({
       start(controller) {

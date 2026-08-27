@@ -9,6 +9,19 @@
  * `jsx-a11y` is here for the same reason the contrast script is: the accessibility work on this
  * branch is only as durable as the thing that re-checks it.
  *
+ * The type-aware block below is the second reason, and it was measured rather than assumed:
+ * `npx eslint --print-config` reported `parserOptions.project: {}` and not one type-checked rule,
+ * because `tseslint.configs.recommended` is the NON-type-checked preset. So `no-floating-promises`
+ * was absent in a codebase with 32 `void promise` sites — including the one `Composer` uses for
+ * every Send, whose orchestrator ran five store writes outside its own `try`. `chatStore` records
+ * what that costs when it fires: "no bubble, no answer, no banner, no lock. Send did nothing, for
+ * ever."
+ *
+ * Only the three rules that catch that class are enabled, not the whole `recommendedTypeChecked`
+ * preset. The rest of that preset is mostly `no-unsafe-*`, which fires all over code that
+ * deliberately handles `unknown` at a process boundary — this file's own rule is that a lint rule
+ * earns its place by catching a bug this codebase can produce.
+ *
  * Pinned to ESLint 9 because eslint-plugin-jsx-a11y does not declare support for 10 yet.
  */
 
@@ -53,6 +66,25 @@ export default tseslint.config(
       // what WAI-ARIA recommends for a focusable scroll container, so `region` joins the allowed
       // roles. A bare `tabIndex` on an unnamed, unroled element is still an error.
       'jsx-a11y/no-noninteractive-tabindex': ['error', { roles: ['tabpanel', 'region'] }],
+    },
+  },
+
+  // Type-aware linting, scoped to the application code that `tsconfig.json` actually includes.
+  // `projectService` rather than a `project` glob: it resolves each file through the nearest
+  // tsconfig, so nothing has to be listed twice and a new directory does not silently drop out of
+  // the check.
+  {
+    files: ['src/**/*.{ts,tsx}', 'server/**/*.ts', 'shared/**/*.ts'],
+    languageOptions: {
+      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
+    },
+    rules: {
+      // The three that catch a promise nobody is holding. `void` still silences the first
+      // deliberately — that is what it is for — so an existing `void promise` is unaffected and a
+      // NEW un-awaited call has to be marked as intended.
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
+      '@typescript-eslint/await-thenable': 'error',
     },
   },
 

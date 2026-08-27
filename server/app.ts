@@ -6,10 +6,18 @@
  * is here. The split is also what made the two defects below expressible as tests rather than as
  * measurements somebody had to take by hand.
  *
- * This process does four things: proxy a fixed route list, serve `/config.js`, serve static assets
- * with SPA fallback, and answer its own `/healthz`. Bare `node:http` rather than a framework — a
- * framework's routing layer would be overhead, and its middleware ecosystem contains at least one
- * thing (`compression`) that silently destroys Server-Sent Events.
+ * This process proxies a fixed route list, serves `/config.js`, serves static assets with SPA
+ * fallback, answers its own `/healthz`, `/readyz` and `/metrics`, and accepts the browser's log
+ * batches on `/api/client-events`. Bare `node:http` rather than a framework — a framework's routing
+ * layer would be overhead, and its middleware ecosystem contains at least one thing
+ * (`compression`) that silently destroys Server-Sent Events.
+ *
+ * **Every response is logged and counted**, which it was not: this file handled `/healthz`,
+ * `/config.js`, `/api/*` and the static assets and emitted no line on any success path, so an
+ * operator watching the UI pod during an incident saw three startup lines and then silence — no
+ * request rate, no status distribution, no latency, no per-route volume, no upstream error rate.
+ * Both the line and the counters are keyed on the route's PATTERN rather than its path, for the
+ * reason `ResolvedRoute.template` gives.
  */
 
 import http from 'node:http';
@@ -20,6 +28,10 @@ import { resolveRoute } from './routes.ts';
 import { proxy } from './proxy.ts';
 import { serveConfigJs } from './runtimeConfig.ts';
 import { log } from './log.ts';
+import { handleClientEvents } from './clientEvents.ts';
+import { readiness } from './ready.ts';
+import { renderMetrics, requestFinished, requestStarted } from './metrics.ts';
+import type { ProxyTrace } from './proxy.ts';
 
 /**
  * The headers that make this origin safe to be, applied to **every** response.
@@ -80,6 +92,70 @@ function createAssetHandler(): (
   });
 }
 
+/**
+ * Count the bytes this process writes for one response.
+ *
+ * `res.socket.bytesWritten` is per SOCKET and this server keeps connections alive, so it counts
+ * every earlier response on the same connection too. Wrapping the two writers is the only way to
+ * attribute bytes to a response — and both wrappers return the original's return value, so
+ * backpressure (which `upstreamRes.pipe(res)` depends on) is unchanged.
+ */
+function countBytes(res: http.ServerResponse): () => number {
+  let bytes = 0;
+  const add = (chunk: unknown): void => {
+    if (typeof chunk === 'string') bytes += Buffer.byteLength(chunk);
+    else if (chunk instanceof Uint8Array) bytes += chunk.byteLength;
+  };
+  const write = res.write.bind(res);
+  const end = res.end.bind(res);
+  res.write = ((chunk: never, ...rest: never[]) => {
+    add(chunk);
+    return write(chunk, ...rest);
+  }) as typeof res.write;
+  res.end = ((chunk?: never, ...rest: never[]) => {
+    // `res.end(callback)` is a legal call with no body at all.
+    if (typeof chunk !== 'function') add(chunk);
+    return end(chunk, ...rest);
+  }) as typeof res.end;
+  return () => bytes;
+}
+
+/**
+ * One access-log line per response, plus the metrics behind `/metrics`.
+ *
+ * Written on `finish` rather than at dispatch, so the status, the duration and the byte count are
+ * the real ones — an SSE turn that ran for nine minutes books nine minutes here, which is the
+ * whole point of measuring it. `route` is set by the caller as it dispatches; it starts as the
+ * least specific label rather than as the raw path, because a label is a metric dimension and a
+ * path is not.
+ */
+function observe(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  label: { route: string },
+  trace: ProxyTrace,
+): void {
+  const startedAt = Date.now();
+  const bytes = countBytes(res);
+  requestStarted();
+  res.on('finish', () => {
+    const durationMs = Date.now() - startedAt;
+    requestFinished(label.route, req.method ?? 'GET', res.statusCode, durationMs / 1000);
+    log.info('request', {
+      method: req.method ?? 'GET',
+      // The PATTERN, never the id-bearing path: see `ResolvedRoute.template`.
+      route: label.route,
+      status: res.statusCode,
+      duration_ms: durationMs,
+      bytes: bytes(),
+      ...(trace.upstreamMs === null ? {} : { upstream_ms: trace.upstreamMs }),
+      // The join key. Present on any request the service answered, which is what makes a line
+      // here and a line there the same incident rather than two.
+      correlation_id: trace.correlationId,
+    });
+  });
+}
+
 export function createRequestListener(): http.RequestListener {
   const assets = createAssetHandler();
 
@@ -90,26 +166,75 @@ export function createRequestListener(): http.RequestListener {
     const path = rawUrl.split('?', 1)[0] ?? '/';
     const method = req.method ?? 'GET';
 
+    const label = { route: 'static' };
+    const trace: ProxyTrace = { upstreamMs: null, correlationId: '' };
+    observe(req, res, label, trace);
+
     if (path === '/healthz') {
+      // Liveness, and deliberately still a literal: it answers "is this process serving?", which
+      // is the only question a restart decision may be made on. Readiness is `/readyz` below.
+      label.route = '/healthz';
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end('{"status":"ok"}');
       return;
     }
 
+    if (path === '/readyz') {
+      label.route = '/readyz';
+      void readiness().then((state) => {
+        res.writeHead(state.ready ? 200 : 503, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            status: state.ready ? 'ready' : 'degraded',
+            upstream_status: state.upstreamStatus,
+            ...(state.detail ? { detail: state.detail } : {}),
+          }),
+        );
+      });
+      return;
+    }
+
+    if (path === '/metrics') {
+      // This pod's own numbers, not the service's — `/api/metrics` is deliberately NOT
+      // whitelisted and must stay that way. Unauthenticated, like every other `/metrics` in this
+      // family, which is why nothing here carries an actor, a session or a path as a label.
+      label.route = '/metrics';
+      const body = renderMetrics();
+      res.writeHead(200, {
+        'content-type': 'text/plain; version=0.0.4; charset=utf-8',
+        'content-length': Buffer.byteLength(body),
+      });
+      res.end(body);
+      return;
+    }
+
     if (path === '/config.js') {
+      label.route = '/config.js';
       serveConfigJs(res);
+      return;
+    }
+
+    if (path === '/api/client-events') {
+      // Answered HERE, never forwarded: the service has no such route, so this pod's log is the
+      // sink. It is not in `server/routes.ts` because that list is what gets proxied.
+      label.route = '/api/client-events';
+      void handleClientEvents(req, res);
       return;
     }
 
     if (path.startsWith('/api/')) {
       const route = resolveRoute(method, path);
       if (!route) {
-        // Not whitelisted: answered here, upstream never contacted.
-        log.debug(`blocked un-whitelisted ${method} ${path}`);
+        // Not whitelisted: answered here, upstream never contacted. Labelled as one bucket rather
+        // than by path — an un-whitelisted path is attacker-chosen, so using it as a metric label
+        // would let anyone mint time series in this process.
+        label.route = '/api:blocked';
+        log.debug('blocked un-whitelisted request', { method, path });
         res.writeHead(404, { 'content-type': 'application/json' });
         res.end('{"detail":"not found"}');
         return;
       }
+      label.route = `/api${route.template}`;
       // Preserve the query string — the backend takes none today, but dropping it silently
       // would be a confusing bug the day it does.
       const query = rawUrl.slice(path.length);
@@ -119,6 +244,7 @@ export function createRequestListener(): http.RequestListener {
         route.path + query,
         route.sse,
         route.upload ? cfg.maxUploadBytes : cfg.maxBodyBytes,
+        trace,
       );
       return;
     }

@@ -52,6 +52,9 @@ const ENV: Record<string, string> = {
   APP_VERSION: '9.9.9-from-the-server',
   WARM_SESSIONS: 'false',
   REVIEWER_ROLES: 'Chemclaw.Reviewer,Chemclaw.Approver',
+  // Distinguishable from the `info` both halves fall back to, so a level that fails to cross the
+  // seam reads as the default rather than as this.
+  CLIENT_LOG_LEVEL: 'debug',
   MAX_MESSAGE_CHARS: '250000',
 };
 
@@ -119,6 +122,9 @@ describe('what /config.js actually delivers', () => {
     expect(client.apiScope).toBe('api://api-client-id/Chat.Access');
     expect(client.entraTenantId).toBe('tenant-from-the-server');
     expect(client.authMode).toBe('msal');
+    // The switch support turns on for one tenant. A `logLevel` that silently defaulted would leave
+    // a deployment believing its browsers were reporting when they were not.
+    expect(client.logLevel).toBe('debug');
     // Same shape of consequence: the message cap is the deployment's own
     // (`CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`), so one that fails to cross leaves the composer
     // refusing at the built-in default while the service would have accepted the message.
@@ -152,6 +158,7 @@ describe('what /config.js actually delivers', () => {
       appVersion: 'dev',
       warmSessions: true,
       reviewerRoles: [],
+      logLevel: 'info',
       maxMessageChars: 100_000,
     });
 

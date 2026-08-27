@@ -193,7 +193,9 @@ function JobSheet({
                   description="The service is asked to cancel it. Work already committed on the cluster may still complete, and anything it has spent is not recovered."
                   confirmLabel="Request cancellation"
                   variant="destructive"
-                  onConfirm={cancel}
+                  // `cancel` handles its own failures and cannot reject; `void` says so where
+                  // the dialog expects a void handler.
+                  onConfirm={() => void cancel()}
                 />
               )}
               {running && !isReviewer && (

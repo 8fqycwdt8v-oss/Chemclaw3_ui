@@ -143,4 +143,54 @@ describe('tool_failed', () => {
     // The panel is collapsed by default; the toggle counts the step either way.
     expect(screen.getByText(/1 step/)).toBeTruthy();
   });
+
+  it('counts the failures into the collapsed trigger, where somebody will see them', () => {
+    // A turn where tools failed used to read exactly like one where they did not: the trigger
+    // said "N steps" and the only event that says WHY the model routed around a broken tool was
+    // one click away, behind a disclosure nobody opens. `capability_degraded` is surfaced above
+    // the answer for the same reason; this is the same treatment for a failure inside an answer
+    // that still arrived.
+    render(
+      <TracePanel
+        trace={[
+          {
+            id: 't1',
+            at: 0,
+            kind: 'tool_call',
+            toolCall: { tool: 'gather_evidence', arguments: '' },
+          },
+          {
+            id: 't2',
+            at: 1,
+            kind: 'tool_failed',
+            toolFailure: { tool: 'predict_pka', message: 'connector timed out' },
+          },
+          {
+            id: 't3',
+            at: 2,
+            kind: 'tool_failed',
+            toolFailure: { tool: 'solubility', message: 'connector timed out' },
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText(/3 steps, 2 failed/)).toBeTruthy();
+  });
+
+  it('says nothing about failures on a turn that had none', () => {
+    render(
+      <TracePanel
+        trace={[
+          {
+            id: 't1',
+            at: 0,
+            kind: 'tool_call',
+            toolCall: { tool: 'gather_evidence', arguments: '' },
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText(/1 step\b/)).toBeTruthy();
+    expect(screen.queryByText(/failed/)).toBeNull();
+  });
 });

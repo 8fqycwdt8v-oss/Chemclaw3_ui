@@ -430,23 +430,39 @@ export const TracePanel = memo(function TracePanel({
   /** Null for a transcript read back from the server, which has calls but nothing to fetch
    *  against — the rows still render, without the full-result control. */
   sessionId = null,
+  /** The service's id for the turn this trace belongs to, rendered in the footer. Absent on a
+   *  message from before the field existed, and on a service that sends none. */
+  correlationId = '',
 }: {
   trace: TraceEntry[];
   sessionId?: string | null;
+  correlationId?: string;
 }): React.JSX.Element | null {
   const shown = trace.filter((e) => e.kind !== 'question' && e.kind !== 'approval_request');
   if (shown.length === 0) return null;
 
+  // A turn where tools failed used to read exactly like one where they did not: the collapsed
+  // trigger said "N steps", and `tool_failed` — which the event contract calls "the only event
+  // that says why" when the model routes around a broken tool — was one click away and nobody
+  // clicks. `capability_degraded` is already surfaced above the answer for the same reason; this
+  // is the same treatment for the failure that happens *inside* an answer that still arrived.
+  const failed = shown.filter((e) => e.kind === 'tool_failed').length;
+
   return (
     <Collapsible className="group/trace mt-3">
       <CollapsibleTrigger asChild>
-        <Button variant="link" size="xs" className="-ml-2 px-2 no-underline hover:underline">
+        <Button
+          variant="link"
+          size="xs"
+          className={cn('-ml-2 px-2 no-underline hover:underline', failed > 0 && 'text-danger-ink')}
+        >
           <ChevronRight
             aria-hidden
             className="size-3.5 transition-transform group-data-[state=open]/trace:rotate-90"
           />
           Show the agent’s work ({shown.length} step
-          {shown.length === 1 ? '' : 's'})
+          {shown.length === 1 ? '' : 's'}
+          {failed > 0 ? `, ${failed} failed` : ''})
         </Button>
       </CollapsibleTrigger>
 
@@ -474,6 +490,16 @@ export const TracePanel = memo(function TracePanel({
               </li>
             ))}
           </ol>
+
+          {/* The reference a support conversation is built on, where the reader can select it.
+              Every line the service logged for this turn carries the same string, so this is what
+              turns "it went wrong at 14:32" into one query — including on a turn that SUCCEEDED,
+              which is the case that had no reference of any kind. */}
+          {correlationId && (
+            <p className="mt-3 border-t border-border-subtle pt-2 font-mono text-2xs text-ink-subtle">
+              Reference {correlationId}
+            </p>
+          )}
         </div>
       </CollapsibleContent>
     </Collapsible>

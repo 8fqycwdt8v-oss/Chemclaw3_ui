@@ -24,6 +24,7 @@ import { retryAfterSeconds } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from '../state/chatStore.ts';
+import { logger } from '../lib/logger.ts';
 import { readEventStream } from '../lib/sse.ts';
 
 /**
@@ -47,6 +48,21 @@ import { readEventStream } from '../lib/sse.ts';
  * in ISSUES.md rather than half-built here.
  */
 const MAX_JOB_STREAMS = 3;
+
+/**
+ * Consecutive failed connects before this stream is reported as failing.
+ *
+ * The module docstring names the hazard exactly — "a silent retry loop is exactly how this failure
+ * hides" — and then only the 429 path acted on it. Every other failure (a 500, a 502, a TLS error,
+ * a DNS error, a body that closes the instant it opens) fell into two identical silent branches:
+ * an infinite retry loop, capped at 30 s, with no banner, no counter, no log and no store flag, so
+ * durable job completions quietly stopped arriving and nothing anywhere recorded that they had.
+ *
+ * Four, because the backoff is 1, 2, 4, 8 s: past it the stream has been down for roughly half a
+ * minute, which is long enough that this is not a rollout blipping and short enough that the
+ * chemist has not yet been waiting for a completion that will never arrive.
+ */
+const FAILURES_BEFORE_REPORTING = 4;
 
 export function useJobStreams(): void {
   const { auth, ready } = useAuth();
@@ -82,7 +98,12 @@ export function useJobStreams(): void {
       void openStream(sessionId, auth, controller);
       return controller;
     });
-    return () => controllers.forEach((c) => c.abort());
+    return () => {
+      controllers.forEach((c) => c.abort());
+      // A stream nobody is watching cannot be failing. Without this, dropping a conversation out
+      // of the watch set would leave its indicator up for the life of the page.
+      sessionIds.forEach((id) => useChatStore.getState().setJobStreamFailing(id, false));
+    };
   }, [watchKey, auth, ready]);
 }
 
@@ -94,6 +115,35 @@ async function openStream(
   let attempt = 0;
   let consecutive429 = 0;
   let reauthed = false;
+  /** Connects that produced no frame, in a row. Reset by a frame, never by a connect. */
+  let failures = 0;
+
+  /**
+   * Record one connect that delivered nothing, and say so once it has happened enough times.
+   *
+   * The log line is per attempt because the shape of the failure is what an operator needs — a
+   * 502 every time is an ingress, a 401 once is a token, a clean close every time is a pod coming
+   * up — and the store flag is once, because it drives an indicator rather than a stream of them.
+   */
+  const failed = (reason: string, status?: number): void => {
+    failures += 1;
+    logger.warn('jobstream.connect_failed', {
+      sessionId,
+      reason,
+      ...(status ? { status } : {}),
+      attempt: failures,
+    });
+    if (failures >= FAILURES_BEFORE_REPORTING) {
+      useChatStore.getState().setJobStreamFailing(sessionId, true);
+    }
+  };
+
+  /** A frame arrived, so this stream is doing its job. */
+  const delivering = (): void => {
+    if (failures === 0) return;
+    failures = 0;
+    useChatStore.getState().setJobStreamFailing(sessionId, false);
+  };
 
   while (!controller.signal.aborted) {
     try {
@@ -152,26 +202,33 @@ async function openStream(
       // cannot recover, stop watching. The conversation still works; only push-back is lost, and
       // the turn path will surface the sign-in prompt on the next message.
       if (res.status === 401) {
-        if (reauthed || !(await auth.handleUnauthorized())) return;
+        if (reauthed || !(await auth.handleUnauthorized())) {
+          logger.warn('jobstream.unauthorized', { sessionId });
+          return;
+        }
         reauthed = true;
         continue;
       }
 
       if (!res.ok || !res.body) {
         attempt += 1;
+        failed('status', res.status);
         await backoff(attempt, controller.signal);
         continue;
       }
 
       // `readEventStream` cancels its reader on the way out (loop exit, throw, or this iterator
       // being abandoned), so there is nothing left to clean up here.
-      for await (const event of readEventStream(res.body)) {
+      for await (const frame of readEventStream(res.body)) {
         // A frame arrived, so this connection is doing its job — only now is the escalation
         // reset. Resetting it at connect time meant a connect-then-immediately-close cycle
-        // could repeat for ever without the delay ever growing. `readEventStream` yields `null`
-        // for a heartbeat or an unusable frame too, which still counts as "arrived" here.
+        // could repeat for ever without the delay ever growing. A frame this build cannot use
+        // still counts as "arrived": it proves the connection is delivering, which is the only
+        // question the backoff and the failure counter are asking.
         attempt = 0;
-        if (!event) continue;
+        delivering();
+        if (!frame.event) continue;
+        const event = frame.event;
         try {
           // Both endings, not just the happy one. This stream is scoped server-side to exactly
           // `job_completed` and `job_failed`, and a job that died after the turn ended is the
@@ -194,10 +251,17 @@ async function openStream(
       // still coming up. This is the same pacing every other retry path here already had.
       if (controller.signal.aborted) return;
       attempt += 1;
+      // A body that ends without ever delivering a frame is a failure however clean the close
+      // was: it is the rollout loop this file already paid for once, and the chemist's view of it
+      // is the same as a 502's — completions stop arriving.
+      failed('closed');
       await backoff(attempt, controller.signal);
     } catch {
       if (controller.signal.aborted) return;
       attempt += 1;
+      // `fetch` itself threw: DNS, TLS, a refused connection. Indistinguishable here and worth
+      // distinguishing in the log only by the fact that it is not a status.
+      failed('transport');
       await backoff(attempt, controller.signal);
     }
   }

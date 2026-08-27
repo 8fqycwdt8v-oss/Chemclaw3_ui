@@ -12,8 +12,9 @@
  */
 
 import { config } from '../env.ts';
+import { logger } from '../lib/logger.ts';
 import type { AuthProvider } from '../auth/types.ts';
-import { ApiError, errorFromStatus, readDetail } from './errors.ts';
+import { ApiError, CORRELATION_HEADER, errorFromStatus, readFailure } from './errors.ts';
 
 /**
  * How a request authenticates.
@@ -81,10 +82,39 @@ async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {
   }
 
   if (!res.ok) {
-    throw errorFromStatus(res.status, await readDetail(res), res.headers.get('retry-after'));
+    // Read back rather than sent: the service issues the id and stamps it on its own log records,
+    // so quoting it is what joins a banner a chemist screenshotted to one line in the logs.
+    const failure = await readFailure(res);
+    throw errorFromStatus(
+      res.status,
+      failure.detail,
+      res.headers.get('retry-after'),
+      failure.correlationId,
+    );
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+/**
+ * Swallow a 404 from a LIST route into an empty result, and say so somewhere.
+ *
+ * The degradation is deliberate and unchanged: an older service yields a smaller app rather than a
+ * banner. What it never did was leave a trace — so "the sidebar is empty" and "this deployment's
+ * service predates the listing route" were the same observation, and the second is a deployment
+ * fault somebody should hear about. The record is a log entry rather than a banner precisely
+ * because the UX decision here is right.
+ */
+async function orEmpty<T>(route: string, load: () => Promise<T[]>): Promise<T[]> {
+  try {
+    return await load();
+  } catch (err) {
+    if (err instanceof ApiError && err.kind === 'session_not_found') {
+      logger.warn('api.list_route_missing', { route });
+      return [];
+    }
+    throw err;
+  }
 }
 
 /**
@@ -301,15 +331,22 @@ function upload(
         resolve(xhr.response as AttachmentSummary);
         return;
       }
-      const detail =
+      const body =
         typeof xhr.response === 'object' && xhr.response !== null
-          ? (xhr.response as { detail?: unknown }).detail
-          : undefined;
+          ? (xhr.response as { detail?: unknown; correlation_id?: unknown })
+          : {};
+      // The same read-back as `request` above, through XHR's own accessor — an upload that fails
+      // is exactly as worth joining to the service's logs as a turn that does, and it is refused
+      // by the same per-principal limiter, so it honours the same `Retry-After`.
+      const correlationId =
+        xhr.getResponseHeader(CORRELATION_HEADER)?.trim() ||
+        (typeof body.correlation_id === 'string' ? body.correlation_id : '');
       reject(
         errorFromStatus(
           xhr.status,
-          typeof detail === 'string' ? detail : undefined,
+          typeof body.detail === 'string' ? body.detail : undefined,
           xhr.getResponseHeader('retry-after'),
+          correlationId,
         ),
       );
     };
@@ -349,24 +386,14 @@ export const api = {
 
   /** The profiles this deployment offers. Degrades to `[]`, which the picker reads as "do not
    *  offer a choice" — a service without the route has exactly one profile. */
-  async listProfiles(getToken: TokenGetter): Promise<string[]> {
-    try {
-      return await request<string[]>('/profiles', getToken);
-    } catch (err) {
-      if (err instanceof ApiError && err.kind === 'session_not_found') return [];
-      throw err;
-    }
+  listProfiles(getToken: TokenGetter): Promise<string[]> {
+    return orEmpty('/profiles', () => request<string[]>('/profiles', getToken));
   },
 
   /** The caller's sessions. Returns `[]` if the backend predates this endpoint (404) or has
    *  nothing durable to list, so the sidebar simply stays local-only. */
-  async listSessions(getToken: TokenGetter): Promise<SessionSummary[]> {
-    try {
-      return await request<SessionSummary[]>('/sessions', getToken);
-    } catch (err) {
-      if (err instanceof ApiError && err.kind === 'session_not_found') return [];
-      throw err;
-    }
+  listSessions(getToken: TokenGetter): Promise<SessionSummary[]> {
+    return orEmpty('/sessions', () => request<SessionSummary[]>('/sessions', getToken));
   },
 
   /**
@@ -392,13 +419,10 @@ export const api = {
 
   /** A session's transcript. Same graceful degradation as `listSessions`: a backend without this
    *  route, or a session whose history is gone, yields an empty transcript rather than an error. */
-  async getMessages(sessionId: string, getToken: TokenGetter): Promise<TranscriptMessage[]> {
-    try {
-      return await request<TranscriptMessage[]>(`/sessions/${sessionId}/messages`, getToken);
-    } catch (err) {
-      if (err instanceof ApiError && err.kind === 'session_not_found') return [];
-      throw err;
-    }
+  getMessages(sessionId: string, getToken: TokenGetter): Promise<TranscriptMessage[]> {
+    return orEmpty('/sessions/{id}/messages', () =>
+      request<TranscriptMessage[]>(`/sessions/${sessionId}/messages`, getToken),
+    );
   },
 
   /**
@@ -461,13 +485,8 @@ export const api = {
 
   /** Pending approvals. Degrades to `[]` like `listSessions` — a service whose approval routes
    *  are missing answers 404, and an empty inbox is the honest reading of that. */
-  async listApprovals(getToken: TokenGetter): Promise<PendingApproval[]> {
-    try {
-      return await request<PendingApproval[]>('/approvals', getToken);
-    } catch (err) {
-      if (err instanceof ApiError && err.kind === 'session_not_found') return [];
-      throw err;
-    }
+  listApprovals(getToken: TokenGetter): Promise<PendingApproval[]> {
+    return orEmpty('/approvals', () => request<PendingApproval[]>('/approvals', getToken));
   },
 
   /** Deliver the human Yes/No to a durable approval hold. Deliberately an HTTP route on the
@@ -496,12 +515,7 @@ export const api = {
     if (options.state) query.set('state', options.state);
     if (options.beforeId) query.set('before_id', String(options.beforeId));
     const suffix = query.toString() ? `?${query.toString()}` : '';
-    try {
-      return await request<ProposalSummary[]>(`/proposals${suffix}`, getToken);
-    } catch (err) {
-      if (err instanceof ApiError && err.kind === 'session_not_found') return [];
-      throw err;
-    }
+    return orEmpty('/proposals', () => request<ProposalSummary[]>(`/proposals${suffix}`, getToken));
   },
 
   /** One proposal with the exact bytes it would commit. Not swallowed: it is opened by a click. */
@@ -543,12 +557,7 @@ export const api = {
     if (options.text) query.set('text', options.text);
     if (options.connector) query.set('connector', options.connector);
     const suffix = query.toString() ? `?${query.toString()}` : '';
-    try {
-      return await request<JobRecordSummary[]>(`/jobs${suffix}`, getToken);
-    } catch (err) {
-      if (err instanceof ApiError && err.kind === 'session_not_found') return [];
-      throw err;
-    }
+    return orEmpty('/jobs', () => request<JobRecordSummary[]>(`/jobs${suffix}`, getToken));
   },
 
   getJob(jobId: string, getToken: TokenGetter): Promise<DurableJobStatus> {

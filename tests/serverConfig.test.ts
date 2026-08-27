@@ -38,6 +38,7 @@ const base: BffConfig = {
   maxMessageChars: 100_000,
   csp: '',
   logLevel: 'error',
+  clientLogLevel: 'info',
 };
 
 const config = (over: Partial<BffConfig> = {}): BffConfig => ({ ...base, ...over });

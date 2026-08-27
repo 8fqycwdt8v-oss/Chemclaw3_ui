@@ -18,6 +18,30 @@ import https from 'node:https';
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 import { cfg } from './config.ts';
 import { log } from './log.ts';
+import { upstreamErrorRecorded } from './metrics.ts';
+
+/**
+ * What one proxied request tells the access log about itself.
+ *
+ * Passed in and mutated rather than returned, because the two facts worth recording — how long the
+ * upstream took and the correlation id it answered with — are known at different moments, and both
+ * are known before `res` finishes, which is when the line is written.
+ */
+export interface ProxyTrace {
+  /** Milliseconds from opening the upstream request to its response headers. Null if none came. */
+  upstreamMs: number | null;
+  /** The service's own id for this request, read back from its response header. */
+  correlationId: string;
+}
+
+/**
+ * The response header the Chemclaw service stamps its per-request correlation id on.
+ *
+ * Read here and forwarded to the browser by the header copy below (it is neither hop-by-hop nor
+ * BFF-owned, so it already crosses) — and written into this process's access log, which is what
+ * lets one line here be joined to the service's own record of the same request.
+ */
+const CORRELATION_HEADER = 'x-chemclaw-correlation-id';
 
 const upstream = new URL(cfg.apiUrl);
 const transport = upstream.protocol === 'https:' ? https : http;
@@ -128,7 +152,11 @@ function buildUpstreamHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
 
 /** Refuse a body this process will not carry, in the shape FastAPI's own errors have. */
 function refuseTooLarge(req: IncomingMessage, res: ServerResponse, maxBodyBytes: number): void {
-  log.warn(`refused ${req.method} ${req.url}: body over ${maxBodyBytes} bytes`);
+  log.warn('refused body over cap', {
+    method: req.method,
+    path: req.url,
+    max_bytes: maxBodyBytes,
+  });
   if (!res.headersSent) {
     res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
     res.end(JSON.stringify({ detail: 'request body too large' }));
@@ -142,7 +170,10 @@ export function proxy(
   upstreamPath: string,
   expectSse: boolean,
   maxBodyBytes: number = cfg.maxBodyBytes,
+  /** Filled in as the request runs; the access log reads it when the response finishes. */
+  trace?: ProxyTrace,
 ): void {
+  const startedAt = Date.now();
   // The cheap check first: a declared length over the cap is refused without opening an upstream
   // request at all, which is what stops a 100 MB body from being buffered by the backend before
   // its own validator can reject it.
@@ -163,6 +194,13 @@ export function proxy(
       agent,
     },
     (upstreamRes) => {
+      if (trace) {
+        trace.upstreamMs = Date.now() - startedAt;
+        const correlation = upstreamRes.headers[CORRELATION_HEADER];
+        trace.correlationId = Array.isArray(correlation)
+          ? (correlation[0] ?? '')
+          : (correlation ?? '');
+      }
       const out: http.OutgoingHttpHeaders = {};
       for (const [key, value] of Object.entries(upstreamRes.headers)) {
         if (value === undefined || HOP_BY_HOP.has(key) || BFF_OWNED.has(key)) continue;
@@ -236,7 +274,13 @@ export function proxy(
       if (!res.writableEnded) res.destroy();
       return;
     }
-    log.warn(`upstream error for ${req.method} ${upstreamPath}: ${err.message}`);
+    upstreamErrorRecorded();
+    log.warn('upstream error', {
+      method: req.method,
+      path: upstreamPath,
+      code: err.code ?? 'EPROXY',
+      error: err.message,
+    });
     res.writeHead(502, { 'content-type': 'application/json', connection: 'close' });
     res.end(JSON.stringify({ detail: 'upstream unavailable', code: err.code ?? 'EPROXY' }));
     // And hang up on a body still arriving. Node stops enforcing `requestTimeout` once the

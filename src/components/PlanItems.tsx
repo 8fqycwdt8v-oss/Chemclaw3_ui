@@ -14,8 +14,9 @@
  * for it would claim a completion state nobody reported.
  */
 
-import { Check } from 'lucide-react';
+import { Check, Loader2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { PlanStepJobStatus } from '../state/planJobs.ts';
 
 export type PlanItem = { status: 'done' | 'open' | 'plain'; text: string };
 
@@ -26,7 +27,40 @@ export function parsePlanItem(line: string): PlanItem {
   return { status: 'plain', text: line };
 }
 
-export function PlanItems({ todos }: { todos: string[] }): React.JSX.Element {
+/**
+ * The chip a step wears while a durable job runs for it, and after that job ends.
+ *
+ * Matched on the step's bare text because that is what the service stamps on the job
+ * (`JobStartedEvent.plan_step` is the todo's content, not the rendered `[x] ` line) — so parsing
+ * the checkbox prefix off first is what makes the join line up.
+ */
+function JobChip({ status }: { status: PlanStepJobStatus }): React.JSX.Element {
+  return (
+    <span
+      className={cn(
+        'ml-2 inline-flex items-center gap-1 rounded-full border px-1.5 py-px align-middle',
+        'text-2xs',
+        status === 'failed'
+          ? 'border-danger/40 text-danger-ink'
+          : 'border-border-subtle text-ink-muted',
+      )}
+    >
+      {status === 'running' && <Loader2 className="size-2.5 animate-spin" aria-hidden />}
+      {status === 'done' && <Check className="size-2.5" strokeWidth={3} aria-hidden />}
+      {status === 'failed' && <X className="size-2.5" strokeWidth={3} aria-hidden />}
+      {status === 'running' ? 'job running' : status === 'done' ? 'job done' : 'job failed'}
+    </span>
+  );
+}
+
+export function PlanItems({
+  todos,
+  jobs,
+}: {
+  todos: string[];
+  /** Step text → the state of the durable job(s) behind it; steps not in the map wear no chip. */
+  jobs?: ReadonlyMap<string, PlanStepJobStatus>;
+}): React.JSX.Element {
   return (
     <ul className="space-y-1">
       {todos.map((line, i) => {
@@ -56,6 +90,10 @@ export function PlanItems({ todos }: { todos: string[] }): React.JSX.Element {
                 <span className="sr-only">{item.status === 'done' ? 'Done: ' : 'To do: '}</span>
               )}
               {item.text}
+              {(() => {
+                const job = jobs?.get(item.text);
+                return job ? <JobChip status={job} /> : null;
+              })()}
             </span>
           </li>
         );

@@ -125,8 +125,19 @@ export interface TraceEntry {
    * `settled` is the `job_started` row's version of `toolCall.failed`, and exists for the same
    * reason: a launch row that never learns its job ended goes on saying "runs asynchronously"
    * for the life of the conversation. Both endings set it — the row that follows says which one.
+   *
+   * `planStep` is the checklist item the launch served (the todo's bare text, backend
+   * D-2026-08-27), set only on `job_started` rows and only when the service sent one — it is what
+   * lets the plan card badge the step a running job belongs to. Absent means the job was not
+   * launched from a plan step.
    */
-  job?: { jobId: string; kind?: string; summary?: JobSummary; settled?: boolean };
+  job?: {
+    jobId: string;
+    kind?: string;
+    summary?: JobSummary;
+    settled?: boolean;
+    planStep?: string;
+  };
   /** `reason` may legitimately be empty; the service does not always have one. */
   jobFailure?: { jobId: string; reason: string };
   question?: { question: string; options: string[] };

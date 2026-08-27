@@ -296,7 +296,17 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
           }
         : null;
     case 'job_started':
-      return { ...base, kind: 'job_started', job: { jobId: event.job_id, kind: event.kind } };
+      return {
+        ...base,
+        kind: 'job_started',
+        job: {
+          jobId: event.job_id,
+          kind: event.kind,
+          // Only when the service sent one — an empty string carries no step to badge, and an
+          // absent field is what the plan card's derivation treats as "no link".
+          ...(event.plan_step ? { planStep: event.plan_step } : {}),
+        },
+      };
     case 'job_completed':
       return {
         ...base,

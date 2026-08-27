@@ -46,17 +46,23 @@ function JobSheet({
   const isReviewer = useIsReviewer();
   const [status, setStatus] = useState<DurableJobStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // Tracked separately from `notice`, which a *successful* cancellation also writes. Without it
+  // the spinner's `!status` guard stayed true for the life of the sheet, so a failed read showed
+  // an error string with a spinner turning under it — permanently, and with no way to retry.
+  const [failed, setFailed] = useState(false);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
 
   const load = useCallback(
     (id: string) => {
       setStatus(null);
+      setFailed(false);
       api
         .getJob(id, auth)
         .then(setStatus)
-        .catch((err: unknown) =>
-          setNotice(err instanceof Error ? err.message : 'Could not read that job.'),
-        );
+        .catch((err: unknown) => {
+          setFailed(true);
+          setNotice(err instanceof Error ? err.message : 'Could not read that job.');
+        });
     },
     [auth],
   );
@@ -98,7 +104,15 @@ function JobSheet({
             </p>
           )}
 
-          {!status && <Loading>Reading the job…</Loading>}
+          {failed && (
+            <div>
+              <Button variant="outline" size="sm" onClick={() => load(jobId)}>
+                Try again
+              </Button>
+            </div>
+          )}
+
+          {!status && !failed && <Loading>Reading the job…</Loading>}
 
           {status && (
             <>

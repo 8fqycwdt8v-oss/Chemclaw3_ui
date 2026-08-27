@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { ReviewQueue } from '../src/components/ReviewQueue.tsx';
 import { stubFetch } from './helpers.ts';
+import type { ProposalDetail, ProposalSummary } from '../src/api/client.ts';
 
 const mode = { current: 'dev' as 'dev' | 'msal', roles: [] as string[] };
 
@@ -42,7 +43,9 @@ vi.mock('../src/auth/AuthContext.tsx', async () => {
   };
 });
 
-const SUMMARY = {
+/** Typed against the declaration, so a renamed field fails `tsc -b` rather than this fixture
+ *  quietly describing a shape the gate route no longer sends. */
+const SUMMARY: ProposalSummary = {
   id: 7,
   note_id: 'note-suzuki-42',
   note_type: 'reaction',
@@ -56,7 +59,7 @@ const SUMMARY = {
   reason: '',
 };
 
-const DETAIL = {
+const DETAIL: ProposalDetail = {
   ...SUMMARY,
   content: '---\ntype: reaction\nconfidence: 0.8\n---\nRan in 2-MeTHF at 70 °C.',
   dependencies: [{ path: 'knowledge/compound/brettphos.md', content: '# BrettPhos' }],

@@ -95,6 +95,13 @@ export interface ToolCallEvent {
 export interface TokenEvent {
   type: 'token';
   text: string;
+  /** The agent that produced this chunk; **empty means the main agent**. The backend emits it on
+   *  every token (`agent="subagent" if namespace else ""`) and its own docstring says a consumer
+   *  "concatenates only the unattributed ones", because an attributed chunk is another agent's
+   *  working notes rather than part of the answer. Same optionality rule as `ToolCallEvent.agent`:
+   *  optional in the type, always populated by `normalizeEvent`, and a falsy check is the whole
+   *  handling. */
+  agent?: string;
 }
 
 export interface JobStartedEvent {
@@ -102,6 +109,12 @@ export interface JobStartedEvent {
   job_id: string;
   /** "calc" | "report" | "campaign" | "job" — lets a surface label the job without parsing the id. */
   kind: string;
+  /** The plan step this job was launched for — the todo's bare text, so the checklist item can be
+   *  matched without sharing a hash function with the service (backend D-2026-08-27). Empty means
+   *  the job was not launched from a plan step, which is every job outside the harness. Same
+   *  optionality rule as `TokenEvent.agent`: optional in the type, always populated by
+   *  `normalizeEvent`, and a falsy check is the whole handling. */
+  plan_step?: string;
 }
 
 /** The one structured chemistry payload the backend produces. The backend types it as a bare
@@ -498,9 +511,14 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         agent: asString(o.agent),
       };
     case 'token':
-      return { type: 'token', text: asString(o.text) };
+      return { type: 'token', text: asString(o.text), agent: asString(o.agent) };
     case 'job_started':
-      return { type: 'job_started', job_id: asString(o.job_id), kind: asString(o.kind, 'job') };
+      return {
+        type: 'job_started',
+        job_id: asString(o.job_id),
+        kind: asString(o.kind, 'job'),
+        plan_step: asString(o.plan_step),
+      };
     case 'job_completed':
       return {
         type: 'job_completed',

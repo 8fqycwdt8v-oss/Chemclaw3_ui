@@ -39,7 +39,7 @@
  * a navigation.
  */
 
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { Hexagon, Paperclip, Send, Square, X } from 'lucide-react';
 import { MAX_MESSAGE_CHARS } from '../../shared/events.ts';
 import { api } from '../api/client.ts';
@@ -257,12 +257,69 @@ export function Composer({ conversationId }: { conversationId: string }): React.
    */
   const pasteBefore = useRef('');
   const pasteLanded = useRef(false);
+  /** Mirrors the in-flight upload's controller out of state, which is where leaving cannot reach
+   *  it. See the effect below. */
+  const uploadAbort = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   /** Where the caret was when the structure panel took focus. Captured on open rather than read
    *  back on insert, because by then the caret belongs to the panel's own input. */
   const caretRef = useRef<number | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const hintId = useId();
+
+  /**
+   * Everything above this line that is *about a conversation* is dropped when the conversation
+   * changes.
+   *
+   * This component does not unmount on a switch — only its prop changes — and the file's own
+   * history says what that costs: the draft used to live here too, and you could type in one
+   * conversation, switch, and send the first one's text into the second. It was moved to the
+   * store; these four were left behind. The upload notice announced an attachment the new
+   * conversation's session does not have, the structure panel stayed open over it, and the paste
+   * strip offered "Use the canonical form" against a draft that has never held the pasted span —
+   * a button that writes nothing and says nothing.
+   *
+   * Adjusting state during render rather than in an effect, which is this codebase's shape for
+   * derived state (`JobsPanel`, `NoteSheet`, `ResultSheet`) and the only one with no window in
+   * which the previous conversation's strip is on screen over the new one.
+   */
+  const [ephemeralFor, setEphemeralFor] = useState(conversationId);
+  if (ephemeralFor !== conversationId) {
+    setEphemeralFor(conversationId);
+    setUpload(null);
+    setStructureOpen(false);
+    setDroppedFile(null);
+    setPasted(null);
+    setDryRun(false);
+  }
+
+  /**
+   * The other half of the switch: a paste read that is still in flight may no longer write the
+   * strip, or it settles the previous conversation's structure over the new one — which the
+   * withdrawal effect below cannot catch, because it never saw the span land. Same mechanism a
+   * superseded paste already obeys: a read writes only while it is the newest.
+   *
+   * A LAYOUT effect, not a passive one. A passive cleanup is scheduled after paint, and the read
+   * resolves on a microtask — which can run first, leaving the stale strip on screen anyway.
+   */
+  useLayoutEffect(() => {
+    pasteSeq.current += 1;
+  }, [conversationId]);
+
+  /**
+   * And the upload goes with it.
+   *
+   * The controller lived only in component state, so leaving took it out of reach: `AppShell`
+   * unmounts the composer on `/review` and `/jobs` — both one click away in the sidebar — and a
+   * 40 MB file kept uploading with its progress callback pointed at a dead tree, invisible and
+   * uncancellable for the rest of its life. Coming back re-mounts a composer with no progress bar
+   * and no way to tell whether it landed.
+   *
+   * Aborting is the right default because the composer's own Cancel button already treats an abort
+   * as "no upload happened", and because the request is bound to the session the upload started
+   * against — which is no longer the one on screen.
+   */
+  useEffect(() => () => uploadAbort.current?.abort(), [conversationId]);
 
   const composerLock = useChatStore((s) => s.composerLock);
   // Scoped to THIS conversation. A global check locked the composer in every conversation while
@@ -595,6 +652,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
       return;
     }
     const abort = new AbortController();
+    uploadAbort.current = abort;
     setUpload({ state: 'busy', text: `Uploading ${file.name}…`, progress: 0, abort });
     try {
       const summary = await api.uploadAttachment(sessionId, file, auth, {

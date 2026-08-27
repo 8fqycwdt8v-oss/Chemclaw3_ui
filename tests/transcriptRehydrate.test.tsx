@@ -197,3 +197,62 @@ describe('transcript rehydrate', () => {
     expect(useChatStore.getState().banner?.action).toBe('retry');
   });
 });
+
+describe('the plan behind a rehydrated transcript', () => {
+  const withPlan = (planResponse: Response) =>
+    stubFetch((url) =>
+      url.includes('/messages')
+        ? new Response(JSON.stringify(TRANSCRIPT), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          })
+        : url.includes(`/sessions/${SID}/plan`)
+          ? planResponse
+          : new Response(JSON.stringify({ detail: 'not found' }), { status: 404 }),
+    );
+
+  it('restores the session’s current plan onto the newest assistant message', async () => {
+    // `latestPlan` is stream-only state, so a reload used to drop the checklist while the
+    // session — per GET /sessions/{id}/plan — was still proposing (and possibly blocked on) one.
+    const stub = withPlan(
+      new Response(
+        JSON.stringify({
+          plan: ['compute the pKa', 'propose a note'],
+          plan_hash: 'h-restored',
+          approved: false,
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    restore = stub.restore;
+
+    const cid = seed('server');
+    renderShell(cid);
+    expect(await screen.findByText('compute the pKa')).toBeTruthy();
+
+    const assistant = useChatStore
+      .getState()
+      .conversations[cid]?.messages.findLast((m) => m.role === 'assistant');
+    if (assistant?.role !== 'assistant') throw new Error('no assistant message');
+    expect(assistant.latestPlan).toEqual(['compute the pKa', 'propose a note']);
+    expect(assistant.latestPlanHash).toBe('h-restored');
+  });
+
+  it('rehydrates without a checklist when the service has no plan route', async () => {
+    // An older service 404s the plan read; a session with no plan is the ordinary case. Either
+    // way the transcript still renders and no banner is raised — the checklist simply stays off.
+    const stub = withPlan(new Response(JSON.stringify({ detail: 'not found' }), { status: 404 }));
+    restore = stub.restore;
+
+    const cid = seed('server');
+    renderShell(cid);
+    expect(await screen.findByText('BrettPhos, at 1.2 equiv base.')).toBeTruthy();
+
+    const assistant = useChatStore
+      .getState()
+      .conversations[cid]?.messages.findLast((m) => m.role === 'assistant');
+    if (assistant?.role !== 'assistant') throw new Error('no assistant message');
+    expect(assistant.latestPlan).toBeNull();
+    expect(useChatStore.getState().banner).toBeNull();
+  });
+});

@@ -37,6 +37,7 @@ import type { TraceEntry } from '../state/types.ts';
 import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
 import { JobFailureCard, JobResultCard } from './JobResultCard.tsx';
+import { PlanItems } from './PlanItems.tsx';
 import { ResultSheet } from './ResultSheet.tsx';
 import { methodFor } from '../chem/provenance.ts';
 import { smilesFromArguments } from '../chem/recognise.ts';
@@ -232,17 +233,7 @@ function Row({
       return (
         <div>
           <p className="mb-1.5 text-xs font-medium text-ink-muted">Plan revised</p>
-          <ul className="space-y-1">
-            {entry.plan?.todos.map((todo, i) => (
-              <li key={i} className="flex gap-2 text-sm">
-                <span
-                  aria-hidden
-                  className="mt-1.5 size-1.5 shrink-0 rounded-[1px] border border-ink-subtle"
-                />
-                <span>{todo}</span>
-              </li>
-            ))}
-          </ul>
+          <PlanItems todos={entry.plan?.todos ?? []} />
         </div>
       );
 

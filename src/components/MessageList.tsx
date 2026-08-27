@@ -23,7 +23,8 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ChevronUp, FlaskConical } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import type { AssistantMessage, ChatMessage } from '../state/types.ts';
+import type { AssistantMessage, ChatMessage, TraceEntry } from '../state/types.ts';
+import { planStepJobs } from '../state/planJobs.ts';
 import { Markdown } from './LazyMarkdown.tsx';
 import { StructureText } from './Molecule.tsx';
 import { TracePanel } from './TracePanel.tsx';
@@ -34,6 +35,7 @@ import {
   ReviewRequiredPill,
 } from './AnswerBadges.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
+import { PlanItems } from './PlanItems.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { entitiesOf, messagesFor, useEntityStore } from '../chem/entities.ts';
@@ -44,24 +46,22 @@ import { cn } from '@/lib/utils';
 
 const PlanChecklist = memo(function PlanChecklist({
   todos,
+  trace,
 }: {
   todos: string[];
+  /** The message's own trace — where `job_started` rows carry the step a launch served. */
+  trace: TraceEntry[];
 }): React.JSX.Element | null {
+  // The global feed, because a durable job's ending usually arrives *after* the turn, through the
+  // session's event stream — reading only the trace would leave a chip spinning forever for
+  // exactly the jobs the chip matters for (see `planStepJobs`).
+  const jobFeed = useChatStore((s) => s.jobFeed);
+  const jobs = useMemo(() => planStepJobs(trace, jobFeed), [trace, jobFeed]);
   if (todos.length === 0) return null;
   return (
     <div className="mb-3 rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2.5">
       <p className="mb-1.5 text-2xs font-medium tracking-wide text-ink-subtle uppercase">Plan</p>
-      <ul className="space-y-1">
-        {todos.map((todo, i) => (
-          <li key={i} className="flex gap-2 text-sm">
-            <span
-              aria-hidden
-              className="mt-1.5 size-1.5 shrink-0 rounded-[1px] border border-ink-subtle"
-            />
-            <span>{todo}</span>
-          </li>
-        ))}
-      </ul>
+      <PlanItems todos={todos} jobs={jobs} />
     </div>
   );
 });
@@ -76,7 +76,12 @@ const AssistantBubble = memo(function AssistantBubble({
 }): React.JSX.Element {
   // finalText wins outright. answer.text is the full concatenation of every token, so anything
   // that combined the two would render the entire answer twice.
-  const body = message.finalText ?? message.streamedText;
+  //
+  // `||` and not `??`, which falls back only on null/undefined. A terminal `answer` carrying
+  // `text: ''` — a shape the service really sends — then replaced a settled answer with the empty
+  // string and the ternary below rendered nothing whatsoever, erasing tokens the reader had just
+  // watched arrive. Falling back to them is not the forbidden combination: it never concatenates.
+  const body = message.finalText || message.streamedText;
   const streaming = message.status === 'streaming';
 
   const question = message.trace.findLast?.((e) => e.kind === 'question')?.question;
@@ -95,7 +100,7 @@ const AssistantBubble = memo(function AssistantBubble({
           rest is read. */}
       <PartialAnswerPill message={message} />
       <ReviewRequiredPill message={message} />
-      {message.latestPlan && <PlanChecklist todos={message.latestPlan} />}
+      {message.latestPlan && <PlanChecklist todos={message.latestPlan} trace={message.trace} />}
 
       {body ? (
         streaming ? (
@@ -107,7 +112,6 @@ const AssistantBubble = memo(function AssistantBubble({
           </div>
         ) : (
           <ErrorBoundary
-            resetKey={message.id}
             fallback={() => (
               <div className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2">
                 <p className="text-sm text-warn-ink">
@@ -122,18 +126,28 @@ const AssistantBubble = memo(function AssistantBubble({
             <Markdown figures={figures}>{body}</Markdown>
           </ErrorBoundary>
         )
-      ) : (
-        streaming && (
-          <p className="flex items-center gap-2 text-sm text-ink-muted">
-            {/* "Thinking…" is untrue while the turn is parked on admission control: nothing is
-                running yet. The distinction is the point of the event — a queued turn and a hung
-                server used to look identical from here.
+      ) : streaming ? (
+        <p className="flex items-center gap-2 text-sm text-ink-muted">
+          {/* "Thinking…" is untrue while the turn is parked on admission control: nothing is
+              running yet. The distinction is the point of the event — a queued turn and a hung
+              server used to look identical from here.
 
-                The elapsed time is a SIBLING node, never concatenated in: a ten-minute turn needs
-                a sign of life, but the sentence itself has to stay one stable string. */}
-            <span aria-hidden className="size-1.5 shrink-0 animate-pulse rounded-full bg-brand" />
-            {message.queued ? 'Waiting for a free slot on the server…' : 'Thinking…'}
-            <ElapsedTimer since={message.at} />
+              The elapsed time is a SIBLING node, never concatenated in: a ten-minute turn needs
+              a sign of life, but the sentence itself has to stay one stable string. */}
+          <span aria-hidden className="size-1.5 shrink-0 animate-pulse rounded-full bg-brand" />
+          {message.queued ? 'Waiting for a free slot on the server…' : 'Thinking…'}
+          <ElapsedTimer since={message.at} />
+        </p>
+      ) : (
+        // A settled turn with nothing in either field says so. An empty card is indistinguishable
+        // from a service that answered nothing — and from this component having lost the answer,
+        // which is exactly what it used to do. The question and approval cards are content in
+        // their own right, so a turn that ended in one is not "no answer".
+        message.status === 'done' &&
+        !question &&
+        !approval && (
+          <p className="text-sm text-ink-muted">
+            The turn finished without producing any answer text.
           </p>
         )
       )}

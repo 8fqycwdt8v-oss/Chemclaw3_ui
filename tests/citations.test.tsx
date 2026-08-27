@@ -16,12 +16,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { CitationChip } from '../src/components/CitationChip.tsx';
 import { stubFetch } from './helpers.ts';
+import type { NoteRef, NoteView } from '../src/api/client.ts';
 
 vi.mock('../src/auth/AuthContext.tsx', () => ({
   useAuth: () => ({ auth: { getAccessToken: async () => null, mode: 'dev' }, ready: true }),
 }));
 
-const note = (over: Record<string, unknown> = {}) => ({
+/**
+ * Typed against `NoteView`, and the override is `Partial<NoteRef>` rather than
+ * `Record<string, unknown>`.
+ *
+ * Both halves matter. The return type makes `tsc -b` the drift check for the note route's shape;
+ * the parameter type means a test that overrides a field the interface does not declare — the
+ * shape a rename leaves behind at every call site — fails there too instead of silently adding a
+ * key nothing reads.
+ */
+const note = (over: Partial<NoteRef> = {}): NoteView => ({
   note: {
     id: 'note-suzuki-42',
     type: 'reaction',

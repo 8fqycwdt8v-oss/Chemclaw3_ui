@@ -105,7 +105,12 @@ export function CapabilityDegradedPill({
             <span aria-hidden>·</span>
             <span>
               {capabilityLoss(connector)}{' '}
-              <span className="font-mono text-2xs opacity-70">({connector})</span>
+              {/* De-emphasised by size and by the parentheses, NOT by opacity. `opacity-70` over
+                  `text-warn-ink` on `bg-warn-soft` measures 3.4:1 in the light theme — axe caught
+                  it the first time a browser ever rendered this pill, which was the first time
+                  `e2e/fixture-service.ts` emitted a `capability_degraded` frame. An `-ink` token is
+                  chosen to pass on its ground; multiplying its alpha silently un-chooses it. */}
+              <span className="font-mono text-2xs">({connector})</span>
             </span>
           </span>
         ))}

@@ -79,6 +79,8 @@ export interface Route {
   target: (m: RegExpMatchArray) => string;
   /** True when the upstream responds with `text/event-stream` and must not be buffered. */
   sse: boolean;
+  /** True for the one route that carries a file, and so a much larger body cap than the rest. */
+  upload?: boolean;
 }
 
 export const ROUTES: readonly Route[] = [
@@ -128,6 +130,7 @@ export const ROUTES: readonly Route[] = [
     pattern: new RegExp(`^/api/sessions/${SID}/attachments$`),
     target: (m) => `/sessions/${m[1]}/attachments`,
     sse: false,
+    upload: true,
   },
 
   // The untruncated text of one tool result.
@@ -231,6 +234,7 @@ export const ROUTES: readonly Route[] = [
 export interface ResolvedRoute {
   path: string;
   sse: boolean;
+  upload: boolean;
 }
 
 /** Resolve a request to an upstream path, or `null` if it is not whitelisted. */
@@ -238,7 +242,7 @@ export function resolveRoute(method: string, path: string): ResolvedRoute | null
   for (const route of ROUTES) {
     if (route.method !== method) continue;
     const match = path.match(route.pattern);
-    if (match) return { path: route.target(match), sse: route.sse };
+    if (match) return { path: route.target(match), sse: route.sse, upload: route.upload === true };
   }
   return null;
 }

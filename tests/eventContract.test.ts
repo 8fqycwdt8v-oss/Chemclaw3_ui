@@ -103,8 +103,11 @@ const full: Array<[string, Record<string, unknown>]> = [
   ['queued', {}],
   ['plan', { todos: ['step one'], plan_hash: 'abc123' }],
   ['tool_call', { tool: 'find_notes', arguments: '{"q":1}', agent: 'safety' }],
-  ['token', { text: 'hello' }],
-  ['job_started', { job_id: 'j1', kind: 'qm' }],
+  // `agent` is load-bearing on this one: the backend stamps every token with it and says a
+  // consumer "concatenates only the unattributed ones", so a dropped field here splices a
+  // subagent's working notes into the answer.
+  ['token', { text: 'hello', agent: 'subagent' }],
+  ['job_started', { job_id: 'j1', kind: 'qm', plan_step: 'run the conformer search' }],
   ['job_completed', { job_id: 'j1', summary: { converged: true } }],
   ['job_failed', { job_id: 'j1', reason: 'the solver diverged' }],
   ['capability_degraded', { connectors: ['eln'] }],

@@ -1,19 +1,13 @@
 /**
- * The BFF: static host for the SPA plus a whitelisted streaming proxy to the Chemclaw service.
+ * The BFF's entry point: validate the configuration, then serve.
  *
- * Bare `node:http` rather than a framework. This process does four things — proxy a fixed route
- * list, serve `/config.js`, serve static assets with SPA fallback, and answer its own `/healthz`.
- * A framework's routing layer would be overhead, and its middleware ecosystem contains at least
- * one thing (`compression`) that silently destroys Server-Sent Events.
+ * Everything this process actually *does* lives in `app.ts`, which builds the server without
+ * starting it — that is what makes the request handling and its socket limits testable against
+ * real sockets instead of only measurable by hand.
  */
 
-import http from 'node:http';
-import { existsSync } from 'node:fs';
-import sirv from 'sirv';
 import { cfg, isLoopbackHost, validateConfig } from './config.ts';
-import { resolveRoute } from './routes.ts';
-import { proxy } from './proxy.ts';
-import { serveConfigJs } from './runtimeConfig.ts';
+import { createBffServer } from './app.ts';
 import { log } from './log.ts';
 
 const problems = validateConfig();
@@ -22,92 +16,7 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-// A missing client directory is survivable and the warning below says so: under `npm run dev`
-// the BFF only proxies and serves /config.js, and Vite serves the client. It was not actually
-// survivable — `sirv` calls `readdirSync` on construction and threw ENOENT one line after the
-// warning promised a 404, so a plain `npm run dev` on a fresh checkout (no `dist/client` yet)
-// killed the BFF at import. Vite still came up and proxied /api to a dead port, which is why the
-// symptom reached the browser as a 502 rather than as this stack trace.
-const clientDirExists = existsSync(cfg.clientDir);
-if (!clientDirExists) {
-  log.warn(`client directory ${cfg.clientDir} does not exist — static assets will 404.`);
-  log.warn('Run `npm run build:client` first, or use `npm run dev` for the Vite dev server.');
-}
-
-const assets = !clientDirExists
-  ? // Make the warning true rather than fatal: 404 every asset, serve everything else normally.
-    (_req: http.IncomingMessage, res: http.ServerResponse, next?: () => void) => {
-      if (next) return next();
-      res.writeHead(404, { 'content-type': 'text/plain' });
-      res.end('client build not present');
-    }
-  : sirv(cfg.clientDir, {
-      // SPA fallback, so /auth/callback and any client route resolve to index.html.
-      single: true,
-      etag: true,
-      // Serve Vite's precompressed output rather than compressing at request time. This is both
-      // faster and keeps any compression middleware — which would break SSE — out of the process.
-      gzip: true,
-      brotli: true,
-      setHeaders(res, pathname) {
-        res.setHeader('content-security-policy', cfg.csp);
-        res.setHeader('x-content-type-options', 'nosniff');
-        res.setHeader('referrer-policy', 'same-origin');
-        // Omit X-Frame-Options in dev mode so the Replit preview iframe can load the page.
-        // Production (msal auth) keeps the strict DENY.
-        if (cfg.authMode !== 'dev') res.setHeader('x-frame-options', 'DENY');
-        // Hashed assets are immutable; index.html must never be cached or a deploy won't take.
-        if (pathname === '/index.html' || pathname === '/') {
-          res.setHeader('cache-control', 'no-cache');
-        }
-      },
-    });
-
-const server = http.createServer((req, res) => {
-  const rawUrl = req.url ?? '/';
-  const path = rawUrl.split('?', 1)[0] ?? '/';
-  const method = req.method ?? 'GET';
-
-  if (path === '/healthz') {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    res.end('{"status":"ok"}');
-    return;
-  }
-
-  if (path === '/config.js') {
-    serveConfigJs(res);
-    return;
-  }
-
-  if (path.startsWith('/api/')) {
-    const route = resolveRoute(method, path);
-    if (!route) {
-      // Not whitelisted: answered here, upstream never contacted.
-      log.debug(`blocked un-whitelisted ${method} ${path}`);
-      res.writeHead(404, { 'content-type': 'application/json' });
-      res.end('{"detail":"not found"}');
-      return;
-    }
-    // Preserve the query string — the backend takes none today, but dropping it silently
-    // would be a confusing bug the day it does.
-    const query = rawUrl.slice(path.length);
-    proxy(req, res, route.path + query, route.sse);
-    return;
-  }
-
-  assets(req, res, () => {
-    res.writeHead(404, { 'content-type': 'text/plain' });
-    res.end('Not Found');
-  });
-});
-
-// Must exceed any fronting load balancer's idle timeout, or connection reuse races produce
-// sporadic 502s. `requestTimeout` measures time to RECEIVE a request, not to respond, so
-// disabling it does not affect long SSE responses — but set it explicitly so nobody has to
-// re-derive that when they see a 600s stream and a 300s default in the Node docs.
-server.keepAliveTimeout = 120_000;
-server.headersTimeout = 125_000;
-server.requestTimeout = 0;
+const server = createBffServer();
 
 server.listen(cfg.port, cfg.bindHost, () => {
   log.info(`chemclaw3-ui listening on http://${cfg.bindHost}:${cfg.port}`);
@@ -124,6 +33,13 @@ server.listen(cfg.port, cfg.bindHost, () => {
         'ALLOW_INSECURE_AUTH=true. No sign-in is required and the backend is almost certainly ' +
         'running with CHEMCLAW_ENTRA_REQUIRED=false, meaning every request is a shared principal ' +
         'with all authorization gates open. Do not expose this beyond a trusted dev network.',
+    );
+  }
+
+  if (cfg.allowFraming) {
+    log.warn(
+      'SECURITY: ALLOW_FRAMING=true. This page may be framed by any origin, so a control a ' +
+        'reader clicks here can have been positioned by somebody else. Preview hosts only.',
     );
   }
 });

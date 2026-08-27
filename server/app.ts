@@ -1,0 +1,162 @@
+/**
+ * The BFF's request handling and its socket-level limits, as a server nobody has started yet.
+ *
+ * Split out of `index.ts` so both are testable: `index.ts` is the *entry point* — validate the
+ * config, listen, log, shut down — and everything a test would want to drive against real sockets
+ * is here. The split is also what made the two defects below expressible as tests rather than as
+ * measurements somebody had to take by hand.
+ *
+ * This process does four things: proxy a fixed route list, serve `/config.js`, serve static assets
+ * with SPA fallback, and answer its own `/healthz`. Bare `node:http` rather than a framework — a
+ * framework's routing layer would be overhead, and its middleware ecosystem contains at least one
+ * thing (`compression`) that silently destroys Server-Sent Events.
+ */
+
+import http from 'node:http';
+import { existsSync } from 'node:fs';
+import sirv from 'sirv';
+import { cfg } from './config.ts';
+import { resolveRoute } from './routes.ts';
+import { proxy } from './proxy.ts';
+import { serveConfigJs } from './runtimeConfig.ts';
+import { log } from './log.ts';
+
+/**
+ * The headers that make this origin safe to be, applied to **every** response.
+ *
+ * They used to live inside `sirv`'s `setHeaders`, which made them a property of the static file
+ * handler rather than of the process: `/api/*`, `/config.js` and `/healthz` all return before
+ * `sirv` is ever called, so every one of them was served with no CSP and no nosniff. That matters
+ * because the SPA's `script-src 'self'` is what makes the RDKit SVG path unexploitable, and a
+ * proxied backend response is a same-origin document — an HTML-typed body on `/api/notes/<id>`
+ * was measured executing script on the origin that holds the bearer token.
+ */
+export function setSecurityHeaders(res: http.ServerResponse): void {
+  res.setHeader('content-security-policy', cfg.csp);
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('referrer-policy', 'same-origin');
+  // Both anti-framing controls move together, and on their own switch: tying them to
+  // `AUTH_MODE=dev` dropped them for the deployment that requires no sign-in at all.
+  if (!cfg.allowFraming) res.setHeader('x-frame-options', 'DENY');
+}
+
+/** Static assets, or a handler that makes the "will 404" warning true rather than fatal. */
+function createAssetHandler(): (
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  next?: () => void,
+) => void {
+  // A missing client directory is survivable and the warning below says so: under `npm run dev`
+  // the BFF only proxies and serves /config.js, and Vite serves the client. It was not actually
+  // survivable — `sirv` calls `readdirSync` on construction and threw ENOENT one line after the
+  // warning promised a 404, so a plain `npm run dev` on a fresh checkout (no `dist/client` yet)
+  // killed the BFF at import.
+  if (!existsSync(cfg.clientDir)) {
+    log.warn(`client directory ${cfg.clientDir} does not exist — static assets will 404.`);
+    log.warn('Run `npm run build:client` first, or use `npm run dev` for the Vite dev server.');
+    return (_req, res, next) => {
+      if (next) return next();
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('client build not present');
+    };
+  }
+
+  return sirv(cfg.clientDir, {
+    // SPA fallback, so /auth/callback and any client route resolve to index.html.
+    single: true,
+    etag: true,
+    // Serve Vite's precompressed output rather than compressing at request time. This is both
+    // faster and keeps any compression middleware — which would break SSE — out of the process.
+    gzip: true,
+    brotli: true,
+    setHeaders(res, pathname) {
+      // Only caching lives here now: it is the one header that genuinely depends on which file
+      // is being served. Hashed assets are immutable; index.html must never be cached or a
+      // deploy won't take.
+      if (pathname === '/index.html' || pathname === '/') {
+        res.setHeader('cache-control', 'no-cache');
+      }
+    },
+  });
+}
+
+export function createRequestListener(): http.RequestListener {
+  const assets = createAssetHandler();
+
+  return (req, res) => {
+    setSecurityHeaders(res);
+
+    const rawUrl = req.url ?? '/';
+    const path = rawUrl.split('?', 1)[0] ?? '/';
+    const method = req.method ?? 'GET';
+
+    if (path === '/healthz') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"status":"ok"}');
+      return;
+    }
+
+    if (path === '/config.js') {
+      serveConfigJs(res);
+      return;
+    }
+
+    if (path.startsWith('/api/')) {
+      const route = resolveRoute(method, path);
+      if (!route) {
+        // Not whitelisted: answered here, upstream never contacted.
+        log.debug(`blocked un-whitelisted ${method} ${path}`);
+        res.writeHead(404, { 'content-type': 'application/json' });
+        res.end('{"detail":"not found"}');
+        return;
+      }
+      // Preserve the query string — the backend takes none today, but dropping it silently
+      // would be a confusing bug the day it does.
+      const query = rawUrl.slice(path.length);
+      proxy(
+        req,
+        res,
+        route.path + query,
+        route.sse,
+        route.upload ? cfg.maxUploadBytes : cfg.maxBodyBytes,
+      );
+      return;
+    }
+
+    assets(req, res, () => {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('Not Found');
+    });
+  };
+}
+
+/** The server, configured but not listening. */
+export function createBffServer(): http.Server {
+  const server = http.createServer(
+    {
+      // Node only *checks* `headersTimeout`/`requestTimeout` on a sweep, every
+      // `connectionsCheckingInterval` — 30 s by default. A bound that is only enforced up to 30 s
+      // late is not the bound it claims to be, so the sweep is derived from the timeout instead of
+      // being left at a default that has nothing to do with it.
+      connectionsCheckingInterval: Math.max(
+        1_000,
+        Math.min(30_000, Math.floor(cfg.requestTimeoutMs / 4)),
+      ),
+      // Time to RECEIVE a request, not to respond, so this bounds nothing about a 600 s turn or a
+      // job stream that is silent for minutes — both of those are responses. It was 0 (disabled)
+      // on exactly that reasoning, and the reasoning proved to be about the wrong half: 129
+      // unauthenticated one-byte POSTs, each holding one upstream socket for ever, took the whole
+      // /api surface offline until they were released. See `cfg.requestTimeoutMs`.
+      requestTimeout: cfg.requestTimeoutMs,
+      // Must exceed any fronting load balancer's idle timeout, or connection reuse races produce
+      // sporadic 502s. `headersTimeout` sits just above it for the same reason, and Node refuses
+      // to start a server whose `headersTimeout` exceeds its `requestTimeout` — which is why the
+      // default of the latter is stated in terms of this pair rather than picked round.
+      keepAliveTimeout: 120_000,
+      headersTimeout: Math.min(125_000, cfg.requestTimeoutMs),
+    },
+    createRequestListener(),
+  );
+
+  return server;
+}

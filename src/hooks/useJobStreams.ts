@@ -148,7 +148,6 @@ async function openStream(
         continue;
       }
 
-      attempt = 0;
       const reader = res.body
         .pipeThrough(new TextDecoderStream())
         .pipeThrough(new EventSourceParserStream())
@@ -158,6 +157,10 @@ async function openStream(
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
+          // A frame arrived, so this connection is doing its job — only now is the escalation
+          // reset. Resetting it at connect time meant a connect-then-immediately-close cycle
+          // could repeat for ever without the delay ever growing.
+          attempt = 0;
           if (!value.data) continue;
           try {
             const event = normalizeEvent(JSON.parse(value.data), value.event);
@@ -177,6 +180,15 @@ async function openStream(
       } finally {
         await reader.cancel().catch(() => undefined);
       }
+
+      // The body ended with no error and no status to react to: a backend pod restarting
+      // mid-rollout, a proxy hop closing the connection, an upstream failure after the headers.
+      // Reconnecting is right — reconnecting *immediately* is what turned a rollout into ~300
+      // connects per second per watched session, from every open tab, against the pod that was
+      // still coming up. This is the same pacing every other retry path here already had.
+      if (controller.signal.aborted) return;
+      attempt += 1;
+      await backoff(attempt, controller.signal);
     } catch {
       if (controller.signal.aborted) return;
       attempt += 1;

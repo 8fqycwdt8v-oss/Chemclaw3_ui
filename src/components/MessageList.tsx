@@ -36,6 +36,7 @@ import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { entitiesOf, messagesFor, useEntityStore } from '../chem/entities.ts';
 import { returnedFigures } from '../chem/provenance.ts';
+import { formatDuration } from '../state/turnActivity.ts';
 import { EmptyState } from '@/components/chem/Feedback';
 import { cn } from '@/lib/utils';
 
@@ -48,6 +49,32 @@ import { cn } from '@/lib/utils';
  * looked for anyway.
  */
 const MAX_RESULT_BLOCKS = 3;
+
+/**
+ * The rail's closing row: the answer as a step of the turn.
+ *
+ * The service announces every step except the one that produced the text, so a rail without this
+ * stops at the last tool call — and a reader looking at where a four-minute turn went cannot see
+ * that three of those minutes were the model writing.
+ *
+ * Words rather than tokens, because nothing on this side knows how the service tokenised anything,
+ * and the duration runs from the last step that WAS announced to the turn's end. Absent while the
+ * turn streams, and absent for a turn that produced no text at all — a row claiming an answer
+ * where the card says "the turn finished without producing any answer text" would be the two
+ * halves of one screen disagreeing.
+ */
+function answerStep(message: AssistantMessage): { words: number; duration?: string } | null {
+  if (message.status === 'streaming') return null;
+  const text = message.finalText || message.streamedText;
+  if (!text.trim()) return null;
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+  const lastStep = message.trace[message.trace.length - 1]?.at;
+  const duration =
+    message.endedAt && lastStep && message.endedAt > lastStep
+      ? formatDuration(message.endedAt - lastStep)
+      : undefined;
+  return { words, duration };
+}
 
 /**
  * The turn's results, as data, under the answer.
@@ -211,6 +238,8 @@ const AssistantBubble = memo(function AssistantBubble({
         // Our clock, and absent on a rehydrated turn — which is why the summary omits the time
         // rather than reporting zero.
         durationMs={message.endedAt ? message.endedAt - message.at : null}
+        plan={message.latestPlan}
+        answer={answerStep(message)}
       />
     </div>
   );

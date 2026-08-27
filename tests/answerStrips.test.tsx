@@ -157,7 +157,7 @@ describe('the step rail', () => {
     expect(screen.getByRole('button', { name: /2 steps · 1 tool · 1 job · 4s/ })).toBeTruthy();
   });
 
-  it('names a gate refusal as held rather than counting it among the failures', () => {
+  it('names a gate refusal as a refusal rather than counting it among the failures', () => {
     render(
       <TracePanel
         trace={[
@@ -168,9 +168,40 @@ describe('the step rail', () => {
         ]}
       />,
     );
+    // The collapsed trigger says there is something to look at, because a panel that has to be
+    // opened before trouble is visible is the depth problem this surface exists to fix …
     const trigger = screen.getByRole('button');
-    expect(trigger.textContent).toContain('1 held for approval');
-    expect(trigger.textContent).not.toContain('problem');
+    expect(trigger.textContent).toContain('1 to look at');
+    expect(trigger.textContent).not.toContain('failure');
+
+    // … and the panel's own header says which kind it is, because the reader's next move on a
+    // refusal is an approval and not a bug report.
+    fireEvent.click(trigger);
+    expect(screen.getByText('1 refusal')).toBeTruthy();
+  });
+
+  it('reads a sweep as one row naming every source and what it returned', () => {
+    render(
+      <TracePanel
+        trace={[
+          entry({
+            kind: 'evidence_source',
+            evidenceSource: { source: 'graph', chunks: 6, failed: false },
+          }),
+          entry({
+            kind: 'evidence_source',
+            evidenceSource: { source: 'lexical', chunks: 0, failed: true },
+          }),
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /The agent’s work/ }));
+    expect(screen.getByText('Evidence sweep')).toBeTruthy();
+    // "failed" and "0" are different answers, and the flag is the only thing that tells them
+    // apart: a dark source is a question about the corpus, a broken one is a page for whoever
+    // owns the index.
+    expect(screen.getByText('graph').parentElement?.textContent).toContain('6');
+    expect(screen.getByText('lexical').parentElement?.textContent).toContain('failed');
   });
 
   it('says how long a call took, and says nothing when it never saw it end', () => {
@@ -196,6 +227,79 @@ describe('the step rail', () => {
     expect(screen.getByText('4s')).toBeTruthy();
     // A reloaded transcript has no clock of ours on it, so the row says the one true thing.
     expect(screen.getByText('outcome not recorded')).toBeTruthy();
+  });
+
+  it('opens every step at once, and lets a reader close one afterwards', () => {
+    render(
+      <TracePanel
+        trace={[
+          entry({
+            kind: 'tool_call',
+            toolCall: { tool: 'predict_pka', arguments: '{"smiles":"CCO"}', result: 'pKa 15.9' },
+          }),
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /The agent’s work/ }));
+    // A closed <details> keeps its content in the DOM, so the assertion is on the disclosure's own
+    // state rather than on whether the text can be found.
+    const details = (): HTMLDetailsElement | null => document.querySelector('details');
+    expect(details()?.open).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand all' }));
+    expect(details()?.open).toBe(true);
+    expect(screen.getByText('pKa 15.9')).toBeTruthy();
+    // A default rather than a controlled value: the rows re-mount with it and the reader's own
+    // toggling afterwards is their own.
+    expect(screen.getByRole('button', { name: 'Collapse all' })).toBeTruthy();
+  });
+
+  it('carries the structures and the method on the line, not one caret in', () => {
+    // The two questions a reader opens this panel with — "was that the compound I meant" and "was
+    // that a table or an estimate" — were both behind a disclosure.
+    render(
+      <TracePanel
+        trace={[
+          entry({
+            kind: 'tool_call',
+            toolCall: { tool: 'predict_pka', arguments: '{"smiles":"COc1ccc(Br)cc1"}' },
+          }),
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /The agent’s work/ }));
+    expect(screen.getByText('COc1ccc(Br)cc1')).toBeTruthy();
+    expect(screen.getByText('GFN2-xTB · semiempirical')).toBeTruthy();
+  });
+
+  it('names the plan step a durable job was launched for, by its number', () => {
+    render(
+      <TracePanel
+        trace={[
+          entry({
+            kind: 'job_started',
+            job: { jobId: 'calc-1', kind: 'calc', planStep: 'estimate the pKa' },
+          }),
+        ]}
+        plan={['[x] screen', '[ ] estimate the pKa']}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /The agent’s work/ }));
+    expect(screen.getByText(/for step 2 · estimate the pKa/)).toBeTruthy();
+  });
+
+  it('closes the rail with the answer, in words rather than tokens', () => {
+    // The service announces every step except the one that produced the text, so without this the
+    // rail stops at the last tool call and a four-minute turn looks like a four-second one.
+    render(
+      <TracePanel
+        trace={[entry({ kind: 'tool_call', toolCall: { tool: 'predict_pka', arguments: '{}' } })]}
+        answer={{ words: 418, duration: '9s' }}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /The agent’s work/ }));
+    expect(screen.getByText('Answer written')).toBeTruthy();
+    expect(screen.getByText('418 words')).toBeTruthy();
   });
 
   it('states what a plan revision changed instead of repeating the plan', () => {

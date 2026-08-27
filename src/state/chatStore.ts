@@ -291,17 +291,23 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
         kind: 'tool_failed',
         toolFailure: { tool: event.tool, message: event.message, reason: event.reason ?? null },
       };
-    // Only the failures. A source that was asked and had nothing is the normal case and belongs in
-    // an evidence summary, not in a trace of what went wrong — but a source whose retriever
-    // *raised* reads identically in the merged list, and this is the one place that can say so.
+    // Every source, not only the failures. This used to keep the raised ones and drop the rest,
+    // on the argument that a source asked and silent "belongs in an evidence summary, not in a
+    // trace of what went wrong" — which was right about the trace it was written against, and is
+    // what the rail now IS: one row per sweep reading `lexical failed · graph 6 · eln 0`, where a
+    // dark source and a broken one sit side by side and are told apart by name. Dropping the
+    // successes here made that row unbuildable, and left "which sources were even asked?"
+    // answerable only by reading the service's logs.
     case 'evidence_source':
-      return event.failed
-        ? {
-            ...base,
-            kind: 'evidence_source',
-            evidenceSource: { source: event.source, chunks: event.chunks, failed: true },
-          }
-        : null;
+      return {
+        ...base,
+        kind: 'evidence_source',
+        evidenceSource: {
+          source: event.source,
+          chunks: event.chunks,
+          failed: event.failed === true,
+        },
+      };
     case 'job_started':
       return {
         ...base,

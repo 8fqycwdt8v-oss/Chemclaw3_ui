@@ -80,14 +80,14 @@ function seed(count: number, sessionId: string | null = SID): string {
   for (let i = 0; i < count; i += 1) {
     store.applyEvent(cid, mid, {
       type: 'tool_call',
-      tool: `screen_hazards_${i}`,
+      tool: 'screen_hazards',
       arguments: '{}',
       agent: '',
     });
     store.applyEvent(
       cid,
       mid,
-      toolResultEvent({ tool: `screen_hazards_${i}`, preview: '{"flags"', result_ref: REF(i + 1) }),
+      toolResultEvent({ tool: 'screen_hazards', preview: '{"flags"', result_ref: REF(i + 1) }),
     );
   }
   store.finishTurn(cid, mid, 'done');
@@ -150,6 +150,20 @@ describe('a stored result becomes a block in the answer', () => {
 
     expect(calls.filter((u) => u.includes('tool-results'))).toHaveLength(3);
     expect(screen.getByText(/2 further stored results/)).toBeTruthy();
+  });
+
+  it('names the method on the block, and the size of what it fetched', async () => {
+    // Provenance at the altitude the number is read at: the method used to be four disclosures
+    // down while the value it qualifies sat at depth zero.
+    render(<MessageList conversationId={seed(1)} />);
+    await screen.findByText('organic-azide');
+
+    // Scoped to the block. The status strip above the answer names the turn's methods too, and
+    // deliberately: that line is the ANSWER's provenance, for the numbers the prose quotes with no
+    // block behind them at all. This one is the provenance of the table underneath it.
+    const block = document.querySelector('[data-result-block]');
+    expect(block?.textContent).toContain('Cited reference table');
+    expect(block?.textContent).toContain(`${HAZARD.length.toLocaleString()} B`);
   });
 
   it('offers nothing for a transcript with no session to fetch against', () => {

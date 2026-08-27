@@ -14,6 +14,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  describeActivity,
   formatDuration,
   planPosition,
   summarizeTurn,
@@ -131,6 +132,17 @@ describe('turnActivity', () => {
     expect(activity.tone).toBe('waiting');
   });
 
+  it('says it is reading the plan when that is the last thing that happened', () => {
+    // Its own state rather than "thinking": a turn whose only event so far is a plan revision has
+    // done something specific, and a reader watching the row wants to know the wait is the harness
+    // settling on a plan rather than a model that has said nothing at all.
+    const activity = turnActivity(
+      message({ trace: [entry({ kind: 'plan', plan: { todos: ['[ ] one'] } })] }),
+    );
+    expect(activity.kind).toBe('planning');
+    expect(activity.label).toBe('Reading the plan');
+  });
+
   it('falls back to thinking, with the plan position when there is one', () => {
     const activity = turnActivity(message({ latestPlan: ['[ ] one', '[ ] two'] }));
     expect(activity.kind).toBe('thinking');
@@ -153,11 +165,14 @@ describe('summarizeTurn', () => {
       }),
     ]);
     expect(summary.held).toBe(1);
-    // The timeout and the broken retriever; the refusal is not one of them.
-    expect(summary.problems).toBe(2);
+    // The timeout only. Three kinds, counted three ways, because the reader's next move differs
+    // for each: a refusal wants an approval, a dead source wants whoever owns the index, and a
+    // failure wants somebody to look at the turn.
+    expect(summary.problems).toBe(1);
+    expect(summary.sourcesDown).toBe(1);
   });
 
-  it('does not count a source that was asked and had nothing as a problem', () => {
+  it('does not count a source that was asked and had nothing as one that went down', () => {
     const summary = summarizeTurn([
       entry({
         kind: 'evidence_source',
@@ -165,6 +180,17 @@ describe('summarizeTurn', () => {
       }),
     ]);
     expect(summary.problems).toBe(0);
+    expect(summary.sourcesDown).toBe(0);
+  });
+
+  it('counts one sweep as one step, however many sources answered', () => {
+    // `gather_evidence` asks every source at once and reports each separately, and the rail draws
+    // the run as one row — so counting five reports as five steps would make one call look like
+    // most of the turn, and the count would disagree with what the reader can see.
+    const sweep = ['graph', 'lexical', 'eln'].map((source) =>
+      entry({ kind: 'evidence_source', evidenceSource: { source, chunks: 2, failed: false } }),
+    );
+    expect(summarizeTurn([closedCall('a'), ...sweep]).steps).toBe(2);
   });
 
   it('counts calls and jobs', () => {
@@ -174,6 +200,26 @@ describe('summarizeTurn', () => {
       entry({ kind: 'job_started', job: { jobId: 'j1' } }),
     ]);
     expect(summary).toMatchObject({ steps: 3, toolCalls: 2, jobs: 1 });
+  });
+});
+
+describe('describeActivity', () => {
+  it('says the state and where in the plan it is, in one sentence', () => {
+    // What the app's single polite region is given. One sentence per transition — never per token,
+    // and never the row's own timer, which would queue an announcement every second.
+    const activity = turnActivity(
+      message({
+        latestPlan: ['[x] screen', '[ ] estimate the pKa'],
+        trace: [openCall('predict_pka')],
+      }),
+    );
+    expect(describeActivity(activity)).toBe('Calling predict_pka. Step 2 of 2.');
+  });
+
+  it('says nothing about a plan when there is none to report', () => {
+    expect(describeActivity(turnActivity(message({ queued: true })))).toBe(
+      'Waiting for a free slot on the server.',
+    );
   });
 });
 

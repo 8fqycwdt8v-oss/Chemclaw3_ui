@@ -34,6 +34,8 @@ import { Table2 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { api, type StoredToolResult } from '../api/client.ts';
 import { rendererFor, Verdict } from '../results/renderers.tsx';
+import { methodFor } from '../chem/provenance.ts';
+import { Badge } from '@/components/ui/badge';
 import { ResultSheet } from './ResultSheet.tsx';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -130,6 +132,8 @@ export function ResultBlock({
   if (!picked) return null;
 
   const { renderer, data } = picked;
+  const method = methodFor(tool);
+  const summary = renderer.summary?.(data) ?? null;
 
   return (
     <div
@@ -147,20 +151,47 @@ export function ResultBlock({
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-border-subtle bg-surface-sunken px-3 py-2">
         <h3 className="text-sm font-semibold">{renderer.title(tool)}</h3>
         <span className="font-mono text-2xs text-ink-subtle">{tool}</span>
-        <Button
-          variant="link"
-          size="xs"
-          className="ml-auto px-0 no-underline hover:underline"
-          onClick={() => setSheet(true)}
-        >
-          <Table2 aria-hidden className="size-3.5" />
-          Open full result
-        </Button>
+        {/* The method, at the altitude the number is read at. It used to be four disclosures down
+            while the value it qualifies sat at depth zero; a chemist should never have to ask
+            whether 4.76 came from a cited table or a semiempirical estimate. Nothing renders for a
+            tool this repo has no sourced method for — a confidently wrong label is worse. */}
+        {method && <Badge>{method.method}</Badge>}
+        {summary && (
+          <Badge tone={summary.tone} className="ml-auto">
+            {summary.text}
+          </Badge>
+        )}
       </div>
 
       <div className="flex flex-col gap-2.5 p-3">
         <Verdict data={data} />
         <renderer.View data={data} tool={tool} compact onUsed={() => {}} />
+        {/* What the method does NOT establish, and only under a GENERIC renderer.
+            A typed one pins the service's own qualifying sentence out of the payload — "nothing
+            matching is not a clearance", "the index holds no searchable record" — which is both
+            more specific than the manifest's caveat and, for the hazard screen, the same warning
+            in different words. Two warnings saying one thing is how a reader learns to skip
+            both. The caveat is below the data rather than above it for the same reason it is not
+            in the header: these run to four lines. */}
+        {renderer.generic && method?.caveat && (
+          <p className="border-l-2 border-warn/40 pl-2 text-2xs text-ink-muted">{method.caveat}</p>
+        )}
+      </div>
+
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border-subtle px-3 py-1.5">
+        <Button
+          variant="link"
+          size="xs"
+          className="-ml-2 px-2 no-underline hover:underline"
+          onClick={() => setSheet(true)}
+        >
+          <Table2 aria-hidden className="size-3.5" />
+          Open full result
+        </Button>
+        {/* The join a reviewer asks for, and the one a card without it cannot make. */}
+        <span className="ml-auto font-mono text-2xs text-ink-subtle">
+          {state.result.byte_size.toLocaleString()} B
+        </span>
       </div>
 
       {sheet && (

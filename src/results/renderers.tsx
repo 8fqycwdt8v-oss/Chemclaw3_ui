@@ -309,7 +309,7 @@ function ImpurityLimit({ data, compact }: ResultViewProps): React.JSX.Element {
  * vessel, and it is the one where confusing two species has a physical consequence — a name is
  * what a reagent is called, a structure is what it is.
  */
-function ChargeTable({ data, compact }: ResultViewProps): React.JSX.Element {
+function ChargeTable({ data, tool, compact }: ResultViewProps): React.JSX.Element {
   const unresolved = strings(data.unresolved);
   const all = rows(data.rows);
   const shown = take(all, compact, 4);
@@ -330,6 +330,14 @@ function ChargeTable({ data, compact }: ResultViewProps): React.JSX.Element {
           Not resolved to a structure, so absent from the table below: {unresolved.join(', ')}.
         </p>
       )}
+
+      <div className="flex justify-end">
+        <DownloadCsv
+          headers={[...new Set(all.flatMap((r) => Object.keys(r)))]}
+          records={all}
+          name={tool}
+        />
+      </div>
 
       <Table
         label="Charge table"
@@ -357,6 +365,62 @@ function ChargeTable({ data, compact }: ResultViewProps): React.JSX.Element {
         ))}
       />
       <Trimmed shown={shown.length} total={all.length} />
+    </>
+  );
+}
+
+/**
+ * A run sheet — `generate_screening_design`, and anything else whose rows are meant to be worked
+ * through in the order given.
+ *
+ * Two things separate it from the generic table it used to fall through to. The **order is the
+ * data**: a screening design randomises its run order deliberately, and a table that invites
+ * sorting invites destroying that, so the rows are numbered as they arrive. And the **CSV is not
+ * an extra**: this is the one result that leaves the screen and goes to a bench, and a run sheet
+ * retyped into Excel is where the transcription error enters a campaign — so the download is on
+ * the compact card too, not only in the panel behind it.
+ */
+function RunSheet({ data, tool, compact }: ResultViewProps): React.JSX.Element {
+  const key = firstRecordList(data) ?? 'rows';
+  const records = rows(data[key]);
+  const headers = [...new Set(records.flatMap((r) => Object.keys(r)))];
+  const shown = take(records, compact, 4);
+  return (
+    <>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-2xs tracking-wide text-ink-subtle uppercase">
+          {records.length} run{records.length === 1 ? '' : 's'}, in the order given
+        </p>
+        <DownloadCsv headers={headers} records={records} name={tool} />
+      </div>
+      <Table
+        label="The run sheet, in run order"
+        headers={['#', ...headers]}
+        body={shown.map((record, i) => (
+          <tr key={i}>
+            <Cell numeric>{i + 1}</Cell>
+            {headers.map((header) => {
+              const value = record[header];
+              const asNumber = num(value);
+              if (asNumber !== null)
+                return (
+                  <Cell key={header} numeric>
+                    {asNumber.toLocaleString()}
+                  </Cell>
+                );
+              if (typeof value === 'string' || typeof value === 'boolean')
+                return <Cell key={header}>{String(value)}</Cell>;
+              if (value === undefined || value === null) return <Cell key={header}>—</Cell>;
+              return (
+                <Cell key={header}>
+                  <span className="font-mono text-2xs">{JSON.stringify(value)}</span>
+                </Cell>
+              );
+            })}
+          </tr>
+        ))}
+      />
+      <Trimmed shown={shown.length} total={records.length} />
     </>
   );
 }
@@ -411,13 +475,11 @@ function StructureHits({ data, tool, compact, onUsed }: ResultViewProps): React.
               {hits.length} hit{hits.length === 1 ? '' : 's'}
               {data.hits_truncated === true && ' — a lower bound, not a total'}
             </p>
-            {!compact && (
-              <DownloadCsv
-                headers={[...new Set(hits.flatMap((h) => Object.keys(h)))]}
-                records={hits}
-                name={tool}
-              />
-            )}
+            <DownloadCsv
+              headers={[...new Set(hits.flatMap((h) => Object.keys(h)))]}
+              records={hits}
+              name={tool}
+            />
           </div>
 
           <ul className="grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-3">
@@ -491,7 +553,7 @@ function SeriesResult({ data, compact }: ResultViewProps): React.JSX.Element {
             <p className="text-2xs text-ink-subtle">latest</p>
           </div>
         </div>
-        <p className="mt-2 text-2xs text-ink-subtle">
+        <p className="mt-2 flex flex-wrap items-center gap-x-1.5 text-2xs text-ink-subtle">
           <span className="font-mono">{key}</span> · {values.length} points · first{' '}
           <span className="font-mono tabular-nums">{first}</span>, lowest{' '}
           <span className="font-mono tabular-nums">{Math.min(...values)}</span>, highest{' '}
@@ -631,6 +693,14 @@ export interface ResultRenderer {
   /** Whether this result wants more width than the answer's reading measure. */
   wide: boolean;
   /**
+   * The one thing the block's header can say about the payload before it is read.
+   *
+   * Deliberately a count or a state and never a judgement: "1 high" is what the table says, and
+   * "looks fine" would be this component deciding something the service did not. Absent when the
+   * shape has nothing worth summarising, which is most of them.
+   */
+  summary?: (data: Json) => { text: string; tone: 'neutral' | 'ok' | 'warn' | 'danger' } | null;
+  /**
    * Whether this renderer models the payload or merely displays it.
    *
    * A generic renderer draws what it recognised and may have left the rest behind, so the sheet
@@ -669,6 +739,20 @@ const RENDERERS: (ResultRenderer & { matches: (tool: string, data: Json) => bool
     generic: false,
     title: () => 'Hazard screen',
     wide: true,
+    summary: (data) => {
+      const flags = rows(data.flags);
+      if (flags.length === 0) {
+        // "no rule matched", never "clear": the difference is the whole of the caveat below it.
+        return { text: 'no rule matched', tone: 'neutral' };
+      }
+      const worst = ['critical', 'high', 'medium', 'low', 'info'].find((level) =>
+        flags.some((f) => str(f.severity) === level),
+      );
+      return {
+        text: worst ? `${flags.length} · ${worst}` : `${flags.length} matched`,
+        tone: worst ? (SEVERITY_TONE[worst] ?? 'neutral') : 'neutral',
+      };
+    },
     matches: (tool, data) =>
       tool === 'screen_hazards' || tool === 'screen_genotoxic_alerts' || 'flags' in data,
     View: HazardScreen,
@@ -688,6 +772,10 @@ const RENDERERS: (ResultRenderer & { matches: (tool: string, data: Json) => bool
     generic: false,
     title: () => 'Charge table',
     wide: true,
+    summary: (data) =>
+      strings(data.unresolved).length > 0
+        ? { text: `${strings(data.unresolved).length} unresolved`, tone: 'danger' }
+        : { text: `${rows(data.rows).length} species`, tone: 'neutral' },
     matches: (tool, data) =>
       tool === 'stoichiometry_table' || ('basis_name' in data && rows(data.rows).length > 0),
     View: ChargeTable,
@@ -697,8 +785,29 @@ const RENDERERS: (ResultRenderer & { matches: (tool: string, data: Json) => bool
     generic: false,
     title: () => 'Structures found',
     wide: true,
+    summary: (data) => {
+      if (data.index_empty === true) return { text: 'index empty', tone: 'warn' };
+      const hits = rows(data.hits).length;
+      return { text: `${hits} hit${hits === 1 ? '' : 's'}`, tone: 'neutral' };
+    },
     matches: (_tool, data) => isStructureSearch(data),
     View: StructureHits,
+  },
+  {
+    id: 'runsheet',
+    generic: false,
+    title: () => 'Run sheet',
+    wide: true,
+    summary: (data) => {
+      const key = firstRecordList(data);
+      const count = key ? rows(data[key]).length : 0;
+      return { text: `${count} run${count === 1 ? '' : 's'}`, tone: 'neutral' };
+    },
+    // Name-keyed, and it has to be: "a list of records in a meaningful order" and "a list of
+    // records" are the same shape. Getting it wrong costs a numbered column on a table that did
+    // not want one, which is why the fallback below is the generic table rather than this.
+    matches: (tool, data) => tool === 'generate_screening_design' && !!firstRecordList(data),
+    View: RunSheet,
   },
   {
     id: 'series',

@@ -113,25 +113,20 @@ function FullResult({
 }
 
 /**
- * What method produced this row's numbers, and what its authors say it does not establish.
+ * What the method its authors say it does NOT establish.
  *
- * Every caveat is the backend's own wording (`src/chem/provenance.ts`). A tool this frontend has
- * no sourced method for renders nothing at all — a confidently wrong method label would be worse
- * than the silence it replaces.
+ * The method's *name* is on the row itself — a chemist should never have to open anything to learn
+ * whether a number came from a cited table or a semiempirical estimate. The caveat is two to four
+ * lines and stays in here, because five of them stacked on the rail is the annotation clutter that
+ * trains a reader to stop reading annotations.
+ *
+ * Every word is the backend's own (`src/chem/provenance.ts`). A tool this frontend has no sourced
+ * method for renders nothing at all — a confidently wrong caveat would be worse than the silence.
  */
-function MethodBadge({ tool }: { tool: string }): React.JSX.Element | null {
-  const method = methodFor(tool);
-  if (!method) return null;
-  return (
-    <div className="mt-1.5">
-      <Badge>{method.method}</Badge>
-      {method.caveat && (
-        <p className="mt-1 border-l-2 border-warn/40 pl-2 text-2xs text-ink-muted">
-          {method.caveat}
-        </p>
-      )}
-    </div>
-  );
+function MethodCaveat({ tool }: { tool: string }): React.JSX.Element | null {
+  const caveat = methodFor(tool)?.caveat;
+  if (!caveat) return null;
+  return <p className="mt-1.5 border-l-2 border-warn/40 pl-2 text-2xs text-ink-muted">{caveat}</p>;
 }
 
 /**
@@ -204,12 +199,22 @@ function Step({
   children,
   detail,
   detailLabel = 'details',
+  open,
 }: {
   tone: DotTone;
   children: React.ReactNode;
   /** What opens under the line. Omit for a step with nothing more to show. */
   detail?: React.ReactNode;
   detailLabel?: string;
+  /**
+   * Whether the disclosure starts open — what "expand all" sets.
+   *
+   * A *default*, not a controlled value: the panel re-keys its rows when the control is used, so
+   * this is applied at mount and the reader's own toggling afterwards is left alone. Holding every
+   * row's open state in the parent would mean a click on one row re-rendering all of them, and a
+   * reader who opened two rows losing both the next time anything above changed.
+   */
+  open?: boolean;
 }): React.JSX.Element {
   return (
     <li className="grid grid-cols-[0.75rem_1fr] gap-x-3">
@@ -225,7 +230,7 @@ function Step({
       <div className="min-w-0">
         {children}
         {detail && (
-          <details className="group/step mt-0.5">
+          <details className="group/step mt-0.5" open={open}>
             <summary className="tap-target inline-flex cursor-pointer list-none items-center gap-1 rounded-sm text-2xs text-ink-muted hover:text-ink focus-ring">
               <ChevronRight
                 aria-hidden
@@ -303,11 +308,17 @@ function Row({
   entry,
   previousPlan,
   sessionId,
+  plan,
+  open,
 }: {
-  entry: TraceEntry;
+  entry: RailEntry;
   /** The plan as the previous revision left it, so this row can state the delta. */
   previousPlan: string[] | null;
   sessionId: string | null;
+  /** The turn's current plan, so a job row can say WHICH step it was launched for. */
+  plan: string[] | null;
+  /** Whether this row's disclosure starts open — see `Step`. */
+  open: boolean;
 }): React.JSX.Element | null {
   switch (entry.kind) {
     case 'plan':
@@ -335,13 +346,16 @@ function Row({
           : call.unresolved
             ? 'idle'
             : 'ok';
+      const method = methodFor(call.tool);
+      const structures = call.arguments ? smilesFromArguments(call.arguments) : [];
       return (
         <Step
           tone={tone}
+          open={open}
           detailLabel={call.result !== undefined ? 'what it returned' : 'what it was asked'}
           detail={
             <>
-              <MethodBadge tool={call.tool} />
+              <MethodCaveat tool={call.tool} />
               {call.arguments && <CalledOn argumentsJson={call.arguments} />}
               {call.arguments && (
                 <>
@@ -380,6 +394,21 @@ function Row({
             }
             duration={durationOf(entry.at, call.endedAt)}
           />
+          {/* What the call was made ON and what method answers it, on the line rather than one
+              disclosure in: "did it compute the pKa of the compound I meant" and "was that a
+              cited table or an estimate" are the two questions a reader opens this panel with,
+              and both were behind a caret. The drawings stay inside, where there is room. */}
+          {(structures.length > 0 || method) && (
+            <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-2xs text-ink-muted">
+              {structures.length > 0 && (
+                <span className="truncate font-mono" title={structures.join(' · ')}>
+                  {structures.join(' · ')}
+                </span>
+              )}
+              {structures.length > 0 && method && <span aria-hidden>·</span>}
+              {method && <span>{method.method}</span>}
+            </p>
+          )}
         </Step>
       );
     }
@@ -417,25 +446,45 @@ function Row({
       );
     }
 
-    case 'evidence_source':
+    case 'evidence_source': {
+      // One row for the whole sweep. `gather_evidence` asks every source at once and reports each
+      // separately, so five sources arrive as five events — and the question a reader has is not
+      // "did lexical answer" but "who was asked, and what did each contribute", which is one line.
+      const sources = entry.sweep ?? [];
+      const down = sources.filter((s) => s.failed);
       return (
-        <Step tone="danger">
+        <Step tone={down.length > 0 ? 'danger' : 'ok'}>
           <Line
-            icon={<Unplug aria-hidden className="size-3.5 shrink-0 text-danger-ink" />}
-            label={
-              <>
-                Evidence source <span className="font-medium">{entry.evidenceSource?.source}</span>{' '}
-                failed
-              </>
+            icon={
+              down.length > 0 ? (
+                <Unplug aria-hidden className="size-3.5 shrink-0 text-danger-ink" />
+              ) : undefined
             }
+            label="Evidence sweep"
+            badge={
+              <span className="flex flex-wrap items-center gap-x-2 text-2xs text-ink-muted">
+                {sources.map((source) => (
+                  <span key={source.source} className={source.failed ? 'text-danger-ink' : ''}>
+                    <span className="font-medium">{source.source}</span>{' '}
+                    {/* "failed" and "0" are different answers and the whole reason the event
+                        carries a flag: a dark source is a question about the corpus, a broken one
+                        is a page for whoever owns the index. */}
+                    {source.failed ? 'failed' : source.chunks}
+                  </span>
+                ))}
+              </span>
+            }
+            duration={durationOf(entry.at, entry.sweepEndedAt)}
           />
-          {/* The distinction the event exists for: a source that was asked and had nothing is not
-              in this panel at all, so a row here always means the retriever raised. */}
-          <p className="mt-0.5 text-2xs text-ink-muted">
-            it contributed nothing, and that is a fault rather than an empty corpus
-          </p>
+          {down.length > 0 && (
+            <p className="mt-0.5 text-2xs text-ink-muted">
+              {down.length === 1 ? 'That source' : 'Those sources'} contributed nothing, and that is
+              a fault rather than an empty corpus.
+            </p>
+          )}
         </Step>
       );
+    }
 
     case 'job_started':
       return (
@@ -454,9 +503,23 @@ function Row({
             }
             duration={durationOf(entry.at, entry.job?.endedAt)}
           />
-          {entry.job?.planStep && (
-            <p className="mt-0.5 truncate text-2xs text-ink-muted">for “{entry.job.planStep}”</p>
-          )}
+          {entry.job?.planStep &&
+            (() => {
+              // The step's position, when the plan still holds it: "for step 3 · Estimate the pKa"
+              // is a reader's own index into the checklist above, where the bare text is a string
+              // they have to go and find. The service stamps the text, not the number, because a
+              // plan can be revised between the launch and the render — so a step that has since
+              // been dropped says its text and no number rather than a number that has moved.
+              const index = (plan ?? []).findIndex(
+                (line) => parsePlanItem(line).text === entry.job?.planStep,
+              );
+              return (
+                <p className="mt-0.5 truncate text-2xs text-ink-muted">
+                  {index >= 0 ? `for step ${index + 1} · ` : 'for '}
+                  {entry.job.planStep}
+                </p>
+              );
+            })()}
         </Step>
       );
 
@@ -530,21 +593,63 @@ function Row({
   }
 }
 
+/** One reported source inside a sweep. */
+interface SweptSource {
+  source: string;
+  chunks: number;
+  failed: boolean;
+}
+
 /**
- * Pair each step with the plan as the previous revision left it.
+ * A trace entry as the rail draws it: the store's row, plus what only the rail knows.
+ *
+ * `sweep` is the fold of a run of consecutive `evidence_source` rows into the one row a reader
+ * reads them as. Kept here rather than in the store because it is a *rendering* of the events, not
+ * a different record of them — the store still holds each source's own report, which is what a
+ * later surface (or a test) needs to see.
+ */
+type RailEntry = TraceEntry & { sweep?: SweptSource[]; sweepEndedAt?: number };
+
+/**
+ * Fold the trace into what the rail shows, and pair each plan row with the revision before it.
  *
  * A plain function outside the component rather than a fold inside the render: a plan row states
  * its *delta*, so it needs the revision before it, and carrying that in a variable through a
  * `.map()` during render is the mutation-after-render pattern the React compiler refuses — for
  * good reason, since it is only correct if the map runs once, in order, exactly as written.
  */
-function withPreviousPlan(
+function toRail(
   entries: readonly TraceEntry[],
-): { entry: TraceEntry; previousPlan: string[] | null }[] {
+): { entry: RailEntry; previousPlan: string[] | null }[] {
   let seen: string[] | null = null;
-  const out: { entry: TraceEntry; previousPlan: string[] | null }[] = [];
+  const out: { entry: RailEntry; previousPlan: string[] | null }[] = [];
   for (const entry of entries) {
-    out.push({ entry, previousPlan: seen });
+    const last = out[out.length - 1]?.entry;
+    if (entry.kind === 'evidence_source' && last?.kind === 'evidence_source' && last.sweep) {
+      // Same sweep: append this source's report to the row already standing, and let the row's
+      // duration run to the last source that answered.
+      last.sweep.push({
+        source: entry.evidenceSource?.source ?? 'unknown',
+        chunks: entry.evidenceSource?.chunks ?? 0,
+        failed: entry.evidenceSource?.failed === true,
+      });
+      last.sweepEndedAt = entry.at;
+      continue;
+    }
+    const railEntry: RailEntry =
+      entry.kind === 'evidence_source'
+        ? {
+            ...entry,
+            sweep: [
+              {
+                source: entry.evidenceSource?.source ?? 'unknown',
+                chunks: entry.evidenceSource?.chunks ?? 0,
+                failed: entry.evidenceSource?.failed === true,
+              },
+            ],
+          }
+        : entry;
+    out.push({ entry: railEntry, previousPlan: seen });
     if (entry.kind === 'plan') seen = entry.plan?.todos ?? null;
   }
   return out;
@@ -558,15 +663,33 @@ function withPreviousPlan(
  * reader would open the panel for — whether anything in it went wrong.
  */
 export function summaryLabel(trace: readonly TraceEntry[], durationMs: number | null): string {
-  const { steps, toolCalls, jobs, problems, held } = summarizeTurn(trace);
+  const { steps, toolCalls, jobs, problems, sourcesDown, held } = summarizeTurn(trace);
   const parts = [`${steps} step${steps === 1 ? '' : 's'}`];
   if (toolCalls > 0) parts.push(`${toolCalls} tool${toolCalls === 1 ? '' : 's'}`);
   if (jobs > 0) parts.push(`${jobs} job${jobs === 1 ? '' : 's'}`);
-  if (problems > 0) parts.push(`${problems} problem${problems === 1 ? '' : 's'}`);
-  // Named for what it is rather than folded into the failures: a call the plan gate refused is a
-  // decision somebody made, and the reader's next move on it is approval, not debugging.
-  if (held > 0) parts.push(`${held} held for approval`);
   if (durationMs !== null && durationMs > 0) parts.push(formatDuration(durationMs));
+  // WHAT kind of trouble is named in the panel's own header, where there is room for the three
+  // different next moves it implies. A count of it rides on the collapsed trigger anyway, because
+  // a panel that has to be opened before a broken retriever is visible is exactly the depth
+  // problem this surface exists to fix.
+  const trouble = problems + sourcesDown + held;
+  if (trouble > 0) parts.push(`${trouble} to look at`);
+  return parts.join(' · ');
+}
+
+/**
+ * What went differently, named rather than totalled.
+ *
+ * Three kinds, and they are three because the reader's next move differs for each: a refusal wants
+ * an approval, a dead source wants whoever owns the index, a failure wants somebody to look at the
+ * turn. Rolling them into "3 problems" reports a correctly-gated turn as a broken one.
+ */
+export function troubleLabel(trace: readonly TraceEntry[]): string {
+  const { problems, sourcesDown, held } = summarizeTurn(trace);
+  const parts: string[] = [];
+  if (problems > 0) parts.push(`${problems} failure${problems === 1 ? '' : 's'}`);
+  if (held > 0) parts.push(`${held} refusal${held === 1 ? '' : 's'}`);
+  if (sourcesDown > 0) parts.push(`${sourcesDown} source${sourcesDown === 1 ? '' : 's'} down`);
   return parts.join(' · ');
 }
 
@@ -582,15 +705,30 @@ export const TracePanel = memo(function TracePanel({
   sessionId = null,
   /** How long the whole turn took, by our clock. Null for a rehydrated turn, which has none. */
   durationMs = null,
+  /** The turn's plan, so a job row can name the step it was launched for by its number. */
+  plan = null,
+  /** The answer the turn produced, for the closing row. Absent when it produced none. */
+  answer = null,
 }: {
   trace: TraceEntry[];
   sessionId?: string | null;
   durationMs?: number | null;
+  plan?: string[] | null;
+  answer?: { words: number; duration?: string } | null;
 }): React.JSX.Element | null {
+  // One nonce per press of "expand all": the rows are re-keyed by it, so each re-mounts with the
+  // new default and the reader's own toggling afterwards is left alone.
+  const [expanded, setExpanded] = useState<{ all: boolean; nonce: number }>({
+    all: false,
+    nonce: 0,
+  });
   const shown = trace.filter((e) => e.kind !== 'question' && e.kind !== 'approval_request');
   if (shown.length === 0) return null;
 
-  const rows = withPreviousPlan(shown);
+  const { steps } = summarizeTurn(shown);
+  const trouble = troubleLabel(shown);
+
+  const rows = toRail(shown);
 
   return (
     <Collapsible className="group/trace mt-3">
@@ -604,6 +742,13 @@ export const TracePanel = memo(function TracePanel({
               there is to read. The name is prefixed for anyone who meets this button without the
               answer above it: "6 steps · 2 tools" alone says nothing about what it opens. */}
           <span className="sr-only-live">The agent’s work: </span>
+          {/* The same dot the live row carried, in its settled colour: the trigger is where that
+              row ends up, and a turn that went cleanly should be readable as such without the
+              sentence being parsed. */}
+          <span
+            aria-hidden
+            className={cn('size-1.5 shrink-0 rounded-full', trouble ? 'bg-warn' : 'bg-ok')}
+          />
           {summaryLabel(shown, durationMs)}
         </Button>
       </CollapsibleTrigger>
@@ -616,14 +761,55 @@ export const TracePanel = memo(function TracePanel({
         )}
       >
         <div className="mt-2 rounded-xl border border-border-subtle bg-surface-sunken p-3">
-          <p className="text-2xs text-ink-muted">
-            Every step the agent took, in order. Previews are truncated by the service; where the
-            full result was stored, you can open it.
-          </p>
-          <ol className="mt-3 flex flex-col gap-2.5">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border-subtle pb-2">
+            <span className="text-xs font-medium">
+              {steps} step{steps === 1 ? '' : 's'}
+            </span>
+            {durationMs !== null && durationMs > 0 && (
+              <span className="font-mono text-2xs tabular-nums text-ink-subtle">
+                {formatDuration(durationMs)}
+              </span>
+            )}
+            {trouble && <span className="text-2xs text-warn-ink">{trouble}</span>}
+            <Button
+              variant="link"
+              size="xs"
+              className="ml-auto px-0 no-underline hover:underline"
+              onClick={() => setExpanded((e) => ({ all: !e.all, nonce: e.nonce + 1 }))}
+            >
+              {expanded.all ? 'Collapse all' : 'Expand all'}
+            </Button>
+          </div>
+          <ol className="mt-2.5 flex flex-col gap-2.5">
             {rows.map(({ entry, previousPlan }) => (
-              <Row key={entry.id} entry={entry} previousPlan={previousPlan} sessionId={sessionId} />
+              // Re-keyed by the nonce so "expand all" re-mounts each row with its new default and
+              // then leaves the reader's own toggling alone — see `Step`.
+              <Row
+                key={`${entry.id}-${expanded.nonce}`}
+                entry={entry}
+                previousPlan={previousPlan}
+                sessionId={sessionId}
+                plan={plan}
+                open={expanded.all}
+              />
             ))}
+            {/* The answer itself is a step of the turn and the only one the service does not
+                announce: without it the rail stops at the last tool call, and the reader cannot see
+                that most of the wait was the model writing. Words, never tokens — nothing here
+                knows how the service tokenised anything. */}
+            {answer && (
+              <Step tone="ok">
+                <Line
+                  label="Answer written"
+                  badge={
+                    <span className="text-2xs text-ink-muted">
+                      {answer.words} word{answer.words === 1 ? '' : 's'}
+                    </span>
+                  }
+                  duration={answer.duration}
+                />
+              </Step>
+            )}
           </ol>
         </div>
       </CollapsibleContent>

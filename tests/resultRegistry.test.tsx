@@ -82,6 +82,30 @@ describe('dispatch', () => {
     expect(rendererFor('anything', 'just text')).toBeNull();
   });
 
+  it('reads a screening design as a run sheet, in the order it was given', () => {
+    // The order IS the data — a design randomises its run order deliberately — so the rows are
+    // numbered as they arrive rather than invited to be sorted.
+    const picked = pick('generate_screening_design', {
+      runs: [
+        { temperature: 40, equivalents: 1.1 },
+        { temperature: 80, equivalents: 1.1 },
+      ],
+    });
+    expect(picked.id).toBe('runsheet');
+  });
+
+  it('summarises a payload with what it says, never with a judgement', () => {
+    const hazard = rendererFor('screen_hazards', {
+      flags: [{ severity: 'high' }, { severity: 'low' }],
+    });
+    expect(hazard?.renderer.summary?.(hazard.data)).toEqual({ text: '2 · high', tone: 'danger' });
+
+    // "no rule matched", never "clear": the difference between them is the whole of the caveat
+    // the renderer pins above the table.
+    const clean = rendererFor('screen_hazards', { flags: [] });
+    expect(clean?.renderer.summary?.(clean.data)?.text).toBe('no rule matched');
+  });
+
   it('asks for the card’s full width only where a table or a grid needs it', () => {
     expect(pick('screen_hazards', { flags: [] }).wide).toBe(true);
     expect(pick('predict_pka', { pka: 4.76 }).wide).toBe(false);

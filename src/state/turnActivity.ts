@@ -18,13 +18,18 @@
  * A turn can be several of these at once — a durable job runs asynchronously while the model keeps
  * talking — so "what is happening" needs a ranking rather than a set. It is:
  *
- *   queued → an open tool call → text arriving → an unsettled durable job → thinking
+ *   queued → an open tool call → text arriving → an unsettled durable job → the plan → thinking
  *
  * with `queued` first because it is the one state where *nothing* is running (the turn has not
  * been admitted yet), and the open tool call above the tokens because a call that has not come
  * back is what the turn is actually blocked on. The durable job sits below the tokens on purpose:
  * it does not block the turn, so reporting it while the answer is being written would name the
  * slowest thing on screen rather than the thing the reader is watching.
+ *
+ * `planning` sits second from last and is worth its own state rather than being folded into
+ * "thinking": a turn whose only event so far is a plan revision has done something specific and
+ * visible, and a reader watching the row wants to know that the wait is the harness settling on a
+ * plan rather than a model that has said nothing at all.
  */
 
 import type { AssistantMessage, TraceEntry } from './types.ts';
@@ -38,7 +43,7 @@ export interface PlanPosition {
   text: string;
 }
 
-export type ActivityKind = 'queued' | 'tool' | 'writing' | 'job' | 'thinking';
+export type ActivityKind = 'queued' | 'planning' | 'tool' | 'writing' | 'job' | 'thinking';
 
 export interface TurnActivity {
   kind: ActivityKind;
@@ -143,7 +148,37 @@ export function turnActivity(message: AssistantMessage): TurnActivity {
     };
   }
 
+  // Nothing running, and the last thing that happened was the plan changing.
+  if (trace.length > 0 && trace[trace.length - 1]!.kind === 'plan') {
+    return { kind: 'planning', label: 'Reading the plan', detail: '', step, tone: 'busy' };
+  }
+
   return { kind: 'thinking', label: 'Thinking', detail: '', step, tone: 'busy' };
+}
+
+/**
+ * The one sentence a screen reader is told when the row changes.
+ *
+ * Transitions only, through the app's single polite region — the house rule in `state/announce.ts`
+ * — because the alternative is a live region on a row that also carries a per-second timer, which
+ * queues an announcement every second and reads the answer over the top of itself.
+ */
+export function describeActivity(activity: TurnActivity): string {
+  const where = activity.step ? ` Step ${activity.step.index} of ${activity.step.total}.` : '';
+  switch (activity.kind) {
+    case 'queued':
+      return 'Waiting for a free slot on the server.';
+    case 'planning':
+      return `Reading the plan.${where}`;
+    case 'tool':
+      return `Calling ${activity.detail}.${where}`;
+    case 'writing':
+      return 'Writing the answer.';
+    case 'job':
+      return `Waiting on a durable job.${where}`;
+    default:
+      return `Thinking.${where}`;
+  }
 }
 
 /** What the turn turned out to be, once it has stopped. */
@@ -152,8 +187,16 @@ export interface TurnSummary {
   steps: number;
   toolCalls: number;
   jobs: number;
-  /** Failed calls, dead jobs and broken evidence sources: the rows worth opening the panel for. */
+  /** Failed calls and dead jobs: the rows worth opening the panel for. */
   problems: number;
+  /**
+   * Retrieval sources whose retriever RAISED during a sweep.
+   *
+   * Counted apart from `problems` because the remedies do not overlap: a broken index is a page
+   * for whoever owns it, a failed tool call is usually the turn's own business. Naming them
+   * separately in the panel's header is what lets a reader decide whether to open it at all.
+   */
+  sourcesDown: number;
   /**
    * Calls the plan gate refused.
    *
@@ -178,14 +221,26 @@ const STEP_KINDS = new Set([
   'handoff',
 ]);
 
+/**
+ * A run of consecutive `evidence_source` rows is one sweep.
+ *
+ * `gather_evidence` asks every source at once and reports each separately, so a five-source sweep
+ * arrives as five events. Counting them as five steps would make one call look like most of the
+ * turn — and the rail renders them as one row for exactly that reason, so the count has to agree
+ * with what a reader can see.
+ */
+const isSweepContinuation = (entry: TraceEntry, previous: TraceEntry | undefined): boolean =>
+  entry.kind === 'evidence_source' && previous?.kind === 'evidence_source';
+
 export function summarizeTurn(trace: readonly TraceEntry[]): TurnSummary {
   let toolCalls = 0;
   let jobs = 0;
   let problems = 0;
+  let sourcesDown = 0;
   let held = 0;
   let steps = 0;
-  for (const entry of trace) {
-    if (STEP_KINDS.has(entry.kind)) steps += 1;
+  trace.forEach((entry, i) => {
+    if (STEP_KINDS.has(entry.kind) && !isSweepContinuation(entry, trace[i - 1])) steps += 1;
     if (entry.kind === 'tool_call') toolCalls += 1;
     if (entry.kind === 'job_started') jobs += 1;
     if (entry.kind === 'tool_failed') {
@@ -193,9 +248,9 @@ export function summarizeTurn(trace: readonly TraceEntry[]): TurnSummary {
       else problems += 1;
     }
     if (entry.kind === 'job_failed') problems += 1;
-    if (entry.kind === 'evidence_source' && entry.evidenceSource?.failed) problems += 1;
-  }
-  return { steps, toolCalls, jobs, problems, held };
+    if (entry.kind === 'evidence_source' && entry.evidenceSource?.failed) sourcesDown += 1;
+  });
+  return { steps, toolCalls, jobs, problems, sourcesDown, held };
 }
 
 /**

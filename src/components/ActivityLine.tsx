@@ -11,16 +11,22 @@
  * answer for the reader's attention, and it re-lays-out the page every time it gains a line; a row
  * that changes its own text costs nothing and can be read in a glance without leaving the answer.
  *
- * ## No live region here, and that is the house rule rather than an oversight
+ * ## It announces through the app's one region, and never carries its own
  *
  * `state/announce.ts` owns everything a screen reader hears: transitions only, one short sentence
- * each, through the app's single polite region. This row sits inside the bubble's `aria-busy`
- * container, so a reader is told the turn is working and can navigate to this row deliberately —
- * rather than having every state change queued and read over the answer they are trying to hear.
+ * each, through a single polite region. This row goes through it — a state change is exactly the
+ * kind of transition that seam exists for — rather than carrying `aria-live` itself, which would
+ * put a live region on a node that also holds a per-second timer and queue an announcement every
+ * second, reading the answer over the top of itself.
+ *
+ * The announcement fires on the KIND changing, not on the label: a plan that renames step 3 while
+ * the same tool is still out has not changed what is happening.
  */
 
+import { useEffect, useRef } from 'react';
 import type { AssistantMessage } from '../state/types.ts';
-import { turnActivity, type TurnActivity } from '../state/turnActivity.ts';
+import { describeActivity, turnActivity, type TurnActivity } from '../state/turnActivity.ts';
+import { announceStatus } from '../state/announce.ts';
 import { ElapsedTimer } from '@/components/chem/ElapsedTimer';
 import { cn } from '@/lib/utils';
 
@@ -63,6 +69,17 @@ export function ActivityRow({
   className?: string;
 }): React.JSX.Element {
   const activity = turnActivity(message);
+  // In an effect, not in render: announcing is a side effect, and React may render this row for
+  // reasons that are not a state change at all.
+  const announced = useRef<string | null>(null);
+  const streaming = message.status === 'streaming';
+  useEffect(() => {
+    if (!streaming) return;
+    if (announced.current === activity.kind) return;
+    announced.current = activity.kind;
+    announceStatus(describeActivity(activity));
+  }, [streaming, activity]);
+
   return (
     <span
       className={cn('flex min-w-0 flex-1 items-center gap-2 text-sm text-ink-muted', className)}

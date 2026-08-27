@@ -41,8 +41,8 @@
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { Hexagon, Paperclip, Send, Square, X } from 'lucide-react';
-import { MAX_MESSAGE_CHARS } from '../../shared/events.ts';
 import { api } from '../api/client.ts';
+import { config } from '../env.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { sendMessage, stopStreaming, warmSession } from '../state/sendMessage.ts';
@@ -364,7 +364,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
       const isBlocked =
         useChatStore.getState().composerLock !== false ||
         useChatStore.getState().streaming !== null;
-      if (isBlocked || message.length > MAX_MESSAGE_CHARS || !message.trim()) return;
+      if (isBlocked || message.length > config.maxMessageChars || !message.trim()) return;
       setDraft(conversationId, '');
       void sendMessage({ conversationId, text: message, dryRun, auth });
     };
@@ -502,7 +502,11 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_PX)}px`;
   }, [text]);
 
-  const tooLong = text.length > MAX_MESSAGE_CHARS;
+  // The deployment's cap, not this bundle's: `CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS` is tuned per
+  // site and reaches the SPA through `/config.js`, so the counter and the block agree with the
+  // validator that will actually see the message.
+  const maxChars = config.maxMessageChars;
+  const tooLong = text.length > maxChars;
   const isStreaming = streaming !== null;
   const blocked = composerLock !== false || isStreaming;
   // Typing stays open while auth resolves — that is the point of painting the shell early, and
@@ -844,6 +848,12 @@ export function Composer({ conversationId }: { conversationId: string }): React.
             onPaste={onPaste}
             onKeyDown={(e) => {
               if (e.key !== 'Enter') return;
+              // An IME owns this Enter: it is settling a candidate, not ending a message. Above
+              // every other rule, the Cmd/Ctrl shortcut included — what a CJK writer confirms
+              // mid-composition is the character, and the message they meant to send does not
+              // exist yet. `keyCode === 229` is the same fact reported by browsers that never
+              // set `isComposing`, so dropping it leaves exactly those users with the bug.
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.metaKey || e.ctrlKey) {
                 e.preventDefault();
                 submit();
@@ -973,9 +983,9 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           </div>
 
           <span id={hintId} className="text-2xs">
-            {text.length > MAX_MESSAGE_CHARS * 0.8 ? (
+            {text.length > maxChars * 0.8 ? (
               <span className={cn('tabular-nums', tooLong && 'text-danger-ink')}>
-                {text.length.toLocaleString()} / {MAX_MESSAGE_CHARS.toLocaleString()}
+                {text.length.toLocaleString()} / {maxChars.toLocaleString()}
               </span>
             ) : (
               <span className="hidden sm:inline">

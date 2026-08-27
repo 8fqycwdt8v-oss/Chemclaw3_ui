@@ -79,7 +79,9 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
     throw new ApiError('network', 'Could not reach the Chemclaw service.');
   }
 
-  if (!res.ok) throw errorFromStatus(res.status, await readDetail(res));
+  if (!res.ok) {
+    throw errorFromStatus(res.status, await readDetail(res), res.headers.get('retry-after'));
+  }
 
   const contentType = res.headers.get('content-type') ?? '';
   if (!contentType.includes('text/event-stream') || !res.body) {

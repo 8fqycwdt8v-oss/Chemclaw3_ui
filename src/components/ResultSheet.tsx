@@ -33,7 +33,7 @@ import { useState } from 'react';
 import { Download } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { api, type StoredToolResult } from '../api/client.ts';
-import { toolLabel } from '../lib/format.ts';
+import { formatScientificNumber, toolLabel } from '../lib/format.ts';
 import { Molecule } from './Molecule.tsx';
 import { UseStructure } from '@/components/chem/UseStructure';
 import { mightBeStructure } from '../chem/structure.ts';
@@ -258,13 +258,16 @@ function ImpurityLimit({ data }: { data: Json }): React.JSX.Element {
       <Table
         label="Limits quoted by the guideline"
         headers={['Basis', 'Limit', 'Unit']}
-        body={rows(limit.limits).map((row, i) => (
-          <tr key={`${str(row.basis)}-${i}`}>
-            <Cell>{str(row.basis)}</Cell>
-            <Cell numeric>{num(row.value)?.toLocaleString() ?? '—'}</Cell>
-            <Cell>{str(row.unit)}</Cell>
-          </tr>
-        ))}
+        body={rows(limit.limits).map((row, i) => {
+          const value = num(row.value);
+          return (
+            <tr key={`${str(row.basis)}-${i}`}>
+              <Cell>{str(row.basis)}</Cell>
+              <Cell numeric>{value === null ? '—' : formatScientificNumber(value)}</Cell>
+              <Cell>{str(row.unit)}</Cell>
+            </tr>
+          );
+        })}
       />
 
       <p className="text-2xs text-ink-muted">
@@ -491,7 +494,7 @@ function AutoTable({ records, tool }: { records: Json[]; tool: string }): React.
               if (asNumber !== null)
                 return (
                   <Cell key={key} numeric>
-                    {asNumber.toLocaleString()}
+                    {formatScientificNumber(asNumber)}
                   </Cell>
                 );
               if (typeof value === 'string' || typeof value === 'boolean')

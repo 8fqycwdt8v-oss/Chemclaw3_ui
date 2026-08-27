@@ -52,6 +52,7 @@ import {
   type JobEntity,
   type Mention,
 } from '../chem/entities.ts';
+import { formatScientificNumber } from '../lib/format.ts';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -129,7 +130,7 @@ function ValueList({ mentions }: { mentions: readonly Mention[] }): React.JSX.El
               {mention.tool}
             </span>
             <span className="block font-mono text-2xs tabular-nums text-ink-muted">
-              {shown.map((v) => v.toLocaleString()).join(', ')}
+              {shown.map((v) => formatScientificNumber(v)).join(', ')}
               {values.length > shown.length && ` … +${values.length - shown.length}`}
             </span>
             {mention.shared && (

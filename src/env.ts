@@ -9,6 +9,8 @@
  * bytes than the rest of this module.
  */
 
+import { MAX_MESSAGE_CHARS } from '../shared/events.ts';
+
 export type AuthMode = 'dev' | 'msal';
 
 export interface RuntimeConfig {
@@ -40,6 +42,18 @@ export interface RuntimeConfig {
    * and so does `useIsReviewer`.
    */
   reviewerRoles: string[];
+  /**
+   * The longest message the service will accept, in characters.
+   *
+   * Runtime rather than compile-time for the same reason `reviewerRoles` is: the value belongs to
+   * the deployment, not to this bundle. `CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS` is explicitly
+   * tunable, and a hardcoded copy is wrong in both directions — refusing what the service accepts,
+   * or inviting a message it rejects with a 422 once the whole body has crossed the wire.
+   *
+   * Falls back to `MAX_MESSAGE_CHARS`, the backend's own default, when nothing supplies it: an
+   * older BFF that predates the field, or a `vite dev` with no server behind it.
+   */
+  maxMessageChars: number;
 }
 
 declare global {
@@ -79,6 +93,15 @@ function resolve(): RuntimeConfig {
     appVersion: pick(w.appVersion, 'dev'),
     warmSessions: w.warmSessions !== false,
     reviewerRoles: Array.isArray(w.reviewerRoles) ? w.reviewerRoles.map(String) : [],
+    // A cap of zero, a negative one or a non-number is not a stricter limit — it is a composer
+    // that refuses every message, including the one the chemist is typing when the bad value
+    // ships. Only a usable number displaces the default.
+    maxMessageChars:
+      typeof w.maxMessageChars === 'number' &&
+      Number.isFinite(w.maxMessageChars) &&
+      w.maxMessageChars > 0
+        ? Math.floor(w.maxMessageChars)
+        : MAX_MESSAGE_CHARS,
   };
 }
 

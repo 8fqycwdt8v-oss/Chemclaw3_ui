@@ -612,5 +612,15 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
  *  this to validate path segments, which also makes traversal structurally impossible. */
 export const SESSION_ID_RE = /^[0-9a-f]{32}$/;
 
-/** The backend's own cap (`CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`); over it is a 422. */
+/**
+ * The backend's *default* cap (`CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`, default 100_000); over it is
+ * a 422.
+ *
+ * A fallback, not the limit. The setting is tuned per deployment, so a build-time copy of it is
+ * only right for a site that never changed it: raise it upstream and this refuses messages the
+ * service would accept; lower it and the composer invites a message the service will reject after
+ * the whole body has been sent. The live value reaches the SPA through `/config.js`
+ * (`config.maxMessageChars`), and this is what stands in when nothing supplied one — an older BFF,
+ * or a static preview with no server behind it.
+ */
 export const MAX_MESSAGE_CHARS = 100_000;

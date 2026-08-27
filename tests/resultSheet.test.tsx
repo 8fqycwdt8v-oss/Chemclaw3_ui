@@ -418,19 +418,23 @@ describe('a campaign progress reading', () => {
     window: 4,
     n_observations: 8,
     n_distinct: 8,
+    n_distinct_in_space: 8,
     design_space: null,
     best_value: 87.6,
     best_so_far: [51.0, 63.5, 71.0, 86.4, 87.1, 87.1, 87.6, 87.6],
     evaluations_since_improvement: 4,
-    window_span: 1.5999999999999943,
+    window_span: 0.5,
     window_indistinguishable: true,
     enough_observations: true,
     plateaued: true,
     summary:
       'Best yield so far: 87.6 over 8 evaluation(s). The last gain larger than the stated assay ' +
-      'noise (+/-2) was 4 evaluation(s) ago. The most recent 4 results span 1.6, so they are NOT ' +
+      'noise (+/-2) was 4 evaluation(s) ago. The most recent 4 results span 0.5, so they are NOT ' +
       'distinguishable from each other. Plateaued: no further gain beyond the noise for at least ' +
-      '4 evaluation(s). This is a reading of the runs supplied and nothing more.',
+      '4 evaluation(s). This is a reading of the runs supplied and nothing more: it cannot show ' +
+      'that a global optimum has been reached, only that recent points in the region already ' +
+      'explored have not beaten the noise. An untried corner of the space is not evidence either ' +
+      'way.',
   };
 
   it('divides feasible runs by feasible cells when an exclusion makes them differ', async () => {
@@ -460,7 +464,10 @@ describe('a campaign progress reading', () => {
     // The chart is a chart, and it names what it draws. The whole reason the band is on it: a
     // difference smaller than the assay is not a difference, and a bare line invites the opposite.
     const chart = await screen.findByRole('img', { name: /Best yield so far/ });
-    expect(chart.textContent).toContain('higher is better');
+    // The axis label specifically, in its own "name · direction" form. Asserting the bare phrase
+    // would match the <desc> that the accessible-name query above already found it by, so every
+    // axis <text> could be deleted and this test would stay green.
+    expect(chart.textContent).toContain('yield · ↑ higher is better');
     expect(screen.getByText(/The shaded band is ±2/)).toBeTruthy();
     // The verdict as a state, not as a sentence to be skimmed past.
     expect(screen.getByText('Plateaued')).toBeTruthy();
@@ -495,19 +502,29 @@ describe('a campaign progress reading', () => {
 
     expect(await screen.findByText('Plateau verdict withheld')).toBeTruthy();
     expect(screen.queryByText('Plateaued')).toBeNull();
-    expect(screen.queryByText('Still improving')).toBeNull();
+    expect(screen.queryByText('Not plateaued')).toBeNull();
     // And the reason, stated as the absence of a finding rather than as a finding.
     expect(screen.getByText(/is the absence of a finding either way/)).toBeTruthy();
   });
 
-  it('calls a moving campaign moving, so the withheld state is not the only non-plateau', async () => {
+  it('reports a non-plateau as the absence of a plateau, not as a finding of progress', async () => {
+    // The third state is "not plateaued", never "still improving". Upstream computes
+    // `plateaued = enough and since >= window`, so `since == window - 1` is false while its own
+    // summary claims only that the last gain was N evaluations ago. A green "Still improving" on
+    // that payload upgrades a negative into a positive — one notch along from the over-claim the
+    // withheld state exists to prevent, and on the reading a chemist uses to spend another
+    // fortnight.
     open(
       'campaign_progress',
-      JSON.stringify({ ...PLATEAUED, evaluations_since_improvement: 0, plateaued: false }),
+      JSON.stringify({ ...PLATEAUED, evaluations_since_improvement: 3, plateaued: false }),
     );
 
-    expect(await screen.findByText('Still improving')).toBeTruthy();
+    expect(await screen.findByText('Not plateaued')).toBeTruthy();
+    expect(screen.queryByText(/Still improving/)).toBeNull();
     expect(screen.queryByText('Plateau verdict withheld')).toBeNull();
+    // The count that says how it is actually doing is on the card, which is where that question
+    // gets answered rather than in a badge.
+    expect(screen.getByText('3')).toBeTruthy();
   });
 });
 
@@ -607,16 +624,44 @@ describe('an experiment suggestion', () => {
     expect(screen.getByText('bo-9f2c1ad4')).toBeTruthy();
   });
 
+  it('does not call a predicted candidate a seed just because it carries no sd', async () => {
+    // `predicted_value` and `predicted_sd` are filled from two *independent* column probes
+    // upstream (`{name}_pred` and `{name}_sd` in `engine.py::_frame_to_candidates`), so a mean
+    // with no sd is representable. Keying the seed badge on `sd` therefore both mislabelled such
+    // a candidate "no surrogate opinion" and suppressed the prediction block entirely — dropping
+    // the number the chemist is being asked to act on, while telling them there was none.
+    open(
+      'suggest_next_experiment',
+      JSON.stringify({
+        ...MULTI,
+        candidates: [
+          {
+            params: { temperature: 92.0, catalyst: 'Pd(OAc)2' },
+            predicted_value: 88.2,
+            predicted_sd: null,
+            predicted_values: {},
+            predicted_sds: {},
+          },
+        ],
+      }),
+    );
+
+    expect(await screen.findByText('Candidate 1')).toBeTruthy();
+    expect(screen.getByText('88.2')).toBeTruthy();
+    expect(screen.queryByText(/space-filling seed/)).toBeNull();
+  });
+
   it('draws a two-objective front as a scatter and marks who is on it', async () => {
     open('suggest_next_experiment', JSON.stringify(MULTI));
 
     const chart = await screen.findByRole('img', {
       name: /Trade-off between yield and impurity/,
     });
-    // Both objective names AND both directions: a front is unreadable without knowing which way
-    // is better on each axis.
-    expect(chart.textContent).toContain('higher is better');
-    expect(chart.textContent).toContain('lower is better');
+    // Both objective names AND both directions, in the axis labels' own "name · direction" form
+    // rather than the bare phrase — the <desc> the accessible name comes from carries the phrase
+    // too, so matching it would leave the axes themselves unpinned.
+    expect(chart.textContent).toContain('yield · ↑ higher is better');
+    expect(chart.textContent).toContain('impurity · ↓ lower is better');
     // Front membership is a label, never colour alone — three runs, three labelled rows.
     expect(screen.getAllByText('on the front')).toHaveLength(3);
     // And the runs that are NOT on it are accounted for rather than silently absent: this result

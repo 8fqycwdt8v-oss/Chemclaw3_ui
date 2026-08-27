@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { resolveRoute } from '../server/routes.ts';
 
@@ -14,6 +15,7 @@ describe('proxy route whitelist', () => {
       ['GET', '/api/sessions', '/sessions'],
       ['GET', `/api/sessions/${SID}/messages`, `/sessions/${SID}/messages`],
       ['POST', `/api/sessions/${SID}/messages`, `/sessions/${SID}/messages`],
+      ['POST', `/api/sessions/${SID}/turn/stop`, `/sessions/${SID}/turn/stop`],
       ['GET', `/api/sessions/${SID}/events`, `/sessions/${SID}/events`],
       ['POST', `/api/sessions/${SID}/attachments`, `/sessions/${SID}/attachments`],
       ['GET', `/api/sessions/${SID}/plan`, `/sessions/${SID}/plan`],
@@ -33,6 +35,27 @@ describe('proxy route whitelist', () => {
     ];
     for (const [method, path, upstream] of cases) {
       expect(resolveRoute(method, path), `${method} ${path}`).toMatchObject({ path: upstream });
+    }
+  });
+
+  it('leaves no document claiming the stop route does not exist', () => {
+    // `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` replaced the mechanism, and the code
+    // followed it the same day — but `README.md` and the comment on `res.on('close')` in
+    // `server/proxy.ts` went on describing the old one for a release: "the service has no cancel
+    // endpoint, so propagating the disconnect is the only way it releases the session's turn
+    // lock". Both are the places a reader goes to learn how Stop works, so both were teaching the
+    // superseded contract while the route sat in the whitelist above.
+    //
+    // This catches that sentence, not every way of writing it. It is worth having anyway: the
+    // claim is load-bearing and its exact phrasing is what survived a rewrite of the code beneath
+    // it.
+    expect(resolveRoute('POST', `/api/sessions/${SID}/turn/stop`)).not.toBeNull();
+    for (const file of ['README.md', 'server/proxy.ts']) {
+      // Whitespace-collapsed, because both places wrap prose: in `README.md` the claim ran
+      // across a line break as "has\n  no cancel endpoint", which a literal-space pattern reads
+      // as absent.
+      const prose = readFileSync(file, 'utf8').replace(/\s+/g, ' ');
+      expect(prose, file).not.toMatch(/(is|has) no cancel endpoint/);
     }
   });
 

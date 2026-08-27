@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { sendMessage } from '../src/state/sendMessage.ts';
 import type { AuthProvider } from '../src/auth/types.ts';
@@ -281,42 +281,58 @@ describe('sendMessage', () => {
    * you asked for, a break raises a banner — and nothing checked that the second one was reachable.
    */
   describe('the connection dropping mid-answer', () => {
-    const dropAfter = (prefix: string) => {
-      const stub = stubFetch((url, init) => {
-        if (url.endsWith('/sessions') && init?.method === 'POST') {
-          return new Response(JSON.stringify({ session_id: 'g'.repeat(32) }), {
-            status: 200,
-            headers: { 'content-type': 'application/json' },
-          });
-        }
-        return brokenSseResponse(prefix);
-      });
-      restore = stub.restore;
-      return stub;
-    };
+    it('is reported as a failure once recovery gives up finding an answer', async () => {
+      // A session exists, so the drop is no longer an instant failure
+      // (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`): the client polls
+      // `GET /sessions/{id}/messages` for the detached turn's answer before giving up. This mock
+      // never has one to serve, so the fake clock is what lets the test observe the eventual
+      // failure without waiting out the real ~630 s deadline.
+      vi.useFakeTimers();
+      try {
+        const stub = stubFetch((url, init) => {
+          if (url.endsWith('/sessions') && init?.method === 'POST') {
+            return new Response(JSON.stringify({ session_id: 'g'.repeat(32) }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          if (url.endsWith('/messages') && (init?.method ?? 'GET') === 'GET') {
+            return new Response(JSON.stringify([]), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          return brokenSseResponse(
+            sseFrames([{ type: 'token', text: 'The pKa of acetic acid is ' }]),
+          );
+        });
+        restore = stub.restore;
 
-    it('is reported as a failure, keeping what had already arrived', async () => {
-      dropAfter(sseFrames([{ type: 'token', text: 'The pKa of acetic acid is ' }]));
+        const cid = useChatStore.getState().createConversation();
+        const turn = sendMessage({ conversationId: cid, text: 'pKa?', auth: devAuth });
+        await vi.advanceTimersByTimeAsync(630_000);
+        await turn;
 
-      const cid = useChatStore.getState().createConversation();
-      await sendMessage({ conversationId: cid, text: 'pKa?', auth: devAuth });
+        const message = useChatStore.getState().conversations[cid]?.messages[1];
+        expect(message).toMatchObject({ role: 'assistant', status: 'error' });
+        // The half-answer is kept — the service did the work and it is the only copy on screen —
+        // but it is kept as a *failure*, which is the distinction the banner below carries.
+        expect(message && 'streamedText' in message && message.streamedText).toBe(
+          'The pKa of acetic acid is ',
+        );
+        expect(message && 'error' in message && message.error?.kind).toBe('stream');
 
-      const message = useChatStore.getState().conversations[cid]?.messages[1];
-      expect(message).toMatchObject({ role: 'assistant', status: 'error' });
-      // The half-answer is kept — the service did the work and it is the only copy on screen — but
-      // it is kept as a *failure*, which is the distinction the banner below carries.
-      expect(message && 'streamedText' in message && message.streamedText).toBe(
-        'The pKa of acetic acid is ',
-      );
-      expect(message && 'error' in message && message.error?.kind).toBe('stream');
-
-      // A Stop raises no banner at all. A banner is therefore the whole visible difference between
-      // "your network died" and "you cancelled this", and it is what a relabelling mutation removes.
-      const banner = useChatStore.getState().banner;
-      expect(banner?.kind).toBe('error');
-      expect(useChatStore.getState().composerLock).toBe(false);
-      expect(useChatStore.getState().streaming).toBeNull();
-    });
+        // A Stop raises no banner at all. A banner is therefore the whole visible difference
+        // between "your network died" and "you cancelled this", and it is what a relabelling
+        // mutation removes.
+        const banner = useChatStore.getState().banner;
+        expect(banner?.kind).toBe('error');
+        expect(useChatStore.getState().composerLock).toBe(false);
+        expect(useChatStore.getState().streaming).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    }, 20_000);
 
     it('is told apart from the user pressing Stop on the same partial answer', async () => {
       // The control. Same partial text, same broken socket — but aborted, so no banner and the

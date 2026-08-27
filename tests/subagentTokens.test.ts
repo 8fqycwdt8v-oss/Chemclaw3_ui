@@ -20,7 +20,7 @@ import { normalizeEvent } from '../shared/events.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { sendMessage } from '../src/state/sendMessage.ts';
 import type { AuthProvider } from '../src/auth/types.ts';
-import { errorEvent, sseFrames, sseResponse, stubFetch } from './helpers.ts';
+import { answerEvent, errorEvent, sseFrames, sseResponse, stubFetch } from './helpers.ts';
 
 const devAuth: AuthProvider = {
   mode: 'dev',
@@ -76,14 +76,19 @@ describe('a turn that delegates', () => {
           headers: { 'content-type': 'application/json' },
         });
       }
-      // No answer: the turn hits the loop cap, which is precisely when `streamedText` is what
-      // gets kept and shown.
+      // The loop cap fires mid-stream — the one error code the backend documents as sharing its
+      // turn with an answer, so a degraded `AnswerEvent` carrying the same partial text follows
+      // it rather than the stream simply ending. Without that follow-up event `streamTurn`
+      // correctly treats the turn as unanswered and the client's own detach-recovery kicks in
+      // (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`) — a real signal this mock must not
+      // manufacture, since nothing here backs a `GET /messages` poll.
       return sseResponse(
         sseFrames([
           { type: 'token', text: 'The pKa is ', agent: '' },
           { type: 'token', text: '[checking the corpus…]', agent: 'subagent' },
           { type: 'token', text: '4.2.', agent: '' },
           errorEvent({ message: 'step limit reached', code: 'loop_cap_reached' }),
+          answerEvent({ text: 'The pKa is 4.2.' }),
         ]),
       );
     });

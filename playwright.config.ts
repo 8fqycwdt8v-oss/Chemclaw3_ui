@@ -6,7 +6,7 @@
  * the stream parser and the route whitelist; everything about layout, focus, the keyboard and the
  * theme was unverified.
  *
- * The `webServer` runs the real BFF against `e2e/fixture-service.mjs` rather than stubbing the
+ * The `webServer` runs the real BFF against `e2e/fixture-service.ts` rather than stubbing the
  * network in the page. That is deliberate: the property most worth protecting here is that SSE
  * frames reach the browser *incrementally*, and a `page.route` fulfilment cannot produce timed
  * frames — it would prove nothing about buffering anywhere in the chain.
@@ -21,7 +21,7 @@ export default defineConfig({
   testDir: './e2e',
   // **The exact complement of `playwright.full-stack.config.ts`'s `testMatch`.** That config selects
   // `full-stack.spec.ts` and nothing else; this one had no `testMatch` at all, so it also picked it
-  // up — and ran the four-repo suite against `e2e/fixture-service.mjs`, which replies with one
+  // up — and ran the four-repo suite against `e2e/fixture-service.ts`, which replies with one
   // canned answer regardless of the question. Asked for the flash point of 2-MeTHF, the fixture
   // answered with the pKa of acetic acid and a `screen_hazards({"smiles":"CCO"})` call, so
   // "a solvent question reaches the props server" could not pass here however healthy the stack.
@@ -56,7 +56,7 @@ export default defineConfig({
     // a non-loopback bind, and this suite runs unauthenticated. Binding loopback is the honest way
     // to satisfy that — the server really is only reachable from this machine — rather than
     // setting ALLOW_INSECURE_AUTH and teaching the test harness to wave the check through.
-    command: `node e2e/fixture-service.mjs ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 CLIENT_DIR=dist/client node dist/server.js`,
+    command: `node --experimental-strip-types e2e/fixture-service.ts ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 CLIENT_DIR=dist/client node dist/server.js`,
     url: `http://127.0.0.1:${PORT}/api/healthz`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,

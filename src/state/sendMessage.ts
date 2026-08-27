@@ -11,6 +11,7 @@ import { prefetchMarkdown } from '../components/LazyMarkdown.tsx';
 import { ApiError } from '../api/errors.ts';
 import { streamTurn } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
+import type { ComposerLock } from './types.ts';
 import { useChatStore } from './chatStore.ts';
 import { useEntityStore } from '../chem/entities.ts';
 import { announceStatus, describeAnswer } from './announce.ts';
@@ -144,6 +145,19 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
 
   const batcher = createTokenBatcher(conversationId, messageId);
 
+  /**
+   * Set the composer lock, but only while this turn is still the one the app is waiting on.
+   *
+   * The lock is a single global slot, and so is `streaming`. An older turn finishing must not
+   * unlock a composer that a newer one owns — `finishTurn` and `setStreaming` are already keyed
+   * on `messageId` for exactly that reason, and this was the one write that was not.
+   */
+  const releaseComposer = (lock: ComposerLock): void => {
+    const streaming = useChatStore.getState().streaming;
+    if (streaming && streaming.messageId !== messageId) return;
+    useChatStore.getState().setComposerLock(lock);
+  };
+
   const runOnce = async (sessionId: string): Promise<void> => {
     await streamTurn({
       sessionId,
@@ -153,7 +167,13 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       getToken: () => auth.getAccessToken(),
       onEvent(event) {
         if (event.type === 'token') {
-          batcher.push(event.text);
+          // Unattributed tokens only, which is the backend's own rule for this stream: a token
+          // carrying an `agent` is a subagent's working prose, and concatenating it splices
+          // another agent's notes into the answer a chemist reads. Invisible most of the time
+          // because the root-only `answer` event replaces the render — and not invisible at all
+          // when the turn is stopped, times out, or hits the loop cap, where the streamed text is
+          // what is kept and persisted.
+          if (!event.agent) batcher.push(event.text);
           return;
         }
         batcher.flush();
@@ -184,7 +204,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       try {
         await runOnce(sessionId);
         useChatStore.getState().finishTurn(conversationId, messageId, 'done');
-        useChatStore.getState().setComposerLock(false);
+        releaseComposer(false);
         // Announced, not focused: moving focus here would interrupt a listener mid-sentence.
         // The answer carries tabIndex={-1} so they can navigate to it when ready.
         announceStatus(describeAnswer(answerText(conversationId, messageId)));
@@ -224,7 +244,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
 
     if (apiError.kind === 'aborted') {
       useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
-      useChatStore.getState().setComposerLock(false);
+      releaseComposer(false);
       announceStatus('Stopped before the answer was complete.');
       return;
     }
@@ -243,15 +263,25 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       ? `${apiError.message} (reference ${apiError.correlationId})`
       : apiError.message;
 
-    // 429 is terminal — the budget does not replenish on a retry, so leave the composer locked
-    // and say so. Everything else releases the composer and surfaces a banner.
-    if (apiError.kind === 'budget_exhausted') {
-      useChatStore.getState().setComposerLock('budget_exhausted');
+    // The chemist's question, back where they typed it. `Composer` clears the draft at submit,
+    // so before this a failed turn also destroyed the message — the "Retry" on the banner is a
+    // rehydrate of the transcript and has never re-sent anything. Only into an empty draft:
+    // whatever they have typed since is newer than this.
+    if (!useChatStore.getState().drafts[conversationId]) {
+      useChatStore.getState().setDraft(conversationId, opts.text);
+    }
+
+    // A budget that is genuinely gone is terminal — it does not replenish because somebody
+    // pressed a button — so leave the composer locked and say so. A turn the service *shed*
+    // carries the same code and `retryable`, and falls through to the ordinary branch below,
+    // which already offers Retry.
+    if (apiError.kind === 'budget_exhausted' && !apiError.retryable) {
+      releaseComposer('budget_exhausted');
       useChatStore.getState().setBanner({ kind: 'error', text });
       return;
     }
 
-    useChatStore.getState().setComposerLock(false);
+    releaseComposer(false);
     useChatStore.getState().setBanner({
       kind: 'error',
       text,

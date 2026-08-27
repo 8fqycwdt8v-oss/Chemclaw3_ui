@@ -49,12 +49,18 @@ Expects the Chemclaw3 checkout as a sibling directory (override with `CHEMCLAW_R
 
 ```sh
 export ANTHROPIC_API_KEY=...        # or CHEMCLAW_LLM_PROVIDER=openai_compatible + OPENAI_API_KEY
-docker compose up --build
+ALLOW_INSECURE_AUTH=true docker compose up --build
 open http://localhost:3000
 ```
 
 This brings up Postgres/pgvector, Temporal, the Chemclaw3 service, and this UI. Only the UI
-publishes a port; the backend stays on the internal network.
+publishes a port — on `127.0.0.1` by default — and the backend stays on the internal network.
+
+`ALLOW_INSECURE_AUTH=true` is not optional and is not a default this repository sets for you: the
+stack runs `AUTH_MODE=dev`, which requires no sign-in and drives the backend as a shared principal
+with every authorization gate open, and the BFF refuses to serve that on a non-loopback bind unless
+somebody says it is deliberate. Share it beyond the host with `UI_BIND=0.0.0.0`, and allow it to be
+framed (a preview iframe) with `ALLOW_FRAMING=true` — each one a separate decision.
 
 ### Against a locally-run backend
 
@@ -165,7 +171,7 @@ npm run test:e2e       # Playwright — layout, focus, keyboard, theme, mobile d
 perceptual and WCAG is defined on sRGB relative luminance, so two tokens that look far apart can
 still fail. That gap is exactly how white-on-accent survived in dark mode at roughly 2:1.
 
-`test:e2e` runs the real BFF against `e2e/fixture-service.mjs`, which emits SSE frames with real
+`test:e2e` runs the real BFF against `e2e/fixture-service.ts`, which emits SSE frames with real
 gaps between them. Stubbing the network inside the page would hand the whole body over at once and
 pass against a chain that buffers end to end — the one failure this project most wants to catch.
 

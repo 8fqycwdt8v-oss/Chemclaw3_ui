@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { sendMessage } from '../src/state/sendMessage.ts';
 import type { AuthProvider } from '../src/auth/types.ts';
-import { answerEvent, jsonError, sseFrames, sseResponse, stubFetch } from './helpers.ts';
+import {
+  answerEvent,
+  brokenSseResponse,
+  jsonError,
+  sseFrames,
+  sseResponse,
+  stubFetch,
+} from './helpers.ts';
 
 const devAuth: AuthProvider = {
   mode: 'dev',
@@ -12,6 +19,37 @@ const devAuth: AuthProvider = {
   logout: async () => undefined,
   handleUnauthorized: async () => false,
 };
+
+/**
+ * A provider whose token changes *because* it re-authenticated.
+ *
+ * Not a queue of tokens, deliberately. `api.createSession` takes a token of its own before the
+ * turn ever runs, so a positional queue would hand the first attempt the value meant for the
+ * second and the assertion below would pass on the wrong bytes. Keying the token off the refresh
+ * having happened is also what a real provider does: the replay must carry the credential that
+ * exists *after* `handleUnauthorized` resolved, not merely a second copy of the stale one.
+ */
+function reauthingAuth(recovers: boolean): AuthProvider & { asked: number } {
+  return {
+    mode: 'msal',
+    account: null,
+    asked: 0,
+    refreshed: false,
+    async getAccessToken() {
+      return this.refreshed ? 'fresh' : 'stale';
+    },
+    async login() {},
+    async logout() {},
+    async handleUnauthorized() {
+      this.asked += 1;
+      if (recovers) this.refreshed = true;
+      return recovers;
+    },
+  } as AuthProvider & { asked: number; refreshed: boolean };
+}
+
+const bearer = (init?: RequestInit): string | undefined =>
+  (init?.headers as Record<string, string> | undefined)?.authorization;
 
 const ANSWER = sseFrames([{ type: 'token', text: 'ok' }, answerEvent({ text: 'ok' })]);
 
@@ -146,6 +184,165 @@ describe('sendMessage', () => {
     await sendMessage({ conversationId: cid, text: 'hello', auth: devAuth });
 
     expect(useChatStore.getState().banner?.action).toBe('reset');
+  });
+
+  /**
+   * A token that expires *inside* a conversation turn.
+   *
+   * `handleUnauthorized` has three callers: every `api.*` route (covered by
+   * `tests/apiAuthRecovery.test.ts`), the job push-back stream (`tests/jobStreamAuth.test.ts`), and
+   * this one — the only one a chemist actually sits in, since an Entra access token lives 60-90
+   * minutes and a conversation outlives that. It was the one with no test, and deleting the
+   * recovery branch from `sendMessage` left the whole suite green.
+   */
+  describe('a 401 arriving mid-turn', () => {
+    /** Turn attempts, and the session POSTs, kept apart so "replayed once" can be asserted. */
+    const stubTurn = (turnStatus: (attempt: number) => Response) => {
+      const state = { turns: 0 };
+      const stub = stubFetch((url, init) => {
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          return new Response(JSON.stringify({ session_id: 'f'.repeat(32) }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        state.turns += 1;
+        return turnStatus(state.turns);
+      });
+      restore = stub.restore;
+      return { stub, state };
+    };
+
+    it('refreshes the token and replays the turn exactly once', async () => {
+      const { stub, state } = stubTurn((n) =>
+        n === 1 ? jsonError(401, 'invalid or expired token') : sseResponse(ANSWER),
+      );
+      const auth = reauthingAuth(true);
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({ conversationId: cid, text: 'hello', auth });
+
+      expect(state.turns).toBe(2);
+      expect(auth.asked).toBe(1);
+      // The bytes that matter: a replay carrying the stale token satisfies a call-count assertion
+      // and fixes nothing — the service would 401 it again.
+      const turnCalls = stub.calls.filter((c) => c.url.endsWith('/messages'));
+      expect(turnCalls.map((c) => bearer(c.init))).toEqual(['Bearer stale', 'Bearer fresh']);
+
+      const conversation = useChatStore.getState().conversations[cid];
+      // One user bubble and ONE assistant answer — the replay must reuse the message the first
+      // attempt started, not append a second empty one beside it.
+      expect(conversation?.messages).toHaveLength(2);
+      expect(conversation?.messages[1]).toMatchObject({ role: 'assistant', status: 'done' });
+      // Nothing to click, because nothing went wrong from the chemist's side.
+      expect(useChatStore.getState().banner).toBeNull();
+      expect(useChatStore.getState().composerLock).toBe(false);
+      expect(useChatStore.getState().streaming).toBeNull();
+      // The session handle is untouched: a 401 says who you are, not which session this is.
+      expect(conversation?.contextLost).toBeFalsy();
+    });
+
+    it('gives up after one replay even when the provider claims to recover forever', async () => {
+      // The bound that matters. Recovery is a boolean rather than a loop because a turn costs real
+      // money and collides with the backend's per-session turn lock; a provider that always says
+      // "recovered" must not be able to spend the budget in a spin.
+      const { state } = stubTurn(() => jsonError(401, 'invalid or expired token'));
+      const auth = reauthingAuth(true);
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({ conversationId: cid, text: 'hello', auth });
+
+      expect(state.turns).toBe(2);
+      expect(auth.asked).toBe(1);
+      expect(useChatStore.getState().banner?.action).toBe('reauth');
+      expect(useChatStore.getState().composerLock).toBe(false);
+    });
+
+    it('does not replay when recovery needs an interactive redirect', async () => {
+      // `handleUnauthorized` resolving false means navigation is already under way, so a replay
+      // would fire a doomed turn into a page that is leaving.
+      const { state } = stubTurn(() => jsonError(401, 'invalid or expired token'));
+      const auth = reauthingAuth(false);
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({ conversationId: cid, text: 'hello', auth });
+
+      expect(state.turns).toBe(1);
+      expect(auth.asked).toBe(1);
+      expect(useChatStore.getState().banner?.action).toBe('reauth');
+    });
+  });
+
+  /**
+   * The turn-level half of "a dropped connection is not a Stop".
+   *
+   * `streamTurn` decides the *kind*; this is what a chemist sees because of it. The two outcomes
+   * are deliberately different surfaces — a Stop is silent and keeps its partial text as something
+   * you asked for, a break raises a banner — and nothing checked that the second one was reachable.
+   */
+  describe('the connection dropping mid-answer', () => {
+    const dropAfter = (prefix: string) => {
+      const stub = stubFetch((url, init) => {
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          return new Response(JSON.stringify({ session_id: 'g'.repeat(32) }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return brokenSseResponse(prefix);
+      });
+      restore = stub.restore;
+      return stub;
+    };
+
+    it('is reported as a failure, keeping what had already arrived', async () => {
+      dropAfter(sseFrames([{ type: 'token', text: 'The pKa of acetic acid is ' }]));
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({ conversationId: cid, text: 'pKa?', auth: devAuth });
+
+      const message = useChatStore.getState().conversations[cid]?.messages[1];
+      expect(message).toMatchObject({ role: 'assistant', status: 'error' });
+      // The half-answer is kept — the service did the work and it is the only copy on screen — but
+      // it is kept as a *failure*, which is the distinction the banner below carries.
+      expect(message && 'streamedText' in message && message.streamedText).toBe(
+        'The pKa of acetic acid is ',
+      );
+      expect(message && 'error' in message && message.error?.kind).toBe('stream');
+
+      // A Stop raises no banner at all. A banner is therefore the whole visible difference between
+      // "your network died" and "you cancelled this", and it is what a relabelling mutation removes.
+      const banner = useChatStore.getState().banner;
+      expect(banner?.kind).toBe('error');
+      expect(useChatStore.getState().composerLock).toBe(false);
+      expect(useChatStore.getState().streaming).toBeNull();
+    });
+
+    it('is told apart from the user pressing Stop on the same partial answer', async () => {
+      // The control. Same partial text, same broken socket — but aborted, so no banner and the
+      // message is marked as something the chemist chose.
+      const stub = stubFetch((url, init) => {
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          return new Response(JSON.stringify({ session_id: 'h'.repeat(32) }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        return brokenSseResponse(
+          sseFrames([{ type: 'token', text: 'The pKa of acetic acid is ' }]),
+          new TypeError('network error'),
+          () => useChatStore.getState().streaming?.abort.abort(),
+        );
+      });
+      restore = stub.restore;
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({ conversationId: cid, text: 'pKa?', auth: devAuth });
+
+      const message = useChatStore.getState().conversations[cid]?.messages[1];
+      expect(message).toMatchObject({ role: 'assistant', status: 'aborted' });
+      expect(useChatStore.getState().banner).toBeNull();
+    });
   });
 
   it('refuses to start a second turn while one is locked', async () => {

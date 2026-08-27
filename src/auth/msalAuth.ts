@@ -19,6 +19,7 @@
 
 import type { AccountInfo, Configuration, IPublicClientApplication } from '@azure/msal-browser';
 import { config } from '../env.ts';
+import { forgetLocalHistory } from '../state/chatStore.ts';
 import type { AuthAccount, AuthProvider } from './types.ts';
 
 export function buildMsalConfig(): Configuration {
@@ -110,6 +111,12 @@ export async function createMsalAuth(): Promise<AuthProvider> {
     },
 
     async logout() {
+      // The transcripts are not MSAL's to clear: its cache holds the credential, in
+      // `sessionStorage`, and every conversation is persisted separately to `localStorage`. A
+      // sign-out that removes only the first leaves the second for whoever signs in next on the
+      // same browser profile — which on a shared lab workstation is a different chemist.
+      forgetLocalHistory();
+      sessionStorage.removeItem(REAUTH_KEY);
       await pca.logoutRedirect();
     },
 

@@ -38,6 +38,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 
 type Health = 'checking' | 'ok' | 'down';
 
+/** How often the service is probed, and how long one probe may hang before the service is called
+ *  unreachable. The deadline is what makes "checking" a *transient* state: without it a backend
+ *  that accepts the connection and never answers leaves the indicator in the one state that means
+ *  "I do not know" for the life of the tab. Short of the interval, so a probe is never outlived by
+ *  the next one. */
+const HEALTH_POLL_MS = 30_000;
+const HEALTH_TIMEOUT_MS = 5_000;
+
 const HEALTH: Record<Health, { status: Status; label: string }> = {
   checking: { status: 'pending', label: 'checking' },
   ok: { status: 'ok', label: 'connected' },
@@ -61,14 +69,21 @@ export function TopBar({
 
   useEffect(() => {
     let cancelled = false;
+    // Skipped while one is outstanding. Every probe is bounded now, so this cannot wedge the poll
+    // — and without it a hung backend collected a new never-resolving request every 30 s, plus one
+    // more on every visibility change.
+    let inFlight = false;
     const check = (): void => {
       if (typeof document !== 'undefined' && document.hidden) return;
+      if (inFlight) return;
+      inFlight = true;
       void api_health().then((ok) => {
+        inFlight = false;
         if (!cancelled) setHealth(ok ? 'ok' : 'down');
       });
     };
     check();
-    const timer = setInterval(check, 30_000);
+    const timer = setInterval(check, HEALTH_POLL_MS);
     // Catch up immediately on return rather than waiting out the rest of the interval.
     document.addEventListener('visibilitychange', check);
     return () => {
@@ -105,9 +120,15 @@ export function TopBar({
           <TooltipTrigger asChild>
             <span className="inline-flex items-center">
               {/* The label is hidden on the narrowest screens but never removed: the dot's colour
-                  must not be the only carrier of the state. */}
+                  must not be the only carrier of the state. `StatusDot` renders it for assistive
+                  tech even at `showLabel={false}`, so the sibling below is the VISIBLE copy only —
+                  aria-hidden, or a screen reader hears the one word twice, and a third time from
+                  the tooltip it describes. */}
               <StatusDot status={meta.status} label={meta.label} showLabel={false} />
-              <span className="sr-only-live sm:not-sr-only sm:ml-1.5 sm:text-xs sm:text-ink-muted">
+              <span
+                aria-hidden
+                className="sr-only-live sm:not-sr-only sm:ml-1.5 sm:text-xs sm:text-ink-muted"
+              >
                 {meta.label}
               </span>
             </span>
@@ -215,12 +236,26 @@ export function TopBar({
   );
 }
 
-/** Kept local so the health poll cannot accidentally acquire a token on every tick. */
+/**
+ * Kept local so the health poll cannot accidentally acquire a token on every tick.
+ *
+ * Bounded by its own controller rather than by `AbortSignal.timeout`, because the abort has to be
+ * cleared again on the ordinary path: a timer left armed for every probe would keep the tab awake
+ * for nothing. A probe that runs out of time is reported as unreachable, which is what a backend
+ * that has stopped answering is to a reader of this header.
+ */
 async function api_health(): Promise<boolean> {
+  const abort = new AbortController();
+  const deadline = setTimeout(() => abort.abort(), HEALTH_TIMEOUT_MS);
   try {
-    const res = await fetch(`${config.apiBase}/healthz`, { cache: 'no-store' });
+    const res = await fetch(`${config.apiBase}/healthz`, {
+      cache: 'no-store',
+      signal: abort.signal,
+    });
     return res.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(deadline);
   }
 }

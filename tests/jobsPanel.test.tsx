@@ -10,12 +10,20 @@
  *
  * **Cancellation is a request, not an outcome.** The service answers 202 and a workflow already
  * past its last cancellation point finishes anyway, so nothing in this UI may say the job stopped.
+ *
+ * **And a read that failed has to stop looking like a read that is still going.** The sheet set
+ * `status` to `null` on the way in and, on failure, wrote only the notice — so its spinner's
+ * `!status` guard stayed true for the life of the sheet. A chemist got an error string with a
+ * spinner turning under it, permanently, and no way to retry: the only other control in the sheet
+ * is the close button. Its three sibling sheets all guard their spinner on a failed state, which
+ * is what makes this an oversight rather than a house style.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { JobsPanel } from '../src/components/JobsPanel.tsx';
 import { stubFetch } from './helpers.ts';
+import type { DurableJobStatus, JobRecordSummary } from '../src/api/client.ts';
 
 const mode = { current: 'dev' as 'dev' | 'msal', roles: [] as string[] };
 
@@ -38,7 +46,14 @@ vi.mock('../src/auth/AuthContext.tsx', async () => {
   };
 });
 
-const RECORD = {
+/**
+ * Annotated with the interface the service's route is declared to return, not left as a bare
+ * literal. Zero runtime cost, and it makes `tsc -b` — already a CI step — the drift check: a field
+ * renamed or added on `JobRecordSummary` now fails the typecheck here instead of leaving this
+ * fixture describing a shape the real service stopped sending. `e2e/fixture-service.ts`'s own
+ * comment records that exact failure having happened once, to `GET /sessions`.
+ */
+const RECORD: JobRecordSummary = {
   job_id: 'calc-9f2c',
   connector: 'calc',
   job: 'compare_solvents',
@@ -48,7 +63,7 @@ const RECORD = {
   completed_at: '2026-08-01T09:00:00Z',
 };
 
-const STATUS = {
+const STATUS: DurableJobStatus = {
   job_id: 'calc-9f2c',
   status: 'running',
   summary: null,
@@ -59,6 +74,10 @@ const STATUS = {
 let restore: (() => void) | null = null;
 const deletes: string[] = [];
 let searched = '';
+
+/** How many times the job read has been asked for, and whether it is currently failing. */
+let jobReads = 0;
+let jobReadFails = false;
 
 function serve(records = [RECORD]): void {
   const stub = stubFetch((url, init) => {
@@ -71,6 +90,13 @@ function serve(records = [RECORD]): void {
       });
     }
     if (url.includes('/jobs/')) {
+      jobReads += 1;
+      if (jobReadFails) {
+        return new Response(JSON.stringify({ detail: 'boom' }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       return new Response(JSON.stringify(STATUS), {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -89,6 +115,8 @@ beforeEach(() => {
   cleanup();
   deletes.length = 0;
   searched = '';
+  jobReads = 0;
+  jobReadFails = false;
   mode.current = 'dev';
   mode.roles = [];
 });
@@ -149,6 +177,23 @@ describe('JobsPanel', () => {
 
     expect(screen.queryByRole('button', { name: 'Request cancellation' })).toBeNull();
     expect(screen.getByText(/needs a reviewer role/)).toBeTruthy();
+  });
+
+  it('stops the spinner when the read failed, and offers the retry', async () => {
+    // Otherwise "still loading" and "this failed and will never load" are the same screen.
+    jobReadFails = true;
+    serve();
+    render(<JobsPanel />);
+    fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
+
+    await screen.findByRole('status');
+    await waitFor(() => expect(screen.queryByText('Reading the job…')).toBeNull());
+
+    jobReadFails = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+    expect(await screen.findByText('running')).toBeTruthy();
+    expect(jobReads).toBe(2);
   });
 
   it('distinguishes an empty registry from an empty search', async () => {

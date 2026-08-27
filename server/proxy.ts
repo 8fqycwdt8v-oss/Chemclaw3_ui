@@ -25,11 +25,16 @@ const transport = upstream.protocol === 'https:' ? https : http;
 /**
  * keepAlive with NO socket timeout. A turn can legitimately run for the backend's full 600s
  * wall clock without producing a byte, and the job stream longer still.
+ *
+ * The pool size is a security control as much as a capacity one: a request claims a socket the
+ * moment its first body byte arrives, so anything that can open connections and dribble bytes can
+ * hold the pool. `cfg.requestTimeoutMs` is what puts a bound on that; this is the ceiling it is
+ * bounding, and it is configurable so the two can be tuned together.
  */
 const agent = new transport.Agent({
   keepAlive: true,
   keepAliveMsecs: 15_000,
-  maxSockets: 128,
+  maxSockets: cfg.maxUpstreamSockets,
   timeout: 0,
 });
 
@@ -44,6 +49,20 @@ const HOP_BY_HOP = new Set([
   'transfer-encoding',
   'upgrade',
   'host',
+]);
+
+/**
+ * Response headers this process owns, whatever the upstream says.
+ *
+ * A proxied response is delivered on the app's own origin, so its CSP and nosniff are the SPA's
+ * to state. Letting the backend's copy through would mean the security posture of a same-origin
+ * document was decided by whichever service answered it.
+ */
+const BFF_OWNED = new Set([
+  'content-security-policy',
+  'x-content-type-options',
+  'x-frame-options',
+  'referrer-policy',
 ]);
 
 const isEventStream = (headers: IncomingHttpHeaders): boolean =>
@@ -107,12 +126,32 @@ function buildUpstreamHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
   return headers;
 }
 
+/** Refuse a body this process will not carry, in the shape FastAPI's own errors have. */
+function refuseTooLarge(req: IncomingMessage, res: ServerResponse, maxBodyBytes: number): void {
+  log.warn(`refused ${req.method} ${req.url}: body over ${maxBodyBytes} bytes`);
+  if (!res.headersSent) {
+    res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
+    res.end(JSON.stringify({ detail: 'request body too large' }));
+  }
+  req.destroy();
+}
+
 export function proxy(
   req: IncomingMessage,
   res: ServerResponse,
   upstreamPath: string,
   expectSse: boolean,
+  maxBodyBytes: number = cfg.maxBodyBytes,
 ): void {
+  // The cheap check first: a declared length over the cap is refused without opening an upstream
+  // request at all, which is what stops a 100 MB body from being buffered by the backend before
+  // its own validator can reject it.
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared > maxBodyBytes) {
+    refuseTooLarge(req, res, maxBodyBytes);
+    return;
+  }
+
   const upstreamReq = transport.request(
     {
       protocol: upstream.protocol,
@@ -126,7 +165,7 @@ export function proxy(
     (upstreamRes) => {
       const out: http.OutgoingHttpHeaders = {};
       for (const [key, value] of Object.entries(upstreamRes.headers)) {
-        if (value === undefined || HOP_BY_HOP.has(key)) continue;
+        if (value === undefined || HOP_BY_HOP.has(key) || BFF_OWNED.has(key)) continue;
         out[key] = value;
       }
 
@@ -184,15 +223,31 @@ export function proxy(
 
   upstreamReq.on('error', (err: NodeJS.ErrnoException) => {
     if (res.headersSent) {
-      res.destroy();
+      // Unless the response is already complete — a body we refused ourselves has its 413 in the
+      // socket buffer, and destroying here would truncate the very answer that explains the
+      // refusal, leaving the caller with a bare connection reset.
+      if (!res.writableEnded) res.destroy();
       return;
     }
     log.warn(`upstream error for ${req.method} ${upstreamPath}: ${err.message}`);
-    res.writeHead(502, { 'content-type': 'application/json' });
+    res.writeHead(502, { 'content-type': 'application/json', connection: 'close' });
     res.end(JSON.stringify({ detail: 'upstream unavailable', code: err.code ?? 'EPROXY' }));
+    // And hang up on a body still arriving. Node stops enforcing `requestTimeout` once the
+    // response has completed, so answering early and then waiting politely for the rest of a
+    // request nobody is sending is precisely the unbounded hold the timeout exists to prevent.
+    if (!req.readableEnded) req.destroy();
   });
 
-  // Request bodies are small — the backend caps messages at 100k chars — except attachments,
-  // which stream through just as happily.
+  // And the same cap counted as it passes, because `content-length` is absent on a chunked
+  // upload — a body with no declared length is exactly the one the check above cannot see.
+  // A 'data' listener coexists with .pipe(); both receive chunks in flowing mode.
+  let received = 0;
+  req.on('data', (chunk: Buffer) => {
+    received += chunk.length;
+    if (received <= maxBodyBytes) return;
+    upstreamReq.destroy();
+    refuseTooLarge(req, res, maxBodyBytes);
+  });
+
   req.pipe(upstreamReq);
 }

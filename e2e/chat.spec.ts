@@ -43,7 +43,16 @@ test('stop ends the turn and unlocks the composer', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Stop' }).click();
 
-  await expect(page.getByText('Stopped before the answer was complete.')).toBeVisible();
+  // Scoped to the message, not to the page. The same sentence is also written into the polite live
+  // region, and an unscoped `getByText` matches both the instant they overlap — a strict-mode
+  // violation that turns a passing property into an intermittent red. The property worth asserting
+  // here is the durable one a chemist can still read a minute later: the message itself is marked
+  // as stopped. The announcement is `tests/announce.test.ts`'s job.
+  await expect(
+    page
+      .getByRole('article', { name: 'Assistant answer' })
+      .getByText('Stopped before the answer was complete.'),
+  ).toBeVisible();
   await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
 });
 

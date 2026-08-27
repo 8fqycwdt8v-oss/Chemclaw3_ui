@@ -9,7 +9,7 @@
  */
 
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
+import { persist, type PersistStorage, type StorageValue } from 'zustand/middleware';
 import type { ChemclawEvent, JobTerminalEvent } from '../../shared/events.ts';
 import { useEntityStore } from '../chem/entities.ts';
 import type { ApiErrorKind } from '../api/errors.ts';
@@ -140,6 +140,15 @@ export function migratePersisted(persisted: unknown, version: number): Persisted
 
 /** Keep persisted state bounded — see `partialize` below. */
 const MAX_CONVERSATIONS = 30;
+/**
+ * The most recent messages of any one conversation that are written to disk.
+ *
+ * `messages` was the one collection here with no bound at all, while `order`, `trace` and
+ * `jobFeed` all had one — so a single long-lived conversation could carry the whole persisted
+ * payload past the browser's quota on its own. Generous rather than tight: the in-memory
+ * conversation keeps everything for the session, and this only decides what survives a reload.
+ */
+const MAX_PERSISTED_MESSAGES = 200;
 const MAX_JOB_FEED = 50;
 /** A completion older than this is history, not news. Bounds the persisted feed's size too. */
 const JOB_FEED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -405,6 +414,102 @@ const updateAssistant = (
   };
 };
 
+/**
+ * Drop the oldest half of the persisted conversations, so a payload that was refused can be
+ * retried as a smaller one. Returns `null` when there is nothing left to drop.
+ */
+function shedOldest(state: PersistedState): PersistedState | null {
+  if (state.order.length === 0) return null;
+  const order = state.order.slice(0, Math.floor(state.order.length / 2));
+  const conversations: Record<string, Conversation> = {};
+  for (const id of order) {
+    const conversation = state.conversations[id];
+    if (conversation) conversations[id] = conversation;
+  }
+  return {
+    ...state,
+    order,
+    conversations,
+    activeId: state.activeId && conversations[state.activeId] ? state.activeId : (order[0] ?? null),
+    jobFeed: state.jobFeed.filter(
+      (j) => j.conversationId === null || conversations[j.conversationId],
+    ),
+  };
+}
+
+/**
+ * `localStorage`, with the two things `createJSONStorage(() => localStorage)` does not do.
+ *
+ * `persist` re-serialises the whole slice on EVERY store write — one per animation-frame token
+ * flush — and hands the failure straight back to the action that caused it. `appendUserMessage`
+ * runs before `sendMessage`'s try/catch, so a `QuotaExceededError` there left the turn as an
+ * unhandled rejection: no bubble, no answer, no banner, no lock. Send did nothing, for ever,
+ * because a reload does not empty the store that is full.
+ *
+ * So: a refused write sheds the oldest conversations and tries again, and a write that cannot
+ * succeed at all is swallowed the way `prefsStore` already swallows its own. History stops being
+ * durable; the app keeps working, which is the right way round.
+ */
+let storageWritable = true;
+
+const chatStorage: PersistStorage<PersistedState> = {
+  getItem(name) {
+    try {
+      const raw = localStorage.getItem(name);
+      return raw === null ? null : (JSON.parse(raw) as StorageValue<PersistedState>);
+    } catch {
+      // Unreadable (private mode, denied storage, or corrupt JSON) reads as "nothing stored",
+      // which is a clean first-run rather than a boot failure.
+      return null;
+    }
+  },
+
+  setItem(name, value) {
+    // Latched off after a write that could not land even with a single conversation in it. That
+    // is storage being denied rather than full — shedding cannot help, and retrying it once per
+    // animation frame would burn a `JSON.stringify` of the whole slice on every token.
+    if (!storageWritable) return;
+    let state: PersistedState | null = value.state;
+    while (state) {
+      try {
+        localStorage.setItem(name, JSON.stringify({ ...value, state }));
+        return;
+      } catch {
+        state = shedOldest(state);
+      }
+    }
+    storageWritable = false;
+    console.warn('chemclaw3: local history could not be saved (storage is full or unavailable).');
+  },
+
+  removeItem(name) {
+    try {
+      localStorage.removeItem(name);
+    } catch {
+      // Nothing to do and nothing to report: the value we wanted gone is already unreachable.
+    }
+  },
+};
+
+/**
+ * Forget every conversation, in memory and on disk.
+ *
+ * Sign-out's other half. MSAL caches the *credential* in `sessionStorage`, which dies with the
+ * tab; the transcripts live here, in `localStorage`, under one key that is not partitioned by
+ * account — so signing out removed the credential and left the data it was protecting for the
+ * next person to use the browser profile.
+ *
+ * It lives beside the store rather than in the auth provider because both halves are the store's
+ * own: `clearAll` is what stops the previous account's conversations being on screen if the
+ * sign-out redirect is slow or blocked, and `persist.clearStorage` is what stops them coming back
+ * on the next load. Ordered, too: `clearAll` writes a fresh state through the persist middleware,
+ * so removing the key has to come second.
+ */
+export function forgetLocalHistory(): void {
+  useChatStore.getState().clearAll();
+  useChatStore.persist.clearStorage();
+}
+
 export const useChatStore = create<ChatState>()(
   persist(
     (set, get) => ({
@@ -420,13 +525,19 @@ export const useChatStore = create<ChatState>()(
       notifyOnJobComplete: false,
       streaming: null,
 
+      // Neither of these clears `composerLock`, and that is the fix rather than an omission.
+      // The lock and the `streaming` slot are single, global, app-wide things — one turn at a
+      // time — while `Composer` derives its own blocking per conversation. Clearing the lock on
+      // a conversation change therefore unblocked a composer whose turn was still running: a
+      // second turn started, overwrote the one `streaming` slot, and left the first turn's
+      // `AbortController` unreachable, so Stop could no longer release the backend's turn lease
+      // or its admission permit. The banner still clears, because it belongs to the view.
       createConversation() {
         const conversation = newConversation();
         set((s) => ({
           conversations: { ...s.conversations, [conversation.id]: conversation },
           order: [conversation.id, ...s.order],
           activeId: conversation.id,
-          composerLock: false,
           banner: null,
         }));
         return conversation.id;
@@ -434,7 +545,7 @@ export const useChatStore = create<ChatState>()(
 
       selectConversation(id) {
         if (!get().conversations[id]) return;
-        set({ activeId: id, composerLock: false, banner: null });
+        set({ activeId: id, banner: null });
       },
 
       deleteConversation(id) {
@@ -513,6 +624,14 @@ export const useChatStore = create<ChatState>()(
         set((s) => {
           const conversation = s.conversations[conversationId];
           if (!conversation || messages.length === 0) return {};
+          // The precondition the caller believes it is enforcing, enforced where it cannot race.
+          // The rehydrate effect starts only for an empty conversation and cancels itself when
+          // the message count changes — but that cancellation is an effect cleanup, so it runs on
+          // React's next render, while `sendMessage` appends synchronously. A transcript that
+          // resolved inside that window replaced the turn that had just started, and every later
+          // token was dropped in silence because `updateAssistant` matches on an id that is no
+          // longer in the array.
+          if (conversation.messages.length !== 0) return {};
           // Name it from what was actually asked in it.
           //
           // `GET /sessions` returns `{session_id, created_at}` and no title — the server mints a
@@ -524,7 +643,7 @@ export const useChatStore = create<ChatState>()(
           // precondition the rehydrate effect runs under (`messageCount === 0`), so a title
           // replaced here can only ever be the placeholder from `newConversation()` or the
           // sidebar's stub. A conversation someone has typed into keeps the name it earned.
-          const first = conversation.messages.length === 0 ? messages.find(isUser) : undefined;
+          const first = messages.find(isUser);
           return {
             conversations: {
               ...s.conversations,
@@ -825,7 +944,7 @@ export const useChatStore = create<ChatState>()(
       // acceptable as the emergency it was the first time.
       name: 'chemclaw3.chat.v2',
       version: 3,
-      storage: createJSONStorage(() => localStorage),
+      storage: chatStorage,
 
       migrate: migratePersisted,
 
@@ -839,7 +958,7 @@ export const useChatStore = create<ChatState>()(
           if (!conversation) continue;
           conversations[id] = {
             ...conversation,
-            messages: conversation.messages.map((m) =>
+            messages: conversation.messages.slice(-MAX_PERSISTED_MESSAGES).map((m) =>
               m.role === 'assistant' && m.status === 'streaming'
                 ? {
                     ...m,

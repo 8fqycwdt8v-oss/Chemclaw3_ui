@@ -67,7 +67,12 @@ const AssistantBubble = memo(function AssistantBubble({
 }): React.JSX.Element {
   // finalText wins outright. answer.text is the full concatenation of every token, so anything
   // that combined the two would render the entire answer twice.
-  const body = message.finalText ?? message.streamedText;
+  //
+  // `||` and not `??`, which falls back only on null/undefined. A terminal `answer` carrying
+  // `text: ''` — a shape the service really sends — then replaced a settled answer with the empty
+  // string and the ternary below rendered nothing whatsoever, erasing tokens the reader had just
+  // watched arrive. Falling back to them is not the forbidden combination: it never concatenates.
+  const body = message.finalText || message.streamedText;
   const streaming = message.status === 'streaming';
 
   const question = message.trace.findLast?.((e) => e.kind === 'question')?.question;
@@ -98,7 +103,6 @@ const AssistantBubble = memo(function AssistantBubble({
           </div>
         ) : (
           <ErrorBoundary
-            resetKey={message.id}
             fallback={() => (
               <div className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2">
                 <p className="text-sm text-warn-ink">
@@ -113,18 +117,28 @@ const AssistantBubble = memo(function AssistantBubble({
             <Markdown figures={figures}>{body}</Markdown>
           </ErrorBoundary>
         )
-      ) : (
-        streaming && (
-          <p className="flex items-center gap-2 text-sm text-ink-muted">
-            {/* "Thinking…" is untrue while the turn is parked on admission control: nothing is
-                running yet. The distinction is the point of the event — a queued turn and a hung
-                server used to look identical from here.
+      ) : streaming ? (
+        <p className="flex items-center gap-2 text-sm text-ink-muted">
+          {/* "Thinking…" is untrue while the turn is parked on admission control: nothing is
+              running yet. The distinction is the point of the event — a queued turn and a hung
+              server used to look identical from here.
 
-                The elapsed time is a SIBLING node, never concatenated in: a ten-minute turn needs
-                a sign of life, but the sentence itself has to stay one stable string. */}
-            <span aria-hidden className="size-1.5 shrink-0 animate-pulse rounded-full bg-brand" />
-            {message.queued ? 'Waiting for a free slot on the server…' : 'Thinking…'}
-            <ElapsedTimer since={message.at} />
+              The elapsed time is a SIBLING node, never concatenated in: a ten-minute turn needs
+              a sign of life, but the sentence itself has to stay one stable string. */}
+          <span aria-hidden className="size-1.5 shrink-0 animate-pulse rounded-full bg-brand" />
+          {message.queued ? 'Waiting for a free slot on the server…' : 'Thinking…'}
+          <ElapsedTimer since={message.at} />
+        </p>
+      ) : (
+        // A settled turn with nothing in either field says so. An empty card is indistinguishable
+        // from a service that answered nothing — and from this component having lost the answer,
+        // which is exactly what it used to do. The question and approval cards are content in
+        // their own right, so a turn that ended in one is not "no answer".
+        message.status === 'done' &&
+        !question &&
+        !approval && (
+          <p className="text-sm text-ink-muted">
+            The turn finished without producing any answer text.
           </p>
         )
       )}

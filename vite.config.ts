@@ -29,9 +29,13 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist/client',
-    // `hidden` still emits maps for error reporting but drops the sourceMappingURL comment, so
-    // production bundles stop advertising them to anyone who opens devtools.
-    sourcemap: 'hidden',
+    // No maps at all. `'hidden'` suppresses the `//# sourceMappingURL=` comment and still writes
+    // the `.map` files next to the chunks — into the very directory the Dockerfile copies whole
+    // and `sirv` serves, so appending `.map` to any chunk URL returned the TypeScript of the
+    // whole SPA with `sourcesContent` inlined. Nothing here uploads them to an error tracker,
+    // which was the only thing `'hidden'` was buying. Turn this back on together with whatever
+    // consumes them, and strip the files from the image in the same change.
+    sourcemap: false,
   },
   server: {
     port: 5173,

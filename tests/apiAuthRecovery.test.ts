@@ -14,6 +14,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { api } from '../src/api/client.ts';
+import type { SessionSummary } from '../src/api/client.ts';
 import { ApiError } from '../src/api/errors.ts';
 import type { AuthProvider } from '../src/auth/types.ts';
 import { jsonError, stubFetch } from './helpers.ts';
@@ -61,11 +62,14 @@ const bearer = (init?: RequestInit): string | undefined =>
 describe('a 401 on a plain route', () => {
   it('is retried once with the refreshed token when the provider recovers', async () => {
     let call = 0;
+    // Typed, so the one route this file asserts a *body* for is bound to its declaration: a field
+    // added to `SessionSummary` fails `tsc -b` here rather than leaving the fixture behind.
+    const body: SessionSummary[] = [{ session_id: SESSION }];
     const stub = stubFetch(() => {
       call += 1;
       return call === 1
         ? jsonError(401, 'invalid or expired token')
-        : new Response(JSON.stringify([{ session_id: SESSION }]), {
+        : new Response(JSON.stringify(body), {
             status: 200,
             headers: { 'content-type': 'application/json' },
           });

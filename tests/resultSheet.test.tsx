@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ResultSheet } from '../src/components/ResultSheet.tsx';
 import { stubFetch } from './helpers.ts';
+import type { StoredToolResult } from '../src/api/client.ts';
 
 vi.mock('../src/auth/AuthContext.tsx', () => ({
   useAuth: () => ({ auth: { getAccessToken: async () => null, mode: 'dev' }, ready: true }),
@@ -28,12 +29,23 @@ let restore: (() => void) | null = null;
 
 /** Serve one stored result and open the panel on it. */
 function open(tool: string, text: string): void {
+  // Named and typed rather than inlined into `JSON.stringify`. An anonymous literal is outside the
+  // type system entirely, so the route's declared shape and the body this test serves could drift
+  // apart with `tsc -b` green — which is how a component that renders `undefined` against the real
+  // service passes here.
+  const stored: StoredToolResult = {
+    ref: REF,
+    tool,
+    correlation_id: 'turn-9',
+    byte_size: text.length,
+    text,
+  };
   const stub = stubFetch(
     () =>
-      new Response(
-        JSON.stringify({ ref: REF, tool, correlation_id: 'turn-9', byte_size: text.length, text }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      ),
+      new Response(JSON.stringify(stored), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
   );
   restore = stub.restore;
   render(

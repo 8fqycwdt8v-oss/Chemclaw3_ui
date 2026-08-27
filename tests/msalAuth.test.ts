@@ -313,4 +313,30 @@ describe('signing in and out', () => {
     expect(calls.loginRedirect).toEqual([{ scopes: [SCOPE] }]);
     expect(calls.logoutRedirect).toBe(1);
   });
+
+  it('takes the conversations with it', async () => {
+    // MSAL's own cache is in `sessionStorage` and dies with the tab, which is right and is not
+    // the whole story: every transcript is persisted separately to `localStorage`, under one
+    // global key that is not partitioned by account. Sign-out removed the credential and left
+    // the data the credential was protecting — on a shared analytical-development workstation,
+    // the next chemist to sign in read the previous one's unpublished route out of the sidebar,
+    // before any token was involved.
+    const { useChatStore } = await import('../src/state/chatStore.ts');
+    const { createMsalAuth } = await import('../src/auth/msalAuth.ts');
+
+    const cid = useChatStore.getState().createConversation();
+    useChatStore.getState().appendUserMessage(cid, 'the unpublished route');
+    sessionStorage.setItem('chemclaw.lastReauth', String(Date.now()));
+    expect(localStorage.getItem('chemclaw3.chat.v2')).toContain('the unpublished route');
+
+    const auth = await createMsalAuth();
+    await auth.logout();
+
+    expect(localStorage.getItem('chemclaw3.chat.v2')).toBeNull();
+    expect(sessionStorage.getItem('chemclaw.lastReauth')).toBeNull();
+    // And in memory too: `logoutRedirect` navigates, but a redirect that is blocked or slow must
+    // not leave the previous account's transcript on screen.
+    const conversations = Object.values(useChatStore.getState().conversations);
+    expect(conversations.flatMap((c) => c.messages)).toEqual([]);
+  });
 });

@@ -433,6 +433,27 @@ describe('a campaign progress reading', () => {
       '4 evaluation(s). This is a reading of the runs supplied and nothing more.',
   };
 
+  it('divides feasible runs by feasible cells when an exclusion makes them differ', async () => {
+    // The two counts differ exactly when the history holds a run an exclusion later forbade — the
+    // ordinary case of a pairing excluded after being run once. Rendering `n_distinct` over
+    // `design_space` reads "4 / 3": more conditions run than the grid contains, which a chemist
+    // reads as a broken number rather than as a real exclusion.
+    open(
+      'campaign_progress',
+      JSON.stringify({
+        ...PLATEAUED,
+        n_observations: 6,
+        n_distinct: 4,
+        n_distinct_in_space: 3,
+        design_space: 3,
+      }),
+    );
+
+    expect(await screen.findByText('3 / 3')).toBeTruthy();
+    expect(screen.queryByText('4 / 3')).toBeNull();
+    expect(screen.getByText(/1 further run\(s\) are outside it/)).toBeTruthy();
+  });
+
   it('draws the best-so-far series with the assay noise made visible', async () => {
     open('campaign_progress', JSON.stringify(PLATEAUED));
 

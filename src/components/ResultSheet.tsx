@@ -665,6 +665,7 @@ function CampaignProgressReading({ data }: { data: Json }): React.JSX.Element {
   const direction = str(data.direction);
   const observations = num(data.n_observations) ?? 0;
   const distinct = num(data.n_distinct);
+  const inSpace = num(data.n_distinct_in_space);
   const designSpace = num(data.design_space);
   const since = num(data.evaluations_since_improvement);
   const windowSize = num(data.window);
@@ -714,13 +715,28 @@ function CampaignProgressReading({ data }: { data: Json }): React.JSX.Element {
 
       <dl className="grid grid-cols-2 gap-2 sm:grid-cols-3">
         <Stat label="Evaluations" value={observations} />
+        {/*
+          Two counts, and the ratio uses the second. `n_distinct` is every condition performed;
+          `n_distinct_in_space` is how many of those occupy a cell of the *feasible* grid, which is
+          what `design_space` counts once an exclusion has removed some. Dividing the first by
+          `design_space` compares two different quantities and can render "7 / 6" — impossible on
+          its face — whenever the history holds a run an exclusion later forbade, which is the
+          ordinary case of a pairing excluded after being run once. The note says so when the two
+          counts disagree, rather than silently dropping the run from the headline.
+        */}
         <Stat
           label="Distinct conditions"
-          value={designSpace === null ? (distinct ?? '—') : `${distinct ?? '—'} / ${designSpace}`}
+          value={
+            designSpace === null
+              ? (distinct ?? '—')
+              : `${inSpace ?? distinct ?? '—'} / ${designSpace}`
+          }
           note={
             designSpace === null
               ? 'the grid is infinite — a continuous parameter'
-              : 'of the full grid'
+              : inSpace !== null && distinct !== null && distinct > inSpace
+                ? `of the feasible grid — ${distinct - inSpace} further run(s) are outside it, excluded by a constraint`
+                : 'of the feasible grid'
           }
         />
         <Stat

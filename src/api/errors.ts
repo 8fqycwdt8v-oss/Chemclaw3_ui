@@ -32,8 +32,13 @@ export type ApiErrorKind =
   | 'network'
   /** The user pressed Stop. */
   | 'aborted'
-  /** The stream was malformed, truncated, or never produced an answer. */
+  /** The stream was malformed, truncated, or dropped — a connection problem, plausibly
+   *  recoverable by polling the session transcript for the answer the server is still producing. */
   | 'stream'
+  /** The stream ended cleanly with the server's own `empty_answer` event: the turn ran to
+   *  completion and produced nothing. Not a connection problem — polling the transcript would
+   *  wait for an answer the server has already said will never arrive. */
+  | 'empty_answer'
   /** An `error` event arrived in-stream. Includes the turn timeout, which the backend reports as
    *  a final SSE event rather than an HTTP status. */
   | 'agent';
@@ -137,9 +142,11 @@ export function errorFromEvent(event: {
       // ever'". Hardcoding `false` here rendered every shed as a permanent refusal.
       return new ApiError('budget_exhausted', event.message, undefined, options);
     case 'empty_answer':
-      // Not a service failure — the turn ran and produced nothing. `stream` already means "the
-      // stream ended without an answer", which is exactly what happened.
-      return new ApiError('stream', event.message, undefined, options);
+      // Not a service failure, and not a connection problem either — the turn ran to completion
+      // and produced nothing. Its own kind, so callers don't run connection-drop recovery (polling
+      // the transcript for an answer that will never land) against an outcome the server has
+      // already resolved.
+      return new ApiError('empty_answer', event.message, undefined, options);
     default:
       return new ApiError('agent', event.message, undefined, options);
   }

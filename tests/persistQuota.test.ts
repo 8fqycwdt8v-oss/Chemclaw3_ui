@@ -15,7 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useChatStore } from '../src/state/chatStore.ts';
+import { flushChatPersistence, useChatStore } from '../src/state/chatStore.ts';
 import type { AuthProvider } from '../src/auth/types.ts';
 import { answerEvent, sseFrames, sseResponse, stubFetch } from './helpers.ts';
 
@@ -144,6 +144,9 @@ describe('the persisted payload', () => {
       ids.push(id);
       useChatStore.getState().appendUserMessage(id, `${filler} ${i}`);
     }
+    // The disk write is throttled now (only the first of this burst lands synchronously); force
+    // the trailing write of the final state out before inspecting what actually persisted.
+    flushChatPersistence();
 
     const written = store.get('chemclaw3.chat.v2');
     expect(written).toBeDefined();

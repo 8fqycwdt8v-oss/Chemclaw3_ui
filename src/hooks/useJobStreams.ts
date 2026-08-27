@@ -19,12 +19,11 @@
  */
 
 import { useEffect, useMemo } from 'react';
-import { EventSourceParserStream } from 'eventsource-parser/stream';
-import { normalizeEvent } from '../../shared/events.ts';
 import { config } from '../env.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from '../state/chatStore.ts';
+import { readEventStream } from '../lib/sse.ts';
 
 /**
  * How many sessions to watch at once.
@@ -148,37 +147,28 @@ async function openStream(
         continue;
       }
 
-      const reader = res.body
-        .pipeThrough(new TextDecoderStream())
-        .pipeThrough(new EventSourceParserStream())
-        .getReader();
-
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          // A frame arrived, so this connection is doing its job — only now is the escalation
-          // reset. Resetting it at connect time meant a connect-then-immediately-close cycle
-          // could repeat for ever without the delay ever growing.
-          attempt = 0;
-          if (!value.data) continue;
-          try {
-            const event = normalizeEvent(JSON.parse(value.data), value.event);
-            // Both endings, not just the happy one. This stream is scoped server-side to exactly
-            // `job_completed` and `job_failed`, and a job that died after the turn ended is the
-            // case the whole push-back path exists for — dropping it left the launch row saying
-            // "runs asynchronously" indefinitely.
-            if (event?.type === 'job_completed' || event?.type === 'job_failed') {
-              // The event carries no session id — but we know which stream we opened, so the
-              // association is attached here rather than by mutating the wire contract.
-              useChatStore.getState().pushJobFinished(event, sessionId);
-            }
-          } catch {
-            // one bad frame is not worth dropping the stream
+      // `readEventStream` cancels its reader on the way out (loop exit, throw, or this iterator
+      // being abandoned), so there is nothing left to clean up here.
+      for await (const event of readEventStream(res.body)) {
+        // A frame arrived, so this connection is doing its job — only now is the escalation
+        // reset. Resetting it at connect time meant a connect-then-immediately-close cycle
+        // could repeat for ever without the delay ever growing. `readEventStream` yields `null`
+        // for a heartbeat or an unusable frame too, which still counts as "arrived" here.
+        attempt = 0;
+        if (!event) continue;
+        try {
+          // Both endings, not just the happy one. This stream is scoped server-side to exactly
+          // `job_completed` and `job_failed`, and a job that died after the turn ended is the
+          // case the whole push-back path exists for — dropping it left the launch row saying
+          // "runs asynchronously" indefinitely.
+          if (event.type === 'job_completed' || event.type === 'job_failed') {
+            // The event carries no session id — but we know which stream we opened, so the
+            // association is attached here rather than by mutating the wire contract.
+            useChatStore.getState().pushJobFinished(event, sessionId);
           }
+        } catch {
+          // one bad frame is not worth dropping the stream
         }
-      } finally {
-        await reader.cancel().catch(() => undefined);
       }
 
       // The body ended with no error and no status to react to: a backend pod restarting

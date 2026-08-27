@@ -66,10 +66,18 @@ const PATTERNS: { kind: string; re: RegExp }[] = [
 
 const combined = new RegExp(PATTERNS.map((p) => p.re.source).join('|'), 'g');
 
+// `report-` names both a written report note and a durable report job, so a `report-<id>` token
+// can satisfy both patterns below. Classify job-shaped ids first: `PATTERNS`' declaration order
+// (note before job) only controls how `combined` splits prose into tokens, not which kind a
+// genuinely ambiguous token gets — checking job first here is what actually breaks the tie.
+const CLASSIFICATION_ORDER = ['job', 'note'] as const;
+
 const kindOf = (token: string): string => {
-  for (const { kind, re } of PATTERNS) {
-    re.lastIndex = 0;
-    if (new RegExp(`^${re.source}$`).test(token)) return kind;
+  for (const kind of CLASSIFICATION_ORDER) {
+    const pattern = PATTERNS.find((p) => p.kind === kind);
+    if (!pattern) continue;
+    pattern.re.lastIndex = 0;
+    if (new RegExp(`^${pattern.re.source}$`).test(token)) return kind;
   }
   return 'note';
 };

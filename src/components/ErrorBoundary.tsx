@@ -17,10 +17,16 @@ import { Component, type ErrorInfo, type ReactNode } from 'react';
 
 interface Props {
   children: ReactNode;
-  /** Rendered instead of the children when they throw. Receives a reset for a retry affordance. */
-  fallback: (error: Error, reset: () => void) => ReactNode;
-  /** Remounting key: when this changes, a boundary that has caught will try rendering again. */
-  resetKey?: string | number;
+  /** Rendered instead of the children when they throw.
+   *
+   *  It takes no reset. Both fallbacks deliberately stay shown — the transcript's renders the raw
+   *  answer text, which is what the reader came for — and a `reset` neither of them accepted was a
+   *  retry capability that read as available and could not fire. The same went for a `resetKey`
+   *  whose only caller passed `message.id` to a boundary already inside a bubble keyed on it, so
+   *  it was constant for the boundary's whole life; switching conversations is handled where it
+   *  actually happens, by `key={conversationId}` on `MessageList`. Re-add either one WITH the
+   *  affordance that calls it. */
+  fallback: (error: Error) => ReactNode;
 }
 
 interface State {
@@ -34,20 +40,13 @@ export class ErrorBoundary extends Component<Props, State> {
     return { error };
   }
 
-  override componentDidUpdate(previous: Props): void {
-    // Switching conversations should not leave the previous one's render failure on screen.
-    if (this.state.error && previous.resetKey !== this.props.resetKey) {
-      this.setState({ error: null });
-    }
-  }
-
   override componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error('Render failed:', error, info.componentStack);
   }
 
   override render(): ReactNode {
     const { error } = this.state;
-    if (error) return this.props.fallback(error, () => this.setState({ error: null }));
+    if (error) return this.props.fallback(error);
     return this.props.children;
   }
 }

@@ -129,13 +129,13 @@ export function errorFromEvent(event: {
   const options = { retryable: event.retryable, correlationId: event.correlation_id };
   switch (event.code) {
     case 'budget_exhausted':
-      // The one that must lock the composer — the same terminal state a 429 produces.
-      return new ApiError('budget_exhausted', event.message, undefined, {
-        ...options,
-        // Non-negotiable regardless of what the event says: the budget does not replenish
-        // because someone pressed a button, and offering Retry here is offering a dead end.
-        retryable: false,
-      });
+      // The kind that can lock the composer — the same terminal state a 429 produces. Whether it
+      // *does* is the event's call, not this table's: the service sends this one code for two
+      // different things, and only it can tell them apart. A real budget exhaustion arrives
+      // `retryable=False`; admission control shedding a turn arrives `retryable=True` with
+      // "server at capacity; retry shortly", which its own ADR glosses as "'not now', not 'not
+      // ever'". Hardcoding `false` here rendered every shed as a permanent refusal.
+      return new ApiError('budget_exhausted', event.message, undefined, options);
     case 'empty_answer':
       // Not a service failure — the turn ran and produced nothing. `stream` already means "the
       // stream ended without an answer", which is exactly what happened.

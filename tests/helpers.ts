@@ -84,6 +84,51 @@ export function byteStream(text: string, chunkSize = 1024): ReadableStream<Uint8
   });
 }
 
+/**
+ * A stream that delivers `prefix` and then *errors*, rather than closing.
+ *
+ * The distinction this exists to make testable: `byteStream` ends cleanly, which is what a turn
+ * that finished looks like. A dropped Wi-Fi, a killed pod or an ingress idle-timeout is the other
+ * thing — the body raises mid-flight, and the reader's `read()` rejects instead of resolving
+ * `{done: true}`. Those two arrive at the same `catch` in `streamTurn` and mean opposite things to
+ * a chemist, so a test that only ever produces the clean ending cannot tell them apart.
+ *
+ * `beforeError` lets a test observe the socket breaking at a chosen moment — it runs after the
+ * prefix has been enqueued and before the error is raised, which is where "the user had already
+ * pressed Stop" and "nobody pressed anything" diverge.
+ */
+export function erroringStream(
+  prefix: string,
+  error: Error = new TypeError('network error'),
+  beforeError?: () => void,
+): ReadableStream<Uint8Array> {
+  const bytes = new TextEncoder().encode(prefix);
+  let sent = false;
+  return new ReadableStream({
+    pull(controller) {
+      if (!sent) {
+        sent = true;
+        if (bytes.length > 0) controller.enqueue(bytes);
+        return;
+      }
+      beforeError?.();
+      controller.error(error);
+    },
+  });
+}
+
+/** A 200 that is a well-formed event stream right up to the moment the body breaks. */
+export function brokenSseResponse(
+  prefix: string,
+  error?: Error,
+  beforeError?: () => void,
+): Response {
+  return new Response(erroringStream(prefix, error, beforeError), {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
 export function sseResponse(body: string, chunkSize = 1024): Response {
   return new Response(byteStream(body, chunkSize), {
     status: 200,

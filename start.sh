@@ -8,11 +8,16 @@ cd "$SCRIPT_DIR"
 export CHEMCLAW_API_URL="${CHEMCLAW_API_URL:-http://127.0.0.1:8000}"
 export AUTH_MODE="${AUTH_MODE:-dev}"
 export BIND_HOST="${BIND_HOST:-0.0.0.0}"
-# This script's whole purpose is a reachable dev instance on Replit, so dev auth on a non-loopback
-# bind is the intent rather than an accident — and `validateConfig` now refuses to start without
-# this said out loud. Overridable, so pointing start.sh at a real tenant does not carry the opt-out
-# along with it.
-export ALLOW_INSECURE_AUTH="${ALLOW_INSECURE_AUTH:-true}"
+# NOT defaulted. `validateConfig` refuses to serve AUTH_MODE=dev on a non-loopback bind unless the
+# exposure is written down, and a value this script writes down for you is not a record of anyone's
+# decision — it is the refusal cancelled in advance. A reachable dev instance (Replit, a shared
+# box) is a deliberate thing to want, so say so when starting it:
+#
+#   ALLOW_INSECURE_AUTH=true ./start.sh
+#
+# Same for ALLOW_FRAMING, which the preview iframe needs and nothing else does.
+export ALLOW_INSECURE_AUTH="${ALLOW_INSECURE_AUTH:-false}"
+export ALLOW_FRAMING="${ALLOW_FRAMING:-false}"
 export LOG_LEVEL="${LOG_LEVEL:-info}"
 export APP_VERSION="${APP_VERSION:-dev}"
 export SSE_HEARTBEAT_MS="${SSE_HEARTBEAT_MS:-15000}"

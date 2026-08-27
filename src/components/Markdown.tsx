@@ -1,9 +1,22 @@
 /**
  * Answer rendering.
  *
- * Two remark plugins rewrite the text, and their ORDER matters: `remarkCitations` runs first and
- * turns note ids into link nodes, so `remarkGrounding` — which skips anything inside a link —
- * cannot then mistake the digits inside `note-4821` for a measurement.
+ * Three remark plugins rewrite the text, and their ORDER matters twice over.
+ *
+ * `remarkStripReservedLinks` runs FIRST, and it is a security boundary rather than a tidy-up. The
+ * two marks below — the grounding overlay and the citation chip — are decided from the link's
+ * href, and both schemes are fixed literals. But the text they are read out of is markdown written
+ * by the *model*, which is the untrusted party the overlay exists to police: an answer containing
+ * `[91.4%](#figure/grounded)` used to paint an invented number with the mark that means a tool
+ * returned it, on a turn where no tool returned anything, bypassing `remarkGrounding`'s own
+ * "nothing returned, so mark nothing" guard because the forged link never went through it. So the
+ * answer's own links in these two schemes are unwrapped before either producer runs, and after
+ * that a `#cite/` or `#figure/` href can only have come from the plugins below. Anything added to
+ * `plugins` that mints one of these hrefs must go AFTER the stripper.
+ *
+ * Then `remarkCitations` runs before `remarkGrounding` — it turns note ids into link nodes, so
+ * `remarkGrounding`, which skips anything inside a link, cannot then mistake the digits inside
+ * `rxn-suzuki-4821` for a measurement.
  *
  * NOTE: `rehype-raw` is deliberately NOT installed. react-markdown does not render raw HTML
  * unless you add it, so the correct sanitisation answer here is "do not enable the hazard" —
@@ -14,11 +27,42 @@
 import { useMemo, type ComponentProps } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { remarkCitations } from '../lib/citations.ts';
+import { visit } from 'unist-util-visit';
+import type { Node, Parent } from 'unist';
+import { CITE_HREF, remarkCitations } from '../lib/citations.ts';
 import { mightBeStructure } from '../chem/structure.ts';
 import { FIGURE_HREF, remarkGrounding } from '../chem/provenance.ts';
 import { CitationChip } from './CitationChip.tsx';
 import { InlineSmiles } from './Molecule.tsx';
+
+interface LinkNode extends Node {
+  type: 'link';
+  url: string;
+  children: Node[];
+}
+
+/** The href schemes below are this component's own private channel, and nothing the answer says
+ *  may enter it. */
+const RESERVED_HREFS = [CITE_HREF, FIGURE_HREF] as const;
+
+/**
+ * Remark plugin: unwrap any link the *answer* wrote in one of this component's reserved schemes,
+ * leaving its text behind.
+ *
+ * Unwrapping rather than dropping, because the content of such a link is ordinary answer text — a
+ * figure, an id — and the reader is entitled to it. What is withdrawn is the claim about it.
+ */
+function remarkStripReservedLinks() {
+  return (tree: Node): void => {
+    visit(tree, 'link', (node: LinkNode, index: number | undefined, parent: Parent | undefined) => {
+      if (!parent || index === undefined) return;
+      if (!RESERVED_HREFS.some((scheme) => node.url.startsWith(scheme))) return;
+      parent.children.splice(index, 1, ...(node.children as Parent['children']));
+      // Resume at the same index, which now holds what the link contained.
+      return index;
+    });
+  };
+}
 
 /**
  * Model-authored headings are demoted two levels: h1 -> h3, h2 -> h4, and so on.
@@ -93,13 +137,13 @@ const components: Components = {
   h6: heading('h6'),
 
   a({ href, children, ...props }) {
-    if (href?.startsWith('#cite/')) {
+    if (href?.startsWith(CITE_HREF)) {
       // No leading hole in the destructure: `slice` has already removed the `#cite/` prefix, so
       // the first element IS the kind. Skipping it put the kind in `id` and left `id` empty, and
       // every citation chip in a rendered answer therefore came out as an empty button with an
       // "Open " tooltip — the linkified id, which is the whole point of the plugin, was invisible.
       // Nothing caught it because the chip's own tests construct it directly with props.
-      const [kind = 'note', id = ''] = href.slice('#cite/'.length).split('/');
+      const [kind = 'note', id = ''] = href.slice(CITE_HREF.length).split('/');
       return <CitationChip kind={kind} id={id} />;
     }
     if (href?.startsWith(FIGURE_HREF)) {
@@ -156,7 +200,7 @@ export function Markdown({
   // is taken off the component rather than imported from `unified`, which is a transitive
   // dependency this package does not declare.
   const plugins = useMemo<ComponentProps<typeof ReactMarkdown>['remarkPlugins']>(
-    () => [remarkGfm, remarkCitations, [remarkGrounding, figures]],
+    () => [remarkGfm, remarkStripReservedLinks, remarkCitations, [remarkGrounding, figures]],
     [figures],
   );
 

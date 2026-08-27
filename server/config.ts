@@ -42,6 +42,9 @@ const MODES: Record<string, AuthMode> = { dev: 'dev', msal: 'msal' };
 const authMode: AuthMode = MODES[rawAuthMode] ?? 'dev';
 const authModeIsValid = rawAuthMode in MODES;
 
+/** Read once, because both `cfg.allowFraming` and the CSP built below have to agree. */
+const allowFraming = bool('ALLOW_FRAMING', false);
+
 /** Loopback names, for the unauthenticated-exposure check. Mirrors the backend's `_LOOPBACK_HOSTS`. */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
@@ -58,7 +61,7 @@ const ENTRA_HOST = 'https://login.microsoftonline.com';
  * would break that refresh roughly an hour after login — a failure that looks like a random
  * logout and is miserable to trace back to a header.
  */
-function buildCsp(mode: AuthMode): string {
+function buildCsp(mode: AuthMode, allowFraming: boolean): string {
   const directives: Record<string, string[]> = {
     'default-src': ["'self'"],
     // No inline scripts: /config.js is a real same-origin file precisely so this can stay strict.
@@ -85,9 +88,13 @@ function buildCsp(mode: AuthMode): string {
     'frame-src': ["'none'"],
     'form-action': ["'self'"],
     'base-uri': ["'none'"],
-    // Allow framing from any origin in dev mode so the Replit preview iframe works.
-    // Production deployments behind Entra auth should tighten this back to "'none'".
-    'frame-ancestors': mode === 'dev' ? ['*'] : ["'none'"],
+    // Framing is its own opt-in (`ALLOW_FRAMING`), not a consequence of the auth mode.
+    //
+    // It used to be `mode === 'dev' ? ['*'] : ["'none'"]`, which dropped this control — and the
+    // `X-Frame-Options` header with it — for every dev-mode deployment, because ONE of them
+    // (the Replit preview) needs an iframe. A dev-mode UI requires no sign-in and opens every
+    // authorization gate, so it is the deployment that can least afford to be clickjacked.
+    'frame-ancestors': allowFraming ? ['*'] : ["'none'"],
     'object-src': ["'none'"],
   };
 
@@ -113,12 +120,22 @@ export interface BffConfig {
   authModeIsValid: boolean;
   /** Opt-in to serving `AUTH_MODE=dev` on a non-loopback bind. See `validateConfig`. */
   allowInsecureAuth: boolean;
+  /** Opt-in to being framed by any origin — the Replit preview, and nothing else so far. */
+  allowFraming: boolean;
   entraTenantId: string;
   entraClientId: string;
   apiScope: string;
   appVersion: string;
   sseHeartbeatMs: number;
   upstreamConnectTimeoutMs: number;
+  /** How long a client may take to *send* a request before it is disconnected. */
+  requestTimeoutMs: number;
+  /** Upstream keep-alive sockets this process will hold at once. */
+  maxUpstreamSockets: number;
+  /** Largest request body forwarded on an ordinary route. */
+  maxBodyBytes: number;
+  /** Largest request body forwarded on the attachment upload route. */
+  maxUploadBytes: number;
   warmSessions: boolean;
   reviewerRoles: string[];
   csp: string;
@@ -137,6 +154,9 @@ export const cfg: BffConfig = {
   // Deliberately not defaulted from anything else. Exposing an unauthenticated UI is a decision,
   // and the only way to record a decision is to make someone write it down.
   allowInsecureAuth: bool('ALLOW_INSECURE_AUTH', false),
+  // Same rule, and for a control of the same kind: being framed is a decision, so it is written
+  // down per deployment rather than inferred from something else.
+  allowFraming,
   entraTenantId: str('ENTRA_TENANT_ID'),
   // The SPA's own app registration. NOT the API's client id, and note the backend has no
   // CHEMCLAW_ENTRA_CLIENT_ID setting at all — its Settings model is extra="forbid", so
@@ -162,7 +182,29 @@ export const cfg: BffConfig = {
     .filter(Boolean),
   sseHeartbeatMs: num('SSE_HEARTBEAT_MS', 15_000),
   upstreamConnectTimeoutMs: num('UPSTREAM_CONNECT_TIMEOUT_MS', 10_000),
-  csp: buildCsp(authMode),
+  // Time to RECEIVE a request, not to answer one, so this bounds nothing about a 600 s turn or a
+  // silent job stream — both of those are *responses*. It used to be 0 (disabled), and the cost
+  // was measured: 129 unauthenticated one-byte POSTs each claimed one of the upstream agent's
+  // keep-alive sockets and never released it, which took the whole /api surface offline until the
+  // attacker let go — with no credential, and with no recovery short of the attacker letting go.
+  //
+  // The default is 130 s rather than something tighter because Node refuses `headersTimeout >
+  // requestTimeout`, and `headersTimeout` is pinned just above the 120 s keep-alive this process
+  // needs in front of a load balancer. A deployment that knows its own front end can tighten
+  // this; what matters is that the bound exists, so the pool recycles on its own.
+  requestTimeoutMs: num('REQUEST_TIMEOUT_MS', 130_000),
+  // The other half of that measurement: the pool was 128 and the outage threshold was 129. Raised
+  // and made configurable so a legitimate burst of concurrent turns is not sharing a ceiling with
+  // whatever is holding sockets open.
+  maxUpstreamSockets: num('MAX_UPSTREAM_SOCKETS', 512),
+  // The backend caps a message at 100k characters — but that is a Pydantic validator, which runs
+  // after FastAPI has read and buffered the whole body. The BFF is the only thing in front of it,
+  // so it is the only place a body can be refused before it is paid for. 2 MB leaves room for the
+  // largest legitimate JSON here (a 100k-character message with structures attached to it).
+  maxBodyBytes: num('MAX_BODY_BYTES', 2 * 1024 * 1024),
+  // Attachments stream through the same pipe and are legitimately much larger.
+  maxUploadBytes: num('MAX_UPLOAD_BYTES', 32 * 1024 * 1024),
+  csp: buildCsp(authMode, allowFraming),
   logLevel: str('LOG_LEVEL', 'info'),
 };
 

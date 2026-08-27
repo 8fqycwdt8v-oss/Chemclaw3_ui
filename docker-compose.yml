@@ -134,15 +134,22 @@ services:
       CHEMCLAW_API_URL: http://chemclaw:8080
       AUTH_MODE: ${AUTH_MODE:-dev}
       # A local stack binds 0.0.0.0 so the port mapping works, which is a non-loopback bind as far
-      # as the BFF can tell. Saying the exposure is deliberate is what lets it start.
-      ALLOW_INSECURE_AUTH: ${ALLOW_INSECURE_AUTH:-true}
+      # as the BFF can tell, and AUTH_MODE=dev needs no sign-in — so the BFF refuses to start
+      # until somebody says the exposure is deliberate. NOT defaulted here: this file publishing
+      # an unauthenticated agent UI on a shared dev host, because a compose default said it was
+      # fine, is exactly the decision that has to be somebody's rather than the repository's.
+      #
+      #   ALLOW_INSECURE_AUTH=true docker compose up
+      ALLOW_INSECURE_AUTH: ${ALLOW_INSECURE_AUTH:-false}
       ENTRA_TENANT_ID: ${ENTRA_TENANT_ID:-}
       ENTRA_CLIENT_ID: ${ENTRA_CLIENT_ID:-}
       API_SCOPE: ${API_SCOPE:-}
       APP_VERSION: ${APP_VERSION:-compose}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     ports:
-      - '${UI_PORT:-3000}:8080'
+      # Loopback by default: the stack it brings up requires no sign-in, so publishing it on every
+      # interface of the host is a decision too. `UI_BIND=0.0.0.0` to share it deliberately.
+      - '${UI_BIND:-127.0.0.1}:${UI_PORT:-3000}:8080'
 
 volumes:
   postgres-data:

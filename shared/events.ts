@@ -95,6 +95,13 @@ export interface ToolCallEvent {
 export interface TokenEvent {
   type: 'token';
   text: string;
+  /** The agent that produced this chunk; **empty means the main agent**. The backend emits it on
+   *  every token (`agent="subagent" if namespace else ""`) and its own docstring says a consumer
+   *  "concatenates only the unattributed ones", because an attributed chunk is another agent's
+   *  working notes rather than part of the answer. Same optionality rule as `ToolCallEvent.agent`:
+   *  optional in the type, always populated by `normalizeEvent`, and a falsy check is the whole
+   *  handling. */
+  agent?: string;
 }
 
 export interface JobStartedEvent {
@@ -498,7 +505,7 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         agent: asString(o.agent),
       };
     case 'token':
-      return { type: 'token', text: asString(o.text) };
+      return { type: 'token', text: asString(o.text), agent: asString(o.agent) };
     case 'job_started':
       return { type: 'job_started', job_id: asString(o.job_id), kind: asString(o.kind, 'job') };
     case 'job_completed':

@@ -4,6 +4,7 @@ import { ApiError } from '../src/api/errors.ts';
 import type { ChemclawEvent } from '../shared/events.ts';
 import {
   answerEvent,
+  brokenSseResponse,
   errorEvent,
   jsonError,
   sseFrames,
@@ -199,6 +200,76 @@ describe('streamTurn', () => {
         onEvent: () => undefined,
       }),
     ).rejects.toMatchObject({ kind: 'stream' });
+  });
+
+  /**
+   * The connection dropping is not the user pressing Stop.
+   *
+   * Every other case in this file ends the stream *cleanly* — the body closes, `read()` resolves
+   * `{done: true}`. A dropped Wi-Fi, an evicted pod or an ingress idle-timeout is the other thing:
+   * the body raises mid-flight. Both land in the same `catch`, and the only thing that tells them
+   * apart is `signal.aborted`.
+   *
+   * Collapsing them is the worst outcome this surface has. "You stopped this" is presented with no
+   * banner and no retry, and the partial text is kept as though it were deliberate — so a chemist
+   * whose network died reads a silently truncated answer and believes they caused it.
+   */
+  describe('a stream that breaks mid-body', () => {
+    const runBroken = async (
+      prefix: string,
+      opts: { abortBeforeBreak?: boolean } = {},
+    ): Promise<{ err: ApiError; events: ChemclawEvent[] }> => {
+      const abort = new AbortController();
+      const stub = stubFetch(() =>
+        brokenSseResponse(prefix, new TypeError('network error'), () => {
+          if (opts.abortBeforeBreak) abort.abort();
+        }),
+      );
+      restore = stub.restore;
+      const events: ChemclawEvent[] = [];
+      try {
+        await streamTurn({
+          sessionId: SESSION,
+          message: 'x',
+          signal: abort.signal,
+          getToken: async () => null,
+          onEvent: (e) => events.push(e),
+        });
+      } catch (err) {
+        return { err: err as ApiError, events };
+      }
+      throw new Error('expected the broken stream to fail the turn');
+    };
+
+    it('is a stream failure, not an abort, when nobody pressed Stop', async () => {
+      const { err, events } = await runBroken(sseFrames([{ type: 'token', text: 'Partial ' }]));
+
+      expect(err).toBeInstanceOf(ApiError);
+      // The assertion that matters is the negative one: `aborted` is the kind `sendMessage` reads
+      // as "the user did this", and it must not be reachable without an abort signal.
+      expect(err.kind).not.toBe('aborted');
+      expect(err.kind).toBe('stream');
+      expect(err.message).not.toBe('Stopped.');
+      // What arrived before the break is still delivered — losing it would throw away work the
+      // service already did and already charged for.
+      expect(events.map((e) => e.type)).toEqual(['token']);
+    });
+
+    it('IS an abort when the same break follows the user pressing Stop', async () => {
+      // The other half, and what makes the first assertion mean something: the signal is the only
+      // thing that distinguishes these two, so both directions have to be pinned or a mutation
+      // that hardcodes either one survives.
+      const { err } = await runBroken(sseFrames([{ type: 'token', text: 'Partial ' }]), {
+        abortBeforeBreak: true,
+      });
+      expect(err.kind).toBe('aborted');
+    });
+
+    it('reports a break before the first frame as a stream failure too', async () => {
+      const { err, events } = await runBroken('');
+      expect(err.kind).toBe('stream');
+      expect(events).toEqual([]);
+    });
   });
 
   it('skips a malformed frame rather than killing the turn', async () => {

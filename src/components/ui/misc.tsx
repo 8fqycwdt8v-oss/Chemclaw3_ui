@@ -1,5 +1,5 @@
 /**
- * The small primitives — Collapsible, Skeleton, Switch, Label.
+ * The small primitives — Collapsible, Switch, Label.
  *
  * Grouped in one file rather than four: each is a handful of lines, and the registry's
  * one-file-per-primitive layout only pays off when a CLI is writing them.
@@ -19,20 +19,6 @@ import { cn } from '@/lib/utils';
 export const Collapsible = C.Root;
 export const CollapsibleTrigger = C.Trigger;
 export const CollapsibleContent = C.Content;
-
-/* ── Skeleton ────────────────────────────────────────────────────────────────
-   Reserves the space its content will occupy. The point is no layout shift when the real
-   thing lands, so callers give it the real dimensions. */
-
-export function Skeleton({ className, ...props }: React.ComponentProps<'div'>): React.JSX.Element {
-  return (
-    <div
-      data-slot="skeleton"
-      className={cn('animate-pulse rounded-md bg-surface-sunken', className)}
-      {...props}
-    />
-  );
-}
 
 /* ── Switch ──────────────────────────────────────────────────────────────────
    Replaces a bare <input type="checkbox">, which rendered as a light-mode control on a dark

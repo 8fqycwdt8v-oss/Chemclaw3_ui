@@ -21,6 +21,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { ApprovalPrompt } from '../src/components/Prompts.tsx';
 import { api } from '../src/api/client.ts';
 import { ApiError } from '../src/api/errors.ts';
+import type { PlanStatus } from '../src/api/client.ts';
 
 vi.mock('../src/auth/AuthContext.tsx', () => ({
   useAuth: () => ({ auth: { getAccessToken: async () => 'token' } }),
@@ -35,7 +36,10 @@ async function decideVia(triggerName: RegExp): Promise<void> {
   fireEvent.click(within(dialog).getByRole('button', { name: triggerName }));
 }
 
-const planStatus = (hash: string, plan: string[] = ['Run xTB on the aryl bromide']) => ({
+const planStatus = (
+  hash: string,
+  plan: string[] = ['Run xTB on the aryl bromide'],
+): PlanStatus => ({
   session_id: SID,
   plan_hash: hash,
   plan,

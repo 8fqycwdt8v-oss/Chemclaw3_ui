@@ -19,6 +19,34 @@
  * Run it with the stack already up:
  *   make live-e2e-full-stack          # in the Chemclaw3 repo
  *   npm run test:e2e:full-stack       # here
+ *
+ * ## Why this is not in CI, and what it would take
+ *
+ * `.github/workflows/ci.yml` runs `npm run test:e2e` — the fixture config — and nothing here. That
+ * is deliberate and it is also the reason the four scenarios below were allowed to rot into
+ * assertions that could not fail: nothing re-read them, and their green was only ever consulted by
+ * a human at the moment they most wanted to trust it. Adding a job that runs this on every push
+ * would make it worse rather than better, so the conditions are written down instead of guessed at:
+ *
+ *  1. **Somewhere to run four repositories.** This suite needs Postgres, Temporal, the Chemclaw3-mcp
+ *     fleet, Chemclaw3_mock's ELN/Entra/vendor mocks, this repo's BFF and SPA. That is
+ *     `Chemclaw3`'s `make live-e2e-full-stack`, and it belongs on a self-hosted runner or a
+ *     scheduled job with a compose bring-up — not on a `ubuntu-latest` push runner, where the
+ *     bring-up alone would dominate the gate.
+ *  2. **A model credential in CI, and a decision about spending it.** Every scenario costs a real
+ *     turn against a real model. A per-push job spends that per push, per contributor, and
+ *     `retries: 0` here means a flaky turn is a red gate rather than a retried one.
+ *  3. **A verdict on non-determinism.** Whether a given turn calls a given tool is a model
+ *     decision. The assertions below are written to survive that — a tool *family*, not a
+ *     sentence — but "the model chose a different route" will still be a red run sometimes, and a
+ *     gate that is sometimes red for a reason nobody can fix teaches people to ignore it.
+ *
+ * The shape that fits all three is a **scheduled** run (nightly, or on a release branch) against a
+ * long-lived stack, reporting into an issue rather than blocking a push — plus what has already
+ * been done here: the *mechanism* these scenarios depend on, the trace-scoped read in
+ * `e2e/trace.ts`, is now covered by `e2e/trace-scope.spec.ts` in the fixture tier, which does run
+ * on every push. That does not prove the stack is healthy. It does prove that when this suite says
+ * a tool was called, it is reading the trace and not the question.
  */
 
 import { defineConfig, devices } from '@playwright/test';

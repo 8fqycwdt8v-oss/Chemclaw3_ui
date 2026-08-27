@@ -74,6 +74,11 @@ const kindOf = (token: string): string => {
   return 'note';
 };
 
+/** The href scheme `<Markdown>` renders as a citation chip, mirroring `#figure/` in
+ *  `provenance.ts`. Exported so the component that gives it meaning is also the one that can
+ *  strip it out of the answer, rather than repeating the literal. */
+export const CITE_HREF = '#cite/';
+
 /**
  * Remark plugin. Splits text nodes on citation-shaped tokens and emits links with a
  * `#cite/<kind>/<id>` href, which `<Markdown>` renders as a citation chip.
@@ -102,7 +107,7 @@ export function remarkCitations() {
         }
         children.push({
           type: 'link',
-          url: `#cite/${kindOf(token)}/${token}`,
+          url: `${CITE_HREF}${kindOf(token)}/${token}`,
           children: [{ type: 'text', value: token } as TextNode],
         } as LinkNode);
         cursor = start + token.length;

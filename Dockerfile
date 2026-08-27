@@ -27,6 +27,11 @@ WORKDIR /app
 COPY --from=build --chown=node:node /app/dist ./dist
 USER node
 EXPOSE 8080
+# LIVENESS, and `/healthz` deliberately: it answers from a literal and never touches the upstream,
+# so it asks "is this process serving?" — the only question a restart may be decided on. Readiness
+# is `/readyz`, which probes the Chemclaw service; point a readiness probe or a load balancer at
+# that one. Restarting this container because the *backend* is down would take away the one process
+# still able to explain the outage, and it would come back no readier than it went down.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+process.env.PORT+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "dist/server.js"]

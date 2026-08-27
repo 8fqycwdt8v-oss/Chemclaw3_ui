@@ -140,6 +140,10 @@ export interface BffConfig {
   reviewerRoles: string[];
   csp: string;
   logLevel: string;
+  /** How much the BROWSER records, served through `/config.js`. Separate from `logLevel`, which
+   *  is this process's own verbosity: turning the pod's logs up is not the same decision as
+   *  turning every chemist's browser up. */
+  clientLogLevel: string;
 }
 
 export const cfg: BffConfig = {
@@ -206,6 +210,9 @@ export const cfg: BffConfig = {
   maxUploadBytes: num('MAX_UPLOAD_BYTES', 32 * 1024 * 1024),
   csp: buildCsp(authMode, allowFraming),
   logLevel: str('LOG_LEVEL', 'info'),
+  // Defaults to `info` rather than to this process's own level: the two are independent knobs and
+  // an operator debugging the BFF has not asked every open tab to start reporting.
+  clientLogLevel: str('CLIENT_LOG_LEVEL', 'info'),
 };
 
 /**

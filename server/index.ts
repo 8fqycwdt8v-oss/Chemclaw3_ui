@@ -19,9 +19,14 @@ if (problems.length > 0) {
 const server = createBffServer();
 
 server.listen(cfg.port, cfg.bindHost, () => {
-  log.info(`chemclaw3-ui listening on http://${cfg.bindHost}:${cfg.port}`);
-  log.info(`proxying /api -> ${cfg.apiUrl}`);
-  log.info(`auth mode: ${cfg.authMode}`);
+  log.info('listening', {
+    address: `http://${cfg.bindHost}:${cfg.port}`,
+    upstream: cfg.apiUrl,
+    auth_mode: cfg.authMode,
+    app_version: cfg.appVersion,
+    log_level: cfg.logLevel,
+    client_log_level: cfg.clientLogLevel,
+  });
 
   if (cfg.authMode === 'dev' && !isLoopbackHost(cfg.bindHost)) {
     // Reaching this line now means ALLOW_INSECURE_AUTH=true — `validateConfig` refuses to start
@@ -45,7 +50,7 @@ server.listen(cfg.port, cfg.bindHost, () => {
 });
 
 const shutdown = (signal: string) => () => {
-  log.info(`${signal} received, closing`);
+  log.info('shutting down', { signal });
   server.close(() => process.exit(0));
   // Open SSE streams hold the server open indefinitely; don't wait forever on them.
   setTimeout(() => process.exit(0), 5_000).unref();

@@ -203,6 +203,8 @@ function newAssistantMessage(): AssistantMessage {
     trace: [],
     latestPlan: null,
     latestPlanHash: null,
+    correlationId: '',
+    stalled: false,
     error: null,
   };
 }
@@ -362,6 +364,15 @@ export interface ChatState {
   jobFeed: JobFeedItem[];
   /** True once the backend has told us twice that we are over its stream cap. */
   jobStreamsThrottled: boolean;
+  /**
+   * Sessions whose job push-back stream has failed to connect repeatedly.
+   *
+   * A list rather than a flag, because the streams are per session and a single boolean would
+   * flap: one dead session would clear the moment another delivered a frame, which is how the
+   * indicator would end up describing neither. Not persisted — it is a statement about the network
+   * right now, and a reload re-establishes every stream anyway.
+   */
+  jobStreamsFailing: string[];
   /** Opt-in, and deliberately separate from `Notification.permission` — a browser-level
    *  revocation must read as "blocked", not as "off". */
   notifyOnJobComplete: boolean;
@@ -390,6 +401,10 @@ export interface ChatState {
   startAssistantMessage: (conversationId: string) => string;
   appendTokens: (conversationId: string, messageId: string, text: string) => void;
   applyEvent: (conversationId: string, messageId: string, event: ChemclawEvent) => void;
+  /** Record the service's id for this turn, so a successful answer is findable in its logs too. */
+  setCorrelationId: (conversationId: string, messageId: string, correlationId: string) => void;
+  /** The stream has gone quiet, or come back. Never ends the turn — see `AssistantMessage.stalled`. */
+  setTurnStalled: (conversationId: string, messageId: string, stalled: boolean) => void;
   finishTurn: (conversationId: string, messageId: string, status: 'done' | 'aborted') => void;
   failTurn: (
     conversationId: string,
@@ -407,6 +422,7 @@ export interface ChatState {
   restoreJobItem: (jobId: string) => void;
   markJobsSeen: () => void;
   setJobStreamsThrottled: (throttled: boolean) => void;
+  setJobStreamFailing: (sessionId: string, failing: boolean) => void;
   setNotifyOnJobComplete: (enabled: boolean) => void;
   /** Set the session id only if there is not one already, returning whichever id now wins. */
   setSessionIdIfAbsent: (conversationId: string, sessionId: string) => string;
@@ -543,6 +559,7 @@ export const useChatStore = create<ChatState>()(
       sessionProfiles: {},
       jobFeed: [],
       jobStreamsThrottled: false,
+      jobStreamsFailing: [],
       notifyOnJobComplete: false,
       streaming: null,
 
@@ -616,6 +633,7 @@ export const useChatStore = create<ChatState>()(
             activeId: fresh.id,
             drafts: {},
             jobStreamsThrottled: false,
+            jobStreamsFailing: [],
             composerLock: false,
             banner: null,
             jobFeed: [],
@@ -859,8 +877,21 @@ export const useChatStore = create<ChatState>()(
         );
       },
 
+      setCorrelationId(conversationId, messageId, correlationId) {
+        if (!correlationId) return;
+        set((s) => updateAssistant(s, conversationId, messageId, (m) => ({ ...m, correlationId })));
+      },
+
+      setTurnStalled(conversationId, messageId, stalled) {
+        set((s) => updateAssistant(s, conversationId, messageId, (m) => ({ ...m, stalled })));
+      },
+
       finishTurn(conversationId, messageId, status) {
-        set((s) => updateAssistant(s, conversationId, messageId, (m) => ({ ...m, status })));
+        // A settled turn is never stalled: the flag describes a stream that is still open and
+        // silent, and leaving it set would put "no activity" beside a finished answer for ever.
+        set((s) =>
+          updateAssistant(s, conversationId, messageId, (m) => ({ ...m, status, stalled: false })),
+        );
       },
 
       failTurn(conversationId, messageId, error) {
@@ -868,6 +899,7 @@ export const useChatStore = create<ChatState>()(
           updateAssistant(s, conversationId, messageId, (m) => ({
             ...m,
             status: 'error',
+            stalled: false,
             error,
           })),
         );
@@ -929,6 +961,17 @@ export const useChatStore = create<ChatState>()(
       setJobStreamsThrottled(throttled) {
         if (get().jobStreamsThrottled === throttled) return;
         set({ jobStreamsThrottled: throttled });
+      },
+
+      setJobStreamFailing(sessionId, failing) {
+        const current = get().jobStreamsFailing;
+        const known = current.includes(sessionId);
+        if (failing === known) return;
+        set({
+          jobStreamsFailing: failing
+            ? [...current, sessionId]
+            : current.filter((id) => id !== sessionId),
+        });
       },
 
       setNotifyOnJobComplete(enabled) {

@@ -14,6 +14,7 @@
  */
 
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { logger } from '../lib/logger.ts';
 
 interface Props {
   children: ReactNode;
@@ -41,6 +42,17 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   override componentDidCatch(error: Error, info: ErrorInfo): void {
+    // The console call stays: it is what a developer with the tab open actually reads, and it
+    // carries the component stack, which is the part that says *where*. What is new is that the
+    // failure also leaves the browser — this used to be the entire reporting story for a crash,
+    // so a render error nobody was watching happen was a render error nobody ever heard about.
+    logger.error('render.failed', {
+      name: error.name,
+      message: error.message,
+      // First frames only: a component stack is long, and the top of it is what identifies the
+      // subtree. The whole thing is in the console for anyone who has the tab.
+      componentStack: (info.componentStack ?? '').trim().split('\n').slice(0, 5).join(' | '),
+    });
     console.error('Render failed:', error, info.componentStack);
   }
 

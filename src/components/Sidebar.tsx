@@ -25,10 +25,12 @@ import {
   TriangleAlert,
 } from 'lucide-react';
 import { api } from '../api/client.ts';
+import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore, newConversation } from '../state/chatStore.ts';
 import { announceStatus } from '../state/announce.ts';
 import { relativeTime } from '../lib/format.ts';
+import { logger } from '../lib/logger.ts';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import {
@@ -95,10 +97,15 @@ function useServerSessions(): 'idle' | 'degraded' {
           }
           return { conversations: next, order: [...s.order, ...ids] };
         });
-      } catch {
+      } catch (err) {
         // A backend without the listing endpoint and a backend that refused our token are not the
         // same thing, and silently showing a local-only list made them look identical. Not worth
-        // a banner, but worth saying somewhere.
+        // a banner, but worth saying somewhere — and "somewhere" is now a real place rather than
+        // a sentence in this comment.
+        logger.warn('sessions.list_failed', {
+          kind: err instanceof ApiError ? err.kind : 'unknown',
+          ...(err instanceof ApiError && err.status ? { status: err.status } : {}),
+        });
         if (!cancelled) setHealth('degraded');
       }
     })();
@@ -210,7 +217,7 @@ function SidebarLink({
       aria-current={current ? 'page' : undefined}
       className={cn('w-full justify-start', current && 'bg-surface-sunken')}
       onClick={() => {
-        navigate(to);
+        void navigate(to);
         onNavigate?.();
       }}
     >
@@ -229,6 +236,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
   const conversations = useChatStore((s) => s.conversations);
   const degraded = useServerSessions();
   const throttled = useChatStore((s) => s.jobStreamsThrottled);
+  const streamsFailing = useChatStore((s) => s.jobStreamsFailing.length > 0);
   const [query, setQuery] = useState('');
 
   // The store prepends on create but server-merged stubs were appended, so a conversation used
@@ -261,7 +269,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           className="w-full justify-start"
           onClick={() => {
             // Push, so Back returns to where they were. The URL-sync effect only ever replaces.
-            navigate(`/c/${useChatStore.getState().createConversation()}`);
+            void navigate(`/c/${useChatStore.getState().createConversation()}`);
             onNavigate?.();
           }}
         >
@@ -303,7 +311,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
               onSelect={() => {
                 const title = conversations[id]?.title ?? 'conversation';
                 const count = conversations[id]?.messages.length ?? 0;
-                navigate(`/c/${id}`);
+                void navigate(`/c/${id}`);
                 onNavigate?.();
                 // Land the reader in the transcript rather than leaving focus on a list item
                 // whose content just changed underneath it, and say what they landed in — the
@@ -335,6 +343,17 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           <StatusDot
             status="warn"
             label="Watching fewer conversations for finished jobs — the service limited concurrent streams."
+            className="items-start text-2xs leading-snug"
+          />
+        )}
+
+        {/* Low-key, exactly like the throttle notice above it, and for the same reason: nothing
+            the reader can act on, but "a durable run finished and nobody told you" is not a state
+            to leave unsaid. Until now every failure but a 429 retried in silence for ever. */}
+        {streamsFailing && (
+          <StatusDot
+            status="warn"
+            label="Not receiving finished-job notifications — the connection to the service keeps failing."
             className="items-start text-2xs leading-snug"
           />
         )}

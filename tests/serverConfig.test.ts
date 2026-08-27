@@ -37,6 +37,7 @@ const base: BffConfig = {
   reviewerRoles: [],
   csp: '',
   logLevel: 'error',
+  clientLogLevel: 'info',
 };
 
 const config = (over: Partial<BffConfig> = {}): BffConfig => ({ ...base, ...over });

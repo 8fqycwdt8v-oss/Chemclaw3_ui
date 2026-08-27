@@ -235,14 +235,41 @@ export interface ResolvedRoute {
   path: string;
   sse: boolean;
   upload: boolean;
+  /**
+   * The route's SHAPE — `/sessions/{id}/messages` — rather than the path that matched it.
+   *
+   * What the access log and the metrics label a request with. The path itself carries a session
+   * id, a note id or a job id, so labelling with it would mint a fresh time series per
+   * conversation and turn a scrape into a memory leak; and a log grouped by path cannot answer
+   * "how many messages did we serve", which is the question being asked.
+   */
+  template: string;
 }
+
+/**
+ * Placeholders standing in for a match's capture groups.
+ *
+ * The template is derived by calling the route's own `target` with these rather than being
+ * declared a second time per route, because a second declaration is a thing that drifts: `target`
+ * IS the route's shape, so a route that changes shape changes its label in the same edit. Two
+ * names, not one repeated: exactly one route captures twice, and it captures a session and a
+ * result ref, which are different things and read as different things in a log.
+ */
+const TEMPLATE_GROUPS = ['', '{id}', '{ref}'] as unknown as RegExpMatchArray;
 
 /** Resolve a request to an upstream path, or `null` if it is not whitelisted. */
 export function resolveRoute(method: string, path: string): ResolvedRoute | null {
   for (const route of ROUTES) {
     if (route.method !== method) continue;
     const match = path.match(route.pattern);
-    if (match) return { path: route.target(match), sse: route.sse, upload: route.upload === true };
+    if (match) {
+      return {
+        path: route.target(match),
+        sse: route.sse,
+        upload: route.upload === true,
+        template: route.target(TEMPLATE_GROUPS),
+      };
+    }
   }
   return null;
 }

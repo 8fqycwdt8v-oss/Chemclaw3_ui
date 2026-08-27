@@ -52,6 +52,9 @@ const ENV: Record<string, string> = {
   APP_VERSION: '9.9.9-from-the-server',
   WARM_SESSIONS: 'false',
   REVIEWER_ROLES: 'Chemclaw.Reviewer,Chemclaw.Approver',
+  // Distinguishable from the `info` both halves fall back to, so a level that fails to cross the
+  // seam reads as the default rather than as this.
+  CLIENT_LOG_LEVEL: 'debug',
 };
 
 /** Boot the server half against `ENV` and hand back its config plus the script it would serve. */
@@ -118,6 +121,9 @@ describe('what /config.js actually delivers', () => {
     expect(client.apiScope).toBe('api://api-client-id/Chat.Access');
     expect(client.entraTenantId).toBe('tenant-from-the-server');
     expect(client.authMode).toBe('msal');
+    // The switch support turns on for one tenant. A `logLevel` that silently defaulted would leave
+    // a deployment believing its browsers were reporting when they were not.
+    expect(client.logLevel).toBe('debug');
     // `false` and not the `true` default: a boolean that failed to cross reads as its fallback,
     // which for this one is the *on* state and therefore invisible.
     expect(client.warmSessions).toBe(false);
@@ -147,6 +153,7 @@ describe('what /config.js actually delivers', () => {
       appVersion: 'dev',
       warmSessions: true,
       reviewerRoles: [],
+      logLevel: 'info',
     });
 
     expect(script).not.toContain('</script>');

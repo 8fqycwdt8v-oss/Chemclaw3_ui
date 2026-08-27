@@ -137,6 +137,12 @@ const AssistantBubble = memo(function AssistantBubble({
           <span aria-hidden className="size-1.5 shrink-0 animate-pulse rounded-full bg-brand" />
           {message.queued ? 'Waiting for a free slot on the server…' : 'Thinking…'}
           <ElapsedTimer since={message.at} />
+          {/* The one thing "Thinking…" plus a counter cannot say: nothing has arrived for a
+              minute and a half. A backend that accepted the POST and then died looks exactly like
+              a model working hard, for up to ten and a half minutes. Not an abort — a long turn
+              is legitimate and cutting it off would destroy the answer — a note, and it
+              disappears the moment a frame lands. */}
+          {message.stalled && <span className="text-2xs text-warn-ink">no activity for 90 s</span>}
         </p>
       ) : (
         // A settled turn with nothing in either field says so. An empty card is indistinguishable
@@ -178,7 +184,11 @@ const AssistantBubble = memo(function AssistantBubble({
       )}
 
       <AnswerFooter message={message} />
-      <TracePanel trace={message.trace} sessionId={sessionId} />
+      <TracePanel
+        trace={message.trace}
+        sessionId={sessionId}
+        correlationId={message.correlationId ?? ''}
+      />
     </div>
   );
 });

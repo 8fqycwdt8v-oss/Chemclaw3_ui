@@ -100,6 +100,20 @@ const DEBOUNCE_MS = 180;
 export const FIELD_PLACEHOLDER = 'Paste SMILES, drop a .mol or .sdf, or draw it';
 
 /**
+ * What the sketcher dialog says it is not.
+ *
+ * The canvas is a third-party WASM editor driven by a pointer. Nothing in this repository can make
+ * it navigable by keyboard or legible to a screen reader — that is the editor's own markup, not
+ * ours — so the honest thing is to say out loud that drawing is one of three doors and the other
+ * two are text. This is the dialog's `aria-description`, so it is announced on open rather than
+ * being a sentence somebody has to go looking for, and it is visible for the same reason.
+ *
+ * Exported because two tests assert on it and a string typed twice is a string that drifts once.
+ */
+export const SKETCHER_ALTERNATIVE =
+  'Drawing needs a pointer. Cancel to paste SMILES or drop a MOL or SDF file instead — every route ends at the same structure, confirmed the same way.';
+
+/**
  * What this panel can read.
  *
  * Exported because the composer routes a dropped file by the same rule — anything else is a
@@ -813,14 +827,28 @@ function SketcherBody({
         </div>
       </div>
 
+      <Dialog.Description className="mb-2 text-xs text-ink-muted">
+        {SKETCHER_ALTERNATIVE}
+      </Dialog.Description>
+
       {state === 'unavailable' && (
-        <p className="mb-2 text-xs text-danger-ink">
-          The structure editor could not be loaded. Paste SMILES or drop a MOL file instead — both
-          reach the same place.
-        </p>
+        // The alternative is not repeated here: `SKETCHER_ALTERNATIVE` above already names it,
+        // for every reader rather than only the one whose editor failed.
+        <p className="mb-2 text-xs text-danger-ink">The structure editor could not be loaded.</p>
       )}
 
-      <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-border-subtle">
+      {/* `data-sketcher-canvas` marks the one region of this app the axe pass does not scan, and
+          the attribute is the whole record of that exemption: everything inside is Ketcher's own
+          markup, which this repository neither writes nor can fix. `e2e/a11y.spec.ts` excludes it
+          by this selector and scans the rest of the dialog — the title, the description above, and
+          the two controls — precisely so the alternative stays checked while the canvas does not
+          pretend to be. `ISSUES.md` carries the limitation. */}
+      <div
+        data-sketcher-canvas
+        role="group"
+        aria-label="Structure editor"
+        className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-border-subtle"
+      >
         {state === 'loading' && (
           <Loading className="absolute inset-0 justify-center">
             Loading the structure editor…

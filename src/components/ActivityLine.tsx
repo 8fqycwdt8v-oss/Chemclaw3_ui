@@ -99,6 +99,14 @@ export function ActivityRow({
       {/* A sibling node, never concatenated into the sentence: a ten-minute turn needs a sign of
           life, and the sentence itself has to stay one stable string. */}
       <ElapsedTimer since={message.at} className="ml-auto shrink-0" />
+      {/* The one thing an activity label plus a counter cannot say: nothing has arrived for a
+          minute and a half. A backend that accepted the POST and then died looks exactly like a
+          model working hard, for up to ten and a half minutes. Not an abort — a long turn is
+          legitimate and cutting it off would destroy the answer — a note, and it disappears the
+          moment a frame lands. */}
+      {message.stalled && (
+        <span className="shrink-0 text-2xs text-warn-ink">no activity for 90 s</span>
+      )}
     </span>
   );
 }

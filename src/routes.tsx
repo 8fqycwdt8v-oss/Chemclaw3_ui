@@ -42,7 +42,10 @@ function Bootstrap(): React.JSX.Element {
     const state = useChatStore.getState();
     const [first] = state.order;
     const target = first && state.conversations[first] ? first : state.createConversation();
-    navigate(`/c/${target}`, { replace: true });
+    // `void`: react-router's `navigate` returns a promise that settles when the transition
+    // does, and nothing here waits for it. Marked rather than left floating so the lint rule
+    // that now exists can tell this from a promise somebody forgot.
+    void navigate(`/c/${target}`, { replace: true });
   }, [navigate]);
 
   return <Loading className="justify-center p-8">Opening…</Loading>;
@@ -67,7 +70,7 @@ function SessionResolver(): React.JSX.Element {
     const state = useChatStore.getState();
     const existing = Object.values(state.conversations).find((c) => c.sessionId === sessionId);
     if (existing) {
-      navigate(`/c/${existing.id}`, { replace: true });
+      void navigate(`/c/${existing.id}`, { replace: true });
       return;
     }
     const conversation = {
@@ -81,7 +84,7 @@ function SessionResolver(): React.JSX.Element {
       conversations: { ...s.conversations, [conversation.id]: conversation },
       order: [conversation.id, ...s.order],
     }));
-    navigate(`/c/${conversation.id}`, { replace: true });
+    void navigate(`/c/${conversation.id}`, { replace: true });
   }, [sessionId, valid, navigate]);
 
   if (!valid) {
@@ -127,14 +130,14 @@ export function NotFound({
         <p className="mt-1.5 text-sm text-ink-muted">{detail}</p>
         <div className="mt-4 flex flex-wrap gap-2">
           {order[0] && (
-            <Button size="sm" onClick={() => navigate(`/c/${order[0]}`)}>
+            <Button size="sm" onClick={() => void navigate(`/c/${order[0]}`)}>
               Open the most recent
             </Button>
           )}
           <Button
             variant="outline"
             size="sm"
-            onClick={() => navigate(`/c/${useChatStore.getState().createConversation()}`)}
+            onClick={() => void navigate(`/c/${useChatStore.getState().createConversation()}`)}
           >
             Start a new conversation
           </Button>
@@ -185,7 +188,7 @@ function ConversationRoute(): React.JSX.Element {
     const current = useChatStore.getState().activeId;
     if (!current || current === conversationId) return;
     // `replace`, so a deletion does not leave a dead entry for Back to land on.
-    navigate(`/c/${current}`, { replace: true });
+    void navigate(`/c/${current}`, { replace: true });
   }, [known, conversationId, navigate]);
 
   if (!known) return <AppShell>{<NotFound />}</AppShell>;

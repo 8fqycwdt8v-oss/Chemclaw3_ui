@@ -102,13 +102,24 @@ pipeline {
     // Against the image, not the workspace. `npm run check:no-dev-auth` in the GitHub job reads the
     // `dist/` this agent built; the image's bundle was built inside the Dockerfile, with
     // `ALLOW_DEV_AUTH` defaulting to false. Only one of those two artifacts is served to a chemist.
+    //
+    // kaniko builds and pushes in one pass and leaves no local image (see `image.sh`'s
+    // `build_and_push`) — but when it actually pushed one (a real, non-dry-run build with a
+    // registry set), `IMAGE_REF` names a real image sitting in that registry, and this pulls it
+    // back explicitly rather than silently skipping the one check that inspects the artifact that
+    // actually ships. Only the combination that produced nothing anywhere — kaniko with no
+    // registry push — is still skipped, and that combination is also the one the Deploy stage
+    // below already refuses to act on.
     stage('The published bundle carries no dev auth provider') {
-      when { expression { params.IMAGE_BUILDER != 'kaniko' } }
+      when { expression { params.IMAGE_BUILDER != 'kaniko' || (!params.DRY_RUN && params.IMAGE_REGISTRY) } }
       steps {
         sh '''
           set -euo pipefail
           runner="$(command -v podman || command -v docker)"
           rm -rf .image-dist && mkdir -p .image-dist
+          if [ "${IMAGE_BUILDER:-}" = "kaniko" ]; then
+            "${runner}" pull "${IMAGE_REF}"
+          fi
           cid="$("${runner}" create "${IMAGE_REF}")"
           trap '"${runner}" rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
           "${runner}" cp "${cid}:/app/dist/client" .image-dist/client
@@ -120,13 +131,17 @@ pipeline {
     // The container serves the SPA, its runtime config and nothing it should not. Same four
     // assertions the GitHub container job makes, made here of the artifact that is about to be
     // published — the proxy whitelist one especially, since it is the only thing standing between
-    // the browser and every backend route the BFF could otherwise forward.
+    // the browser and every backend route the BFF could otherwise forward. Same kaniko carve-out
+    // as the stage above, for the same reason.
     stage('The image serves') {
-      when { expression { params.IMAGE_BUILDER != 'kaniko' } }
+      when { expression { params.IMAGE_BUILDER != 'kaniko' || (!params.DRY_RUN && params.IMAGE_REGISTRY) } }
       steps {
         sh '''
           set -euo pipefail
           runner="$(command -v podman || command -v docker)"
+          if [ "${IMAGE_BUILDER:-}" = "kaniko" ]; then
+            "${runner}" pull "${IMAGE_REF}"
+          fi
           cid="$("${runner}" run -d -p 127.0.0.1:8080:8080 \
             -e AUTH_MODE=dev -e ALLOW_INSECURE_AUTH=true \
             -e CHEMCLAW_API_URL=http://127.0.0.1:9 "${IMAGE_REF}")"

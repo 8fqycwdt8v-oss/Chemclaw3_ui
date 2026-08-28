@@ -251,9 +251,15 @@ const AssistantBubble = memo(function AssistantBubble({
         )}
       </div>
 
+      {/* No `AnswerFooter` here. It carried the confidence, the unsupported claims and the method
+          line BELOW the answer, and `StatusStrip` above now carries all three — ranked by what the
+          reader has to do about them, and placed before the text because a qualifier read after
+          the answer is read once the reader has already believed it. Rendering both would print
+          one turn's confidence twice. */}
       <TracePanel
         trace={message.trace}
         sessionId={sessionId}
+        correlationId={message.correlationId ?? ''}
         // Our clock, and absent on a rehydrated turn — which is why the summary omits the time
         // rather than reporting zero.
         durationMs={message.endedAt ? message.endedAt - message.at : null}

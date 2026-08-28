@@ -204,6 +204,8 @@ function newAssistantMessage(): AssistantMessage {
     latestPlan: null,
     latestPlanHash: null,
     endedAt: null,
+    correlationId: '',
+    stalled: false,
     error: null,
   };
 }
@@ -417,6 +419,15 @@ export interface ChatState {
   jobFeed: JobFeedItem[];
   /** True once the backend has told us twice that we are over its stream cap. */
   jobStreamsThrottled: boolean;
+  /**
+   * Sessions whose job push-back stream has failed to connect repeatedly.
+   *
+   * A list rather than a flag, because the streams are per session and a single boolean would
+   * flap: one dead session would clear the moment another delivered a frame, which is how the
+   * indicator would end up describing neither. Not persisted — it is a statement about the network
+   * right now, and a reload re-establishes every stream anyway.
+   */
+  jobStreamsFailing: string[];
   /** Opt-in, and deliberately separate from `Notification.permission` — a browser-level
    *  revocation must read as "blocked", not as "off". */
   notifyOnJobComplete: boolean;
@@ -445,6 +456,10 @@ export interface ChatState {
   startAssistantMessage: (conversationId: string) => string;
   appendTokens: (conversationId: string, messageId: string, text: string) => void;
   applyEvent: (conversationId: string, messageId: string, event: ChemclawEvent) => void;
+  /** Record the service's id for this turn, so a successful answer is findable in its logs too. */
+  setCorrelationId: (conversationId: string, messageId: string, correlationId: string) => void;
+  /** The stream has gone quiet, or come back. Never ends the turn — see `AssistantMessage.stalled`. */
+  setTurnStalled: (conversationId: string, messageId: string, stalled: boolean) => void;
   finishTurn: (conversationId: string, messageId: string, status: 'done' | 'aborted') => void;
   failTurn: (
     conversationId: string,
@@ -462,6 +477,7 @@ export interface ChatState {
   restoreJobItem: (jobId: string) => void;
   markJobsSeen: () => void;
   setJobStreamsThrottled: (throttled: boolean) => void;
+  setJobStreamFailing: (sessionId: string, failing: boolean) => void;
   setNotifyOnJobComplete: (enabled: boolean) => void;
   /** Set the session id only if there is not one already, returning whichever id now wins. */
   setSessionIdIfAbsent: (conversationId: string, sessionId: string) => string;
@@ -514,19 +530,66 @@ function shedOldest(state: PersistedState): PersistedState | null {
 }
 
 /**
- * `localStorage`, with the two things `createJSONStorage(() => localStorage)` does not do.
+ * `localStorage`, with the three things `createJSONStorage(() => localStorage)` does not do.
  *
  * `persist` re-serialises the whole slice on EVERY store write — one per animation-frame token
- * flush — and hands the failure straight back to the action that caused it. `appendUserMessage`
- * runs before `sendMessage`'s try/catch, so a `QuotaExceededError` there left the turn as an
- * unhandled rejection: no bubble, no answer, no banner, no lock. Send did nothing, for ever,
- * because a reload does not empty the store that is full.
+ * flush, for as long as an answer is streaming — and hands the failure straight back to the
+ * action that caused it. `appendUserMessage` runs before `sendMessage`'s try/catch, so a
+ * `QuotaExceededError` there left the turn as an unhandled rejection: no bubble, no answer, no
+ * banner, no lock. Send did nothing, for ever, because a reload does not empty the store that is
+ * full.
  *
- * So: a refused write sheds the oldest conversations and tries again, and a write that cannot
- * succeed at all is swallowed the way `prefsStore` already swallows its own. History stops being
- * durable; the app keeps working, which is the right way round.
+ * So: a refused write sheds the oldest conversations and tries again, a write that cannot succeed
+ * at all is swallowed the way `prefsStore` already swallows its own, and the actual
+ * `JSON.stringify` + `localStorage.setItem` is throttled to once every `PERSIST_THROTTLE_MS`
+ * rather than once per frame — a full slice of history is up to a few hundred KB, and stringifying
+ * it 60 times a second is main-thread work competing with the token render it is trying not to
+ * jank. The in-memory store itself is never throttled, only the disk write; `flushChatPersistence`
+ * forces the latest value out immediately, called on `pagehide`/`beforeunload` so a closed tab
+ * never loses more than one throttle window's worth of history.
  */
 let storageWritable = true;
+
+const PERSIST_THROTTLE_MS = 750;
+let scheduledName: string | null = null;
+let scheduledValue: StorageValue<PersistedState> | null = null;
+let throttleTimer: ReturnType<typeof setTimeout> | null = null;
+let lastWriteAt = 0;
+
+function writeChatStorageNow(name: string, value: StorageValue<PersistedState>): void {
+  if (!storageWritable) return;
+  let state: PersistedState | null = value.state;
+  while (state) {
+    try {
+      localStorage.setItem(name, JSON.stringify({ ...value, state }));
+      return;
+    } catch {
+      state = shedOldest(state);
+    }
+  }
+  storageWritable = false;
+  console.warn('chemclaw3: local history could not be saved (storage is full or unavailable).');
+}
+
+/** Force the most recently coalesced write out immediately, bypassing the throttle window. */
+export function flushChatPersistence(): void {
+  if (throttleTimer !== null) {
+    clearTimeout(throttleTimer);
+    throttleTimer = null;
+  }
+  if (scheduledName === null || scheduledValue === null) return;
+  const name = scheduledName;
+  const value = scheduledValue;
+  scheduledName = null;
+  scheduledValue = null;
+  lastWriteAt = Date.now();
+  writeChatStorageNow(name, value);
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', flushChatPersistence);
+  window.addEventListener('beforeunload', flushChatPersistence);
+}
 
 const chatStorage: PersistStorage<PersistedState> = {
   getItem(name) {
@@ -542,20 +605,21 @@ const chatStorage: PersistStorage<PersistedState> = {
 
   setItem(name, value) {
     // Latched off after a write that could not land even with a single conversation in it. That
-    // is storage being denied rather than full — shedding cannot help, and retrying it once per
-    // animation frame would burn a `JSON.stringify` of the whole slice on every token.
+    // is storage being denied rather than full — shedding cannot help.
     if (!storageWritable) return;
-    let state: PersistedState | null = value.state;
-    while (state) {
-      try {
-        localStorage.setItem(name, JSON.stringify({ ...value, state }));
-        return;
-      } catch {
-        state = shedOldest(state);
-      }
+    scheduledName = name;
+    scheduledValue = value;
+    const elapsed = Date.now() - lastWriteAt;
+    if (elapsed >= PERSIST_THROTTLE_MS) {
+      flushChatPersistence();
+      return;
     }
-    storageWritable = false;
-    console.warn('chemclaw3: local history could not be saved (storage is full or unavailable).');
+    if (throttleTimer === null) {
+      throttleTimer = setTimeout(() => {
+        throttleTimer = null;
+        flushChatPersistence();
+      }, PERSIST_THROTTLE_MS - elapsed);
+    }
   },
 
   removeItem(name) {
@@ -598,6 +662,7 @@ export const useChatStore = create<ChatState>()(
       sessionProfiles: {},
       jobFeed: [],
       jobStreamsThrottled: false,
+      jobStreamsFailing: [],
       notifyOnJobComplete: false,
       streaming: null,
 
@@ -671,6 +736,7 @@ export const useChatStore = create<ChatState>()(
             activeId: fresh.id,
             drafts: {},
             jobStreamsThrottled: false,
+            jobStreamsFailing: [],
             composerLock: false,
             banner: null,
             jobFeed: [],
@@ -926,14 +992,26 @@ export const useChatStore = create<ChatState>()(
         );
       },
 
+      setCorrelationId(conversationId, messageId, correlationId) {
+        if (!correlationId) return;
+        set((s) => updateAssistant(s, conversationId, messageId, (m) => ({ ...m, correlationId })));
+      },
+
+      setTurnStalled(conversationId, messageId, stalled) {
+        set((s) => updateAssistant(s, conversationId, messageId, (m) => ({ ...m, stalled })));
+      },
+
       finishTurn(conversationId, messageId, status) {
-        // Stamped on every ending, not just the successful one: an aborted turn took as long as
-        // it took, and the summary line has no other way to say so.
+        // `endedAt` is stamped on every ending, not just the successful one: an aborted turn took
+        // as long as it took, and the summary line has no other way to say so. `stalled` is
+        // cleared because the flag describes a stream that is still open and silent, and leaving
+        // it set would put "no activity" beside a finished answer for ever.
         set((s) =>
           updateAssistant(s, conversationId, messageId, (m) => ({
             ...m,
             status,
             endedAt: Date.now(),
+            stalled: false,
           })),
         );
       },
@@ -944,6 +1022,7 @@ export const useChatStore = create<ChatState>()(
             ...m,
             status: 'error',
             endedAt: Date.now(),
+            stalled: false,
             error,
           })),
         );
@@ -1005,6 +1084,17 @@ export const useChatStore = create<ChatState>()(
       setJobStreamsThrottled(throttled) {
         if (get().jobStreamsThrottled === throttled) return;
         set({ jobStreamsThrottled: throttled });
+      },
+
+      setJobStreamFailing(sessionId, failing) {
+        const current = get().jobStreamsFailing;
+        const known = current.includes(sessionId);
+        if (failing === known) return;
+        set({
+          jobStreamsFailing: failing
+            ? [...current, sessionId]
+            : current.filter((id) => id !== sessionId),
+        });
       },
 
       setNotifyOnJobComplete(enabled) {

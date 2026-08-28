@@ -132,7 +132,8 @@ verbatim breaks refresh about an hour after login — a failure that looks like 
 ## Layout
 
 ```
-server/     the BFF — route whitelist, streaming proxy, static host, /config.js
+server/     the BFF — route whitelist, streaming proxy, static host, /config.js,
+            the access log + /metrics + /readyz, and the browser's log sink
 src/        the SPA — api/ auth/ state/ components/
   components/ui/    primitives (button, sheet, alert-dialog, …) on Radix + cva
   components/chem/  composites built from them (StatusDot, ConfirmDialog, …)
@@ -158,9 +159,14 @@ Three files carry most of the difficulty and are commented accordingly:
 
 - **`server/proxy.ts`** — every SSE trap. Chiefly: it forces `accept-encoding: identity` (a
   compressed event stream buffers until the compressor's window fills), and it destroys the upstream
-  request when the client disconnects. That last line is what makes **Stop** work: the service has
-  no cancel endpoint, so propagating the disconnect is the only way it releases the session's turn
-  lock — without it, the next message comes back 409.
+  request when the client disconnects. That last line used to be what made **Stop** work, and no
+  longer is. `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` split the two meanings the closed
+  socket carried: a disconnect now only **detaches** — the turn runs to completion on the service's
+  own pump task, and its answer lands in the transcript whether anyone is watching or not — while
+  cancelling is a request, `POST /sessions/{id}/turn/stop`. So Stop is two acts in order
+  (`stopStreaming` → `api.stopTurn`, then abort the fetch), and propagating the disconnect is still
+  worth doing for a different reason: it tells the service its reader is gone, so events are
+  discarded rather than buffered for nobody, and it frees this process's upstream socket.
 - **`src/components/MessageList.tsx`** — `Bubble` is memoised because `updateAssistant` replaces
   the messages array every animation frame while returning the same object for messages it did not
   touch. Never give anything on this path a custom `areEqual`: one forgotten field and a streaming
@@ -169,6 +175,37 @@ Three files carry most of the difficulty and are commented accordingly:
 - **`src/state/chatStore.ts`** — the store keeps `streamedText` and `finalText` apart because
   `answer.text` is the _full concatenation_ of every token. Any code path that combined them would
   render the whole answer twice. There is deliberately none.
+
+## Observability
+
+Error _handling_ here is careful; error _reporting_ used to be absent — every failure this UI knew
+about died in the browser. Four things close that, and each is checked by a test.
+
+**One reference, on every turn.** The service mints a correlation id per turn and stamps it on
+every JSON log record it writes. This app reads it back — from the `X-Chemclaw-Correlation-Id`
+response header, from a `correlation_id` in an error body, and from any stream frame that carries
+one (so a `turn_started` the service may start sending is picked up with no change on either side).
+It reaches three places: every error banner (`… (reference abc123)`), the trace panel's footer on a
+turn that **succeeded**, and the crash screen. It is deliberately never _sent_: the BFF strips
+`x-chemclaw-*` request headers, and the service has no reader for one.
+
+**A client-side record.** `src/lib/logger.ts` keeps the last 200 entries in memory and batches them
+to `POST /api/client-events`, which the **BFF logs itself** — the Chemclaw service has no such
+route. Verbosity is `CLIENT_LOG_LEVEL` (runtime, through `/config.js`), and `?debug=1` raises one
+browser without a redeploy. `main.tsx` installs `unhandledrejection` and `error` listeners, which
+did not exist: an unhandled rejection anywhere in the app used to be invisible.
+
+**The BFF's own traffic.** One JSON access line per response — method, route _pattern_, status,
+duration, bytes, upstream duration, correlation id — plus `GET /metrics` (request count, duration
+histogram, in-flight, upstream errors). Every label is bounded: the route pattern is
+`/api/sessions/{id}/messages`, never the path, because a per-session label mints a time series per
+conversation, and `/metrics` is unauthenticated like every other one in this family.
+
+**Readiness that means something.** `GET /readyz` probes the service's own `/readyz` (cached a few
+seconds). `GET /healthz` stays a literal `{"status":"ok"}` and stays what the container
+`HEALTHCHECK` reads, deliberately: it is liveness, and restarting this container because the
+_backend_ died would remove the one process still able to explain the outage. Point a readiness
+probe or a load balancer at `/readyz`.
 
 ## Testing
 

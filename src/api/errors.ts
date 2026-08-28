@@ -24,19 +24,42 @@ export type ApiErrorKind =
   | 'plan_changed'
   /** 422 — message over the backend's character cap. */
   | 'message_too_long'
-  /** 429 — turn/token budget exhausted, or too many concurrent event streams. Terminal. */
+  /** 429 without a `Retry-After` — the turn/token budget is spent, or too many concurrent event
+   *  streams are open. Terminal: neither replenishes because somebody pressed a button. */
   | 'budget_exhausted'
+  /** 429 *with* a `Retry-After` — the per-principal request limiter refused this call and said
+   *  when to come back. The service computes that number specifically so a client can wait it
+   *  out, so this is a pause, not a refusal. */
+  | 'rate_limited'
   /** 503 — admission control shed the turn; the service is at capacity. Retryable. */
   | 'capacity'
   /** `fetch` itself threw — the service is unreachable. */
   | 'network'
   /** The user pressed Stop. */
   | 'aborted'
-  /** The stream was malformed, truncated, or never produced an answer. */
+  /** The stream was malformed, truncated, or dropped — a connection problem, plausibly
+   *  recoverable by polling the session transcript for the answer the server is still producing. */
   | 'stream'
+  /** The stream ended cleanly with the server's own `empty_answer` event: the turn ran to
+   *  completion and produced nothing. Not a connection problem — polling the transcript would
+   *  wait for an answer the server has already said will never arrive. */
+  | 'empty_answer'
   /** An `error` event arrived in-stream. Includes the turn timeout, which the backend reports as
    *  a final SSE event rather than an HTTP status. */
-  | 'agent';
+  | 'agent'
+  /**
+   * The auth provider could not produce a bearer token, for a reason it did not resolve into an
+   * interactive sign-in itself — `msalAuth.getAccessToken` rethrows exactly this shape, on
+   * purpose: a silent-refresh failure is very often a network blip, not proof the session is
+   * gone, and forcing a redirect on one would send a chemist to a login page to fix an unplugged
+   * VPN.
+   *
+   * Distinct from `network` although the message reads the same: this failure happens strictly
+   * BEFORE any request is opened, so unlike a `fetch` that throws after being sent, there is no
+   * chance whatsoever that the server received anything. `stream`/`network` recovery polls the
+   * session transcript on exactly that chance — for this kind there is none to poll for, and
+   * `sendMessage` must not read "no bearer token" as "the turn may still be running server-side". */
+  | 'token_unavailable';
 
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
@@ -44,14 +67,26 @@ export class ApiError extends Error {
   /** Whether a bare retry of the same request could plausibly succeed. */
   readonly retryable: boolean;
   /**
-   * The service's own id for the turn that failed, when it sent one.
+   * The service's own id for the request or turn that failed, when it sent one.
    *
-   * Only in-stream errors carry it — an HTTP failure has no correlation id to give — so this is
-   * empty far more often than not. It is shown to the user rather than only logged, because the
-   * browser console is not somewhere a chemist looks and this string is the entire content of a
-   * useful support message.
+   * It used to come only from an in-stream `error` event, so every HTTP-level failure — a 401, a
+   * 409, a dropped connection — reached the banner with nothing to quote, and "it broke at 14:32"
+   * could not be joined to a single line of the service's logs. The service stamps this id on
+   * every JSON log record it writes, so the join key exists; what was missing was reading it back.
+   * Now `errorFromStatus` takes it from the response (the `X-Chemclaw-Correlation-Id` header, or
+   * `correlation_id` in the error body) and `streamTurn` carries the turn's own.
+   *
+   * Still empty when the service did not send one — an older deployment, or a `fetch` that never
+   * reached it — and empty is the honest reading, never a placeholder. It is shown to the user
+   * rather than only logged, because the browser console is not somewhere a chemist looks and this
+   * string is the entire content of a useful support message.
    */
   readonly correlationId: string;
+  /**
+   * Seconds to wait before retrying, from the service's own `Retry-After`. Zero when it sent none,
+   * which is every failure but `rate_limited`.
+   */
+  readonly retryAfterSeconds: number;
 
   constructor(
     kind: ApiErrorKind,
@@ -60,48 +95,139 @@ export class ApiError extends Error {
     /** Overrides the kind-derived default. The service knows things about one specific failure
      *  that its category does not — a `storage_unavailable` may or may not be worth retrying,
      *  and it is the only party that can tell. */
-    options?: { retryable?: boolean; correlationId?: string },
+    options?: { retryable?: boolean; correlationId?: string; retryAfterSeconds?: number },
   ) {
     super(message);
     this.name = 'ApiError';
     this.kind = kind;
     this.status = status;
-    this.retryable = options?.retryable ?? (kind === 'capacity' || kind === 'network');
+    this.retryable =
+      options?.retryable ?? (kind === 'capacity' || kind === 'network' || kind === 'rate_limited');
     this.correlationId = options?.correlationId ?? '';
+    this.retryAfterSeconds = options?.retryAfterSeconds ?? 0;
   }
 }
 
-export function errorFromStatus(status: number, detail?: string): ApiError {
+/**
+ * The response header the service stamps its per-request correlation id on.
+ *
+ * Read, never sent. Sending one is a dead end twice over: the BFF strips every `x-chemclaw-*`
+ * request header deliberately (`server/proxy.ts`, a trap removed before somebody adds a reader),
+ * and the service mints the id itself and has no reader for a client-supplied one. The id is the
+ * service's to issue and this app's to quote back.
+ */
+export const CORRELATION_HEADER = 'x-chemclaw-correlation-id';
+
+/** The correlation id this response carries, or `''` when it carries none. */
+export const correlationFrom = (res: { headers: Headers }): string =>
+  res.headers.get(CORRELATION_HEADER)?.trim() ?? '';
+
+/**
+ * Seconds a `Retry-After` asks for, or `null` when there is no usable one.
+ *
+ * Exported because `useJobStreams` reads the same header off the same status for the same reason,
+ * and the header's meaning is one fact — a second copy of this parse is a second answer to
+ * "was this the rate limiter?".
+ *
+ * Delta-seconds only. The one producer of this header in the chain is the service's
+ * per-principal request limiter, which sends `str(ceil(seconds))`; an HTTP-date would come from
+ * something else in the path whose meaning we cannot vouch for, and misreading it as a wait is
+ * worse than not having one. Zero is not "immediately" here — it is a value we cannot act on —
+ * so it does not count.
+ */
+export function retryAfterSeconds(header: string | null | undefined): number | null {
+  if (!header) return null;
+  const seconds = Number(header.trim());
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+}
+
+/**
+ * Map an HTTP failure onto a typed error.
+ *
+ * `retryAfter` is the response's own `Retry-After`, and it is what tells the two 429s apart. The
+ * service refuses with that status for three structurally different reasons: the per-principal
+ * request limiter, which computes the wait and sends it precisely so a client backs off by the
+ * right amount; the turn/token budget; and the concurrent-event-stream cap. Only the first
+ * replenishes on its own, and only the first says so. Collapsing all three into
+ * `budget_exhausted` locked the composer on a limit that had already refilled by the time the
+ * banner rendered — the same conflation `errorFromEvent` below records for the in-band path,
+ * fixed here on the same principle: the service's own signal decides, not the status number.
+ *
+ * (The event-stream cap does not come through here at all — `useJobStreams` reads that status
+ * itself, and honours a `Retry-After` for the same reason.)
+ *
+ * `correlationId` is threaded onto every branch so that EVERY banner can carry a reference, not
+ * only the ones raised by an in-stream `error` event. Both trailing arguments are read off the
+ * same failed response, which is why `readFailure` hands back the id and the caller passes the
+ * header straight through.
+ */
+export function errorFromStatus(
+  status: number,
+  detail?: string,
+  /** The response's `Retry-After`, verbatim — parsed here, not at the call site. */
+  retryAfter?: string | null,
+  /** The service's id for the request that failed — `correlationFrom`, or the error body's
+   *  `correlation_id`. */
+  correlationId?: string,
+): ApiError {
+  const options = correlationId ? { correlationId } : undefined;
   switch (status) {
     case 401:
-      return new ApiError('unauthorized', 'Your session has expired. Please sign in again.', 401);
+      return new ApiError(
+        'unauthorized',
+        'Your session has expired. Please sign in again.',
+        401,
+        options,
+      );
     case 404:
-      return new ApiError('session_not_found', detail || 'unknown session', 404);
+      return new ApiError('session_not_found', detail || 'unknown session', 404, options);
     case 409:
       return new ApiError(
         'turn_in_flight',
         detail || 'A turn is already running for this conversation.',
         409,
+        options,
       );
     case 422:
       return new ApiError(
         'message_too_long',
         detail || 'That message exceeds the service’s length limit.',
         422,
+        options,
       );
-    case 429:
+    case 429: {
+      const wait = retryAfterSeconds(retryAfter);
+      if (wait !== null) {
+        // The one status whose `detail` is not used. The limiter's is the fixed string "too many
+        // requests", which says nothing the kind does not, and the banner appends the wait to
+        // this — so a lower-case fragment from the service would land mid-sentence.
+        return new ApiError(
+          'rate_limited',
+          'The service is limiting how fast requests can be made.',
+          429,
+          { ...options, retryAfterSeconds: wait },
+        );
+      }
       return new ApiError(
         'budget_exhausted',
         detail || 'The usage budget for this service is exhausted.',
         429,
+        options,
       );
+    }
     case 503:
-      return new ApiError('capacity', detail || 'The service is at capacity. Retry shortly.', 503);
+      return new ApiError(
+        'capacity',
+        detail || 'The service is at capacity. Retry shortly.',
+        503,
+        options,
+      );
     default:
       return new ApiError(
         'network',
         detail || `The service returned an unexpected status (${status}).`,
         status,
+        options,
       );
   }
 }
@@ -137,21 +263,36 @@ export function errorFromEvent(event: {
       // ever'". Hardcoding `false` here rendered every shed as a permanent refusal.
       return new ApiError('budget_exhausted', event.message, undefined, options);
     case 'empty_answer':
-      // Not a service failure — the turn ran and produced nothing. `stream` already means "the
-      // stream ended without an answer", which is exactly what happened.
-      return new ApiError('stream', event.message, undefined, options);
+      // Not a service failure, and not a connection problem either — the turn ran to completion
+      // and produced nothing. Its own kind, so callers don't run connection-drop recovery (polling
+      // the transcript for an answer that will never land) against an outcome the server has
+      // already resolved.
+      return new ApiError('empty_answer', event.message, undefined, options);
     default:
       return new ApiError('agent', event.message, undefined, options);
   }
 }
 
-/** Best-effort extraction of FastAPI's `{"detail": "..."}` without letting a parse failure mask
- *  the real error — an error page or an empty body is common on the failure paths. */
-export async function readDetail(res: Response): Promise<string | undefined> {
+/**
+ * What a failed response says about itself: FastAPI's `{"detail": …}` and the correlation id.
+ *
+ * Both halves are best-effort and neither may mask the real error — an error page, an empty body
+ * or a gateway's HTML is common on exactly these paths. The header is read first because it is
+ * present on every response the service writes, including the ones with no body at all; the body's
+ * `correlation_id` is the fallback for a response that carries one there instead.
+ */
+export async function readFailure(
+  res: Response,
+): Promise<{ detail?: string; correlationId: string }> {
+  const fromHeader = correlationFrom(res);
   try {
-    const body = (await res.json()) as { detail?: unknown };
-    return typeof body?.detail === 'string' ? body.detail : undefined;
+    const body = (await res.json()) as { detail?: unknown; correlation_id?: unknown };
+    return {
+      detail: typeof body?.detail === 'string' ? body.detail : undefined,
+      correlationId:
+        fromHeader || (typeof body?.correlation_id === 'string' ? body.correlation_id : ''),
+    };
   } catch {
-    return undefined;
+    return { correlationId: fromHeader };
   }
 }

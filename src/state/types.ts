@@ -283,6 +283,26 @@ export interface AssistantMessage {
    * "not known", and the summary simply omits the time.
    */
   endedAt?: number | null;
+  /**
+   * The service's own id for the turn that produced this message.
+   *
+   * The join key between what a chemist saw and what the service logged: it is minted per turn and
+   * stamped on every JSON log record the service writes. It used to reach this app on exactly one
+   * path — an in-stream `error` event — so a turn that SUCCEEDED had no reference at all, and "the
+   * answer at 14:32 cited the wrong note" was unjoinable to anything. Read back from the response
+   * header (and from any frame that carries one) and rendered in the trace panel's footer.
+   *
+   * Absent on a message persisted before this field existed, and empty against a service that does
+   * not send one — both read as "no reference", which is the honest answer.
+   */
+  correlationId?: string;
+  /**
+   * No frame has arrived for `TURN_STALL_MS`, and the turn has not ended.
+   *
+   * Not an error and not a timeout: the reader is told the chain has gone quiet, and the turn is
+   * left running. Cleared the moment a frame arrives, so it describes now rather than ever.
+   */
+  stalled?: boolean;
   error: { kind: ApiErrorKind; message: string } | null;
 }
 
@@ -323,4 +343,11 @@ export interface Banner {
   kind: 'error' | 'warn' | 'info';
   text: string;
   action?: 'reauth' | 'reset' | 'retry';
+  /**
+   * Seconds the service asked the caller to wait, from a `Retry-After`. Counted down in the
+   * banner so a pause reads as a pause: the number is the whole difference between "come back in
+   * twenty seconds" and "this is over", and without it a rate limit looks exactly like a spent
+   * budget.
+   */
+  retryAfterSeconds?: number;
 }

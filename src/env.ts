@@ -9,6 +9,9 @@
  * bytes than the rest of this module.
  */
 
+import type { LogLevel } from './lib/logger.ts';
+import { MAX_MESSAGE_CHARS } from '../shared/events.ts';
+
 export type AuthMode = 'dev' | 'msal';
 
 export interface RuntimeConfig {
@@ -40,6 +43,27 @@ export interface RuntimeConfig {
    * and so does `useIsReviewer`.
    */
   reviewerRoles: string[];
+  /**
+   * How much this browser records through `src/lib/logger.ts`.
+   *
+   * Runtime rather than build-time for the same reason everything else here is: one image, any
+   * tenant. A deployment that wants its UI quiet sets `silent`; the usual posture is `info`, and
+   * `?debug=1` raises one chemist's browser to `debug` without a redeploy — which is the case
+   * support is actually in when a single user is the one seeing the fault.
+   */
+  logLevel: LogLevel;
+  /**
+   * The longest message the service will accept, in characters.
+   *
+   * Runtime rather than compile-time for the same reason `reviewerRoles` is: the value belongs to
+   * the deployment, not to this bundle. `CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS` is explicitly
+   * tunable, and a hardcoded copy is wrong in both directions — refusing what the service accepts,
+   * or inviting a message it rejects with a 422 once the whole body has crossed the wire.
+   *
+   * Falls back to `MAX_MESSAGE_CHARS`, the backend's own default, when nothing supplies it: an
+   * older BFF that predates the field, or a `vite dev` with no server behind it.
+   */
+  maxMessageChars: number;
 }
 
 declare global {
@@ -62,6 +86,12 @@ const fromVite = (): Partial<RuntimeConfig> => {
   };
 };
 
+/** A level the logger will accept, or `info` — a typo must not silence the record. */
+const asLevel = (value: unknown): LogLevel | undefined => {
+  const known: LogLevel[] = ['silent', 'error', 'warn', 'info', 'debug'];
+  return known.find((level) => level === value);
+};
+
 const pick = (...values: (string | undefined)[]): string => {
   for (const value of values) if (value && value.trim()) return value.trim();
   return '';
@@ -79,6 +109,16 @@ function resolve(): RuntimeConfig {
     appVersion: pick(w.appVersion, 'dev'),
     warmSessions: w.warmSessions !== false,
     reviewerRoles: Array.isArray(w.reviewerRoles) ? w.reviewerRoles.map(String) : [],
+    logLevel: asLevel(w.logLevel) ?? 'info',
+    // A cap of zero, a negative one or a non-number is not a stricter limit — it is a composer
+    // that refuses every message, including the one the chemist is typing when the bad value
+    // ships. Only a usable number displaces the default.
+    maxMessageChars:
+      typeof w.maxMessageChars === 'number' &&
+      Number.isFinite(w.maxMessageChars) &&
+      w.maxMessageChars > 0
+        ? Math.floor(w.maxMessageChars)
+        : MAX_MESSAGE_CHARS,
   };
 }
 

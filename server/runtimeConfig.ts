@@ -21,7 +21,26 @@ export interface RuntimeConfig {
   warmSessions: boolean;
   /** The service's privileged app-role names, so the SPA can hide what would 403. */
   reviewerRoles: string[];
+  /**
+   * What the browser records — see `logLevel` in src/env.ts.
+   *
+   * The union is written out here rather than imported from `src/`, exactly as `authMode` is: this
+   * interface is one half of a seam, the SPA's `RuntimeConfig` is the other, and
+   * `tests/runtimeConfig.test.ts` asserts the two are mutually assignable — which is what catches a
+   * drift that a shared import would hide by construction. A server-side import of `src/lib` would
+   * also drag the browser's `config` into the BFF bundle.
+   */
+  logLevel: 'silent' | 'error' | 'warn' | 'info' | 'debug';
+  /** The service's message-length cap, so the composer refuses where the service refuses. */
+  maxMessageChars: number;
 }
+
+const LOG_LEVELS = ['silent', 'error', 'warn', 'info', 'debug'] as const;
+
+/** `CLIENT_LOG_LEVEL` as a level the SPA will accept. A typo must not silence the record, so an
+ *  unrecognised value falls back to `info` rather than to nothing. */
+const clientLogLevel = (): RuntimeConfig['logLevel'] =>
+  LOG_LEVELS.find((level) => level === cfg.clientLogLevel) ?? 'info';
 
 export function runtimeConfig(): RuntimeConfig {
   return {
@@ -33,6 +52,8 @@ export function runtimeConfig(): RuntimeConfig {
     appVersion: cfg.appVersion,
     warmSessions: cfg.warmSessions,
     reviewerRoles: cfg.reviewerRoles,
+    logLevel: clientLogLevel(),
+    maxMessageChars: cfg.maxMessageChars,
   };
 }
 

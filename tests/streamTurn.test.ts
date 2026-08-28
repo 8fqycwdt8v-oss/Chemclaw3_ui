@@ -171,10 +171,11 @@ describe('streamTurn', () => {
       expect(err.retryable).toBe(true);
     });
 
-    it('reports an answerless turn as a stream failure, not a service failure', async () => {
-      // `empty_answer` means the turn ran and produced nothing, which is what `stream` already
-      // means here. Calling it an agent error would imply something broke.
-      expect((await failWith({ code: 'empty_answer' })).kind).toBe('stream');
+    it('reports an answerless turn as its own kind, not a stream drop or a service failure', async () => {
+      // `empty_answer` means the turn ran to completion and produced nothing — calling it `agent`
+      // would imply something broke, and calling it `stream` would make callers poll the
+      // transcript for an answer the server has already said will never arrive.
+      expect((await failWith({ code: 'empty_answer' })).kind).toBe('empty_answer');
     });
 
     it('carries the correlation id, which is the only thing support can act on', async () => {
@@ -356,6 +357,55 @@ describe('streamTurn', () => {
     });
     const devHeaders = devMode.calls[0]?.init?.headers as Record<string, string>;
     expect(devHeaders.authorization).toBeUndefined();
+  });
+
+  /**
+   * `getToken` failing is not the same fault as `fetch` failing, and conflating them is what
+   * `D-` (see `src/api/errors.ts`, `'token_unavailable'`) exists to prevent: this is called
+   * strictly before the POST is ever opened, so there is zero chance — not merely low odds, as
+   * with a `fetch` that throws after being sent — that the server received anything. A caller
+   * (`sendMessage`) that read this the way it reads `kind: 'network'` would poll the session
+   * transcript for up to ten minutes for a turn that was never asked to start.
+   */
+  describe('the token provider failing before any request is opened', () => {
+    it('rejects as token_unavailable, retryable, and never calls fetch', async () => {
+      const stub = stubFetch(() => sseResponse(sseFrames([answerEvent()])));
+      restore = stub.restore;
+
+      const err = await streamTurn({
+        sessionId: SESSION,
+        message: 'x',
+        signal: new AbortController().signal,
+        getToken: () => Promise.reject(new Error('acquireTokenSilent: network is down')),
+        onEvent: () => undefined,
+      }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).kind).toBe('token_unavailable');
+      expect((err as ApiError).retryable).toBe(true);
+      // The load-bearing assertion: nothing was ever sent, so a caller that polls the transcript
+      // for a "detached" answer would be waiting on a turn that does not exist anywhere.
+      expect(stub.calls).toHaveLength(0);
+    });
+
+    it('reports Stop rather than token_unavailable when the signal was already aborted', async () => {
+      const stub = stubFetch(() => sseResponse(sseFrames([answerEvent()])));
+      restore = stub.restore;
+      const controller = new AbortController();
+      controller.abort();
+
+      const err = await streamTurn({
+        sessionId: SESSION,
+        message: 'x',
+        signal: controller.signal,
+        getToken: () => Promise.reject(new Error('abandoned')),
+        onEvent: () => undefined,
+      }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).kind).toBe('aborted');
+      expect(stub.calls).toHaveLength(0);
+    });
   });
 
   it('passes dry_run through to the service', async () => {

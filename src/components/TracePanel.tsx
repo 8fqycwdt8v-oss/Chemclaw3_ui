@@ -681,6 +681,9 @@ export const TracePanel = memo(function TracePanel({
   /** Null for a transcript read back from the server, which has calls but nothing to fetch
    *  against — the rows still render, without the full-result control. */
   sessionId = null,
+  /** The service's id for the turn this trace belongs to, rendered in the footer. Absent on a
+   *  message from before the field existed, and on a service that sends none. */
+  correlationId = '',
   /** How long the whole turn took, by our clock. Null for a rehydrated turn, which has none. */
   durationMs = null,
   /** The turn's plan, so a job row can name the step it was launched for by its number. */
@@ -690,6 +693,7 @@ export const TracePanel = memo(function TracePanel({
 }: {
   trace: TraceEntry[];
   sessionId?: string | null;
+  correlationId?: string;
   durationMs?: number | null;
   plan?: string[] | null;
   answer?: { words: number; duration?: string } | null;
@@ -703,7 +707,11 @@ export const TracePanel = memo(function TracePanel({
   const shown = trace.filter((e) => e.kind !== 'question' && e.kind !== 'approval_request');
   if (shown.length === 0) return null;
 
-  const { steps } = summarizeTurn(shown);
+  const { steps, problems } = summarizeTurn(shown);
+  // A turn where tools failed used to read exactly like one where they did not, and the fix for
+  // that was a `, N failed` suffix on the step count. `troubleLabel` is that same argument carried
+  // further: a refusal wants an approval, a dead source wants whoever owns the index, and a
+  // failure wants somebody to look at the turn, so the three are named rather than totalled.
   const trouble = troubleLabel(shown);
 
   const rows = withPreviousPlan(shown);
@@ -711,7 +719,17 @@ export const TracePanel = memo(function TracePanel({
   return (
     <Collapsible className="group/trace mt-3">
       <CollapsibleTrigger asChild>
-        <Button variant="link" size="xs" className="-ml-2 px-2 no-underline hover:underline">
+        <Button
+          variant="link"
+          size="xs"
+          // Tinted on a *failure* only, not on any trouble: a plan-gate refusal is the gate doing
+          // its job and a dark source is a question about the corpus, and colouring the control red
+          // for either teaches a reader that the red means nothing.
+          className={cn(
+            '-ml-2 px-2 no-underline hover:underline',
+            problems > 0 && 'text-danger-ink',
+          )}
+        >
           <ChevronRight
             aria-hidden
             className="size-3.5 transition-transform group-data-[state=open]/trace:rotate-90"
@@ -789,6 +807,16 @@ export const TracePanel = memo(function TracePanel({
               </Step>
             )}
           </ol>
+
+          {/* The reference a support conversation is built on, where the reader can select it.
+              Every line the service logged for this turn carries the same string, so this is what
+              turns "it went wrong at 14:32" into one query — including on a turn that SUCCEEDED,
+              which is the case that had no reference of any kind. */}
+          {correlationId && (
+            <p className="mt-3 border-t border-border-subtle pt-2 font-mono text-2xs text-ink-subtle">
+              Reference {correlationId}
+            </p>
+          )}
         </div>
       </CollapsibleContent>
     </Collapsible>

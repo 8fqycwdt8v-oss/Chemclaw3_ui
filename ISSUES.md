@@ -217,6 +217,30 @@ registry; profile selection; tool calls surviving a reload.
   cannot prove any of it.
 - **`npm run smoke` against a real service.** The e2e fixture emits real time-gapped SSE frames
   through the real BFF, which is not the same thing as a real backend.
+- **The structure sketcher has no accessible path, and will not get one here.** The canvas is
+  Ketcher — a third-party WASM editor driven by a pointer. Radix's Dialog wraps the _chrome_ in a
+  focus trap, an Escape handler and `aria-modal`; it does not make the drawing surface navigable by
+  keyboard or legible to a screen reader, and nothing in this repository can, because the markup
+  inside it is not ours. Making it accessible is an upstream change or a replacement editor.
+
+  What is done instead is to stop the gap being silent. Drawing is one of three doors and the other
+  two are text: the panel's SMILES field is labelled and reachable like any input, a `.mol`/`.sdf`
+  drop reaches the same validation, and all three converge on one RDKit-canonicalised string, so a
+  chemist who cannot draw is not locked out of anything — only out of the most convenient route to
+  it. The dialog now says so in its `aria-description`, which Radix announces on open
+  (`SKETCHER_ALTERNATIVE` in `src/components/StructureInput.tsx`), so the alternative is told rather
+  than discovered.
+
+  The axe pass excludes exactly one selector, `[data-sketcher-canvas]`, and scans the rest of that
+  dialog including the sentence above (`e2e/a11y.spec.ts`). That exclusion is the honest form of
+  this limitation: a gate permanently red on markup no commit here can fix is a gate people learn
+  to skip, and the version of this that reads worse is a scan that quietly never visits the state
+  at all — which is what it did before.
+
+  **What would change the answer:** Ketcher shipping a keyboard-navigable editing mode, or a
+  structure-entry route that is neither a canvas nor a string (a name lookup would be one, and
+  `resolve_compound` is an agent tool with no HTTP route — see the module docstring).
+
 - **`PendingApproval` is still typed loosely** (`[key: string]: unknown`, every field optional).
   The service's shape is three required strings — `approval_id`, `question`, `requested_by`
   (`agent/interaction_tools.py`) — so the index signature is known information left on the floor.

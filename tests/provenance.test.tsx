@@ -251,6 +251,31 @@ describe('method badges', () => {
   it('carries no caveat where the manifest states none', () => {
     expect(methodFor('stoichiometry_table')?.caveat).toBeUndefined();
   });
+
+  it('has a sourced method for every tool the bo bundle advertises', () => {
+    // Transcribed from `connectors/bo/connector.yaml` — its five `endpoint.tools` plus the one
+    // `jobs[].name` — rather than derived from `KNOWN_TOOLS`, for the reason `TOOL_METHOD` is keyed
+    // on `KnownTool` in the first place: this list going stale against the backend is the failure,
+    // and a list that reads itself out of the same file it is checking cannot catch it.
+    //
+    // A per-tool assertion rather than one over the set, so a failure names the tool that is
+    // missing. Every one of these is a surrogate's opinion or a reading of runs supplied, and this
+    // panel's whole rule is that a number arrives with what produced it: a BO tool missing here
+    // shows a chemist a recommended condition with no method beside it at all.
+    for (const tool of [
+      'suggest_next_experiment',
+      'resume_campaign',
+      'generate_screening_design',
+      'campaign_progress',
+      'predict_outcome',
+      'start_optimization_campaign',
+    ]) {
+      expect(methodFor(tool), `no method for ${tool}`).not.toBeNull();
+    }
+    // And the two that decide how a chemist reads a recommendation say what they are not.
+    expect(methodFor('suggest_next_experiment')?.caveat).toContain('proposals a human runs');
+    expect(methodFor('predict_outcome')?.caveat).toContain('endorses nothing');
+  });
 });
 
 describe('capability_degraded as a chemistry statement', () => {

@@ -392,3 +392,436 @@ describe('the charge table', () => {
     expect(screen.getByText('187.03')).toBeTruthy();
   });
 });
+
+/**
+ * The three Bayesian-optimization results.
+ *
+ * Every fixture below was produced by constructing the backend's own pydantic models
+ * (`chemclaw.science.bo.problem`, `chemclaw.science.bo.progress`,
+ * `chemclaw.connectors.bo.server.tools`) and dumping them, rather than written by hand — including
+ * the `summary` computed fields, which is why they read the way they do. A hand-written fixture is
+ * the failure the fingerprint tests already paid for once: an assertion can only disagree with the
+ * fixture it was handed, and a field name invented here would render nothing against the real
+ * service while passing in this file.
+ *
+ * What each test pins is the half of the payload that is lost when it renders as a table: the assay
+ * noise a gain has to be read against, the verdict the service *declined* to give, the front that
+ * has no single best point, and a number the model reached by extrapolating.
+ */
+describe('a campaign progress reading', () => {
+  /** A plateaued eight-run campaign against a stated ±2% assay, exactly as `campaign_progress`
+   *  returns it. */
+  const PLATEAUED = {
+    objective: 'yield',
+    direction: 'maximize',
+    assay_noise: 2.0,
+    window: 4,
+    n_observations: 8,
+    n_distinct: 8,
+    n_distinct_in_space: 8,
+    design_space: null,
+    best_value: 87.6,
+    best_so_far: [51.0, 63.5, 71.0, 86.4, 87.1, 87.1, 87.6, 87.6],
+    evaluations_since_improvement: 4,
+    window_span: 0.5,
+    window_indistinguishable: true,
+    enough_observations: true,
+    plateaued: true,
+    summary:
+      'Best yield so far: 87.6 over 8 evaluation(s). The last gain larger than the stated assay ' +
+      'noise (+/-2) was 4 evaluation(s) ago. The most recent 4 results span 0.5, so they are NOT ' +
+      'distinguishable from each other. Plateaued: no further gain beyond the noise for at least ' +
+      '4 evaluation(s). This is a reading of the runs supplied and nothing more: it cannot show ' +
+      'that a global optimum has been reached, only that recent points in the region already ' +
+      'explored have not beaten the noise. An untried corner of the space is not evidence either ' +
+      'way.',
+  };
+
+  it('divides feasible runs by feasible cells when an exclusion makes them differ', async () => {
+    // The two counts differ exactly when the history holds a run an exclusion later forbade — the
+    // ordinary case of a pairing excluded after being run once. Rendering `n_distinct` over
+    // `design_space` reads "4 / 3": more conditions run than the grid contains, which a chemist
+    // reads as a broken number rather than as a real exclusion.
+    open(
+      'campaign_progress',
+      JSON.stringify({
+        ...PLATEAUED,
+        n_observations: 6,
+        n_distinct: 4,
+        n_distinct_in_space: 3,
+        design_space: 3,
+      }),
+    );
+
+    expect(await screen.findByText('3 / 3')).toBeTruthy();
+    expect(screen.queryByText('4 / 3')).toBeNull();
+    expect(screen.getByText(/1 further run\(s\) are outside it/)).toBeTruthy();
+  });
+
+  it('draws the best-so-far series with the assay noise made visible', async () => {
+    open('campaign_progress', JSON.stringify(PLATEAUED));
+
+    // The chart is a chart, and it names what it draws. The whole reason the band is on it: a
+    // difference smaller than the assay is not a difference, and a bare line invites the opposite.
+    const chart = await screen.findByRole('img', { name: /Best yield so far/ });
+    // The axis label specifically, in its own "name · direction" form. Asserting the bare phrase
+    // would match the <desc> that the accessible-name query above already found it by, so every
+    // axis <text> could be deleted and this test would stay green.
+    expect(chart.textContent).toContain('yield · ↑ higher is better');
+    expect(screen.getByText(/The shaded band is ±2/)).toBeTruthy();
+    // The verdict as a state, not as a sentence to be skimmed past.
+    expect(screen.getByText('Plateaued')).toBeTruthy();
+    // And the three numbers a lab leader decides on.
+    expect(screen.getByText('Evaluations')).toBeTruthy();
+    expect(screen.getByText(/evaluation\(s\) since a gain beat the noise/)).toBeTruthy();
+    expect(screen.getByText(/the grid is infinite/)).toBeTruthy();
+  });
+
+  it('withholds the plateau verdict on too few runs instead of showing a confident chip', async () => {
+    // The case this renderer exists for. Upstream computes `plateaued = enough and since >= window`,
+    // so on two runs it is `false` — and rendering `false` as "still improving" would answer a
+    // question the service explicitly declined to answer.
+    open(
+      'campaign_progress',
+      JSON.stringify({
+        ...PLATEAUED,
+        n_observations: 2,
+        n_distinct: 2,
+        best_value: 63.5,
+        best_so_far: [51.0, 63.5],
+        evaluations_since_improvement: 0,
+        window_span: 12.5,
+        window_indistinguishable: false,
+        enough_observations: false,
+        plateaued: false,
+        summary:
+          '2 evaluation(s) is too few to read a trend from — this needs at least 6. No plateau ' +
+          'verdict is given, which is different from saying the campaign is still improving.',
+      }),
+    );
+
+    expect(await screen.findByText('Plateau verdict withheld')).toBeTruthy();
+    expect(screen.queryByText('Plateaued')).toBeNull();
+    expect(screen.queryByText('Not plateaued')).toBeNull();
+    // And the reason, stated as the absence of a finding rather than as a finding.
+    expect(screen.getByText(/is the absence of a finding either way/)).toBeTruthy();
+  });
+
+  it('reports a non-plateau as the absence of a plateau, not as a finding of progress', async () => {
+    // The third state is "not plateaued", never "still improving". Upstream computes
+    // `plateaued = enough and since >= window`, so `since == window - 1` is false while its own
+    // summary claims only that the last gain was N evaluations ago. A green "Still improving" on
+    // that payload upgrades a negative into a positive — one notch along from the over-claim the
+    // withheld state exists to prevent, and on the reading a chemist uses to spend another
+    // fortnight.
+    open(
+      'campaign_progress',
+      JSON.stringify({ ...PLATEAUED, evaluations_since_improvement: 3, plateaued: false }),
+    );
+
+    expect(await screen.findByText('Not plateaued')).toBeTruthy();
+    expect(screen.queryByText(/Still improving/)).toBeNull();
+    expect(screen.queryByText('Plateau verdict withheld')).toBeNull();
+    // The count that says how it is actually doing is on the card, which is where that question
+    // gets answered rather than in a badge.
+    expect(screen.getByText('3')).toBeTruthy();
+  });
+});
+
+describe('an experiment suggestion', () => {
+  /** Two objectives, five runs supplied, three of them on the front, one real candidate and one
+   *  seed point — the shape `suggest_next_experiment` returns for a trade-off. */
+  const MULTI = {
+    campaign_id: 'bo-9f2c1ad4',
+    candidates: [
+      {
+        params: { temperature_c: 92.0, ligand: 'L2' },
+        predicted_value: 88.2,
+        predicted_sd: 3.4,
+        predicted_values: { yield: 88.2, impurity: 1.9 },
+        predicted_sds: { yield: 3.4, impurity: 0.6 },
+      },
+      {
+        params: { temperature_c: 35.0, ligand: 'L3' },
+        predicted_value: null,
+        predicted_sd: null,
+        predicted_values: {},
+        predicted_sds: {},
+      },
+    ],
+    requested: 2,
+    calc_refs: ['xtb:abc123', 'xtb:def456'],
+    scale: {
+      name: 'yield',
+      direction: 'maximize',
+      n: 5,
+      observed_min: 51.0,
+      observed_max: 86.4,
+      observed_sd: 13.272980072312324,
+    },
+    scales: [
+      {
+        name: 'yield',
+        direction: 'maximize',
+        n: 5,
+        observed_min: 51.0,
+        observed_max: 86.4,
+        observed_sd: 13.272980072312324,
+      },
+      {
+        name: 'impurity',
+        direction: 'minimize',
+        n: 5,
+        observed_min: 0.4,
+        observed_max: 3.1,
+        observed_sd: 1.1819475453673907,
+      },
+    ],
+    front: [
+      {
+        params: { temperature_c: 60.0, ligand: 'L2' },
+        value: 71.0,
+        values: { yield: 71.0, impurity: 1.4 },
+        provenance: 'measured',
+        surrogate_sd: null,
+      },
+      {
+        params: { temperature_c: 80.0, ligand: 'L2' },
+        value: 86.4,
+        values: { yield: 86.4, impurity: 3.1 },
+        provenance: 'measured',
+        surrogate_sd: null,
+      },
+      {
+        params: { temperature_c: 80.0, ligand: 'L3' },
+        value: 62.0,
+        values: { yield: 62.0, impurity: 0.4 },
+        provenance: 'measured',
+        surrogate_sd: null,
+      },
+    ],
+    front_tolerance: 0.5,
+    opened_new_campaign: false,
+    summary:
+      'This is a trade-off over 2 objectives (maximize yield, minimize impurity), so there is no ' +
+      'single best point.',
+  };
+
+  it('renders each candidate with its prediction and the sd tied to it', async () => {
+    open('suggest_next_experiment', JSON.stringify(MULTI));
+
+    expect(await screen.findByText('Candidate 1')).toBeTruthy();
+    // The sd is a qualification of the value, not a second number in a second column — so it is
+    // asserted as one string, which is what the reader has to be unable to drop.
+    expect(screen.getByText('± 3.4')).toBeTruthy();
+    expect(screen.getByText(/predicted yield \(maximize\)/)).toBeTruthy();
+    expect(screen.getByText(/predicted impurity \(minimize\)/)).toBeTruthy();
+    // The conditions, which are the thing a chemist actually sets up.
+    expect(screen.getByText('92')).toBeTruthy();
+    // A seed point had no surrogate behind it, which upstream says "is not an endorsement".
+    expect(screen.getByText(/space-filling seed/)).toBeTruthy();
+    // The handle a later turn quotes to continue this campaign.
+    expect(screen.getByText('bo-9f2c1ad4')).toBeTruthy();
+  });
+
+  it('does not call a predicted candidate a seed just because it carries no sd', async () => {
+    // `predicted_value` and `predicted_sd` are filled from two *independent* column probes
+    // upstream (`{name}_pred` and `{name}_sd` in `engine.py::_frame_to_candidates`), so a mean
+    // with no sd is representable. Keying the seed badge on `sd` therefore both mislabelled such
+    // a candidate "no surrogate opinion" and suppressed the prediction block entirely — dropping
+    // the number the chemist is being asked to act on, while telling them there was none.
+    open(
+      'suggest_next_experiment',
+      JSON.stringify({
+        ...MULTI,
+        candidates: [
+          {
+            params: { temperature: 92.0, catalyst: 'Pd(OAc)2' },
+            predicted_value: 88.2,
+            predicted_sd: null,
+            predicted_values: {},
+            predicted_sds: {},
+          },
+        ],
+      }),
+    );
+
+    expect(await screen.findByText('Candidate 1')).toBeTruthy();
+    expect(screen.getByText('88.2')).toBeTruthy();
+    expect(screen.queryByText(/space-filling seed/)).toBeNull();
+  });
+
+  it('draws a two-objective front as a scatter and marks who is on it', async () => {
+    open('suggest_next_experiment', JSON.stringify(MULTI));
+
+    const chart = await screen.findByRole('img', {
+      name: /Trade-off between yield and impurity/,
+    });
+    // Both objective names AND both directions, in the axis labels' own "name · direction" form
+    // rather than the bare phrase — the <desc> the accessible name comes from carries the phrase
+    // too, so matching it would leave the axes themselves unpinned.
+    expect(chart.textContent).toContain('yield · ↑ higher is better');
+    expect(chart.textContent).toContain('impurity · ↓ lower is better');
+    // Front membership is a label, never colour alone — three runs, three labelled rows.
+    expect(screen.getAllByText('on the front')).toHaveLength(3);
+    // And the runs that are NOT on it are accounted for rather than silently absent: this result
+    // carries only the front, so the count is stated instead of drawn.
+    expect(screen.getByText(/the other 2 are beaten on every objective at once/)).toBeTruthy();
+    expect(screen.getByText(/Runs differing by 0.5 or less/)).toBeTruthy();
+  });
+
+  it('refuses a 2-D scatter for three objectives and says why', async () => {
+    // A three-objective front on two axes drops one of them, and a reader cannot see that it
+    // happened. The table is the honest answer.
+    open(
+      'suggest_next_experiment',
+      JSON.stringify({
+        campaign_id: 'bo-3obj',
+        candidates: [
+          {
+            params: { temperature_c: 70.0 },
+            predicted_value: 80.0,
+            predicted_sd: 2.0,
+            predicted_values: {},
+            predicted_sds: {},
+          },
+        ],
+        requested: 1,
+        calc_refs: [],
+        scale: {
+          name: 'yield',
+          direction: 'maximize',
+          n: 3,
+          observed_min: 51.0,
+          observed_max: 86.4,
+        },
+        scales: [
+          { name: 'yield', direction: 'maximize', n: 3, observed_min: 51.0, observed_max: 86.4 },
+          { name: 'impurity', direction: 'minimize', n: 3, observed_min: 0.9, observed_max: 3.1 },
+          { name: 'cost', direction: 'minimize', n: 3, observed_min: 12.0, observed_max: 30.0 },
+        ],
+        front: [
+          {
+            params: { temperature_c: 40.0 },
+            value: 51.0,
+            values: { yield: 51.0, impurity: 0.9, cost: 12.0 },
+            provenance: 'measured',
+            surrogate_sd: null,
+          },
+          {
+            params: { temperature_c: 80.0 },
+            value: 86.4,
+            values: { yield: 86.4, impurity: 3.1, cost: 30.0 },
+            provenance: 'measured',
+            surrogate_sd: null,
+          },
+        ],
+        front_tolerance: null,
+        opened_new_campaign: false,
+        summary: 'This is a trade-off over 3 objectives.',
+      }),
+    );
+
+    expect(await screen.findByText(/cannot be drawn as a two-axis scatter/)).toBeTruthy();
+    expect(screen.queryByRole('img', { name: /Trade-off between/ })).toBeNull();
+    // The front is still answered, and all three axes are columns of it.
+    expect(screen.getAllByText('on the front')).toHaveLength(2);
+    expect(screen.getByRole('columnheader', { name: 'cost' })).toBeTruthy();
+    // Drawn at exact precision, which upstream says is usually a shorter front than the truth.
+    expect(screen.getByText(/every numeric difference counted as real/)).toBeTruthy();
+  });
+
+  it('says a new campaign was opened, which is the one thing the summary never mentions', async () => {
+    // The tool's own docstring is imperative about this: "If `opened_new_campaign` comes back true,
+    // say so before presenting the candidates." It means the decision space drifted and the history
+    // is now split in two, and the computed `summary` says nothing about it.
+    open('suggest_next_experiment', JSON.stringify({ ...MULTI, opened_new_campaign: true }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toMatch(/new campaign was opened/);
+    expect(alert.textContent).toMatch(/split across two campaigns/);
+  });
+
+  it('does not claim a front for a campaign with nothing measured yet', async () => {
+    open(
+      'suggest_next_experiment',
+      JSON.stringify({
+        ...MULTI,
+        candidates: [MULTI.candidates[1]],
+        front: [],
+        scales: MULTI.scales.map((scale) => ({
+          ...scale,
+          n: 0,
+          observed_min: null,
+          observed_max: null,
+          observed_sd: null,
+        })),
+        summary: 'no runs were supplied, so there is no front yet',
+      }),
+    );
+
+    expect(await screen.findByText(/nothing has been measured/)).toBeTruthy();
+    expect(screen.queryByRole('img', { name: /Trade-off between/ })).toBeNull();
+    // And a ± with nothing to be read against is stated as such rather than left implied.
+    expect(screen.getAllByText(/has nothing to be read against/).length).toBeGreaterThan(0);
+  });
+});
+
+describe('a surrogate prediction', () => {
+  const ANSWER = {
+    predictions: [
+      {
+        params: { temperature_c: 90.0, ligand: 'L2' },
+        values: { yield: 84.31 },
+        sds: { yield: 2.6 },
+        in_domain: true,
+        summary:
+          'The model predicts yield 84.31 ± 2.6 here. This is an answer about a point you named, ' +
+          'not a recommendation to run it.',
+      },
+      {
+        params: { temperature_c: 400.0, ligand: 'L2' },
+        values: { yield: 131.7 },
+        sds: { yield: 16.08 },
+        in_domain: false,
+        summary:
+          'The model predicts yield 131.7 ± 16.1 here. This point is **outside** the declared ' +
+          'range, so the model is extrapolating.',
+      },
+    ],
+    fit: [{ objective: 'yield', r2: 0.93, mae: 1.42, folds: 5, n_observations: 8, summary: '' }],
+    summary: 'Cross-validated on 8 run(s) over 5 folds, R² 0.93 and mean absolute error 1.4.',
+  };
+
+  it('marks an out-of-domain prediction as an extrapolation', async () => {
+    open('predict_outcome', JSON.stringify(ANSWER));
+
+    // The backend deliberately answers rather than refuses here, and returns the number *plus* the
+    // fact that it is an extrapolation. Printing the mean and losing the flag turns a qualified
+    // answer into an unqualified one, which is worse than not rendering it at all.
+    expect(await screen.findByText('extrapolation')).toBeTruthy();
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toMatch(/outside the declared range/);
+    expect(alert.textContent).toMatch(/nothing constrains the mean/);
+    // The in-range point is labelled too, so the mark means something by contrast.
+    expect(screen.getByText('inside the declared space')).toBeTruthy();
+  });
+
+  it('keeps each prediction with its own uncertainty and its own caveat', async () => {
+    open('predict_outcome', JSON.stringify(ANSWER));
+
+    expect(await screen.findByText('84.31')).toBeTruthy();
+    expect(screen.getByText('± 2.6')).toBeTruthy();
+    expect(screen.getByText('131.7')).toBeTruthy();
+    expect(screen.getByText('± 16.08')).toBeTruthy();
+    // Per prediction, not pooled: unlike the fit summaries, this sentence is about one point.
+    expect(screen.getByText(/not a recommendation to run it/)).toBeTruthy();
+  });
+
+  it('reports the fit quality the predictions have to be read against', async () => {
+    open('predict_outcome', JSON.stringify(ANSWER));
+
+    expect(await screen.findByText('R² 0.93')).toBeTruthy();
+    expect(screen.getByText(/5 folds over 8 run\(s\)/)).toBeTruthy();
+  });
+});

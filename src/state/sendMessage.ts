@@ -9,12 +9,27 @@ import { api } from '../api/client.ts';
 import { config } from '../env.ts';
 import { prefetchMarkdown } from '../components/LazyMarkdown.tsx';
 import { ApiError } from '../api/errors.ts';
-import { streamTurn } from '../api/streamTurn.ts';
+import { streamTurn, TURN_STALL_MS } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import type { ComposerLock } from './types.ts';
 import { useChatStore } from './chatStore.ts';
 import { useEntityStore } from '../chem/entities.ts';
 import { announceStatus, describeAnswer } from './announce.ts';
+import { logger } from '../lib/logger.ts';
+
+/**
+ * What the reader is told when Stop was pressed and the server never confirmed it.
+ *
+ * The turn keeps running server-side — holding the session's turn lock and spending budget — so
+ * the 409 their next message gets is a consequence of this, not a fault of their own. Saying so
+ * here is what turns that 409 from "the app is broken" into something they were warned about.
+ */
+const STOP_UNCONFIRMED =
+  'Stopped here, but the server did not confirm it. The turn may still be running, so the next ' +
+  'message may be refused until it finishes.';
+
+/** How long the announcement waits for the stop request before saying the ordinary thing. */
+const STOP_CONFIRM_TIMEOUT_MS = 2_000;
 
 export interface SendOptions {
   conversationId: string;
@@ -135,25 +150,113 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   if (store.composerLock) return;
   if (!text.trim()) return;
 
-  store.appendUserMessage(conversationId, text);
-  const messageId = store.startAssistantMessage(conversationId);
+  // Snapshotted before `appendUserMessage` — which now runs inside the `try` below — adds this
+  // turn's own copy, so a repeated identical question can still be told apart from its own prior
+  // appearances once detach recovery has to find it in the *backend's* transcript by text alone
+  // (see `recoverDetachedAnswer`). It stays out here because it is a read: it is the store
+  // *writes* that had to move inside the `try`, and this one must happen before them either way.
+  const priorOccurrences = (store.conversations[conversationId]?.messages ?? []).filter(
+    (m) => m.role === 'user' && m.text === text,
+  ).length;
 
   const abort = new AbortController();
+
+  /** When Send was pressed. The client half of a turn's timing, which the service cannot see. */
+  const startedAt = Date.now();
+  let firstTokenAt: number | null = null;
+  let answeredAt: number | null = null;
+  /** The service's id for this turn, for the log lines below and for the store. */
+  let correlationId = '';
+  /** Frames this build could not use. One is forward compatibility; every one is a version skew. */
+  const dropped = { malformed: 0, unknown: 0, types: new Set<string>() };
+  /**
+   * What the explicit Stop reported, awaited before the reader is told what happened.
+   *
+   * `api.stopTurn` resolves `false` when the backend has no such route and THROWS on a 500/503,
+   * and both outcomes used to be discarded — after which the user was reliably told "Stopped
+   * before the answer was complete" while the turn kept running server-side, kept spending budget
+   * and kept the session's turn lock, so their next message came back 409 and was rendered as a
+   * "reset the conversation" banner: an app bug to a chemist and nothing at all to an operator.
+   */
+  let stopOutcome: Promise<'stopped' | 'unconfirmed'> | null = null;
+
+  /** Assigned inside the try, and read by the catch and finally below. */
+  let messageId = '';
+
   const stop = (): void => {
     // Server first, then socket: the backend detaches on disconnect
     // (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so aborting the fetch alone would
     // leave the turn running — and the session 409-busy — for its whole remaining duration.
-    // Fire-and-forget: the abort below is what the UI reacts to, and a stop that raced the
-    // turn's own completion resolves `false` harmlessly.
     const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
-    if (sessionId) void api.stopTurn(sessionId, () => auth.getAccessToken()).catch(() => undefined);
+    if (sessionId) {
+      stopOutcome = api
+        .stopTurn(sessionId, () => auth.getAccessToken())
+        .then((stopped) => {
+          if (stopped) return 'stopped' as const;
+          // `false` is "there was nothing to stop": the turn finished in the race, or this backend
+          // predates the route. Not an error, but not a confirmation either.
+          logger.warn('turn.stop_not_confirmed', { sessionId });
+          return 'unconfirmed' as const;
+        })
+        .catch((err: unknown) => {
+          logger.error('turn.stop_failed', {
+            sessionId,
+            kind: err instanceof ApiError ? err.kind : 'unknown',
+            status: err instanceof ApiError ? err.status : undefined,
+          });
+          return 'unconfirmed' as const;
+        });
+    }
+    // Unconditional and immediate, whatever the server ends up saying: the local half of Stop —
+    // stop rendering, release the composer — is right either way, and waiting on a request that
+    // may be the thing that is broken would freeze the one control the user reached for.
     abort.abort();
   };
-  store.setStreaming({ conversationId, messageId, abort, stop });
-  store.setComposerLock('turn_in_flight');
-  store.setBanner(null);
 
-  const batcher = createTokenBatcher(conversationId, messageId);
+  const warnStopUnconfirmed = (): void => {
+    useChatStore.getState().setBanner({ kind: 'warn', text: STOP_UNCONFIRMED });
+    announceStatus('Stopped here; the server did not confirm the turn was cancelled.');
+  };
+
+  /**
+   * Say what Stop actually achieved.
+   *
+   * Both stop paths come through here — the one that ends the stream and the one that abandons
+   * recovery — so the wording cannot drift between them.
+   *
+   * The wait is BOUNDED, and that is not a detail: `api.stopTurn` has no timeout of its own, and
+   * "the server stopped answering" is one of the states this is trying to report, so an unbounded
+   * await would hang the turn's own promise on exactly the failure it exists to describe — leaving
+   * `streaming` occupied and the Stop control on screen for ever. Past the bound the reader is told
+   * the ordinary thing and the answer, if it ever comes, corrects it.
+   */
+  const announceStop = async (): Promise<void> => {
+    if (!stopOutcome) {
+      announceStatus('Stopped before the answer was complete.');
+      return;
+    }
+    const pending = stopOutcome;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      pending,
+      new Promise<'pending'>((resolve) => {
+        timer = setTimeout(() => resolve('pending'), STOP_CONFIRM_TIMEOUT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+
+    if (outcome === 'unconfirmed') {
+      warnStopUnconfirmed();
+      return;
+    }
+    announceStatus('Stopped before the answer was complete.');
+    // Still in flight: whatever it eventually says, say it then rather than blocking on it.
+    if (outcome === 'pending') {
+      void pending.then((late) => {
+        if (late === 'unconfirmed') warnStopUnconfirmed();
+      });
+    }
+  };
 
   /**
    * Set the composer lock, but only while this turn is still the one the app is waiting on.
@@ -175,18 +278,52 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       dryRun,
       signal: abort.signal,
       getToken: () => auth.getAccessToken(),
+      onCorrelationId(id) {
+        // Kept in three places, each for a different reader: the store, so the trace panel can
+        // show a reference on a turn that SUCCEEDED; the logger's context, so every subsequent
+        // entry from this browser carries it; and here, so the banner below can quote it even
+        // when the failure carried none of its own.
+        correlationId = id;
+        logger.setContext({ correlationId: id });
+        useChatStore.getState().setCorrelationId(conversationId, messageId, id);
+      },
+      onStall(stalled) {
+        useChatStore.getState().setTurnStalled(conversationId, messageId, stalled);
+        if (stalled) logger.warn('turn.stalled', { sessionId, afterMs: TURN_STALL_MS });
+        else logger.info('turn.resumed', { sessionId });
+      },
+      onFrameDropped(drop) {
+        if (drop.reason === 'malformed') dropped.malformed += 1;
+        else dropped.unknown += 1;
+        if (drop.type) dropped.types.add(drop.type);
+      },
       onEvent(event) {
         if (event.type === 'token') {
+          // The first sign the chain is moving, and the client half of a measurement the service
+          // cannot take: it knows when it started generating, not when the bytes reached a browser.
+          firstTokenAt ??= Date.now();
           // Unattributed tokens only, which is the backend's own rule for this stream: a token
           // carrying an `agent` is a subagent's working prose, and concatenating it splices
           // another agent's notes into the answer a chemist reads. Invisible most of the time
           // because the root-only `answer` event replaces the render — and not invisible at all
           // when the turn is stopped, times out, or hits the loop cap, where the streamed text is
           // what is kept and persisted.
-          if (!event.agent) batcher.push(event.text);
+          if (!event.agent) batcher?.push(event.text);
           return;
         }
-        batcher.flush();
+        batcher?.flush();
+        if (event.type === 'answer') answeredAt = Date.now();
+        // The one event that says why the model routed around a broken tool. It is rendered in
+        // the trace panel — one click away — and until now it reached nobody outside this tab.
+        if (event.type === 'tool_failed') {
+          logger.warn('tool.failed', {
+            tool: event.tool,
+            // A plan-gate refusal is the control working, not a fault, and the two must not read
+            // the same in a log any more than they do on screen.
+            reason: event.reason ?? 'error',
+            ...(event.agent ? { agent: event.agent } : {}),
+          });
+        }
         // A queued turn is the one state a listener cannot infer from silence: nothing is
         // running yet, and without this the wait is indistinguishable from a hang.
         if (event.type === 'queued') announceStatus('Waiting for a free slot on the server.');
@@ -199,7 +336,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         void useEntityStore.getState().ingest(conversationId, messageId, event);
       },
     });
-    batcher.flush();
+    batcher?.flush();
   };
 
   // Guards a single recovery attempt each. Booleans, not a loop: retrying a turn costs real
@@ -208,9 +345,29 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   let recreatedSession = false;
   let reauthed = false;
 
+  /** Created with the message id, so it cannot exist before the message it batches into does. */
+  let batcher: ReturnType<typeof createTokenBatcher> | null = null;
+
   try {
+    // The turn's five setup writes, INSIDE the try.
+    //
+    // They ran before it, and `Composer` floats this promise with `void` — no handler, and (until
+    // `main.tsx` grew one) no global listener either. So a throw in any of them, which is a real
+    // class rather than a hypothetical one (`chatStore` records a `QuotaExceededError` that
+    // produced "no bubble, no answer, no banner, no lock — Send did nothing, for ever"), was an
+    // unhandled rejection. The storage layer swallowing that one exception fixed the instance;
+    // this closes the shape.
+    logger.setContext({ correlationId: '', sessionId: '' });
+    store.appendUserMessage(conversationId, text);
+    messageId = store.startAssistantMessage(conversationId);
+    store.setStreaming({ conversationId, messageId, abort, stop });
+    store.setComposerLock('turn_in_flight');
+    store.setBanner(null);
+    batcher = createTokenBatcher(conversationId, messageId);
+
     for (;;) {
       const sessionId = await ensureSession(conversationId, auth);
+      logger.setContext({ sessionId });
       try {
         await runOnce(sessionId);
         useChatStore.getState().finishTurn(conversationId, messageId, 'done');
@@ -250,7 +407,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         ? err
         : new ApiError('stream', err instanceof Error ? err.message : 'The turn failed.');
 
-    batcher.flush();
+    batcher?.flush();
 
     // The signal, not only the error kind: a Stop pressed just as the server ends the stream
     // surfaces as a `stream` error with the abort already set, and that is a stop, not a drop —
@@ -258,7 +415,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     if (apiError.kind === 'aborted' || abort.signal.aborted) {
       useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
       releaseComposer(false);
-      announceStatus('Stopped before the answer was complete.');
+      await announceStop();
       return;
     }
 
@@ -274,7 +431,13 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           text: 'Connection lost — the turn is still running on the server; recovering the answer…',
         });
         announceStatus('Connection lost; waiting for the server to finish the turn.');
-        const recovered = await recoverDetachedAnswer(sessionId, opts.text, abort.signal, auth);
+        const recovered = await recoverDetachedAnswer(
+          sessionId,
+          opts.text,
+          priorOccurrences,
+          abort.signal,
+          auth,
+        );
         if (recovered !== null) {
           useChatStore.getState().applyEvent(conversationId, messageId, {
             type: 'answer',
@@ -294,7 +457,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
           useChatStore.getState().setComposerLock(false);
           useChatStore.getState().setBanner(null);
-          announceStatus('Stopped before the answer was complete.');
+          await announceStop();
           return;
         }
       }
@@ -303,6 +466,12 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // Failures are NOT announced here. `failTurn` raises a banner that already carries
     // `role="alert"`, and a second polite announcement of the same sentence reads it twice.
 
+    logger.error('turn.failed', {
+      kind: apiError.kind,
+      ...(apiError.status ? { status: apiError.status } : {}),
+      retryable: apiError.retryable,
+    });
+
     useChatStore
       .getState()
       .failTurn(conversationId, messageId, { kind: apiError.kind, message: apiError.message });
@@ -310,9 +479,13 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // The service's own id for the failed turn, when it sent one. Appended to the banner text
     // rather than given a field of its own: it is the one thing a support conversation needs and
     // nothing in the UI can act on it, so it belongs where it can be selected and copied.
-    const text = apiError.correlationId
-      ? `${apiError.message} (reference ${apiError.correlationId})`
-      : apiError.message;
+    // `correlationId` is the turn's, read back from the response header or a frame that carried
+    // one; the error's own wins when it has one. Before this, every HTTP-level failure — 401, 409,
+    // 422, 429, 503, a network drop, a mid-stream disconnect — printed no reference at all, so the
+    // one string a support conversation needs existed on the server and nowhere a chemist could
+    // see it.
+    const reference = apiError.correlationId || correlationId;
+    const text = reference ? `${apiError.message} (reference ${reference})` : apiError.message;
 
     // The chemist's question, back where they typed it. `Composer` clears the draft at submit,
     // so before this a failed turn also destroyed the message — the "Retry" on the banner is a
@@ -320,6 +493,26 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // whatever they have typed since is newer than this.
     if (!useChatStore.getState().drafts[conversationId]) {
       useChatStore.getState().setDraft(conversationId, opts.text);
+    }
+
+    // A rate limit is a pause with a number on it, and the number is the service's own: the
+    // per-principal limiter computes how long until one token refills and sends it as
+    // `Retry-After` precisely so a client waits the right amount. So the composer stays open, the
+    // question is already back in the draft above, and the banner counts the wait down.
+    //
+    // Deliberately not an automatic re-send. Nothing in this app has ever re-posted a turn on the
+    // user's behalf — the banner's Retry re-reads the transcript — and a client that resends on a
+    // timer turns one refused request into a queue of them against the very budget it is waiting
+    // on. The countdown says when; the human still presses Send.
+    if (apiError.kind === 'rate_limited') {
+      releaseComposer(false);
+      const seconds = Math.ceil(apiError.retryAfterSeconds);
+      useChatStore.getState().setBanner({
+        kind: 'warn',
+        text: `${text} Try again in ${seconds} s.`,
+        retryAfterSeconds: seconds,
+      });
+      return;
     }
 
     // A budget that is genuinely gone is terminal — it does not replenish because somebody
@@ -348,6 +541,31 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   } finally {
     const streaming = useChatStore.getState().streaming;
     if (streaming?.messageId === messageId) useChatStore.getState().setStreaming(null);
+
+    // The client half of the turn's timing. It composes with the service's own turn span, which
+    // cannot see any of these three: when the chemist pressed Send, when the first byte reached
+    // this browser, and when the answer settled. Together they are what answers "is it the
+    // frontend or the backend?" — a question nothing in this app could contribute to before.
+    const settled = useChatStore
+      .getState()
+      .conversations[conversationId]?.messages.find((m) => m.id === messageId);
+    logger.info('turn.timing', {
+      outcome: settled?.role === 'assistant' ? settled.status : 'unstarted',
+      firstTokenMs: firstTokenAt === null ? null : firstTokenAt - startedAt,
+      answerMs: answeredAt === null ? null : answeredAt - startedAt,
+      totalMs: Date.now() - startedAt,
+    });
+
+    // Dropping a malformed or unknown frame is right and is pinned by tests. Doing it silently is
+    // what made "one bad frame" and "this build cannot read anything a newer service sends" the
+    // same observation.
+    if (dropped.malformed > 0 || dropped.unknown > 0) {
+      logger.warn('stream.frames_dropped', {
+        malformed: dropped.malformed,
+        unknown: dropped.unknown,
+        types: [...dropped.types],
+      });
+    }
   }
 }
 
@@ -355,14 +573,23 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
  * Read a detached turn's answer back from the transcript, or `null` when it never appears.
  *
  * The detached turn writes its exchange to `session_messages` at its true end, so the recovery
- * signal is an assistant entry following the last transcript entry that carries this turn's own
+ * signal is an assistant entry following the transcript entry that carries this turn's own
  * question. Bounded — the server's turn deadline is 600 s, and polling much past it would wait
  * on a turn that can no longer exist — and abandoned early if the user presses Stop, whose
  * `stop()` both cancels the server turn and flips this signal.
+ *
+ * The wire carries no turn id, so the question text is all there is to match on — but a chemist
+ * retrying an identical failed question (the banner's own "Retry" refills the same text) makes
+ * that text non-unique. `priorOccurrences` is how many times this exact question already sat in
+ * the transcript *before this turn started*; skipping that many matches finds this turn's own
+ * copy instead of an older, already-answered one. Until the backend commits this turn's copy,
+ * that many occurrences is all there is, so the search correctly keeps polling rather than
+ * returning a stale answer.
  */
 async function recoverDetachedAnswer(
   sessionId: string,
   question: string,
+  priorOccurrences: number,
   signal: AbortSignal,
   auth: AuthProvider,
 ): Promise<string | null> {
@@ -372,11 +599,27 @@ async function recoverDetachedAnswer(
     let transcript;
     try {
       transcript = await api.getMessages(sessionId, () => auth.getAccessToken());
-    } catch {
-      continue; // the network that dropped the stream may still be flapping — keep trying
+    } catch (err) {
+      // The network that dropped the stream may still be flapping — keep trying, and leave a
+      // record. Recovery giving up after ten minutes of this used to look, from outside the
+      // browser, exactly like recovery never having been attempted.
+      logger.debug('recovery.poll_failed', {
+        kind: err instanceof ApiError ? err.kind : 'unknown',
+      });
+      continue;
     }
-    const asked = transcript.map((m) => (m.role === 'user' ? m.text : null)).lastIndexOf(question);
-    if (asked === -1) continue; // the turn has not committed its exchange yet
+    let seen = 0;
+    let asked = -1;
+    for (let i = 0; i < transcript.length; i += 1) {
+      const entry = transcript[i];
+      if (!entry || entry.role !== 'user' || entry.text !== question) continue;
+      if (seen === priorOccurrences) {
+        asked = i;
+        break;
+      }
+      seen += 1;
+    }
+    if (asked === -1) continue; // this turn's own copy has not committed yet
     const answer = transcript
       .slice(asked + 1)
       .find((m) => m.role === 'assistant' && m.text.trim() !== '');

@@ -11,7 +11,7 @@
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { normalizeEvent } from '../shared/events.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { StatusStrip } from '../src/components/StatusStrip.tsx';
@@ -146,5 +146,61 @@ describe('tool_failed', () => {
     );
     // The panel is collapsed by default; the toggle counts the step either way.
     expect(screen.getByText(/1 step/)).toBeTruthy();
+  });
+
+  it('counts the failures into the collapsed trigger, where somebody will see them', () => {
+    // A turn where tools failed used to read exactly like one where they did not: the trigger
+    // said "N steps" and the only event that says WHY the model routed around a broken tool was
+    // one click away, behind a disclosure nobody opens. `capability_degraded` is surfaced above
+    // the answer for the same reason; this is the same treatment for a failure inside an answer
+    // that still arrived.
+    render(
+      <TracePanel
+        trace={[
+          {
+            id: 't1',
+            at: 0,
+            kind: 'tool_call',
+            toolCall: { tool: 'gather_evidence', arguments: '' },
+          },
+          {
+            id: 't2',
+            at: 1,
+            kind: 'tool_failed',
+            toolFailure: { tool: 'predict_pka', message: 'connector timed out' },
+          },
+          {
+            id: 't3',
+            at: 2,
+            kind: 'tool_failed',
+            toolFailure: { tool: 'solubility', message: 'connector timed out' },
+          },
+        ]}
+      />,
+    );
+    // Named rather than totalled: `2 to look at` on the trigger, and the kind said properly inside,
+    // because a reader's next move on a failure differs from their next move on a refusal.
+    const trigger = screen.getByRole('button', { name: /The agent’s work/ });
+    expect(trigger.textContent).toContain('3 steps');
+    expect(trigger.textContent).toContain('2 to look at');
+    fireEvent.click(trigger);
+    expect(screen.getByText('2 failures')).toBeTruthy();
+  });
+
+  it('says nothing about failures on a turn that had none', () => {
+    render(
+      <TracePanel
+        trace={[
+          {
+            id: 't1',
+            at: 0,
+            kind: 'tool_call',
+            toolCall: { tool: 'gather_evidence', arguments: '' },
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText(/1 step\b/)).toBeTruthy();
+    expect(screen.queryByText(/failed/)).toBeNull();
   });
 });

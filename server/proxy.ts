@@ -18,6 +18,30 @@ import https from 'node:https';
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 import { cfg } from './config.ts';
 import { log } from './log.ts';
+import { upstreamErrorRecorded } from './metrics.ts';
+
+/**
+ * What one proxied request tells the access log about itself.
+ *
+ * Passed in and mutated rather than returned, because the two facts worth recording — how long the
+ * upstream took and the correlation id it answered with — are known at different moments, and both
+ * are known before `res` finishes, which is when the line is written.
+ */
+export interface ProxyTrace {
+  /** Milliseconds from opening the upstream request to its response headers. Null if none came. */
+  upstreamMs: number | null;
+  /** The service's own id for this request, read back from its response header. */
+  correlationId: string;
+}
+
+/**
+ * The response header the Chemclaw service stamps its per-request correlation id on.
+ *
+ * Read here and forwarded to the browser by the header copy below (it is neither hop-by-hop nor
+ * BFF-owned, so it already crosses) — and written into this process's access log, which is what
+ * lets one line here be joined to the service's own record of the same request.
+ */
+const CORRELATION_HEADER = 'x-chemclaw-correlation-id';
 
 const upstream = new URL(cfg.apiUrl);
 const transport = upstream.protocol === 'https:' ? https : http;
@@ -128,7 +152,11 @@ function buildUpstreamHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
 
 /** Refuse a body this process will not carry, in the shape FastAPI's own errors have. */
 function refuseTooLarge(req: IncomingMessage, res: ServerResponse, maxBodyBytes: number): void {
-  log.warn(`refused ${req.method} ${req.url}: body over ${maxBodyBytes} bytes`);
+  log.warn('refused body over cap', {
+    method: req.method,
+    path: req.url,
+    max_bytes: maxBodyBytes,
+  });
   if (!res.headersSent) {
     res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
     res.end(JSON.stringify({ detail: 'request body too large' }));
@@ -142,7 +170,10 @@ export function proxy(
   upstreamPath: string,
   expectSse: boolean,
   maxBodyBytes: number = cfg.maxBodyBytes,
+  /** Filled in as the request runs; the access log reads it when the response finishes. */
+  trace?: ProxyTrace,
 ): void {
+  const startedAt = Date.now();
   // The cheap check first: a declared length over the cap is refused without opening an upstream
   // request at all, which is what stops a 100 MB body from being buffered by the backend before
   // its own validator can reject it.
@@ -163,6 +194,13 @@ export function proxy(
       agent,
     },
     (upstreamRes) => {
+      if (trace) {
+        trace.upstreamMs = Date.now() - startedAt;
+        const correlation = upstreamRes.headers[CORRELATION_HEADER];
+        trace.correlationId = Array.isArray(correlation)
+          ? (correlation[0] ?? '')
+          : (correlation ?? '');
+      }
       const out: http.OutgoingHttpHeaders = {};
       for (const [key, value] of Object.entries(upstreamRes.headers)) {
         if (value === undefined || HOP_BY_HOP.has(key) || BFF_OWNED.has(key)) continue;
@@ -210,12 +248,19 @@ export function proxy(
   /**
    * Propagate a client disconnect into the upstream request.
    *
-   * This is the single most important line in the file. The backend serialises turns per session
-   * and there is no cancel endpoint: if the user presses Stop (or closes the tab) and we leave the
-   * upstream request open, the turn keeps running, keeps spending budget, and keeps holding the
-   * session's turn slot — so the next message comes back 409 "a turn is already running". FastAPI
-   * cancels the handler on client disconnect, so destroying the socket here is what actually
-   * releases that lock.
+   * This used to be the single most important line in the file, and the reason given for it is now
+   * wrong: destroying the socket does not cancel anything.
+   * `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop` separated the two meanings a closed stream
+   * carried, because the backend could not tell Stop from a Wi-Fi handoff and killed ten-minute
+   * turns for the latter. A disconnect **detaches** — the turn runs to completion on the
+   * service's own pump task and writes its transcript — and cancelling is an explicit
+   * `POST /sessions/{id}/turn/stop`, which the SPA sends before it aborts the fetch
+   * (`src/state/sendMessage.ts`) and which `server/routes.ts` whitelists.
+   *
+   * It stays, for what it does do. The service discards events once its reader is gone, so the
+   * detach is what stops it buffering for nobody; and leaving a half-read upstream response open
+   * holds a socket and a `pipe` in this process for as long as the turn lasts. Neither is the turn
+   * lock — a session stays 409-busy now for exactly as long as a turn is genuinely running.
    */
   res.on('close', () => {
     if (!res.writableFinished) upstreamReq.destroy();
@@ -229,7 +274,13 @@ export function proxy(
       if (!res.writableEnded) res.destroy();
       return;
     }
-    log.warn(`upstream error for ${req.method} ${upstreamPath}: ${err.message}`);
+    upstreamErrorRecorded();
+    log.warn('upstream error', {
+      method: req.method,
+      path: upstreamPath,
+      code: err.code ?? 'EPROXY',
+      error: err.message,
+    });
     res.writeHead(502, { 'content-type': 'application/json', connection: 'close' });
     res.end(JSON.stringify({ detail: 'upstream unavailable', code: err.code ?? 'EPROXY' }));
     // And hang up on a body still arriving. Node stops enforcing `requestTimeout` once the

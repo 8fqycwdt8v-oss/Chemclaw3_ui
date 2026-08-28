@@ -134,6 +134,51 @@ describe('a 401 on a plain route', () => {
   });
 });
 
+describe('the token provider failing before any request is opened', () => {
+  /**
+   * `getAccessToken` throwing is not the same fault as the fetch it never reaches throwing.
+   * `msalAuth.getAccessToken` rethrows a silent-refresh failure that is not
+   * `InteractionRequiredAuthError` on purpose, rather than resolving it into a forced redirect —
+   * so this failure must not be read by `sendMessage` as `kind: 'network'`, which is exactly what
+   * happened before `'token_unavailable'` existed: a bare, non-`ApiError` rejection escaped
+   * `request` entirely and was wrapped by `sendMessage`'s outer catch as `kind: 'stream'`, sending
+   * a request that was never opened into a ten-minute poll of a session that may not even exist
+   * yet (the very call that would have created it is the one that failed).
+   */
+  it('rejects as token_unavailable, retryable, and never calls fetch', async () => {
+    const stub = stubFetch(() => jsonError(500, 'must not be reached'));
+    restore = stub.restore;
+    const auth: AuthProvider = {
+      mode: 'msal',
+      account: null,
+      getAccessToken: () => Promise.reject(new Error('acquireTokenSilent: network is down')),
+      login: async () => undefined,
+      logout: async () => undefined,
+      handleUnauthorized: async () => false,
+    };
+
+    const err = await api.createSession(auth).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).kind).toBe('token_unavailable');
+    expect((err as ApiError).retryable).toBe(true);
+    expect(stub.calls).toHaveLength(0);
+  });
+
+  it('is the same failure for a bare token getter, not only a full AuthProvider', async () => {
+    const stub = stubFetch(() => jsonError(500, 'must not be reached'));
+    restore = stub.restore;
+
+    const err = await api
+      .listSessions(() => Promise.reject(new Error('token store is corrupt')))
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).kind).toBe('token_unavailable');
+    expect(stub.calls).toHaveLength(0);
+  });
+});
+
 describe('the routes that swallow a 404', () => {
   it('still recover a 401, because an empty list and a signed-out user are different things', async () => {
     let call = 0;

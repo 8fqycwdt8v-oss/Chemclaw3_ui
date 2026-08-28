@@ -14,7 +14,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
-import { rendererFor, toCsv } from '../src/results/renderers.tsx';
+import { rendererFor, toCsv, type ResultRenderer } from '../src/results/renderers.tsx';
 import type { Json } from '../src/results/shape.ts';
 
 vi.mock('../src/auth/AuthContext.tsx', () => ({
@@ -23,10 +23,18 @@ vi.mock('../src/auth/AuthContext.tsx', () => ({
 
 afterEach(cleanup);
 
-const pick = (tool: string, payload: unknown): { id: string; wide: boolean; data: Json } => {
+const pick = (
+  tool: string,
+  payload: unknown,
+): { id: string; wide: boolean; data: Json; renderer: ResultRenderer } => {
   const found = rendererFor(tool, payload);
   if (!found) throw new Error('no renderer');
-  return { id: found.renderer.id, wide: found.renderer.wide, data: found.data };
+  return {
+    id: found.renderer.id,
+    wide: found.renderer.wide,
+    data: found.data,
+    renderer: found.renderer,
+  };
 };
 
 const draw = (tool: string, payload: unknown, compact: boolean): void => {
@@ -61,8 +69,42 @@ describe('dispatch', () => {
   });
 
   it('finds a series by a run of numbers, and names it by the key the service chose', () => {
-    const picked = pick('campaign_progress', { running_best: [41, 52, 58, 63, 71] });
+    // A tool name the registry has never heard of, which is the point of the shape dispatch and
+    // deliberately not `campaign_progress` — that one now has a typed renderer of its own, so
+    // using it here would have tested the name-keyed path while claiming to test the shape one.
+    const picked = pick('yield_over_time', { running_best: [41, 52, 58, 63, 71] });
     expect(picked.id).toBe('series');
+  });
+
+  it('gives the three campaign shapes their own renderers, by name', () => {
+    // Keyed on tool name deliberately: a plateau reading, a batch of proposals with a Pareto front
+    // and a prediction with an in-domain flag share no field worth dispatching on. Each carries one
+    // fact a generic table loses — the assay noise the gains are read against, a front with no
+    // single best point, and a number produced by extrapolating.
+    expect(pick('campaign_progress', { best_so_far: [1, 2, 3] }).id).toBe('campaign');
+    expect(pick('suggest_next_experiment', { candidates: [] }).id).toBe('proposals');
+    expect(pick('predict_outcome', { predicted_value: 82, in_domain: false }).id).toBe(
+      'prediction',
+    );
+  });
+
+  it('says an extrapolated prediction is extrapolated, in the header', () => {
+    // The one fact the number cannot carry on its own: a prediction outside the space the surrogate
+    // was fitted on reads identically to one inside it.
+    const outside = pick('predict_outcome', { predicted_value: 82, in_domain: false });
+    expect(outside.renderer.summary?.(outside.data)?.text).toBe('extrapolated');
+    const inside = pick('predict_outcome', { predicted_value: 82, in_domain: true });
+    expect(inside.renderer.summary?.(inside.data)).toBeNull();
+  });
+
+  it('withholds a plateau verdict the service withheld', () => {
+    // The backend computes `plateaued` as `enough and since >= window`, so on two runs it is
+    // `false` — and a chip reading "still improving" there would answer a question the service
+    // explicitly declined. Three states, never two.
+    const few = pick('campaign_progress', { enough_observations: false, plateaued: false });
+    expect(few.renderer.summary?.(few.data)?.text).toBe('too few runs to say');
+    const done = pick('campaign_progress', { enough_observations: true, plateaued: true });
+    expect(done.renderer.summary?.(done.data)?.text).toBe('plateaued');
   });
 
   it('finds a value strip only when there is no record list to tabulate', () => {

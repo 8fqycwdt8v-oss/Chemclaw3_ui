@@ -5,6 +5,7 @@ import type { AuthProvider } from '../src/auth/types.ts';
 import {
   answerEvent,
   brokenSseResponse,
+  errorEvent,
   jsonError,
   sseFrames,
   sseResponse,
@@ -361,6 +362,200 @@ describe('sendMessage', () => {
     });
   });
 
+  describe('a repeated identical question, mid detach-recovery', () => {
+    it('does not return the earlier answer to the same question as this turn’s recovered answer', async () => {
+      // The chemist asks 'dup?', gets an answer, then asks the exact same text again (e.g. via
+      // the failure banner's Retry, which refills the same draft) and this second attempt's
+      // connection drops. Detach recovery must find the *second* exchange, not re-serve the
+      // first — `lastIndexOf` on question text alone used to return the first one the moment it
+      // saw it, before the second turn's own copy had even committed.
+      let turnCalls = 0;
+      let getCalls = 0;
+      const stub = stubFetch((url, init) => {
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          return new Response(JSON.stringify({ session_id: 'm'.repeat(32) }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/messages') && (init?.method ?? 'GET') === 'GET') {
+          getCalls += 1;
+          const first = [
+            { role: 'user' as const, text: 'dup?' },
+            { role: 'assistant' as const, text: 'first answer' },
+          ];
+          // The second turn's own exchange only shows up after a few polls, simulating the real
+          // lag between the drop and the backend committing the detached turn.
+          const body =
+            getCalls < 3
+              ? first
+              : [
+                  ...first,
+                  { role: 'user' as const, text: 'dup?' },
+                  { role: 'assistant' as const, text: 'second answer' },
+                ];
+          return new Response(JSON.stringify(body), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        turnCalls += 1;
+        if (turnCalls === 1) {
+          return sseResponse(
+            sseFrames([
+              { type: 'token', text: 'first answer' },
+              answerEvent({ text: 'first answer' }),
+            ]),
+          );
+        }
+        return brokenSseResponse(sseFrames([{ type: 'token', text: 'still working' }]));
+      });
+      restore = stub.restore;
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({ conversationId: cid, text: 'dup?', auth: devAuth });
+      expect(useChatStore.getState().conversations[cid]?.messages).toHaveLength(2);
+
+      vi.useFakeTimers();
+      try {
+        const turn = sendMessage({ conversationId: cid, text: 'dup?', auth: devAuth });
+        await vi.advanceTimersByTimeAsync(12_000);
+        await turn;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      const messages = useChatStore.getState().conversations[cid]?.messages ?? [];
+      expect(messages).toHaveLength(4);
+      const secondAnswer = messages[3];
+      expect(secondAnswer).toMatchObject({ role: 'assistant', status: 'done' });
+      expect(secondAnswer && 'finalText' in secondAnswer && secondAnswer.finalText).toBe(
+        'second answer',
+      );
+    }, 20_000);
+  });
+
+  /**
+   * A hard token-acquisition failure — `msalAuth.getAccessToken` rethrowing something other than
+   * `InteractionRequiredAuthError` — is not a dropped connection, even though both used to reach
+   * `sendMessage`'s outer catch as a bare rejection wrapped into `kind: 'stream'`. That misreading
+   * sent a turn that was never opened into the ten-minute "the server may still be running it"
+   * recovery poll. `'token_unavailable'` (`tests/streamTurn.test.ts`, `tests/apiAuthRecovery.test.ts`)
+   * is the unit-level fix; these two are the end-to-end guarantee that `sendMessage` actually shows
+   * an immediate, retryable failure instead.
+   */
+  describe('the token provider failing before any request is opened', () => {
+    const failingAuth: AuthProvider = {
+      mode: 'msal',
+      account: null,
+      getAccessToken: () => Promise.reject(new Error('acquireTokenSilent: network is down')),
+      login: async () => undefined,
+      logout: async () => undefined,
+      handleUnauthorized: async () => false,
+    };
+
+    it('fails immediately, with no polling, when the session already exists', async () => {
+      let messagesPolled = false;
+      const stub = stubFetch((url, init) => {
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          return new Response(JSON.stringify({ session_id: 'n'.repeat(32) }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/messages') && (init?.method ?? 'GET') === 'GET') {
+          messagesPolled = true;
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        throw new Error('the turn stream must never be reached');
+      });
+      restore = stub.restore;
+
+      // A session that already exists, minted while `getAccessToken` still worked — the shape a
+      // second message in the same conversation has, and the one where the store's `sessionId`
+      // would make the (wrong) recovery branch look plausible if this failure were misread as a
+      // dropped connection.
+      const cid = useChatStore.getState().createConversation();
+      useChatStore.setState((s) => ({
+        conversations: {
+          ...s.conversations,
+          [cid]: { ...s.conversations[cid]!, sessionId: 'n'.repeat(32) },
+        },
+      }));
+
+      await sendMessage({ conversationId: cid, text: 'hello', auth: failingAuth });
+
+      expect(messagesPolled).toBe(false);
+      const message = useChatStore.getState().conversations[cid]?.messages[1];
+      expect(message && 'error' in message && message.error?.kind).toBe('token_unavailable');
+      const banner = useChatStore.getState().banner;
+      expect(banner?.kind).toBe('error');
+      expect(banner?.text).not.toContain('Connection lost');
+      expect(banner?.action).toBe('retry');
+      expect(useChatStore.getState().composerLock).toBe(false);
+    });
+
+    it('fails immediately when minting the very first session fails the same way', async () => {
+      const stub = stubFetch(() => {
+        throw new Error('nothing should ever be fetched');
+      });
+      restore = stub.restore;
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({ conversationId: cid, text: 'hello', auth: failingAuth });
+
+      expect(stub.calls).toHaveLength(0);
+      const message = useChatStore.getState().conversations[cid]?.messages[1];
+      expect(message && 'error' in message && message.error?.kind).toBe('token_unavailable');
+      expect(useChatStore.getState().banner?.action).toBe('retry');
+      expect(useChatStore.getState().composerLock).toBe(false);
+    });
+  });
+
+  describe('an in-stream empty_answer', () => {
+    it('is reported as an immediate failure, not a connection-drop recovery', async () => {
+      // `empty_answer` is a well-formed, fully-read stream ending in a terminal event the server
+      // sent on purpose — the opposite of a drop. Recovering it the way a broken socket is
+      // recovered would poll GET /sessions/{id}/messages for an answer the server has already
+      // said will never arrive.
+      const stub = stubFetch((url, init) => {
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          return new Response(JSON.stringify({ session_id: 'k'.repeat(32) }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/messages') && (init?.method ?? 'GET') === 'GET') {
+          throw new Error('must not poll for a detached answer on empty_answer');
+        }
+        return sseResponse(
+          sseFrames([
+            errorEvent({ code: 'empty_answer', message: 'The turn produced no answer.' }),
+          ]),
+        );
+      });
+      restore = stub.restore;
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({
+        conversationId: cid,
+        text: 'what is the meaning of life',
+        auth: devAuth,
+      });
+
+      const message = useChatStore.getState().conversations[cid]?.messages[1];
+      expect(message && 'error' in message && message.error?.kind).toBe('empty_answer');
+
+      const banner = useChatStore.getState().banner;
+      expect(banner?.kind).toBe('error');
+      expect(banner?.text).not.toContain('Connection lost');
+      expect(useChatStore.getState().composerLock).toBe(false);
+    });
+  });
+
   it('refuses to start a second turn while one is locked', async () => {
     const stub = stubFetch(() => sseResponse(ANSWER));
     restore = stub.restore;
@@ -424,6 +619,62 @@ describe('detach and stop (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop)', (
     expect(stub.calls.some((c) => c.url.endsWith('/turn/stop'))).toBe(true);
     const message = useChatStore.getState().conversations[cid]?.messages.at(-1);
     expect(message?.role === 'assistant' && message.status).toBe('aborted');
+  });
+
+  it('says the stop was not confirmed when the server refuses it, so the next 409 is expected', async () => {
+    // `api.stopTurn` resolves `false` when there is no route and THROWS on a 500/503; both used to
+    // be discarded with `.catch(() => undefined)`. The user was then reliably told "Stopped before
+    // the answer was complete" while the turn kept running server-side — holding the session's
+    // turn lock and spending budget — so their next message came back 409, which `sendMessage`
+    // maps to a "reset" banner: an app bug to a chemist and nothing at all to an operator.
+    const { stopStreaming } = await import('../src/state/sendMessage.ts');
+    let releaseStream: (() => void) | null = null;
+    const hanging = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode('event: token\ndata: {"type":"token","text":"hi"}\n\n'),
+        );
+        releaseStream = () => controller.close();
+      },
+    });
+    const stub = stubFetch((url, init) => {
+      if (url.endsWith('/sessions') && init?.method === 'POST') {
+        return new Response(JSON.stringify({ session_id: 'c'.repeat(32) }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (url.endsWith('/turn/stop')) {
+        // The server cannot take the request. The local stream still ends, because Stop's local
+        // half is unconditional — that part of the UX is right and is unchanged.
+        releaseStream?.();
+        return jsonError(503, 'at capacity');
+      }
+      return new Response(hanging, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      });
+    });
+    restore = stub.restore;
+
+    const cid = useChatStore.getState().createConversation();
+    const turn = sendMessage({ conversationId: cid, text: 'long question', auth: devAuth });
+    const firstToken = () => {
+      const message = useChatStore.getState().conversations[cid]?.messages.at(-1);
+      return message?.role === 'assistant' && message.streamedText.length > 0;
+    };
+    while (!firstToken()) await new Promise((r) => setTimeout(r, 5));
+    stopStreaming();
+    await turn;
+
+    // The local stop still happened...
+    const message = useChatStore.getState().conversations[cid]?.messages.at(-1);
+    expect(message?.role === 'assistant' && message.status).toBe('aborted');
+    // ...and the reader is told the server did not confirm it, which is what makes the 409 their
+    // next message may get an expected consequence rather than a mystery.
+    const banner = useChatStore.getState().banner;
+    expect(banner?.kind).toBe('warn');
+    expect(banner?.text).toContain('did not confirm');
   });
 
   it('a dropped stream recovers the answer from the transcript instead of failing the turn', async () => {

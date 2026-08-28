@@ -47,6 +47,18 @@ message. The fix turned out not to need this page at all — `App.tsx` was alrea
 `GET /sessions/{id}/plan` on exactly that path to restore the checklist, and throwing `approved`
 away. It now carries it, and `chatStore.attachPlan` re-attaches the decision beside the plan.
 
+**And the half that recovery could not reach is now this page's, on a route that did not exist.**
+Restoring the card works for a conversation somebody opens; it answers nothing for a chemist who
+closed the tab, because the session id is minted server-side and returned once. Every plan surface
+was addressed by that id, so "which of my conversations is waiting on me" had no route to ask.
+`GET /plans/pending` is it (`D-2026-08-28-an-inbox-asks-a-narrower-question-than-a-card` upstream),
+and the section it fills is the one this entry left deliberately empty. Two things about it are
+answers to what went wrong above: it lists a plan **nobody has decided**, not one with no live
+approval — an approval is spent by the turn it authorized, so the looser predicate would have made
+a permanently _full_ inbox of every finished conversation — and it returns `gated`/`unread` beside
+the rows, so an empty list can say whether this deployment gates plans at all and whether the
+service's scan was complete. `listPendingPlans` does not swallow its failures.
+
 ## Closed: three ways to serve an unauthenticated UI by accident
 
 Not filed before being fixed, and recorded because the shape is worth recognising again: all three

@@ -30,6 +30,7 @@ import type {
   DurableJobStatus,
   JobRecordSummary,
   NoteView,
+  PendingPlans,
   ProposalDetail,
   ProposalSummary,
   SessionSummary,
@@ -274,6 +275,24 @@ const PROPOSAL_DETAIL: ProposalDetail = {
   correlation_id: 'turn-e2e-2',
 };
 
+// One conversation blocked on a plan decision, so `/review` renders its inbox with a row rather
+// than one of its four empty states. `unread: 0` keeps the partial-scan notice out of the way of
+// the axe pass; the notice itself is covered by the component tests.
+const PENDING_PLANS: PendingPlans = {
+  plans: [
+    {
+      session_id: SID,
+      title: 'Which solvent for the Suzuki step?',
+      updated_at: '2026-08-09T09:00:00Z',
+      plan_hash: 'e2e-plan-hash',
+      plan: ['screen the hazards of 2-MeTHF', 'record the comparison as a note'],
+    },
+  ],
+  considered: 1,
+  gated: 1,
+  unread: 0,
+};
+
 const JOB: JobRecordSummary = {
   job_id: 'calc-9f2c',
   connector: 'calc',
@@ -359,6 +378,9 @@ createServer(async (req, res) => {
     req.on('close', () => clearInterval(beat));
     return;
   }
+
+  // The cross-session plan inbox, on the same screen as the PR gate.
+  if (path === '/plans/pending' && req.method === 'GET') return json(res, 200, PENDING_PLANS);
 
   // The PR-gate review queue.
   if (path === '/proposals' && req.method === 'GET') return json(res, 200, [PROPOSAL]);

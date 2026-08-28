@@ -1,8 +1,9 @@
 /**
- * The PR gate, from the browser.
+ * The two gates, from the browser.
  *
- * This is the largest capability the service had and the UI did not touch. What the tests pin is
- * not that the list renders — it is the three properties that make a sign-off mean something:
+ * The PR gate was the largest capability the service had and the UI did not touch. What the tests
+ * pin is not that the list renders — it is the three properties that make a sign-off mean
+ * something:
  *
  *  - the reviewer sees **the bytes that would be committed**, including the files that land
  *    alongside the note, because a GxP decision is on what enters the tree and not on a summary;
@@ -10,13 +11,20 @@
  *    next reviewer and the agent have to go on;
  *  - **a non-reviewer is not offered a decision they cannot make**. Learning your permissions from
  *    a 403 is bad; learning them after forming a judgement you now cannot record is worse.
+ *
+ * The plan inbox is the second gate and the newer half, and what it has to get right is the
+ * opposite failure: **an empty list must never read as "nothing is waiting on you" unless that is
+ * what the service said.** The section this one replaces got that wrong — it swallowed a 404 from
+ * a deleted route into `[]` and rendered a confident empty queue for a release — so the tests
+ * below drive each of the three emptinesses and the failure separately.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { ReviewQueue } from '../src/components/ReviewQueue.tsx';
 import { stubFetch } from './helpers.ts';
-import type { ProposalDetail, ProposalSummary } from '../src/api/client.ts';
+import type { PendingPlans, ProposalDetail, ProposalSummary } from '../src/api/client.ts';
 
 const mode = { current: 'dev' as 'dev' | 'msal', roles: [] as string[] };
 
@@ -67,11 +75,50 @@ const DETAIL: ProposalDetail = {
   correlation_id: 'turn-3',
 };
 
+/** One conversation blocked on a decision, as `GET /plans/pending` reports it. */
+const PENDING: PendingPlans = {
+  plans: [
+    {
+      session_id: 'b'.repeat(32),
+      title: 'Which solvent for the Suzuki step?',
+      updated_at: '2026-08-09T09:00:00Z',
+      plan_hash: 'plan-hash-1',
+      plan: ['screen the hazards of 2-MeTHF', 'record the comparison as a note'],
+    },
+  ],
+  considered: 4,
+  gated: 2,
+  unread: 0,
+};
+
 let restore: (() => void) | null = null;
 const decisions: unknown[] = [];
+/** What the plan inbox route answers this test — replaced per test, never per assertion. */
+let pending: PendingPlans | 'fails' = PENDING;
+
+/** The screen under a router, which `Link` needs and the app always provides. */
+function renderQueue(): void {
+  render(
+    <MemoryRouter>
+      <ReviewQueue />
+    </MemoryRouter>,
+  );
+}
 
 function serve(): void {
   const stub = stubFetch((url, init) => {
+    if (url.includes('/plans/pending')) {
+      if (pending === 'fails') {
+        return new Response(JSON.stringify({ detail: 'boom' }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify(pending), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     if (url.includes('/proposals/7/decision')) {
       decisions.push(JSON.parse(String(init?.body)));
       return new Response(null, { status: 204 });
@@ -99,7 +146,7 @@ function serve(): void {
 
 /** Open the one proposal in the queue. */
 async function openProposal(): Promise<void> {
-  render(<ReviewQueue />);
+  renderQueue();
   fireEvent.click(await screen.findByRole('button', { name: /note-suzuki-42/ }));
   await screen.findByText(/Ran in 2-MeTHF/);
 }
@@ -107,6 +154,7 @@ async function openProposal(): Promise<void> {
 beforeEach(() => {
   cleanup();
   decisions.length = 0;
+  pending = PENDING;
   mode.current = 'dev';
   mode.roles = [];
 });
@@ -119,7 +167,7 @@ afterEach(() => {
 describe('ReviewQueue', () => {
   it('lists what is waiting, with who proposed it', async () => {
     serve();
-    render(<ReviewQueue />);
+    renderQueue();
     expect(await screen.findByText('note-suzuki-42')).toBeTruthy();
     expect(screen.getByText(/chemist@example\.com/)).toBeTruthy();
   });
@@ -187,5 +235,86 @@ describe('ReviewQueue', () => {
     await openProposal();
 
     expect(screen.getByText(/Ran in 2-MeTHF/)).toBeTruthy();
+  });
+});
+
+describe('the plan inbox', () => {
+  it('names the blocked conversation, shows the work, and links into it', async () => {
+    // The session id is the field that makes this screen worth having: it is the one thing a
+    // chemist who closed the tab cannot reconstruct, and `/s/:sessionId` is the only route that
+    // turns it back into a readable conversation.
+    serve();
+    renderQueue();
+
+    expect(await screen.findByText('Which solvent for the Suzuki step?')).toBeTruthy();
+    expect(screen.getByText('screen the hazards of 2-MeTHF')).toBeTruthy();
+    const link = screen.getByRole('link', { name: /Open the conversation/ });
+    expect(link.getAttribute('href')).toBe(`/s/${'b'.repeat(32)}`);
+  });
+
+  it('offers no decision here, because the reasoning is in the conversation', async () => {
+    // The service binds a decision to the hash of the plan as displayed, so deciding from here
+    // would be *safe*. It would not be informed — a plan is approved on the strength of the
+    // reasoning that produced it, and that is one click away rather than on this screen.
+    serve();
+    renderQueue();
+    await screen.findByText('Which solvent for the Suzuki step?');
+
+    expect(screen.queryByRole('button', { name: /^Approve$/ })).toBeNull();
+  });
+
+  it('says the deployment does not gate plans, rather than that nothing is waiting', async () => {
+    // `gated === 0`: no conversation of this chemist's runs a profile that holds work for
+    // approval, so nothing can ever appear here. Rendering that as an empty queue is the failure
+    // the deleted holds inbox shipped — a confident emptiness the deployment could not back.
+    pending = { plans: [], considered: 3, gated: 0, unread: 0 };
+    serve();
+    renderQueue();
+
+    expect(await screen.findByText(/Nothing here asks before it acts/)).toBeTruthy();
+    expect(screen.queryByText(/No plan is waiting on you/)).toBeNull();
+  });
+
+  it('separates "no conversations yet" from "nothing waiting"', async () => {
+    pending = { plans: [], considered: 0, gated: 0, unread: 0 };
+    serve();
+    renderQueue();
+
+    expect(await screen.findByText(/No conversations to check/)).toBeTruthy();
+  });
+
+  it('says the queue is genuinely empty when it is', async () => {
+    pending = { plans: [], considered: 3, gated: 3, unread: 0 };
+    serve();
+    renderQueue();
+
+    expect(await screen.findByText(/No plan is waiting on you/)).toBeTruthy();
+  });
+
+  it('admits when the scan did not cover everything', async () => {
+    // A short list that looks complete is the shape that tells a chemist nothing is waiting while
+    // something is. The service bounds its scan; this has to say so on both paths — with rows and
+    // without them.
+    pending = { ...PENDING, unread: 2 };
+    serve();
+    renderQueue();
+
+    expect(await screen.findByText(/2 older conversations were not checked/)).toBeTruthy();
+
+    cleanup();
+    pending = { plans: [], considered: 30, gated: 30, unread: 5 };
+    renderQueue();
+    expect(await screen.findByText(/5 older conversations were not checked/)).toBeTruthy();
+  });
+
+  it('says the question could not be asked, instead of answering it with an empty list', async () => {
+    // `listPendingPlans` deliberately does not swallow the failure into `[]`. "We could not ask"
+    // and "nothing is waiting" are opposite things to tell somebody whose work is blocked.
+    pending = 'fails';
+    serve();
+    renderQueue();
+
+    expect(await screen.findByText(/could not be asked which plans are waiting/)).toBeTruthy();
+    expect(screen.queryByText(/No plan is waiting on you/)).toBeNull();
   });
 });

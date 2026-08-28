@@ -160,6 +160,13 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
+  // Every plan of the caller's that nobody has decided yet, across conversations.
+  //
+  // The only plan route that is not session-scoped, because it is what answers "which session" —
+  // the decision card lives inside a turn, and a chemist who closed the tab has the id nowhere.
+  // The service scopes it to the caller through the same ownership registry `GET /sessions` reads.
+  { method: 'GET', pattern: /^\/api\/plans\/pending$/, target: () => '/plans/pending', sse: false },
+
   // The PR-gate review queue: machine-written knowledge waiting for a human to sign it into the
   // graph. The service calls this "the line that makes machine-written knowledge safe". Listing
   // is keyset-paginated (`before_id`) and state-filtered through the query string, which the

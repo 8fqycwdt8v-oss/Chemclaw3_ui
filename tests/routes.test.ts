@@ -20,6 +20,7 @@ describe('proxy route whitelist', () => {
       ['POST', `/api/sessions/${SID}/attachments`, `/sessions/${SID}/attachments`],
       ['GET', `/api/sessions/${SID}/plan`, `/sessions/${SID}/plan`],
       ['POST', `/api/sessions/${SID}/plan/decision`, `/sessions/${SID}/plan/decision`],
+      ['GET', '/api/plans/pending', '/plans/pending'],
       ['GET', `/api/sessions/${SID}/tool-results/${REF}`, `/sessions/${SID}/tool-results/${REF}`],
       ['GET', '/api/notes/note-suzuki-42', '/notes/note-suzuki-42'],
       ['GET', '/api/profiles', '/profiles'],
@@ -106,6 +107,10 @@ describe('proxy route whitelist', () => {
     // Reading the plan and deciding on it are separate routes, not one path with two verbs.
     expect(resolveRoute('POST', `/api/sessions/${SID}/plan`)).toBeNull();
     expect(resolveRoute('GET', `/api/sessions/${SID}/plan/decision`)).toBeNull();
+    // The inbox is a read. A decision is answered on the session that raised it, and a POST here
+    // would be a decision with no session named in the path — which is not a route the service
+    // has, and must not become a path this proxy invents.
+    expect(resolveRoute('POST', '/api/plans/pending')).toBeNull();
   });
 
   describe('tool-result refs', () => {

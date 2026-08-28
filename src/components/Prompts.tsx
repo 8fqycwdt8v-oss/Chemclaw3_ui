@@ -4,25 +4,28 @@
  * `QuestionPrompt` — the agent asking the chemist to disambiguate. Answered by sending the choice
  * as the next message, which is exactly what the backend expects.
  *
- * `ApprovalPrompt` — a human sign-off. Two genuinely different cases, and conflating them would
- * produce a button that silently does nothing:
- *   - `approval_id` present: a durable interaction hold, answered via POST /approvals/{id}/decision.
- *   - `approval_id` empty: a plan approval, answered via POST /sessions/{id}/plan/decision.
- *
- * That second case used to say "which has no endpoint at all" and sent a chat message saying
- * "Approved — go ahead." instead. It has had an endpoint for a while, and the difference is not
+ * `ApprovalPrompt` — a human sign-off on the plan, answered via POST /sessions/{id}/plan/decision.
+ * It used to send a chat message saying "Approved — go ahead." instead, and the difference is not
  * cosmetic: the real route records *who* approved *which* plan, bound by a hash, and is the only
  * path into execute mode. A sentence in the transcript records nothing and binds nothing — the
- * agent read it as text and decided for itself, which is precisely the GxP line the plan gate
- * exists to draw.
+ * agent read it as text and decided for itself, which is precisely the line the plan gate exists
+ * to draw.
  *
- * The prefill fallback survives for a service that predates the route (its GET 404s), because
+ * **There was a second case here, and it is gone.** A non-empty `approval_id` meant a durable
+ * interaction hold, answered on `POST /approvals/{id}/decision`. The service deleted that whole
+ * mechanism (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`) because nothing could ever open
+ * one; the event's `approval_id` is now documented upstream as always empty, so the branch was
+ * unreachable and its route 404s. A plan approval and a hold were never the same mechanism, and
+ * the branch is what made them look like two shapes of one.
+ *
+ * The prefill fallback survives for a service that predates the plan route (its GET 404s), because
  * the alternative is a card whose only buttons do nothing.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import { api } from '../api/client.ts';
+import { PlanItems } from './PlanItems.tsx';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { Button } from '@/components/ui/button';
@@ -55,16 +58,21 @@ export function QuestionPrompt({
   );
 }
 
-/** Yes/No controls plus whatever the decision produced — the shape both branches below render. */
+/**
+ * Yes/No controls plus whatever the decision produced.
+ *
+ * The button text used to be a `labels` prop, because a second caller — the durable interaction
+ * hold — said "Approve"/"Reject" where this one says "Approve plan"/"Decline". That caller is gone
+ * with its mechanism, so the tuple never varied again and the copy is inlined here instead: all of
+ * it, including the confirmation wording, now reads in one place.
+ */
 function DecisionControls({
   state,
   error,
-  labels,
   onDecide,
 }: {
   state: 'idle' | 'sending' | 'approved' | 'rejected' | 'failed';
   error: string | null;
-  labels: [string, string];
   onDecide: (approved: boolean) => void;
 }): React.JSX.Element {
   if (state === 'approved' || state === 'rejected') {
@@ -82,29 +90,29 @@ function DecisionControls({
       <ConfirmDialog
         trigger={
           <Button variant="success" size="sm" disabled={state === 'sending'}>
-            {labels[0]}
+            Approve plan
           </Button>
         }
-        title={`${labels[0]}?`}
+        title="Approve plan?"
         description={
           <>
             This is recorded against your account and cannot be undone. The agent will act on it on
             its next run.
           </>
         }
-        confirmLabel={labels[0]}
+        confirmLabel="Approve plan"
         variant="success"
         onConfirm={() => onDecide(true)}
       />
       <ConfirmDialog
         trigger={
           <Button variant="outline" size="sm" disabled={state === 'sending'}>
-            {labels[1]}
+            Decline
           </Button>
         }
-        title={`${labels[1]}?`}
+        title="Decline?"
         description="The agent will not proceed with what it proposed. This is recorded against your account."
-        confirmLabel={labels[1]}
+        confirmLabel="Decline"
         onConfirm={() => onDecide(false)}
       />
       {state === 'sending' && <Loading size="xs">Recording your decision…</Loading>}
@@ -277,23 +285,22 @@ function PlanApprovalPrompt({
 
   return (
     <>
+      {/* `PlanItems`, not a second hand-rolled list, and that is a fix rather than a tidy-up: the
+          streamed plan encodes each step's completion as a leading `[x] ` / `[ ] ` prefix, so a
+          bare list rendered it as literal text — in the one card whose whole job is showing a
+          person what they are signing, while the checklist six lines above it rendered the same
+          steps properly. `PlanItems`' own docstring calls itself "the one rendering of a plan's
+          steps … so the two cannot drift"; this is the caller that was drifting. It also handles
+          the fetch fallback's unprefixed shape, which renders as a plain bullet rather than as an
+          unchecked box claiming a completion state nobody reported. */}
       {plan && plan.todos.length > 0 && (
-        <ul className="mb-3 space-y-1">
-          {plan.todos.map((todo, i) => (
-            <li key={i} className="flex gap-2 text-sm">
-              <span
-                aria-hidden
-                className="mt-1.5 size-1.5 shrink-0 rounded-[1px] border border-ink-subtle"
-              />
-              <span>{todo}</span>
-            </li>
-          ))}
-        </ul>
+        <div className="mb-3">
+          <PlanItems todos={plan.todos} />
+        </div>
       )}
       <DecisionControls
         state={state}
         error={error}
-        labels={['Approve plan', 'Decline']}
         onDecide={(approved) => void decide(approved)}
       />
     </>
@@ -302,13 +309,11 @@ function PlanApprovalPrompt({
 
 export function ApprovalPrompt({
   prompt,
-  approvalId,
   sessionId,
   planTodos,
   planHash,
 }: {
   prompt: string;
-  approvalId: string;
   /** The server session this conversation is bound to — the plan gate is per session, and
    *  `null` (no session yet) is what makes the composer fallback the only option. */
   sessionId: string | null;
@@ -317,24 +322,6 @@ export function ApprovalPrompt({
   planTodos?: string[] | null;
   planHash?: string | null;
 }): React.JSX.Element {
-  const { auth } = useAuth();
-  const [state, setState] = useState<'idle' | 'sending' | 'approved' | 'rejected' | 'failed'>(
-    'idle',
-  );
-  const [error, setError] = useState<string | null>(null);
-
-  const decide = async (approved: boolean): Promise<void> => {
-    setState('sending');
-    setError(null);
-    try {
-      await api.decideApproval(approvalId, approved, auth);
-      setState(approved ? 'approved' : 'rejected');
-    } catch (err) {
-      setState('failed');
-      setError(err instanceof Error ? err.message : 'Could not deliver the decision.');
-    }
-  };
-
   return (
     <div className="mt-3 rounded-lg border border-warn/40 bg-warn-soft p-3.5">
       <p className="mb-2.5 flex items-start gap-2 text-sm text-warn-ink">
@@ -344,17 +331,7 @@ export function ApprovalPrompt({
           {prompt}
         </span>
       </p>
-
-      {approvalId ? (
-        <DecisionControls
-          state={state}
-          error={error}
-          labels={['Approve', 'Reject']}
-          onDecide={(approved) => void decide(approved)}
-        />
-      ) : (
-        <PlanApprovalPrompt sessionId={sessionId} planTodos={planTodos} planHash={planHash} />
-      )}
+      <PlanApprovalPrompt sessionId={sessionId} planTodos={planTodos} planHash={planHash} />
     </div>
   );
 }

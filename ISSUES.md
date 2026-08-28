@@ -22,10 +22,29 @@ are in the BFF whitelist. `GET /sessions` is empty under `session_store="memory"
 durable registry to enumerate, and reporting the process's live LRU would answer a deployment
 question with an eviction-dependent guess.
 
-## Closed: `/approvals` missing (was Issue 3)
+## Closed: `/approvals` is deleted upstream, and so is this UI's half (was Issue 3)
 
-`GET /approvals`, `GET /approvals/{id}` and `POST /approvals/{id}/decision` all exist in
-`routes/approvals.py`, every one gated by `owned_approval`. `ReviewQueue` is the surface.
+This entry used to say the three routes "all exist in `routes/approvals.py`, every one gated by
+`owned_approval`", with `ReviewQueue` as the surface. That was true when it was written and is not
+now: `D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold` deleted `GET /approvals`,
+`GET /approvals/{id}`, `POST /approvals/{id}/decision`, the workflow behind them and the producer,
+because **nothing in the service could ever open a hold** — three consumers with no producer, which
+is what made the control look real.
+
+This UI carried every consumer for a release after that: the proxy entries, `listApprovals` /
+`decideApproval`, a whole "Holds waiting on a decision" section, and a branch in the inline card.
+`listApprovals` swallowed the resulting 404 into `[]`, so the failure mode was not an error — it
+was a confident, permanently empty inbox telling a chemist that nothing was waiting on them, under
+a heading describing a decision that could not occur.
+
+All of it is gone. `tests/routes.test.ts` pins the three routes as _not_ whitelisted, so
+re-adding a consumer without the producer fails rather than shipping quiet.
+
+**What is not solved by this.** The gate that does block work — the plan approval — still lives
+only as an inline card in a live turn. `state/transcript.ts` does not rehydrate `approval_request`,
+so a reload loses the card while the service keeps refusing every state-changing call, and the
+only recovery is to send another message. Giving it a durable home (this page is the obvious one,
+reading `GET /sessions/{id}/plan`) is open work, not something this change did.
 
 ## Closed: three ways to serve an unauthenticated UI by accident
 
@@ -240,8 +259,3 @@ registry; profile selection; tool calls surviving a reload.
   **What would change the answer:** Ketcher shipping a keyboard-navigable editing mode, or a
   structure-entry route that is neither a canvas nor a string (a name lookup would be one, and
   `resolve_compound` is an agent tool with no HTTP route — see the module docstring).
-
-- **`PendingApproval` is still typed loosely** (`[key: string]: unknown`, every field optional).
-  The service's shape is three required strings — `approval_id`, `question`, `requested_by`
-  (`agent/interaction_tools.py`) — so the index signature is known information left on the floor.
-  Tightening it touches `ReviewQueue`, so it is a change of its own.

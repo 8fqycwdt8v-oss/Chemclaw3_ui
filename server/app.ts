@@ -121,13 +121,38 @@ function countBytes(res: http.ServerResponse): () => number {
 }
 
 /**
+ * The status booked for a response the client walked away from.
+ *
+ * nginx's convention, and it is borrowed rather than invented because an abandoned response has no
+ * status of its own: `res.statusCode` is whatever was set before the client left — 200 on an SSE
+ * stream that had been running for minutes, and a bare `200` default on one where no header was
+ * ever written. Booking either would make "how many streams did clients abandon?" unanswerable
+ * from the scrape and would count an abandoned turn as a served one.
+ */
+const CLIENT_CLOSED_REQUEST = 499;
+
+/**
  * One access-log line per response, plus the metrics behind `/metrics`.
  *
- * Written on `finish` rather than at dispatch, so the status, the duration and the byte count are
+ * Written on `close` rather than at dispatch, so the status, the duration and the byte count are
  * the real ones — an SSE turn that ran for nine minutes books nine minutes here, which is the
  * whole point of measuring it. `route` is set by the caller as it dispatches; it starts as the
  * least specific label rather than as the raw path, because a label is a metric dimension and a
  * path is not.
+ *
+ * **`close`, not `finish`, and the difference was a permanently wrong gauge.** `finish` fires when
+ * a response was fully written; a client that hangs up mid-response never reaches it, so neither
+ * the access line nor `requestFinished` ran — and `requestStarted` had already run. Measured on
+ * the route where it matters most: five aborted `GET /sessions/{id}/events` streams took
+ * `chemclaw_ui_requests_in_flight` from 1 to 6 and left it at 6 for the life of the process, so
+ * any alert on that gauge fires for ever after the first abandoned stream; and
+ * `grep -c 'sessions/{id}/events' bff.log` returned **0** — the longest-lived, most
+ * failure-prone route in this process had never written one access line. `close` is emitted on
+ * every terminal outcome, completed or aborted, and exactly once, which is what makes the
+ * decrement and the line a pair rather than a hope. `proxy.ts` already listened for exactly this
+ * to tear the upstream request down (`res.on('close')` there, guarded by the same
+ * `writableFinished`), so an abort was being handled correctly everywhere except in what this
+ * process says about it.
  */
 function observe(
   req: http.IncomingMessage,
@@ -138,16 +163,23 @@ function observe(
   const startedAt = Date.now();
   const bytes = countBytes(res);
   requestStarted();
-  res.on('finish', () => {
+  res.on('close', () => {
     const durationMs = Date.now() - startedAt;
-    requestFinished(label.route, req.method ?? 'GET', res.statusCode, durationMs / 1000);
+    // `writableFinished` is the one honest reading of "did this response actually complete?":
+    // `res.finished` was deprecated for saying yes as soon as `end()` was *called*.
+    const aborted = !res.writableFinished;
+    const status = aborted ? CLIENT_CLOSED_REQUEST : res.statusCode;
+    requestFinished(label.route, req.method ?? 'GET', status, durationMs / 1000);
     log.info('request', {
       method: req.method ?? 'GET',
       // The PATTERN, never the id-bearing path: see `ResolvedRoute.template`.
       route: label.route,
-      status: res.statusCode,
+      status,
       duration_ms: durationMs,
       bytes: bytes(),
+      // Kept beside the 499 rather than replacing it: the status is what a query aggregates on,
+      // and this is what tells a reader the stream was answering when the client left.
+      ...(aborted ? { aborted: true, sent_status: res.statusCode } : {}),
       ...(trace.upstreamMs === null ? {} : { upstream_ms: trace.upstreamMs }),
       // The join key. Present on any request the service answered, which is what makes a line
       // here and a line there the same incident rather than two.

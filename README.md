@@ -199,10 +199,19 @@ did not exist: an unhandled rejection anywhere in the app used to be invisible.
 duration, bytes, upstream duration, correlation id — plus `GET /metrics` (request count, duration
 histogram, in-flight, upstream errors). Every label is bounded: the route pattern is
 `/api/sessions/{id}/messages`, never the path, because a per-session label mints a time series per
-conversation, and `/metrics` is unauthenticated like every other one in this family.
+conversation, and `/metrics` is unauthenticated like every other one in this family. _Per response_
+includes the ones nobody waited for: an abandoned SSE stream books `status 499` (`aborted: true`
+beside it) and releases the in-flight gauge, which is what the bookkeeping ran on `finish` and
+therefore did not do.
+
+**A bound on what the browser may write here.** `POST /api/client-events` is unauthenticated by
+construction — the page that posts is served before sign-in — so the pod takes at most 600 batches
+a minute and answers the rest with a `429` and a `Retry-After` the browser's sink waits out. That
+sink backs off and **recovers**; it used to disable itself for the life of the page after three
+non-2xx replies, so one rolling restart silenced a chemist's browser for the rest of the session.
 
 **Readiness that means something.** `GET /readyz` probes the service's own `/readyz` (cached a few
-seconds). `GET /healthz` stays a literal `{"status":"ok"}` and stays what the container
+seconds, and single-flighted — 40 concurrent probes cost one upstream call, not 40). `GET /healthz` stays a literal `{"status":"ok"}` and stays what the container
 `HEALTHCHECK` reads, deliberately: it is liveness, and restarting this container because the
 _backend_ died would remove the one process still able to explain the outage. Point a readiness
 probe or a load balancer at `/readyz`.

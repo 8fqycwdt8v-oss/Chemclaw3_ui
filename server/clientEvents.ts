@@ -139,11 +139,85 @@ function readBody(req: IncomingMessage): Promise<string | null> {
   });
 }
 
+/**
+ * How many batches this process will write per minute, whoever sends them.
+ *
+ * **Measured before this existed**: twenty concurrent clients posting maximum-size batches for
+ * three seconds had 1,297 accepted, writing 24,643 log entries and ~94 MB — about 31 MB/s, from
+ * an unauthenticated route, from anything that can open a socket to the pod. The handler bounded
+ * the *shape* of an entry (a 64 KiB body, 50 entries, 512-character messages) and nothing bounded
+ * the *rate*, which on a cluster with log shipping is node-disk fill and unbounded ingest cost.
+ *
+ * The number is chosen against the sink's own cadence rather than picked round: `src/lib/logger.ts`
+ * flushes at most every `FLUSH_INTERVAL_MS` (5 s), so a chemist's browser costs ~12 batches a
+ * minute and 600 is ~50 concurrent browsers per replica, with the ceiling scaling by replica
+ * because each pod holds its own. The worst case it admits is 600 × 64 KiB ≈ 38 MB a minute, and a
+ * fixed window means twice that across a window boundary — two orders below the 31 MB/s measured
+ * above, which is the point.
+ *
+ * **There is no per-address bucket, and that is a measurement rather than an omission.** One was
+ * written first, at 60/min keyed on `req.socket.remoteAddress`. In this deployment the UI pod sits
+ * behind an OpenShift route, so every browser's batches arrive from the router's address and the
+ * per-address ceiling becomes a *global* one ten times stricter than the one below: driven with
+ * 120 batches from a single address — ten chemists at the sink's own cadence, well inside the
+ * process budget — it accepted 60 and refused 60. Nothing in this process establishes a trusted
+ * forwarding header (`server/proxy.ts` strips client-supplied `x-chemclaw-*` and reads no
+ * `X-Forwarded-For`), so there is no honest per-client key to bucket on, and a second limit that
+ * cannot see clients is a limit that only refuses real ones.
+ *
+ * A refusal is a 429 the caller can read, not a closed socket: the browser sink treats a non-2xx
+ * as a reason to back off and honours the `Retry-After` below (see `startClientEventSink`), and it
+ * recovers when the pressure passes. Refusals need no counter of their own — `observe` in
+ * `server/app.ts` books every response, so they are already
+ * `chemclaw_ui_requests_total{route="/api/client-events",status="429"}`.
+ */
+const PROCESS_BATCHES_PER_MINUTE = 600;
+const BUDGET_WINDOW_MS = 60_000;
+
+/**
+ * The batches charged in the window that ends at `resetAt`.
+ *
+ * A fixed window rather than a sliding log: a sliding window keeps a timestamp per request, which
+ * is the unbounded allocation this bound exists to prevent — and with one counter for the whole
+ * process, there is nothing to sweep and no map to grow.
+ */
+let budget = { count: 0, resetAt: 0 };
+
+/** Whether this batch is within the budget, charging it when it is. */
+function withinBudget(now: number): boolean {
+  if (now >= budget.resetAt) budget = { count: 0, resetAt: now + BUDGET_WINDOW_MS };
+  if (budget.count >= PROCESS_BATCHES_PER_MINUTE) return false;
+  budget.count += 1;
+  return true;
+}
+
+/** Test seam: the window is process-wide, so one test would otherwise spend another's budget. */
+export function resetClientEventBudget(): void {
+  budget = { count: 0, resetAt: 0 };
+}
+
 /** Accept one batch. Always 204 on success — the browser has nothing to do with a reply. */
 export async function handleClientEvents(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') {
     res.writeHead(405, { 'content-type': 'application/json', allow: 'POST' });
     res.end('{"detail":"method not allowed"}');
+    return;
+  }
+
+  // Charged before the body is read, so a refused caller cannot make this process buffer 64 KiB
+  // per attempt just by being over its limit. The refusal is written FIRST and the still-arriving
+  // body hung up on afterwards, exactly as the 413 below does it: destroying the request instead
+  // of answering takes the socket with it, and the browser reads a network error rather than the
+  // `Retry-After` its sink is waiting for.
+  if (!withinBudget(Date.now())) {
+    const retryAfter = Math.max(1, Math.ceil((budget.resetAt - Date.now()) / 1000));
+    res.writeHead(429, {
+      'content-type': 'application/json',
+      'retry-after': String(retryAfter),
+      connection: 'close',
+    });
+    res.end('{"detail":"too many client event batches"}');
+    if (!req.readableEnded) req.destroy();
     return;
   }
 
@@ -168,7 +242,17 @@ export async function handleClientEvents(req: IncomingMessage, res: ServerRespon
 
   const { entries, appVersion, agent } = entriesFrom(parsed);
   for (const entry of entries) {
-    const emit = entry.level === 'error' ? log.error : entry.level === 'warn' ? log.warn : log.info;
+    // `debug` has its own arm, and the ternary that lacked one is why it mattered: `LEVELS` admits
+    // `debug`, so a chemist on `?debug=1` had every debug line written at INFO — through the one
+    // knob (`LOG_LEVEL`) an operator would reach for to make it stop.
+    const emit =
+      entry.level === 'error'
+        ? log.error
+        : entry.level === 'warn'
+          ? log.warn
+          : entry.level === 'debug'
+            ? log.debug
+            : log.info;
     emit(entry.message, {
       source: 'browser',
       client_ts: entry.ts,

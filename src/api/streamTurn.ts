@@ -76,6 +76,18 @@ export interface StreamTurnOptions {
    */
   onCorrelationId?: (correlationId: string) => void;
   /**
+   * The service has taken this turn: the POST was answered `2xx`.
+   *
+   * Called at most once, and the caller needs it because *nothing else here distinguishes a turn
+   * that is running on the server from one that never started*. `token_unavailable` above names
+   * the one pre-flight failure that has its own kind; everything else that can go wrong before
+   * this line — and everything `sendMessage` itself can throw while setting the turn up — reaches
+   * its outer catch as a bare error and is wrapped as `stream`, which is the kind that means "the
+   * turn may still be running, poll for it". This is the fact that tells those apart, and
+   * `sendMessage` gates detach recovery on it rather than on the kind; see the comment there.
+   */
+  onAccepted?: () => void;
+  /**
    * The stream went quiet for `stallAfterMs`, and later (with `false`) that it came back.
    *
    * Reported rather than acted on: this function deliberately does not abort, because a long turn
@@ -148,6 +160,13 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       failure.correlationId,
     );
   }
+
+  // The service answered 2xx: it has this turn, and it will run it to completion and write it to
+  // the session transcript whether or not this socket survives. Announced HERE rather than after
+  // the content-type check below, because a 200 that is not an event stream means something
+  // between us and the service swallowed the stream — the turn is still the service's, and
+  // recovery is still the right answer for it.
+  opts.onAccepted?.();
 
   // Known before the first frame, so every error below can quote it — including the ones that
   // happen when no frame ever arrives.

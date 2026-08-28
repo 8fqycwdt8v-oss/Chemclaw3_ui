@@ -71,6 +71,10 @@ beforeEach(() => {
 afterEach(() => {
   restore?.();
   restore = null;
+  // Spies too, and not only in the test that installs one: a fake-timer test that times out keeps
+  // running after vitest has failed it, so its own `finally` restores the spy *during the next
+  // test*. That turned one real failure into two confusing ones while this file was being written.
+  vi.restoreAllMocks();
 });
 
 describe('sendMessage', () => {
@@ -360,6 +364,115 @@ describe('sendMessage', () => {
       expect(message).toMatchObject({ role: 'assistant', status: 'aborted' });
       expect(useChatStore.getState().banner).toBeNull();
     });
+  });
+
+  /**
+   * The other half of "a dropped connection is not a Stop": a turn that was never sent at all.
+   *
+   * Detach recovery is right for a stream that broke *after* the service took the turn, and wrong
+   * for anything that failed before one existed — there is nothing to recover, so the poll can
+   * only run out its clock behind a banner saying the opposite of what happened.
+   *
+   * `token_unavailable` (the pair of tests above) names the one such failure that has a kind of
+   * its own. These two are about the rest of them, which have no kind at all: the catch in
+   * `sendMessage` wraps any non-`ApiError` as `stream`, the kind that means "poll for it". The
+   * first case below is the live example, and the second is the control that keeps the narrowing
+   * honest.
+   */
+  describe('a turn the service never accepted', () => {
+    it('fails at once when a setup write throws, instead of polling for a turn nobody started', async () => {
+      // `chatStore` records a `QuotaExceededError` out of `appendUserMessage` as a real class, and
+      // the five setup writes are inside the `try` precisely so it is handled. Handled meant this:
+      // measured on this tree with the acceptance flag ignored, the chemist got the banner
+      // "Connection lost — the turn is still running on the server; recovering the answer…" and
+      // **210** poll attempts over **630 s**, for a turn nothing had sent. The error the poll was
+      // hiding then surfaced anyway, ten and a half minutes late.
+      vi.useFakeTimers();
+      try {
+        let polls = 0;
+        const stub = stubFetch((url, init) => {
+          if (url.endsWith('/sessions') && init?.method === 'POST') {
+            return new Response(JSON.stringify({ session_id: 'q'.repeat(32) }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          polls += 1;
+          return new Response('[]', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        });
+        restore = stub.restore;
+
+        const cid = useChatStore.getState().createConversation();
+        // A session already exists — the second message in a conversation, which is what makes the
+        // recovery branch reachable at all.
+        useChatStore.getState().setSessionId(cid, 'q'.repeat(32), false);
+        vi.spyOn(useChatStore.getState(), 'appendUserMessage').mockImplementation(() => {
+          throw new DOMException('exceeded the quota', 'QuotaExceededError');
+        });
+
+        const turn = sendMessage({ conversationId: cid, text: 'pKa?', auth: devAuth });
+        // One tick is all a failure before the stream may cost. The poll's own interval is 3 s, so
+        // anything that entered recovery would still be sitting in it here.
+        await vi.advanceTimersByTimeAsync(10);
+        await turn;
+
+        expect(polls).toBe(0);
+        expect(useChatStore.getState().composerLock).toBe(false);
+        expect(useChatStore.getState().banner?.kind).toBe('error');
+      } finally {
+        vi.restoreAllMocks();
+        vi.useRealTimers();
+      }
+    }, 20_000);
+
+    it('still polls when `fetch` itself rejected, because that one may have been sent', async () => {
+      // The control, and the reason the gate is not simply "accepted or nothing". A `fetch`
+      // rejection is `kind: network`, and `fetch` rejects as readily after the request bytes are
+      // on the wire as before — a dropped Wi-Fi mid-POST is exactly the case
+      // D-2026-08-27-a-disconnect-is-a-detach-not-a-stop built this recovery for. So that kind
+      // keeps its poll unconditionally, and this test fails if a later simplification folds the
+      // two kinds back together under the acceptance flag.
+      vi.useFakeTimers();
+      try {
+        let turnAttempts = 0;
+        const stub = stubFetch((url, init) => {
+          if (url.endsWith('/sessions') && init?.method === 'POST') {
+            return new Response(JSON.stringify({ session_id: 'r'.repeat(32) }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          if (url.endsWith('/messages') && (init?.method ?? 'GET') === 'GET') {
+            // The detached turn's answer, committed to the transcript while the browser was away.
+            return new Response(
+              JSON.stringify([
+                { role: 'user', text: 'pKa?' },
+                { role: 'assistant', text: 'recovered answer' },
+              ]),
+              { status: 200, headers: { 'content-type': 'application/json' } },
+            );
+          }
+          turnAttempts += 1;
+          return Promise.reject(new TypeError('Failed to fetch'));
+        });
+        restore = stub.restore;
+
+        const cid = useChatStore.getState().createConversation();
+        const turn = sendMessage({ conversationId: cid, text: 'pKa?', auth: devAuth });
+        await vi.advanceTimersByTimeAsync(10_000);
+        await turn;
+
+        expect(turnAttempts).toBe(1);
+        const message = useChatStore.getState().conversations[cid]?.messages[1];
+        expect(message).toMatchObject({ role: 'assistant', status: 'done' });
+        expect(message && 'finalText' in message && message.finalText).toBe('recovered answer');
+      } finally {
+        vi.useRealTimers();
+      }
+    }, 20_000);
   });
 
   describe('a repeated identical question, mid detach-recovery', () => {

@@ -183,6 +183,23 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   /** Assigned inside the try, and read by the catch and finally below. */
   let messageId = '';
 
+  /**
+   * Whether the service took this turn — the POST was answered `2xx`.
+   *
+   * The fact detach recovery is gated on, rather than the error's kind, and it composes with
+   * `token_unavailable` rather than duplicating it. That kind (`src/api/errors.ts`) names the one
+   * pre-flight failure that has a classification of its own: the auth provider refusing to produce
+   * a token. What it cannot name is everything else that fails before the stream exists, because
+   * those failures have no kind — the catch below wraps any non-`ApiError` as `stream`, which is
+   * documented as "plausibly recoverable by polling the session transcript", and it is not. The
+   * five setup writes at the top of the `try` are the live example: `chatStore` records a
+   * `QuotaExceededError` from `appendUserMessage`, and with a session already minted that threw a
+   * chemist into the banner "Connection lost — the turn is still running on the server; recovering
+   * the answer…" with the composer locked, for a turn nothing had sent. Measured on the merged
+   * tree with this flag ignored: **630 s** and **210** poll attempts; with it, one tick.
+   */
+  let turnAccepted = false;
+
   const stop = (): void => {
     // Server first, then socket: the backend detaches on disconnect
     // (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so aborting the fetch alone would
@@ -272,12 +289,18 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   };
 
   const runOnce = async (sessionId: string): Promise<void> => {
+    // Per attempt: a replay after a 401 or a `session_not_found` starts a new turn, and what the
+    // previous attempt got as far as says nothing about this one.
+    turnAccepted = false;
     await streamTurn({
       sessionId,
       message: text,
       dryRun,
       signal: abort.signal,
       getToken: () => auth.getAccessToken(),
+      onAccepted() {
+        turnAccepted = true;
+      },
       onCorrelationId(id) {
         // Kept in three places, each for a different reader: the store, so the trace panel can
         // show a reference on a turn that SUCCEEDED; the logger's context, so every subsequent
@@ -423,7 +446,21 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // server-side (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so a broken stream is a
     // *recoverable* state — the answer will land in the session transcript. Poll it back rather
     // than surfacing a dead-end banner for work that is still happening.
-    if (apiError.kind === 'stream' || apiError.kind === 'network') {
+    //
+    // The two kinds are gated differently because they are different claims, and reading them as
+    // one is what sent turns that never existed into a ten-minute poll:
+    //
+    //  - `network` is `fetch` itself rejecting, which happens as readily *after* the request bytes
+    //    are on the wire as before. Whether the service got it is genuinely unknowable from here,
+    //    and a dropped Wi-Fi mid-POST is the case detach recovery was built for, so it keeps its
+    //    poll unconditionally.
+    //  - `stream` is only ever a real claim about a running turn when a stream actually existed.
+    //    It is also the kind the catch above stamps on any non-`ApiError`, including one thrown by
+    //    this function's own setup writes — for which there is nothing to recover and nothing to
+    //    wait for. `turnAccepted` is what tells those apart; see its docstring.
+    const mayStillBeRunning =
+      apiError.kind === 'network' || (turnAccepted && apiError.kind === 'stream');
+    if (mayStillBeRunning) {
       const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
       if (sessionId) {
         useChatStore.getState().setBanner({

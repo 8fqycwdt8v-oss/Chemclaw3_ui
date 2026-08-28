@@ -46,7 +46,20 @@ export type ApiErrorKind =
   | 'empty_answer'
   /** An `error` event arrived in-stream. Includes the turn timeout, which the backend reports as
    *  a final SSE event rather than an HTTP status. */
-  | 'agent';
+  | 'agent'
+  /**
+   * The auth provider could not produce a bearer token, for a reason it did not resolve into an
+   * interactive sign-in itself — `msalAuth.getAccessToken` rethrows exactly this shape, on
+   * purpose: a silent-refresh failure is very often a network blip, not proof the session is
+   * gone, and forcing a redirect on one would send a chemist to a login page to fix an unplugged
+   * VPN.
+   *
+   * Distinct from `network` although the message reads the same: this failure happens strictly
+   * BEFORE any request is opened, so unlike a `fetch` that throws after being sent, there is no
+   * chance whatsoever that the server received anything. `stream`/`network` recovery polls the
+   * session transcript on exactly that chance — for this kind there is none to poll for, and
+   * `sendMessage` must not read "no bearer token" as "the turn may still be running server-side". */
+  | 'token_unavailable';
 
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;

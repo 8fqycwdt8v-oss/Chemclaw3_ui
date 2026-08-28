@@ -435,6 +435,86 @@ describe('sendMessage', () => {
     }, 20_000);
   });
 
+  /**
+   * A hard token-acquisition failure — `msalAuth.getAccessToken` rethrowing something other than
+   * `InteractionRequiredAuthError` — is not a dropped connection, even though both used to reach
+   * `sendMessage`'s outer catch as a bare rejection wrapped into `kind: 'stream'`. That misreading
+   * sent a turn that was never opened into the ten-minute "the server may still be running it"
+   * recovery poll. `'token_unavailable'` (`tests/streamTurn.test.ts`, `tests/apiAuthRecovery.test.ts`)
+   * is the unit-level fix; these two are the end-to-end guarantee that `sendMessage` actually shows
+   * an immediate, retryable failure instead.
+   */
+  describe('the token provider failing before any request is opened', () => {
+    const failingAuth: AuthProvider = {
+      mode: 'msal',
+      account: null,
+      getAccessToken: () => Promise.reject(new Error('acquireTokenSilent: network is down')),
+      login: async () => undefined,
+      logout: async () => undefined,
+      handleUnauthorized: async () => false,
+    };
+
+    it('fails immediately, with no polling, when the session already exists', async () => {
+      let messagesPolled = false;
+      const stub = stubFetch((url, init) => {
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          return new Response(JSON.stringify({ session_id: 'n'.repeat(32) }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/messages') && (init?.method ?? 'GET') === 'GET') {
+          messagesPolled = true;
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        throw new Error('the turn stream must never be reached');
+      });
+      restore = stub.restore;
+
+      // A session that already exists, minted while `getAccessToken` still worked — the shape a
+      // second message in the same conversation has, and the one where the store's `sessionId`
+      // would make the (wrong) recovery branch look plausible if this failure were misread as a
+      // dropped connection.
+      const cid = useChatStore.getState().createConversation();
+      useChatStore.setState((s) => ({
+        conversations: {
+          ...s.conversations,
+          [cid]: { ...s.conversations[cid]!, sessionId: 'n'.repeat(32) },
+        },
+      }));
+
+      await sendMessage({ conversationId: cid, text: 'hello', auth: failingAuth });
+
+      expect(messagesPolled).toBe(false);
+      const message = useChatStore.getState().conversations[cid]?.messages[1];
+      expect(message && 'error' in message && message.error?.kind).toBe('token_unavailable');
+      const banner = useChatStore.getState().banner;
+      expect(banner?.kind).toBe('error');
+      expect(banner?.text).not.toContain('Connection lost');
+      expect(banner?.action).toBe('retry');
+      expect(useChatStore.getState().composerLock).toBe(false);
+    });
+
+    it('fails immediately when minting the very first session fails the same way', async () => {
+      const stub = stubFetch(() => {
+        throw new Error('nothing should ever be fetched');
+      });
+      restore = stub.restore;
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({ conversationId: cid, text: 'hello', auth: failingAuth });
+
+      expect(stub.calls).toHaveLength(0);
+      const message = useChatStore.getState().conversations[cid]?.messages[1];
+      expect(message && 'error' in message && message.error?.kind).toBe('token_unavailable');
+      expect(useChatStore.getState().banner?.action).toBe('retry');
+      expect(useChatStore.getState().composerLock).toBe(false);
+    });
+  });
+
   describe('an in-stream empty_answer', () => {
     it('is reported as an immediate failure, not a connection-drop recovery', async () => {
       // `empty_answer` is a well-formed, fully-read stream ending in a terminal event the server

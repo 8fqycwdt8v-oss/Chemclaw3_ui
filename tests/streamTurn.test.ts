@@ -359,6 +359,55 @@ describe('streamTurn', () => {
     expect(devHeaders.authorization).toBeUndefined();
   });
 
+  /**
+   * `getToken` failing is not the same fault as `fetch` failing, and conflating them is what
+   * `D-` (see `src/api/errors.ts`, `'token_unavailable'`) exists to prevent: this is called
+   * strictly before the POST is ever opened, so there is zero chance — not merely low odds, as
+   * with a `fetch` that throws after being sent — that the server received anything. A caller
+   * (`sendMessage`) that read this the way it reads `kind: 'network'` would poll the session
+   * transcript for up to ten minutes for a turn that was never asked to start.
+   */
+  describe('the token provider failing before any request is opened', () => {
+    it('rejects as token_unavailable, retryable, and never calls fetch', async () => {
+      const stub = stubFetch(() => sseResponse(sseFrames([answerEvent()])));
+      restore = stub.restore;
+
+      const err = await streamTurn({
+        sessionId: SESSION,
+        message: 'x',
+        signal: new AbortController().signal,
+        getToken: () => Promise.reject(new Error('acquireTokenSilent: network is down')),
+        onEvent: () => undefined,
+      }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).kind).toBe('token_unavailable');
+      expect((err as ApiError).retryable).toBe(true);
+      // The load-bearing assertion: nothing was ever sent, so a caller that polls the transcript
+      // for a "detached" answer would be waiting on a turn that does not exist anywhere.
+      expect(stub.calls).toHaveLength(0);
+    });
+
+    it('reports Stop rather than token_unavailable when the signal was already aborted', async () => {
+      const stub = stubFetch(() => sseResponse(sseFrames([answerEvent()])));
+      restore = stub.restore;
+      const controller = new AbortController();
+      controller.abort();
+
+      const err = await streamTurn({
+        sessionId: SESSION,
+        message: 'x',
+        signal: controller.signal,
+        getToken: () => Promise.reject(new Error('abandoned')),
+        onEvent: () => undefined,
+      }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ApiError);
+      expect((err as ApiError).kind).toBe('aborted');
+      expect(stub.calls).toHaveLength(0);
+    });
+  });
+
   it('passes dry_run through to the service', async () => {
     const stub = stubFetch(() => sseResponse(sseFrames([answerEvent()])));
     restore = stub.restore;

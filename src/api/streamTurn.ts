@@ -101,7 +101,25 @@ export interface StreamTurnOptions {
  * Never retries internally — see the module docstring.
  */
 export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> {
-  const token = await opts.getToken();
+  let token: string | null;
+  try {
+    token = await opts.getToken();
+  } catch (err) {
+    // The provider itself failed before any request was opened — `msalAuth.getAccessToken`
+    // deliberately rethrows a silent-refresh failure that is not `InteractionRequiredAuthError`
+    // rather than resolving it, precisely so a network blip does not force a sign-in redirect.
+    // Left uncaught, this used to escape as a bare, non-`ApiError` rejection that `sendMessage`'s
+    // outer catch could only wrap as `kind: 'stream'` — the same kind a mid-turn disconnect gets
+    // — which sent a turn that never reached the network into the ten-minute "the turn may still
+    // be running server-side" recovery poll. It cannot be: `fetch` below has not been called yet.
+    if (opts.signal.aborted) throw new ApiError('aborted', 'Stopped.');
+    throw new ApiError(
+      'token_unavailable',
+      'Could not obtain a valid session token. Check your connection and try again.',
+      undefined,
+      { retryable: true },
+    );
+  }
 
   let res: Response;
   try {

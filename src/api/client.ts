@@ -50,7 +50,27 @@ export const recoverFrom = async (auth: TokenGetter): Promise<boolean> =>
   typeof auth === 'function' ? false : auth.handleUnauthorized();
 
 async function send(path: string, auth: TokenGetter, init: RequestInit): Promise<Response> {
-  const token = await tokenFrom(auth);
+  let token: string | null;
+  try {
+    token = await tokenFrom(auth);
+  } catch (err) {
+    // The provider failed before any request was opened — `msalAuth.getAccessToken` rethrows a
+    // silent-refresh failure that is not `InteractionRequiredAuthError` rather than resolving it,
+    // so a network blip does not force a sign-in redirect. Left uncaught, this reached every
+    // caller of `request` (session creation among them) as a bare, non-`ApiError` rejection —
+    // which `sendMessage`'s outer catch could only classify as `kind: 'stream'`, the same kind a
+    // genuinely detached turn gets, sending a request that was never sent into a ten-minute poll
+    // of a session transcript for an answer that can never land there.
+    logger.warn('auth.token_acquisition_failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    throw new ApiError(
+      'token_unavailable',
+      'Could not obtain a valid session token. Check your connection and try again.',
+      undefined,
+      { retryable: true },
+    );
+  }
   try {
     return await fetch(`${config.apiBase}${path}`, {
       ...init,

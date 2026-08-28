@@ -10,7 +10,17 @@ import { expect, test } from '@playwright/test';
  * which is what happens for free when you prepend content to a scroller.
  */
 
-const STORAGE_KEY = 'chemclaw3.chat.v2';
+/**
+ * The persisted-history slot this suite seeds.
+ *
+ * Per-account since the shared-workstation fix: `chatStorageKey` (src/state/chatStore.ts) appends
+ * the signed-in principal's `oid` to the frozen base, and nothing is read off disk until
+ * `hydrateChatForAccount` is called with it. This suite runs under `AUTH_MODE=dev`, whose
+ * principal is `oid="dev-user"` (src/auth/devAuth.ts) — so the bare base key, which is what this
+ * seeded before, is a slot the app never reads, and every assertion below failed on an empty
+ * transcript rather than on the property it names.
+ */
+const STORAGE_KEY = 'chemclaw3.chat.v2.dev-user';
 const CONVERSATION = 'e2e-long-transcript';
 const TOTAL = 200;
 

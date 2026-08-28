@@ -35,6 +35,7 @@ import type { TraceEntry } from '../state/types.ts';
 import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
 import { formatDuration, summarizeTurn } from '../state/turnActivity.ts';
+import { refusalCopy } from '../lib/refusals.ts';
 import { JobFailureCard, JobResultCard } from './JobResultCard.tsx';
 import { parsePlanItem } from './PlanItems.tsx';
 import { ResultSheet } from './ResultSheet.tsx';
@@ -433,13 +434,19 @@ function Row({
       // A gate refusal is not a fault, and rendering it in the failure red says it is. The service
       // classifies it for exactly this reason: a correctly-gated turn read as a broken one is the
       // mistake its own live evaluation made before the field existed.
-      const gated = entry.toolFailure?.reason === 'plan_gate';
+      //
+      // Five kinds, not one. This asked `reason === 'plan_gate'` while the other four gates — a
+      // dry run the reader themselves switched on, a role denial, a tool this agent never had, a
+      // repeat the guard stopped — all fell through to the failure red, which told a chemist their
+      // own dry run was a broken pod. `refusalCopy` is the one table; `null` from it still means
+      // an ordinary failure.
+      const refusal = refusalCopy(entry.toolFailure?.reason);
       return (
-        <Step tone={gated ? 'warn' : 'danger'}>
+        <Step tone={refusal ? 'warn' : 'danger'}>
           <Line
-            className={gated ? 'text-warn-ink' : 'text-danger-ink'}
+            className={refusal ? 'text-warn-ink' : 'text-danger-ink'}
             icon={
-              gated ? (
+              refusal ? (
                 <ShieldAlert aria-hidden className="size-3.5 shrink-0" />
               ) : (
                 <CircleX aria-hidden className="size-3.5 shrink-0" />
@@ -448,16 +455,19 @@ function Row({
             label={toolLabel(entry.toolFailure?.tool ?? 'tool')}
             mono={entry.toolFailure?.tool}
             badge={
-              <Badge tone={gated ? 'warn' : 'danger'}>
-                {gated ? 'needs plan approval' : 'failed'}
-              </Badge>
+              <Badge tone={refusal ? 'warn' : 'danger'}>{refusal ? refusal.badge : 'failed'}</Badge>
             }
           />
+          {/* The service's own sentence explains what the gate did; the remedy says what the
+              reader does about it. Both, because neither is the other: "propose_note changes
+              stored data and the plan has not been approved" does not tell a chemist to go and
+              approve it, and a remedy alone would hide which call was refused. */}
           {entry.toolFailure?.message && (
-            <p className={cn('mt-0.5 text-2xs', gated ? 'text-warn-ink' : 'text-danger-ink')}>
+            <p className={cn('mt-0.5 text-2xs', refusal ? 'text-warn-ink' : 'text-danger-ink')}>
               {entry.toolFailure.message}
             </p>
           )}
+          {refusal && <p className="mt-0.5 text-2xs text-ink-muted">{refusal.remedy}</p>}
         </Step>
       );
     }

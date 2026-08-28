@@ -129,22 +129,38 @@ function countBytes(res: http.ServerResponse): () => number {
 }
 
 /**
+ * The status booked for a response the client walked away from.
+ *
+ * nginx's convention, and it is borrowed rather than invented because an abandoned response has no
+ * status of its own: `res.statusCode` is whatever was set before the client left — 200 on an SSE
+ * stream that had been running for minutes, and a bare `200` default on one where no header was
+ * ever written. Booking either would make "how many streams did clients abandon?" unanswerable
+ * from the scrape and would count an abandoned turn as a served one.
+ */
+const CLIENT_CLOSED_REQUEST = 499;
+
+/**
  * One access-log line per response, plus the metrics behind `/metrics`.
  *
- * Booked on `finish` for a response that completed, and on `close` for one that did not — because a
- * client that aborts fires `close` *without* `finish`, and if only `finish` were handled that
- * request would never be booked: no access line, and the `chemclaw_ui_requests_in_flight` gauge
- * `requestStarted` incremented would never come back down. That gauge is monotonic and pumpable —
- * an attacker opening and aborting requests drives it up for ever and leaves no log line at all.
- * So both events settle exactly once (the `settled` guard: `close` always follows `finish`, so the
- * naive form would double-count every normal request), and an aborted request is booked as **499**
- * — the "client closed request" status — rather than the misleading `200` a half-written response
- * still carries.
+ * Written on `close` rather than at dispatch, so the status, the duration and the byte count are
+ * the real ones — an SSE turn that ran for nine minutes books nine minutes here, which is the
+ * whole point of measuring it. `route` is set by the caller as it dispatches; it starts as the
+ * least specific label rather than as the raw path, because a label is a metric dimension and a
+ * path is not.
  *
- * The status, duration and byte count are the real ones: an SSE turn that ran for nine minutes
- * books nine minutes here, which is the whole point of measuring it. `route` is set by the caller
- * as it dispatches; it starts as the least specific label rather than as the raw path, because a
- * label is a metric dimension and a path is not.
+ * **`close`, not `finish`, and the difference was a permanently wrong gauge.** `finish` fires when
+ * a response was fully written; a client that hangs up mid-response never reaches it, so neither
+ * the access line nor `requestFinished` ran — and `requestStarted` had already run. Measured on
+ * the route where it matters most: five aborted `GET /sessions/{id}/events` streams took
+ * `chemclaw_ui_requests_in_flight` from 1 to 6 and left it at 6 for the life of the process, so
+ * any alert on that gauge fires for ever after the first abandoned stream; and
+ * `grep -c 'sessions/{id}/events' bff.log` returned **0** — the longest-lived, most
+ * failure-prone route in this process had never written one access line. `close` is emitted on
+ * every terminal outcome, completed or aborted, and exactly once, which is what makes the
+ * decrement and the line a pair rather than a hope. `proxy.ts` already listened for exactly this
+ * to tear the upstream request down (`res.on('close')` there, guarded by the same
+ * `writableFinished`), so an abort was being handled correctly everywhere except in what this
+ * process says about it.
  */
 function observe(
   req: http.IncomingMessage,
@@ -155,16 +171,12 @@ function observe(
   const startedAt = Date.now();
   const bytes = countBytes(res);
   requestStarted();
-
-  let settled = false;
-  const settle = (): void => {
-    if (settled) return;
-    settled = true;
+  res.on('close', () => {
     const durationMs = Date.now() - startedAt;
-    // `res.writableFinished` is the honest signal that the response completed; `close` before it
-    // means the client went away mid-flight, which is a 499 and not whatever default status a
-    // never-sent response still holds.
-    const status = res.writableFinished ? res.statusCode : 499;
+    // `writableFinished` is the one honest reading of "did this response actually complete?":
+    // `res.finished` was deprecated for saying yes as soon as `end()` was *called*.
+    const aborted = !res.writableFinished;
+    const status = aborted ? CLIENT_CLOSED_REQUEST : res.statusCode;
     requestFinished(label.route, req.method ?? 'GET', status, durationMs / 1000);
     log.info('request', {
       method: req.method ?? 'GET',
@@ -173,19 +185,15 @@ function observe(
       status,
       duration_ms: durationMs,
       bytes: bytes(),
+      // Kept beside the 499 rather than replacing it: the status is what a query aggregates on,
+      // and this is what tells a reader the stream was answering when the client left.
+      ...(aborted ? { aborted: true, sent_status: res.statusCode } : {}),
       ...(trace.upstreamMs === null ? {} : { upstream_ms: trace.upstreamMs }),
       // The join key. Present on any request the service answered, which is what makes a line
       // here and a line there the same incident rather than two.
       correlation_id: trace.correlationId,
     });
-  };
-
-  // `finish` = the response was fully written; `close` = the underlying connection went away,
-  // which fires for BOTH a normal completion (after `finish`) and an abort (instead of it). The
-  // guard makes the common double-signal idempotent while catching the abort the single handler
-  // missed.
-  res.on('finish', settle);
-  res.on('close', settle);
+  });
 }
 
 export function createRequestListener(): http.RequestListener {

@@ -140,3 +140,91 @@ describe('the entity rail', () => {
     expect(await screen.findByText('1,234.5, 1.6')).toBeTruthy();
   });
 });
+
+/**
+ * A number too small for three decimal places is still a measurement.
+ *
+ * `toLocaleString` with no options inherits `Intl`'s `maximumFractionDigits: 3`, which is a
+ * *fixed-decimal* clamp rather than a precision: everything below 5e-4 rounds to `0`, and the cell
+ * says the measurement was zero rather than that it was rounded. `AutoTable` is the generic
+ * renderer for any tool result, so this reached whatever a chemist's `run_python` script returned —
+ * a rate-constant column of `4.2e-6` values rendered as a column of `0`, and the decay it describes
+ * is gone with it. Below `1e-4` the notation switches so the string stays short; between that and
+ * 1 the digits are significant rather than positional. A cap on decimals is fine for a number
+ * bigger than one and lethal for one smaller.
+ */
+describe('a measurement smaller than the default precision', () => {
+  it('survives the helper instead of rounding to zero', () => {
+    expect(formatScientificNumber(3.2e-6)).toBe('3.2E-6');
+    expect(formatScientificNumber(1.2e-9)).toBe('1.2E-9');
+    expect(formatScientificNumber(-4.2e-6)).toBe('-4.2E-6');
+    // Just inside the fixed range: still positional, and still four significant digits rather
+    // than the three decimals that used to collapse it.
+    expect(formatScientificNumber(0.0001234)).toBe('0.0001234');
+    expect(formatScientificNumber(0.0005)).toBe('0.0005');
+  });
+
+  it('leaves a number a chemist reads positionally alone', () => {
+    // The grouping this file exists to pin is untouched, and so is every value at or above 1.
+    expect(formatScientificNumber(1234.5)).toBe('1,234.5');
+    expect(formatScientificNumber(8900)).toBe('8,900');
+    expect(formatScientificNumber(0)).toBe('0');
+    // A very large one is rendered in full rather than collapsed: no digit is dropped, and the
+    // grouping is what makes it readable.
+    expect(formatScientificNumber(6.022e23)).toBe('602,200,000,000,000,000,000,000');
+  });
+
+  it('prints a value that is not a number as one nobody can mistake for a measurement', () => {
+    // Neither can cross JSON, so this is a decision about what the screen says if one ever
+    // arrives — not a rounding. `NaN` and `∞` are both unmistakable; `0` would not be.
+    expect(formatScientificNumber(Number.NaN)).toBe('NaN');
+    expect(formatScientificNumber(Number.POSITIVE_INFINITY)).toBe('∞');
+    expect(formatScientificNumber(Number.NEGATIVE_INFINITY)).toBe('-∞');
+  });
+
+  it('still obeys a call site that states its own precision', () => {
+    // `formatEnergy` asks for one decimal and must keep getting it, small value or not.
+    expect(formatScientificNumber(0.0000032, { maximumFractionDigits: 1 })).toBe('0');
+  });
+
+  it('renders a script’s rate-constant column as numbers, in the real table', async () => {
+    // `run_python` returns whatever the chemist's script assigned, and a list of records under a
+    // key is what reaches `AutoTable`. Every `k_per_s` here used to read `0`.
+    open('run_python', {
+      result: [
+        { time_h: 0, impurity_frac: 0.0121, k_per_s: 4.2e-6 },
+        { time_h: 24, impurity_frac: 0.0009, k_per_s: 4.2e-6 },
+      ],
+    });
+
+    expect((await screen.findAllByText('4.2E-6')).length).toBe(2);
+    // 9e-4 is inside the fixed range, so it stays positional — and it is exactly the value
+    // three decimals used to round *up* to `0.001`, which is a different number.
+    expect(screen.getByText('0.0009')).toBeTruthy();
+    expect(screen.queryByText('0.001')).toBeNull();
+  });
+});
+
+/**
+ * The rail is on screen for every structure a turn mentioned, so it is where a rounded-away value
+ * is seen most often — and it has no units, no method and no way to say a number was truncated.
+ */
+describe('the entity rail on small figures', () => {
+  it('shows them rather than a row of zeroes', async () => {
+    const store = useEntityStore.getState();
+    await store.ingest(C1, 'm2', {
+      type: 'tool_call',
+      tool: 'compute_electronic_properties',
+      arguments: JSON.stringify({ smiles: 'CCO' }),
+    });
+    await store.ingest(
+      C1,
+      'm2',
+      toolResultEvent({ tool: 'compute_electronic_properties', numbers: [0.5136, 3.2e-6] }),
+    );
+
+    render(<EntityRail conversationId={C1} />);
+
+    expect(await screen.findByText('0.5136, 3.2E-6')).toBeTruthy();
+  });
+});

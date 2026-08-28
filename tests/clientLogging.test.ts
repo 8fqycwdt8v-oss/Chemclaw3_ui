@@ -146,22 +146,61 @@ describe('the sink', () => {
     stop();
   });
 
-  it('gives up after repeated sink failures rather than retrying a broken endpoint for ever', async () => {
+  it('backs off a failing endpoint and comes back when it recovers', async () => {
     // A sink that hammers a dead endpoint is the defect this module exists to report, one layer
-    // down — and it cannot log its own failure without recursing.
-    const stub = stubFetch(() => new Response(null, { status: 500 }));
-    restore = stub.restore;
-    const { logger, startClientEventSink } = await loadLogger({ logLevel: 'info' });
-    const stop = startClientEventSink();
+    // down. The first answer to that was a latch — three consecutive non-2xx and the transport
+    // gave up for the life of the page — and a latch is the wrong shape for a diagnostic channel:
+    // measured against a 60 s outage with the app logging once a second, the old sink posted 3
+    // times during it and then **0** times in the two minutes after the endpoint healed. A single
+    // rolling restart therefore silenced a chemist's browser for the rest of their session, with
+    // nothing on screen and no way back but a reload nobody knew to do.
+    vi.useFakeTimers();
+    try {
+      let healthy = false;
+      const posts: number[] = [];
+      const stub = stubFetch(() => {
+        posts.push(Date.now());
+        return healthy
+          ? new Response(null, { status: 204 })
+          : new Response(null, { status: 503, headers: { 'retry-after': '10' } });
+      });
+      restore = stub.restore;
+      const { logger, startClientEventSink } = await loadLogger({ logLevel: 'info' });
+      const stop = startClientEventSink();
 
-    for (let attempt = 0; attempt < 6; attempt += 1) {
-      for (let i = 0; i < 20; i += 1) logger.warn('doomed');
-      // Let the rejected/failed POST settle so the failure counter has moved on.
-      await new Promise((r) => setTimeout(r, 5));
+      // Six failures' worth of traffic. The latch stopped at three; the backoff keeps trying, and
+      // spaces the attempts out rather than posting on every flush.
+      for (let i = 0; i < 60; i += 1) {
+        logger.warn(`during.${i}`);
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+      expect(posts.length).toBeGreaterThan(3);
+      // Spaced: a minute of failing at one entry per second is a handful of attempts, not twelve.
+      expect(posts.length).toBeLessThan(8);
+
+      healthy = true;
+      const duringOutage = posts.length;
+      for (let i = 0; i < 120; i += 1) {
+        logger.warn(`after.${i}`);
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+
+      // The whole point: it recovered. The old sink posted nothing here, ever again.
+      expect(posts.length).toBeGreaterThan(duringOutage + 10);
+
+      // And what was recorded during the outage was not thrown away — the first batch through
+      // after the recovery still carries entries from it.
+      const delivered = stub.calls
+        .slice(duringOutage)
+        .flatMap(
+          (c) => (JSON.parse(String(c.init?.body)) as { entries: { message: string }[] }).entries,
+        )
+        .map((e) => e.message);
+      expect(delivered.some((m) => m.startsWith('during.'))).toBe(true);
+
+      stop();
+    } finally {
+      vi.useRealTimers();
     }
-    stop();
-
-    // Three failures, and then it stops trying.
-    expect(stub.calls.length).toBeLessThanOrEqual(4);
-  });
+  }, 30_000);
 });

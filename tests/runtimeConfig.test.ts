@@ -171,3 +171,42 @@ describe('what /config.js actually delivers', () => {
     expect((window as unknown as { pwned?: number }).pwned).toBeUndefined();
   });
 });
+
+/**
+ * A cap the deployment got wrong must not become a cap of 1.
+ *
+ * `src/env.ts` refuses a zero, a negative or a non-number and keeps the default, and its comment
+ * says why: a cap of zero is not a stricter limit, it is a composer that refuses every message
+ * including the one being typed when the bad value ships. That guard was unreachable on the only
+ * path that feeds it in a deployment, because the BFF clamped with `Math.max(1, …)` first — so
+ * `MAX_MESSAGE_CHARS=0` crossed this seam as `1`, passed the guard, and shipped a one-character
+ * composer with no error anywhere. The guard's own test injects the value straight into `window`,
+ * which is why it stayed green over a production path that could not produce it.
+ *
+ * The validity decision is one predicate now (`isUsableMessageCap`), read by both halves. This
+ * drives the *server* leg through the emitted bytes, because that is the leg that was missing.
+ */
+describe('a MAX_MESSAGE_CHARS the deployment got wrong', () => {
+  /** The cap the SPA ends up with when the environment says this. */
+  async function capFrom(value: string | null): Promise<number> {
+    for (const [key, v] of Object.entries(ENV)) vi.stubEnv(key, v);
+    if (value === null) vi.stubEnv('MAX_MESSAGE_CHARS', '');
+    else vi.stubEnv('MAX_MESSAGE_CHARS', value);
+    vi.resetModules();
+    const server = await import('../server/runtimeConfig.ts');
+    return (await loadClientConfig(server.renderConfigScript())).maxMessageChars;
+  }
+
+  it('never reaches the SPA as a cap of 1', async () => {
+    // Every one of these used to arrive as `1`. `0` is the realistic one: it is the widespread
+    // "0 means unlimited" convention, and it is what a Helm `| default 0` renders.
+    for (const raw of ['0', '-5', '0.4', '1e-9', ' ', 'abc']) {
+      expect(await capFrom(raw)).toBe(100_000);
+    }
+  });
+
+  it('still carries a cap the deployment meant', async () => {
+    expect(await capFrom('250000')).toBe(250_000);
+    expect(await capFrom(null)).toBe(100_000);
+  });
+});

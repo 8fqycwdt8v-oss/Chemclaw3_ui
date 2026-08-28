@@ -37,6 +37,8 @@ const base: BffConfig = {
   warmSessions: true,
   reviewerRoles: [],
   maxMessageChars: 100_000,
+  rawMaxMessageChars: '',
+  maxMessageCharsIsValid: true,
   csp: '',
   logLevel: 'error',
   clientLogLevel: 'info',
@@ -152,5 +154,60 @@ describe('the checks that were already there still work', () => {
   it('requires the Entra settings under msal', () => {
     const problems = validateConfig(config({ authMode: 'msal', rawAuthMode: 'msal' }));
     expect(problems).toHaveLength(3);
+  });
+});
+
+/**
+ * A message cap that is not a cap is a configuration error, not a stricter setting.
+ *
+ * This used to be `Math.max(1, Math.floor(...))`, which turned `MAX_MESSAGE_CHARS=0` — the
+ * widespread "0 means unlimited" convention, and what a Helm `| default 0` renders — into a
+ * one-character composer, silently, for the whole deployment. Clamping *up* to 1 is the
+ * destructive reading of a bad value, and it happened at the one layer that hid it from the SPA
+ * guard written to catch it. The backend refuses the same value outright
+ * (`service_max_message_chars: Field(default=100_000, gt=0)`), which is the posture mirrored here:
+ * same shape as `rawAuthMode`/`authModeIsValid`, because a value nobody can serve is not a default.
+ */
+describe('an unusable MAX_MESSAGE_CHARS', () => {
+  it('is refused rather than clamped to 1', async () => {
+    for (const raw of ['0', '-5', '0.4', '1e-9', 'abc']) {
+      vi.stubEnv('MAX_MESSAGE_CHARS', raw);
+      vi.resetModules();
+      const fresh = await import('../server/config.ts');
+
+      expect(fresh.cfg.maxMessageCharsIsValid).toBe(false);
+      // And the value it falls back to while refusing is the default, never 1: nothing downstream
+      // may see a cap that refuses every message.
+      expect(fresh.cfg.maxMessageChars).toBe(100_000);
+      const problems = fresh.validateConfig(fresh.cfg);
+      expect(problems.some((p) => p.includes('MAX_MESSAGE_CHARS') && p.includes(raw))).toBe(true);
+    }
+  });
+
+  it('leaves a cap the deployment meant alone, unset included', async () => {
+    for (const [raw, expected] of [
+      ['250000', 250_000],
+      ['', 100_000],
+      ['  ', 100_000],
+    ] as const) {
+      vi.stubEnv('MAX_MESSAGE_CHARS', raw);
+      vi.resetModules();
+      const fresh = await import('../server/config.ts');
+
+      expect(fresh.cfg.maxMessageCharsIsValid).toBe(true);
+      expect(fresh.cfg.maxMessageChars).toBe(expected);
+      // Only this field's verdict: `cfg` here is built from the real environment, whose default
+      // bind is `0.0.0.0`, so the dev-auth exposure check legitimately fires alongside.
+      expect(
+        fresh.validateConfig(fresh.cfg).filter((p) => p.includes('MAX_MESSAGE_CHARS')),
+      ).toEqual([]);
+    }
+  });
+
+  it('names the value it was given, so the operator can find it', () => {
+    const problems = validateConfig(
+      config({ rawMaxMessageChars: '0', maxMessageCharsIsValid: false }),
+    );
+    expect(problems.join('\n')).toContain('"0"');
   });
 });

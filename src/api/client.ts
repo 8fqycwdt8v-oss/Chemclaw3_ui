@@ -307,6 +307,34 @@ export interface PlanStatus {
   decided_by: string | null;
 }
 
+/** One conversation whose plan nobody has decided, as the cross-session inbox lists it. */
+export interface PendingPlan {
+  session_id: string;
+  title: string | null;
+  updated_at: string;
+  plan_hash: string;
+  plan: string[];
+}
+
+/**
+ * `GET /plans/pending` — undecided plans, with what the service's scan actually covered.
+ *
+ * The three counts are why this is an object rather than an array, and they are the whole
+ * difference between this screen and the one it replaces. `plans: []` has three meanings:
+ * `gated === 0` is "this deployment has no plan gate, so nothing can ever be here", `unread > 0`
+ * is "the answer is partial", and neither of those is "nothing is waiting on you". The deleted
+ * holds inbox rendered all three as the last one — see the note at the top of `ReviewQueue.tsx`.
+ */
+export interface PendingPlans {
+  plans: PendingPlan[];
+  /** Sessions of the caller's the service looked at — the same set `GET /sessions` lists. */
+  considered: number;
+  /** Of those, the ones running a plan-gated profile: the only ones that can hold a decision. */
+  gated: number;
+  /** Gated sessions whose plan was not read, so the list is short by an unknown amount. */
+  unread: number;
+}
+
 /**
  * POST one file to a session's attachment route, reporting progress.
  *
@@ -574,6 +602,17 @@ export const api = {
   /** The plan a session is proposing, read for the hash that binds a decision to it. */
   getPlan(sessionId: string, getToken: TokenGetter): Promise<PlanStatus> {
     return request<PlanStatus>(`/sessions/${sessionId}/plan`, getToken);
+  },
+
+  /**
+   * Every plan of the caller's that nobody has decided — the only plan read not tied to a session.
+   *
+   * Deliberately not error-swallowing into an empty inbox. `listApprovals` folded its 404 into
+   * `[]` and the screen said "nothing is waiting on you" for a release; a failure here reaches the
+   * caller so the screen can say it could not ask.
+   */
+  listPendingPlans(getToken: TokenGetter): Promise<PendingPlans> {
+    return request<PendingPlans>('/plans/pending', getToken);
   },
 
   /**

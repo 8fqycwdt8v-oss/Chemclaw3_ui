@@ -40,14 +40,21 @@ bearer token.
   component in two sizes, and a tool the service adds tomorrow is legible without a release here.
 - **Resolves citations.** A `note-…` chip opens the note with its provenance and its validity
   window, so a citation in an old answer that points at a superseded note says so.
-- **Reviews machine-written knowledge.** `/review` is the PR gate in the browser: what a proposal
-  would commit, byte for byte, and a decision that needs a reason to reject. `/jobs` is the durable
-  run registry — searchable by _why_ each run was launched — with cancellation for those entitled.
-- **Answers approvals.** A durable hold gets real Approve/Reject buttons wired to
-  `POST /approvals/{id}/decision`; a plan approval posts to `POST /sessions/{id}/plan/decision`,
-  bound to the hash of the plan that was actually shown. Both go through a confirmation: the
-  decision is irreversible and attributable. Against a service that predates the plan route, the
-  card falls back to answering in the conversation and says that is what it is doing.
+- **Shows what is waiting on you, across conversations.** `/review` carries both gates. The PR gate
+  is what a proposal would commit, byte for byte, with a decision that needs a reason to reject.
+  Above it is the plan inbox (`GET /plans/pending`): every conversation where the agent has planned
+  work it may not start — including the ones you closed, which is the whole point, since the
+  decision card otherwise lives only inside a live turn. An empty list says _which_ emptiness it is
+  (no gate in this deployment, nothing waiting, or a scan the service bounded), because the section
+  this one replaced spent a release rendering a swallowed 404 as "nothing is waiting on you".
+  `/jobs` is the durable run registry — searchable by _why_ each run was launched — with
+  cancellation for those entitled.
+- **Answers the plan gate.** A plan approval posts to `POST /sessions/{id}/plan/decision`, bound to
+  the hash of the plan that was actually shown, behind a confirmation that says the decision is
+  irreversible and attributable. It is answered in the conversation rather than in the inbox: a
+  plan is approved on the strength of the reasoning that produced it. Against a service that
+  predates the plan route, the card falls back to answering in the conversation and says that is
+  what it is doing.
 - **Survives a reload** — conversations persist locally and rehydrate from the service.
 - **Is ready for Entra SSO** without a rewrite: one env var switches the auth provider.
 
@@ -199,10 +206,19 @@ did not exist: an unhandled rejection anywhere in the app used to be invisible.
 duration, bytes, upstream duration, correlation id — plus `GET /metrics` (request count, duration
 histogram, in-flight, upstream errors). Every label is bounded: the route pattern is
 `/api/sessions/{id}/messages`, never the path, because a per-session label mints a time series per
-conversation, and `/metrics` is unauthenticated like every other one in this family.
+conversation, and `/metrics` is unauthenticated like every other one in this family. _Per response_
+includes the ones nobody waited for: an abandoned SSE stream books `status 499` (`aborted: true`
+beside it) and releases the in-flight gauge, which is what the bookkeeping ran on `finish` and
+therefore did not do.
+
+**A bound on what the browser may write here.** `POST /api/client-events` is unauthenticated by
+construction — the page that posts is served before sign-in — so the pod takes at most 600 batches
+a minute and answers the rest with a `429` and a `Retry-After` the browser's sink waits out. That
+sink backs off and **recovers**; it used to disable itself for the life of the page after three
+non-2xx replies, so one rolling restart silenced a chemist's browser for the rest of the session.
 
 **Readiness that means something.** `GET /readyz` probes the service's own `/readyz` (cached a few
-seconds). `GET /healthz` stays a literal `{"status":"ok"}` and stays what the container
+seconds, and single-flighted — 40 concurrent probes cost one upstream call, not 40). `GET /healthz` stays a literal `{"status":"ok"}` and stays what the container
 `HEALTHCHECK` reads, deliberately: it is liveness, and restarting this container because the
 _backend_ died would remove the one process still able to explain the outage. Point a readiness
 probe or a load balancer at `/readyz`.

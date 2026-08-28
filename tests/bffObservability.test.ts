@@ -36,15 +36,29 @@ const upstreamPaths: string[] = [];
 /** Flipped by a test to make the upstream's own readiness fail. */
 let upstreamReady = true;
 
+/** How long the upstream takes to answer `/readyz`, so a probe storm has something to pile up on. */
+let readyzDelayMs = 0;
+
 /** Every line this process wrote while a test ran. */
 let lines: string[] = [];
 
 beforeAll(async () => {
   upstream = http.createServer((req, res) => {
     upstreamPaths.push(`${req.method} ${req.url}`);
+    if (req.url?.endsWith('/events')) {
+      // The job push-back stream: open for as long as the client wants it, which is what makes an
+      // abandoned response testable at all.
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
+      res.write(': open\n\n');
+      const ping = setInterval(() => res.write(': ping\n\n'), 100);
+      res.on('close', () => clearInterval(ping));
+      return;
+    }
     if (req.url === '/readyz') {
-      res.writeHead(upstreamReady ? 200 : 503, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ status: upstreamReady ? 'ready' : 'database unreachable' }));
+      setTimeout(() => {
+        res.writeHead(upstreamReady ? 200 : 503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ status: upstreamReady ? 'ready' : 'database unreachable' }));
+      }, readyzDelayMs);
       return;
     }
     // The header the service stamps on every response — the join key this app reads back.
@@ -72,10 +86,14 @@ afterAll(async () => {
   await new Promise<void>((resolve) => upstream.close(() => resolve()));
 });
 
-beforeEach(() => {
+beforeEach(async () => {
+  // Process-wide, like the readiness cache below it: without this, one test spends the budget the
+  // next one needs.
+  (await import('../server/clientEvents.ts')).resetClientEventBudget();
   lines = [];
   upstreamPaths.length = 0;
   upstreamReady = true;
+  readyzDelayMs = 0;
   // Both, because the logger splits by severity: warnings and errors go to stderr.
   vi.spyOn(console, 'log').mockImplementation((line: unknown) => void lines.push(String(line)));
   vi.spyOn(console, 'error').mockImplementation((line: unknown) => void lines.push(String(line)));
@@ -246,6 +264,39 @@ describe('/api/client-events', () => {
     expect(lines.find((l) => l.includes('forged'))?.includes('\n')).toBe(false);
   });
 
+  it('refuses a batch over the per-minute budget with a 429 the sink can read', async () => {
+    // Nothing bounded the RATE at which this unauthenticated route wrote to the pod's log: twenty
+    // clients posting maximum-size batches for three seconds had 1,297 accepted, ~24,600 log
+    // entries and ~94 MB — about 31 MB/s of node disk and log ingest from anything that can open
+    // a socket to the pod.
+    const batch = JSON.stringify({ entries: [{ level: 'info', message: 'turn.timing' }] });
+    const post = (): Promise<Response> =>
+      get('/api/client-events', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: batch,
+      });
+
+    // The budget is 600 a minute; 620 in one burst crosses it and nothing else in this file does.
+    const statuses: number[] = [];
+    for (let i = 0; i < 62; i += 1) {
+      statuses.push(...(await Promise.all(Array.from({ length: 10 }, post))).map((r) => r.status));
+    }
+    expect(statuses.filter((s) => s === 204)).toHaveLength(600);
+    expect(statuses.filter((s) => s === 429)).toHaveLength(20);
+
+    // A refusal the browser can act on rather than a reset socket: the sink reads `Retry-After`
+    // and backs off by it (`src/lib/logger.ts`), which it cannot do if the connection dies first.
+    const refused = await post();
+    expect(refused.status).toBe(429);
+    expect(Number(refused.headers.get('retry-after'))).toBeGreaterThan(0);
+    expect(await refused.json()).toMatchObject({ detail: 'too many client event batches' });
+
+    // And the refusals are already counted, because every response is: no metric of its own.
+    const body = await (await get('/metrics')).text();
+    expect(body).toContain('route="/api/client-events",method="POST",status="429"');
+  }, 30_000);
+
   it('refuses anything but a POST, and refuses a body it will not carry', async () => {
     expect((await get('/api/client-events')).status).toBe(405);
     const big = await get('/api/client-events', {
@@ -255,4 +306,77 @@ describe('/api/client-events', () => {
     });
     expect(big.status).toBe(413);
   });
+});
+
+/** `chemclaw_ui_requests_in_flight` right now. */
+const inFlight = async (): Promise<number> => {
+  const body = await (await get('/metrics')).text();
+  return Number(/chemclaw_ui_requests_in_flight (\d+)/.exec(body)?.[1] ?? -1);
+};
+
+describe('a response the client walked away from', () => {
+  it('still decrements the in-flight gauge and still writes its access line', async () => {
+    // The defect, measured on this route because it is the one that matters: the bookkeeping ran
+    // on `finish`, which a client abort never reaches. Five aborted `/sessions/{id}/events`
+    // streams took the gauge from 1 to 6 and left it at **6 for the life of the process** — a
+    // gauge an alert can only ever fire on again — and the access log had **0** lines for the
+    // longest-lived, most failure-prone route in this process.
+    const before = await inFlight();
+
+    const controllers = Array.from({ length: 5 }, () => new AbortController());
+    await Promise.all(
+      controllers.map((c) =>
+        fetch(`http://127.0.0.1:${port}/api/sessions/${'c'.repeat(32)}/events`, {
+          signal: c.signal,
+        }).then((r) => {
+          // Open the body so the proxy is genuinely streaming when the abort lands.
+          void r.body?.getReader().read();
+        }),
+      ),
+    );
+    expect(await inFlight()).toBe(before + 5);
+
+    for (const c of controllers) c.abort();
+    // The abort has to reach this process; `close` on the response is what the fix listens for.
+    await new Promise((r) => setTimeout(r, 250));
+
+    expect(await inFlight()).toBe(before);
+
+    // One line per abandoned stream, and it says so: 499 is the status booked for a response the
+    // client left, so "how many streams were abandoned?" is answerable from the scrape rather
+    // than being indistinguishable from a served 200.
+    const abandoned = lines
+      .map((l) => {
+        try {
+          return JSON.parse(l) as { message?: string; fields?: Record<string, unknown> };
+        } catch {
+          return null;
+        }
+      })
+      .filter((r) => r?.message === 'request' && r.fields?.route === '/api/sessions/{id}/events');
+    expect(abandoned).toHaveLength(5);
+    expect(abandoned[0]?.fields).toMatchObject({ status: 499, aborted: true, sent_status: 200 });
+
+    const body = await (await get('/metrics')).text();
+    expect(body).toContain('route="/api/sessions/{id}/events",method="GET",status="499"');
+  }, 20_000);
+});
+
+describe('a readiness storm', () => {
+  it('costs one upstream probe however many probes arrive at once', async () => {
+    // The cache is written when a probe RESOLVES, so before the single-flight every request that
+    // arrived while one was in flight started another: 40 concurrent probes against a 120 ms
+    // upstream produced 40 upstream requests. That is a readiness check turning into load on the
+    // service it is asking about, during exactly the rolling restart that produced the burst.
+    const { clearReadinessCache } = await import('../server/ready.ts');
+    clearReadinessCache();
+    readyzDelayMs = 120;
+
+    const statuses = await Promise.all(
+      Array.from({ length: 40 }, () => get('/readyz').then((r) => r.status)),
+    );
+
+    expect(new Set(statuses)).toEqual(new Set([200]));
+    expect(upstreamPaths.filter((p) => p === 'GET /readyz')).toHaveLength(1);
+  }, 20_000);
 });

@@ -191,24 +191,31 @@ dispatch already exist, so each is a renderer rather than a feature.
 
 | #      | Persona and story                                                     | Aim                                                                               | Backend                                                                                                                                                                    | Verdict      |
 | ------ | --------------------------------------------------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| **F1** | Chemist: answer a durable hold                                        | An attributable, irreversible sign-off                                            | `POST /approvals/{id}/decision`                                                                                                                                            | **`SERVED`** |
+| **F1** | ~~Chemist: answer a durable hold~~                                    | ~~An attributable, irreversible sign-off~~                                        | ~~`POST /approvals/{id}/decision`~~ — the mechanism is deleted upstream                                                                                                    | **`GONE`**   |
 | **F2** | Chemist: approve the harness plan before it spends                    | Control what the agent is allowed to execute                                      | `GET /sessions/{id}/plan` + a decision bound to `plan_hash`                                                                                                                | **`SERVED`** |
-| **F3** | Chemist: find every hold waiting on me                                | Nothing stays blocked because someone closed a tab                                | `GET /approvals` → `PendingApproval[]`                                                                                                                                     | **`SERVED`** |
+| **F3** | Chemist: find every decision waiting on me                            | Nothing stays blocked because someone closed a tab                                | `GET /plans/pending` → `{plans, considered, gated, unread}`                                                                                                                | **`SERVED`** |
 | **F4** | Reviewer: review machine-written knowledge before it enters the graph | See the exact bytes that would land in the tree; approve, or reject with a reason | `GET /proposals` (keyset paginated, state-filtered), `GET /proposals/{id}` (`content` + `dependencies` + `session_id` + `correlation_id`), `POST /proposals/{id}/decision` | **`SERVED`** |
 | **F5** | Non-reviewer: do not offer me buttons that 403                        | Not learn my permissions from an error message                                    | The `roles` claim; `entra_privileged_role_set`                                                                                                                             | **`SERVED`** |
 
-**F1 and F2 are what this frontend is for.** The plan decision is bound to the hash of the plan
-that was actually rendered, fetched on card mount so the two cannot drift; a 409 re-reads the plan
-and returns to idle rather than blind-retrying with a new hash; both decisions go through a
-confirmation that says the decision is irreversible and attributable; and against a service that
+**F2 is what this frontend is for, and F1 no longer exists.** The plan decision is bound to the
+hash of the plan that was actually rendered, fetched on card mount so the two cannot drift; a 409
+re-reads the plan and returns to idle rather than blind-retrying with a new hash; the decision goes
+through a confirmation that says it is irreversible and attributable; and against a service that
 predates the plan route the card falls back to answering in the conversation _and says that is what
-it is doing_. Nothing in this document asks for these to change.
+it is doing_. Nothing in this document asks for these to change. F1's durable "hold" was deleted
+upstream (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`) because nothing in the service could
+ever open one — see `ISSUES.md`.
 
-**F3.** ~~`api.listApprovals` exists and has no callers.~~ **Built**, on `/review`. `ISSUES.md`
-Issue 3 said the endpoint did not exist and that an inbox "would be built against nothing"; all
-three approval routes do exist, and both stale issues are corrected. The inbox deliberately does
-not decide a hold in place — a hold belongs to a turn, and answering it away from the reasoning
-that produced the question is answering half a question. It links back instead.
+**F3 outlived the route it was written against, because the aim was never about holds.** "Nothing
+stays blocked because someone closed a tab" is a real story and the plan gate is what blocks work:
+under `plan_only` every state-changing step is refused until a human approves, and until
+`GET /plans/pending` existed that decision was reachable only from inside the turn that raised it.
+**Built**, on `/review`, above the proposals. It deliberately does not decide in place — the
+service would accept it, since a decision is bound to the hash of the plan as displayed, but a plan
+is approved on the strength of the reasoning that produced it, so the row links into the
+conversation instead. What it adds over a bare list is that an empty one is never mute: the service
+returns `gated` and `unread` beside the rows, so "this deployment has no plan gate", "the scan was
+partial" and "nothing is waiting on you" are three different screens rather than one.
 
 **F4 was the largest untouched capability in the system.** **Built.** The queue lists what is
 waiting; opening one shows the literal file content and every file that would land beside it, as
@@ -311,7 +318,7 @@ way.
 | `GET /sessions/{id}/tool-results/{ref}` whitelisted; a "See the full result" control on any stored result; typed renderers for the hazard screen, the ICH lookup and the charge table, a generic table for anything record-shaped, raw text otherwise — with the `verdict` always above the data it qualifies                                                            | A3, D1, D2       |
 | `GET /notes/{id}` whitelisted; a citation chip resolves to the note with its provenance, its validity window and its neighbours, and falls back to asking the agent when the reference is not a readable note                                                                                                                                                            | A2               |
 | `GET/POST /proposals[...]` whitelisted; a `/review` screen showing the exact bytes a proposal would commit, its dependency files and its correlation id, with a rejection that cannot go out without a reason                                                                                                                                                            | F4               |
-| `GET /approvals` given the inbox it always had a client method for, on the same screen                                                                                                                                                                                                                                                                                   | F3               |
+| ~~`GET /approvals` given the inbox it always had a client method for, on the same screen~~ — the route was deleted upstream and the whole section with it; what stands in its place is `GET /plans/pending`, a cross-session inbox of undecided plans on `/review`, whose empty state names which emptiness it is                                                        | F3               |
 | `GET/DELETE /jobs[...]` whitelisted; a `/jobs` registry that leads with the recorded rationale rather than the id, searchable over it, with a cancellation that is requested rather than claimed                                                                                                                                                                         | C2, C3           |
 | The `roles` claim finally used, through `useIsReviewer` and a `REVIEWER_ROLES` runtime setting, to hide what would 403 instead of offering it                                                                                                                                                                                                                            | F5               |
 | `GET /profiles` whitelisted and a picker on a not-yet-started conversation, re-applied on every later mint so a recovered session does not silently change agent                                                                                                                                                                                                         | H1               |

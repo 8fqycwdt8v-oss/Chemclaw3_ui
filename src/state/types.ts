@@ -9,7 +9,7 @@
  */
 
 import type { ApiErrorKind } from '../api/errors.ts';
-import type { JobSummary } from '../../shared/events.ts';
+import type { JobSummary, RefusalReason } from '../../shared/events.ts';
 
 export type TurnStatus = 'streaming' | 'done' | 'error' | 'aborted';
 
@@ -132,12 +132,13 @@ export interface TraceEntry {
     tool: string;
     message: string;
     /**
-     * `'plan_gate'` when the pre-execution approval refused a state-changing call.
+     * Which gate refused this call, or absent/null for an ordinary failure.
      *
      * A refusal is the control working, and rendering it in the same red as a database outage
-     * reports a correctly-gated turn as a broken one. Absent for an ordinary failure.
+     * reports a correctly-gated turn as a broken one. `lib/refusals.ts` owns what each one is
+     * shown as; nothing should switch on the raw string outside it.
      */
-    reason?: 'plan_gate' | null;
+    reason?: RefusalReason | null;
   };
   /**
    * One retrieval source's own report of what it contributed to a sweep.

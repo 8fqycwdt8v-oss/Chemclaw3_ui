@@ -114,6 +114,39 @@ describe('plan approval', () => {
   });
 });
 
+describe('what approving actually did', () => {
+  // "You approved this request. The agent will pick it up on its next run." was wrong twice over,
+  // and both halves stranded a reader. Nothing runs when a decision is recorded — the approval is
+  // a row, and the agent acts on the next *request*, which is something a person has to send — and
+  // the approval is spent when that turn ends, so it covers one request rather than the rest of
+  // the conversation. Someone who read it literally waited for work that was never going to start.
+  it('says the approval covers one request, and offers the request', async () => {
+    vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('h1'));
+    vi.spyOn(api, 'decidePlan').mockResolvedValue();
+    render(<ApprovalPrompt prompt="Approve this plan?" sessionId={SID} />);
+
+    await decideVia(/approve plan/i);
+
+    expect(await screen.findByText(/next request only/i)).toBeTruthy();
+    expect(screen.getByText(/spent when that turn ends/i)).toBeTruthy();
+    // And a way to send that request, so approving is not a dead end.
+    expect(screen.getByRole('button', { name: /continue/i })).toBeTruthy();
+    // The old sentence promised something would happen by itself. It must not be back.
+    expect(screen.queryByText(/pick it up on its next run/i)).toBeNull();
+  });
+
+  it('leaves a decline final, with nothing to continue', async () => {
+    vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('h1'));
+    vi.spyOn(api, 'decidePlan').mockResolvedValue();
+    render(<ApprovalPrompt prompt="Approve this plan?" sessionId={SID} />);
+
+    await decideVia(/decline/i);
+
+    expect(await screen.findByText(/nothing will run/i)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /continue/i })).toBeNull();
+  });
+});
+
 describe('the plan the card shows', () => {
   // The service encodes each step's completion as a leading `[x] ` / `[ ] ` prefix on the line,
   // and `PlanItems` is the one component that knows to parse it off. This card rendered the plan

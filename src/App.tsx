@@ -96,16 +96,30 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
       // so a read placed after it would always be discarded. Silent on any failure: an older
       // service has no plan route, and a session with no plan is the ordinary case, not an
       // error worth a banner.
-      let plan: { todos: string[]; hash: string } | null = null;
+      let plan: { todos: string[]; hash: string; awaitingApproval: boolean } | null = null;
       try {
         const status = await api.getPlan(sessionId, auth);
-        if (status.plan.length > 0) plan = { todos: status.plan, hash: status.plan_hash };
+        // `approved` is the EFFECTIVE state — the route folds `consumed_at` in, so a plan that was
+        // approved and whose approval has since been spent comes back false, which is exactly when
+        // the chemist owes another decision. Carried rather than dropped: without it the checklist
+        // returned and the decision it was blocked on did not.
+        if (status.plan.length > 0) {
+          plan = {
+            todos: status.plan,
+            hash: status.plan_hash,
+            awaitingApproval: !status.approved,
+          };
+        }
       } catch {
         // No plan to restore; the checklist simply stays absent.
       }
       if (cancelled) return;
       useChatStore.getState().hydrateTranscript(conversationId, messages);
-      if (plan) useChatStore.getState().attachPlan(conversationId, plan.todos, plan.hash);
+      if (plan) {
+        useChatStore
+          .getState()
+          .attachPlan(conversationId, plan.todos, plan.hash, plan.awaitingApproval);
+      }
     })();
     return () => {
       cancelled = true;

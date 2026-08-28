@@ -36,6 +36,23 @@ describe('the launchers this repository ships', () => {
         expect(line).not.toMatch(/true/);
       }
     });
+
+    it(`does not bake the dev auth provider into every image in ${file}`, () => {
+      // `ALLOW_DEV_AUTH` is a build arg, not a runtime env, so a `${ALLOW_DEV_AUTH:-true}` default
+      // in compose compiles the no-token provider into an image built with AUTH_MODE=msal too —
+      // the vulnerability was exactly that. The launcher may still turn it on *conditionally*
+      // (start.sh does, but only inside `if AUTH_MODE = dev`), so the thing forbidden is the
+      // unconditional shell default-substitution to true, not the token `true` itself.
+      const lines = read(file)
+        .split('\n')
+        .filter((line) => !line.trimStart().startsWith('#'));
+
+      for (const line of lines) {
+        if (!line.includes('ALLOW_DEV_AUTH')) continue;
+        // `${ALLOW_DEV_AUTH:-true}` / `${ALLOW_DEV_AUTH:=true}` — the repository deciding it on.
+        expect(line).not.toMatch(/ALLOW_DEV_AUTH:[-=]\s*true/);
+      }
+    });
   }
 });
 
@@ -46,5 +63,21 @@ describe('the production client build', () => {
     };
 
     expect(config.build?.sourcemap ?? false).toBe(false);
+  });
+});
+
+describe('the production server build', () => {
+  it('does not emit a source map into the image', () => {
+    // `dist/server.js.map` carries the whole BFF source — the route whitelist, the header logic —
+    // and the Dockerfile copies `dist/` whole, so any image-puller would get it. The build script
+    // is read as text (running esbuild in a unit test would be a real filesystem write), and the
+    // property is that `sourcemap` is off.
+    const script = read('scripts/build-server.mjs')
+      .split('\n')
+      .filter((line) => !line.trimStart().startsWith('//'))
+      .join('\n');
+
+    expect(script).toMatch(/sourcemap:\s*false/);
+    expect(script).not.toMatch(/sourcemap:\s*(true|'.*'|".*")/);
   });
 });

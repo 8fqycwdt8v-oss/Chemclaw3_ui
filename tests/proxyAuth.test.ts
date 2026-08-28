@@ -115,6 +115,34 @@ describe('what reaches the Chemclaw service', () => {
     expect(upstreamHeaders['x-chemclaw-dry-run']).toBeUndefined();
   });
 
+  it('drops the X-Forwarded family, which a browser can set to spoof the edge', async () => {
+    const upstreamHeaders = await post({
+      authorization: 'Bearer t',
+      'x-forwarded-for': '10.0.0.9',
+      'x-forwarded-host': 'evil.example',
+      'x-forwarded-proto': 'https',
+      'x-real-ip': '10.0.0.9',
+      'x-original-url': '/admin',
+      'x-rewrite-url': '/admin',
+      'x-http-method-override': 'DELETE',
+      forwarded: 'for=10.0.0.9;host=evil.example',
+    });
+
+    // Every one of these is browser-settable, and some upstream configurations trust them:
+    // uvicorn honours X-Forwarded-For/Forwarded under --proxy-headers, and the URL/method
+    // overrides smuggle a different path or verb past a gateway's routing and authz. The BFF is
+    // the trust boundary, so none of them reach the backend.
+    expect(upstreamHeaders.authorization).toBe('Bearer t');
+    expect(upstreamHeaders['x-forwarded-for']).toBeUndefined();
+    expect(upstreamHeaders['x-forwarded-host']).toBeUndefined();
+    expect(upstreamHeaders['x-forwarded-proto']).toBeUndefined();
+    expect(upstreamHeaders['x-real-ip']).toBeUndefined();
+    expect(upstreamHeaders['x-original-url']).toBeUndefined();
+    expect(upstreamHeaders['x-rewrite-url']).toBeUndefined();
+    expect(upstreamHeaders['x-http-method-override']).toBeUndefined();
+    expect(upstreamHeaders.forwarded).toBeUndefined();
+  });
+
   it('sends no authorization at all when the caller had none', async () => {
     const upstreamHeaders = await post({});
 

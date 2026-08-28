@@ -82,10 +82,18 @@ function createAssetHandler(): (
     gzip: true,
     brotli: true,
     setHeaders(res, pathname) {
-      // Only caching lives here now: it is the one header that genuinely depends on which file
-      // is being served. Hashed assets are immutable; index.html must never be cached or a
-      // deploy won't take.
-      if (pathname === '/index.html' || pathname === '/') {
+      // Only caching lives here now: it is the one header that genuinely depends on which file is
+      // being served. Hashed assets are immutable; the HTML shell must never be cached, or a deploy
+      // won't take AND an authenticated shell can sit in a shared cache for the next visitor.
+      //
+      // The shell is served for the root, for /index.html, and — via `single` — for any client
+      // deep link with no file extension (`/c/abc`). The previous check matched only the first two,
+      // so every deep link was served with no cache-control at all. Testing the final segment's
+      // extension is testing which file sirv serves: every hashed asset has one and is served
+      // directly; an extensionless path falls back to index.html, which is HTML.
+      const servesHtmlShell =
+        pathname === '/' || pathname === '/index.html' || !/\.[^/]+$/.test(pathname);
+      if (servesHtmlShell) {
         res.setHeader('cache-control', 'no-cache');
       }
     },
@@ -123,11 +131,20 @@ function countBytes(res: http.ServerResponse): () => number {
 /**
  * One access-log line per response, plus the metrics behind `/metrics`.
  *
- * Written on `finish` rather than at dispatch, so the status, the duration and the byte count are
- * the real ones — an SSE turn that ran for nine minutes books nine minutes here, which is the
- * whole point of measuring it. `route` is set by the caller as it dispatches; it starts as the
- * least specific label rather than as the raw path, because a label is a metric dimension and a
- * path is not.
+ * Booked on `finish` for a response that completed, and on `close` for one that did not — because a
+ * client that aborts fires `close` *without* `finish`, and if only `finish` were handled that
+ * request would never be booked: no access line, and the `chemclaw_ui_requests_in_flight` gauge
+ * `requestStarted` incremented would never come back down. That gauge is monotonic and pumpable —
+ * an attacker opening and aborting requests drives it up for ever and leaves no log line at all.
+ * So both events settle exactly once (the `settled` guard: `close` always follows `finish`, so the
+ * naive form would double-count every normal request), and an aborted request is booked as **499**
+ * — the "client closed request" status — rather than the misleading `200` a half-written response
+ * still carries.
+ *
+ * The status, duration and byte count are the real ones: an SSE turn that ran for nine minutes
+ * books nine minutes here, which is the whole point of measuring it. `route` is set by the caller
+ * as it dispatches; it starts as the least specific label rather than as the raw path, because a
+ * label is a metric dimension and a path is not.
  */
 function observe(
   req: http.IncomingMessage,
@@ -138,14 +155,22 @@ function observe(
   const startedAt = Date.now();
   const bytes = countBytes(res);
   requestStarted();
-  res.on('finish', () => {
+
+  let settled = false;
+  const settle = (): void => {
+    if (settled) return;
+    settled = true;
     const durationMs = Date.now() - startedAt;
-    requestFinished(label.route, req.method ?? 'GET', res.statusCode, durationMs / 1000);
+    // `res.writableFinished` is the honest signal that the response completed; `close` before it
+    // means the client went away mid-flight, which is a 499 and not whatever default status a
+    // never-sent response still holds.
+    const status = res.writableFinished ? res.statusCode : 499;
+    requestFinished(label.route, req.method ?? 'GET', status, durationMs / 1000);
     log.info('request', {
       method: req.method ?? 'GET',
       // The PATTERN, never the id-bearing path: see `ResolvedRoute.template`.
       route: label.route,
-      status: res.statusCode,
+      status,
       duration_ms: durationMs,
       bytes: bytes(),
       ...(trace.upstreamMs === null ? {} : { upstream_ms: trace.upstreamMs }),
@@ -153,7 +178,14 @@ function observe(
       // here and a line there the same incident rather than two.
       correlation_id: trace.correlationId,
     });
-  });
+  };
+
+  // `finish` = the response was fully written; `close` = the underlying connection went away,
+  // which fires for BOTH a normal completion (after `finish`) and an abort (instead of it). The
+  // guard makes the common double-signal idempotent while catching the abort the single handler
+  // missed.
+  res.on('finish', settle);
+  res.on('close', settle);
 }
 
 export function createRequestListener(): http.RequestListener {

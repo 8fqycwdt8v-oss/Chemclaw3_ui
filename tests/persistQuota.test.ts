@@ -148,7 +148,8 @@ describe('the persisted payload', () => {
     // the trailing write of the final state out before inspecting what actually persisted.
     flushChatPersistence();
 
-    const written = store.get('chemclaw3.chat.v2');
+    // No account has been hydrated in this test, so the store writes to the pre-sign-in slot.
+    const written = store.get('chemclaw3.chat.v2.anon');
     expect(written).toBeDefined();
     expect(written?.length).toBeLessThanOrEqual(BUDGET);
     // The newest conversation is the one the chemist is looking at, so it is the one that must

@@ -120,10 +120,15 @@ services:
     build:
       context: .
       args:
-        # This stack defaults to AUTH_MODE=dev, so its bundle has to be built to permit the
-        # no-token provider. Tracks AUTH_MODE: bring your own tenant and the dev provider is not
-        # compiled into the image at all.
-        ALLOW_DEV_AUTH: ${ALLOW_DEV_AUTH:-true}
+        # Whether the no-token dev provider is compiled into the client bundle. It does NOT track
+        # AUTH_MODE — this is a build arg and AUTH_MODE is a runtime env, so a `:-true` default here
+        # would bake the dev provider into every image, including one an operator built with
+        # AUTH_MODE=msal expecting real sign-in. So it defaults to unset (the Dockerfile's own
+        # `ARG ALLOW_DEV_AUTH=false` then decides), and running the dev stack is an explicit opt-in
+        # in the same shape as ALLOW_INSECURE_AUTH below:
+        #
+        #   ALLOW_DEV_AUTH=true docker compose up --build
+        ALLOW_DEV_AUTH: ${ALLOW_DEV_AUTH:-}
     depends_on:
       chemclaw:
         condition: service_healthy

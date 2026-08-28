@@ -28,7 +28,62 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { cfg } from './config.ts';
 import { log } from './log.ts';
+
+/**
+ * A per-IP token bucket, the one bound on how fast this unauthenticated route may be hit.
+ *
+ * The input hardening above bounds the *shape* of a batch; nothing bounded its *rate*, so one peer
+ * could POST as fast as the socket allowed and fill this pod's log (and its disk) unauthenticated.
+ * A token bucket keyed on the remote address gives each IP `clientEventsRatePerMin` batches a
+ * minute with a small burst, refilling continuously, and answers 429 when the bucket is empty. It
+ * is deliberately in-memory and per-process: this is a cheap local guard against a noisy or hostile
+ * client, not a distributed quota, and it fails open across a restart rather than persisting state.
+ *
+ * Keyed on `req.socket.remoteAddress` — the real peer, because the BFF is the edge and (since the
+ * proxy now strips the `X-Forwarded-*` family inbound) there is no client-assertable address to
+ * spoof it with.
+ */
+const RATE_WINDOW_MS = 60_000;
+const REFILL_PER_MS = cfg.clientEventsRatePerMin / RATE_WINDOW_MS;
+/** Burst ceiling: a full minute's allowance, so a bursty-but-under-budget client is not punished. */
+const BUCKET_CAPACITY = cfg.clientEventsRatePerMin;
+/** Drop an idle bucket after this long so the map cannot grow without bound under address churn. */
+const BUCKET_IDLE_MS = 5 * RATE_WINDOW_MS;
+
+interface Bucket {
+  tokens: number;
+  updatedAt: number;
+}
+const buckets = new Map<string, Bucket>();
+
+/**
+ * Take one token for `key`, refilling by elapsed time first. Returns false when the bucket is dry.
+ *
+ * Sweeps idle buckets on each call — an O(n) pass over a map whose size is the number of *recently
+ * active* peers, which is small; a dedicated timer would keep the process awake for nothing.
+ */
+function allow(key: string, now: number): boolean {
+  for (const [k, b] of buckets) {
+    if (now - b.updatedAt > BUCKET_IDLE_MS) buckets.delete(k);
+  }
+  const bucket = buckets.get(key) ?? { tokens: BUCKET_CAPACITY, updatedAt: now };
+  bucket.tokens = Math.min(
+    BUCKET_CAPACITY,
+    bucket.tokens + (now - bucket.updatedAt) * REFILL_PER_MS,
+  );
+  bucket.updatedAt = now;
+  const permitted = bucket.tokens >= 1;
+  if (permitted) bucket.tokens -= 1;
+  buckets.set(key, bucket);
+  return permitted;
+}
+
+/** Test seam: the buckets are process-wide, so one test would otherwise read another's state. */
+export function resetClientEventsRateLimit(): void {
+  buckets.clear();
+}
 
 /** Much smaller than `maxBodyBytes`: twenty log entries do not need two megabytes. */
 const MAX_BODY_BYTES = 64 * 1024;
@@ -144,6 +199,18 @@ export async function handleClientEvents(req: IncomingMessage, res: ServerRespon
   if (req.method !== 'POST') {
     res.writeHead(405, { 'content-type': 'application/json', allow: 'POST' });
     res.end('{"detail":"method not allowed"}');
+    return;
+  }
+
+  const key = req.socket.remoteAddress ?? 'unknown';
+  if (!allow(key, Date.now())) {
+    res.writeHead(429, {
+      'content-type': 'application/json',
+      'retry-after': String(Math.ceil(RATE_WINDOW_MS / 1000)),
+    });
+    res.end('{"detail":"too many client-event batches"}');
+    // Don't sit reading a body from a peer we are already refusing.
+    if (!req.readableEnded) req.destroy();
     return;
   }
 

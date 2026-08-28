@@ -39,6 +39,13 @@ function traceFrom(calls: TranscriptToolCall[], key: string, at: number): TraceE
       tool: call.tool,
       arguments: call.arguments,
       ...(call.result == null ? { unresolved: true } : { result: call.result }),
+      // The one field on this route that is not a rendering — it is a handle, and dropping it was
+      // dropping the only way back to what the tool actually returned. `ResultBlock` under the
+      // answer and the trace panel's "full result" both gate on `resultRef`, so a rehydrated
+      // conversation lost both while looking exactly like a turn whose results were never stored.
+      // Spread only when non-empty, for the same reason the service distinguishes the two: an
+      // empty ref means there is nothing to fetch, and a control that 404s is worse than none.
+      ...(call.result_ref ? { resultRef: call.result_ref } : {}),
     },
   }));
 }

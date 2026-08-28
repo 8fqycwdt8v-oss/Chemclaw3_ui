@@ -42,6 +42,13 @@
  * `tool_result`, naming the specialist that raised the event. Empty means the main agent, so it is
  * additive by construction and an existing reader is unaffected.
  *
+ * Then two more fields on `tool_result`, and this time the tripwire on the other side fired first:
+ * `values` (the figures under the keys the tool filed them under) and `result_inline` (the whole
+ * result when it is small enough to ride along). Both are additive with empty defaults, both are
+ * mirrored in the interface AND in `normalizeEvent` below — which is the half that matters, since
+ * this normaliser rebuilds every event field by field and an unmirrored field is *deleted in
+ * transit* rather than merely untyped.
+ *
  * This file is imported by both the SPA (bundled by Vite) and the mock backend (bundled by
  * esbuild). Keep it dependency-free.
  */
@@ -289,6 +296,25 @@ export interface ToolFailedEvent {
   agent?: string;
 }
 
+/**
+ * One number a structured tool result returned, under the name the tool gave it.
+ *
+ * The service's own rule, mirrored because a consumer that softened it would undo the point: the
+ * `label` is the payload's key path (`pka`, `limit.limits.0.value`) and nothing else, and `unit`
+ * is only ever a `unit`/`units` string the payload put beside that number. Neither is prettified
+ * and neither is inferred.
+ *
+ * So a surface may write `pKa 4.76` and, where the tool said so, `0.5 µg/day`. It may **not**
+ * write `4.76 ± 1.6` from `[{pka: 4.76}, {sd: 1.6}]`: nothing on the wire says the second is an
+ * uncertainty on the first, and inventing that relationship is the exact failure `numbers` and
+ * this field exist on opposite sides of.
+ */
+export interface ResultValue {
+  label: string;
+  value: number;
+  unit: string;
+}
+
 export interface ToolResultEvent {
   type: 'tool_result';
   /** What a call returned, as data rather than as the model's paraphrase of it. Success only:
@@ -311,11 +337,32 @@ export interface ToolResultEvent {
    * and a surface that decides to render one result pulls that one result, once.
    */
   result_ref: string;
+  /**
+   * The whole result, when it was small enough to ride along instead of costing a fetch.
+   *
+   * The preview/ref split is a rule about *large* results, and applying it to a 300-byte ICH limit
+   * bought a second round trip for a payload smaller than the preview's own budget. Under the
+   * service's `stream_inline_result_bytes` this carries the text; over it, the field is empty and
+   * the ref is the way to the result exactly as before — so a consumer treats this as an
+   * optimisation and never as the presence check. `result_ref` is still what says a result is
+   * stored.
+   */
+  result_inline?: string;
   /** Note ids the result cited, untruncated even when `preview` is not — so a citation survives
    *  the cut that loses the sentence around it. */
   note_ids: string[];
   /** Numeric values the result carried, untruncated for the same reason. */
   numbers: number[];
+  /**
+   * The same figures, each under the key the tool filed it under — for a surface that *displays* a
+   * value rather than checking one.
+   *
+   * Empty for a result that is not JSON, which is the honest report rather than a gap: the service
+   * refuses to guess a name out of prose, so the figures arrive in `numbers` unnamed, which is
+   * what they are. Optional in the type and always populated by `normalizeEvent`, on the same
+   * grounds as `agent`: the service defaults it, so an older one simply sends nothing.
+   */
+  values?: ResultValue[];
   /** The specialist that raised this event; **empty means the main agent**, which is what every
    *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
    *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
@@ -493,6 +540,25 @@ const asCount = (v: unknown): number =>
   typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : 0;
 
 /**
+ * The labelled figures, dropping anything that is not one.
+ *
+ * A value with no label is not usable by the surfaces this field exists for — it is exactly the
+ * unnamed number `numbers` already carries — and a non-finite one is a blank cell nobody can
+ * explain, which is the same rule `asNumberArray` takes one field up.
+ */
+const asResultValues = (v: unknown): ResultValue[] =>
+  Array.isArray(v)
+    ? v.flatMap((entry) => {
+        if (typeof entry !== 'object' || entry === null) return [];
+        const row = entry as Record<string, unknown>;
+        const label = asString(row.label);
+        const value = row.value;
+        if (!label || typeof value !== 'number' || !Number.isFinite(value)) return [];
+        return [{ label, value, unit: asString(row.unit) }];
+      })
+    : [];
+
+/**
  * Coerce one decoded SSE frame into a `ChemclawEvent`, or `null` if it is not one we know.
  *
  * Returning `null` rather than throwing is deliberate: the backend's event union is explicitly
@@ -560,8 +626,10 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         tool: asString(o.tool, 'unknown'),
         preview: asString(o.preview),
         result_ref: asString(o.result_ref),
+        result_inline: asString(o.result_inline),
         note_ids: asStringArray(o.note_ids),
         numbers: asNumberArray(o.numbers),
+        values: asResultValues(o.values),
         agent: asString(o.agent),
       };
     case 'evidence_source':

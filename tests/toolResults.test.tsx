@@ -100,7 +100,7 @@ describe('tool_result in the trace', () => {
 
     const trace = assistantOf(cid, mid).trace;
     expect(trace).toHaveLength(1);
-    expect(trace[0]?.toolCall).toEqual({
+    expect(trace[0]?.toolCall).toMatchObject({
       tool: 'predict_pka',
       arguments: '{"s":"CCO"}',
       // Untruncated, and carried even when empty — an empty list is "this call returned no
@@ -109,6 +109,10 @@ describe('tool_result in the trace', () => {
       numbers: [],
       result: 'pKa 15.9',
     });
+    // Stamped when the ending arrived, by our clock. It is the only clock there is — nothing on
+    // the wire carries a tool duration — and it is what lets the step rail say how long a call
+    // took instead of listing tool names with no sense of where the turn's time went.
+    expect(typeof trace[0]?.toolCall?.endedAt).toBe('number');
   });
 
   it('leaves an unanswered call open, which is what "running" means', () => {

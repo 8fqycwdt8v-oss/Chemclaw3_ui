@@ -203,6 +203,7 @@ function newAssistantMessage(): AssistantMessage {
     trace: [],
     latestPlan: null,
     latestPlanHash: null,
+    endedAt: null,
     correlationId: '',
     stalled: false,
     error: null,
@@ -225,8 +226,19 @@ function newAssistantMessage(): AssistantMessage {
 function closeToolCall(
   trace: TraceEntry[],
   tool: string,
-  ending: { result: string; resultRef?: string; numbers?: number[] } | { failed: true },
+  ending:
+    | {
+        result: string;
+        resultRef?: string;
+        resultInline?: string;
+        numbers?: number[];
+        values?: { label: string; value: number; unit: string }[];
+      }
+    | { failed: true },
 ): TraceEntry[] {
+  // Our clock, at the moment the ending reached this process. Nothing on the wire carries a tool
+  // duration, so this is the only honest one available — and it is the wait the reader had.
+  const endedAt = Date.now();
   const index = trace.findIndex(
     (entry) =>
       entry.kind === 'tool_call' &&
@@ -236,7 +248,7 @@ function closeToolCall(
   );
   const target = trace[index];
   if (index === -1 || !target?.toolCall) return trace;
-  const updated: TraceEntry = { ...target, toolCall: { ...target.toolCall, ...ending } };
+  const updated: TraceEntry = { ...target, toolCall: { ...target.toolCall, ...ending, endedAt } };
   return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
 }
 
@@ -252,13 +264,42 @@ function closeToolCall(
  * A launch row already dropped by `MAX_TRACE_ENTRIES`, or a completion for a job launched in a
  * different turn, simply finds nothing and leaves the trace alone.
  */
+/**
+ * Fold one source's report into the sweep already standing, when there is one.
+ *
+ * A sweep arrives as one event per source, and both the reading and the cost say it is one step:
+ * the rail draws "graph 6 · lexical failed" as one line, and a row per source spends the trace's
+ * bounded `MAX_TRACE_ENTRIES` budget on retrieval — a retrieval-heavy turn evicting its own early
+ * tool calls, and the result blocks that hang off them.
+ *
+ * Consecutive is the whole test, and it is the right one: the events of one `gather_evidence` call
+ * arrive together, and anything between them ends the sweep. Returns `null` when this event starts
+ * a new one, which is the caller's cue to append rather than merge.
+ */
+function foldIntoSweep(trace: TraceEntry[], entry: TraceEntry): TraceEntry[] | null {
+  const last = trace[trace.length - 1];
+  const reported = entry.evidenceSweep?.[0];
+  if (!last || last.kind !== 'evidence_source' || !last.evidenceSweep || !reported) return null;
+  const merged: TraceEntry = {
+    ...last,
+    // The sweep's own end, so the row can say how long every source took together. The entry's
+    // `at` stays the first source's, which is when the sweep began.
+    evidenceSweepEndedAt: entry.at,
+    evidenceSweep: [...last.evidenceSweep, reported],
+  };
+  return [...trace.slice(0, -1), merged];
+}
+
 function settleJob(trace: TraceEntry[], jobId: string): TraceEntry[] {
   const index = trace.findIndex(
     (entry) => entry.kind === 'job_started' && entry.job?.jobId === jobId && !entry.job.settled,
   );
   const target = trace[index];
   if (index === -1 || !target?.job) return trace;
-  const updated: TraceEntry = { ...target, job: { ...target.job, settled: true } };
+  const updated: TraceEntry = {
+    ...target,
+    job: { ...target.job, settled: true, endedAt: Date.now() },
+  };
   return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
 }
 
@@ -286,17 +327,31 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
         kind: 'tool_failed',
         toolFailure: { tool: event.tool, message: event.message, reason: event.reason ?? null },
       };
-    // Only the failures. A source that was asked and had nothing is the normal case and belongs in
-    // an evidence summary, not in a trace of what went wrong — but a source whose retriever
-    // *raised* reads identically in the merged list, and this is the one place that can say so.
-    case 'evidence_source':
-      return event.failed
-        ? {
-            ...base,
-            kind: 'evidence_source',
-            evidenceSource: { source: event.source, chunks: event.chunks, failed: true },
-          }
-        : null;
+    // Every source, not only the failures. This used to keep the raised ones and drop the rest,
+    // on the argument that a source asked and silent "belongs in an evidence summary, not in a
+    // trace of what went wrong" — which was right about the trace it was written against, and is
+    // what the rail now IS: one row per sweep reading `lexical failed · graph 6 · eln 0`, where a
+    // dark source and a broken one sit side by side and are told apart by name. Dropping the
+    // successes here made that row unbuildable, and left "which sources were even asked?"
+    // answerable only by reading the service's logs.
+    case 'evidence_source': {
+      const reported = {
+        source: event.source,
+        chunks: event.chunks,
+        failed: event.failed === true,
+      };
+      return {
+        ...base,
+        kind: 'evidence_source',
+        // A sweep of one. Every entry is born a sweep so that `foldIntoSweep` has something to
+        // merge INTO and something to merge FROM without a second shape: the first source of a
+        // run stands as a one-source sweep, and each one after it is folded in.
+        evidenceSweep: [reported],
+        // The same source again, under the field a trace persisted before `evidenceSweep`
+        // existed carries. Rehydrated transcripts still render from it.
+        evidenceSource: reported,
+      };
+    }
     case 'job_started':
       return {
         ...base,
@@ -888,6 +943,13 @@ export const useChatStore = create<ChatState>()(
               trace: closeToolCall(m.trace, event.tool, {
                 result: event.preview,
                 ...(event.result_ref ? { resultRef: event.result_ref } : {}),
+                // Omitted rather than stored empty, the same rule the ref takes: absent means "the
+                // service did not send the result with the event", and a block then fetches it.
+                ...(event.result_inline ? { resultInline: event.result_inline } : {}),
+                // The named figures, when the result was structured enough to have names. Kept
+                // beside `numbers` rather than instead of it — the grounding check reads one and
+                // the surfaces read the other.
+                ...(event.values?.length ? { values: event.values } : {}),
                 // Kept whole. This is the untruncated list beside a truncated preview, and it is
                 // the only structured chemistry the stream carries — `provenance.ts` checks the
                 // answer's figures against it, so dropping it here is what made every figure in
@@ -913,9 +975,14 @@ export const useChatStore = create<ChatState>()(
             } else if (event.type === 'job_completed' || event.type === 'job_failed') {
               base = settleJob(base, event.job_id);
             }
+            // One sweep is one row. `gather_evidence` asks every source at once and the service
+            // reports each separately, so this is a *merge* rather than an append — both because
+            // that is how a reader reads them and because a row per source spends the bounded
+            // trace on retrieval, evicting the early tool calls of a retrieval-heavy turn.
+            const folded = event.type === 'evidence_source' ? foldIntoSweep(base, entry) : null;
             return {
               ...m,
-              trace: [...base, entry].slice(-MAX_TRACE_ENTRIES),
+              trace: (folded ?? [...base, entry]).slice(-MAX_TRACE_ENTRIES),
               latestPlan: event.type === 'plan' ? event.todos : m.latestPlan,
               // The hash of the plan as rendered, so the approval card can bind a decision to
               // exactly what was shown without a second round trip that races the next revision.
@@ -935,10 +1002,17 @@ export const useChatStore = create<ChatState>()(
       },
 
       finishTurn(conversationId, messageId, status) {
-        // A settled turn is never stalled: the flag describes a stream that is still open and
-        // silent, and leaving it set would put "no activity" beside a finished answer for ever.
+        // `endedAt` is stamped on every ending, not just the successful one: an aborted turn took
+        // as long as it took, and the summary line has no other way to say so. `stalled` is
+        // cleared because the flag describes a stream that is still open and silent, and leaving
+        // it set would put "no activity" beside a finished answer for ever.
         set((s) =>
-          updateAssistant(s, conversationId, messageId, (m) => ({ ...m, status, stalled: false })),
+          updateAssistant(s, conversationId, messageId, (m) => ({
+            ...m,
+            status,
+            endedAt: Date.now(),
+            stalled: false,
+          })),
         );
       },
 
@@ -947,6 +1021,7 @@ export const useChatStore = create<ChatState>()(
           updateAssistant(s, conversationId, messageId, (m) => ({
             ...m,
             status: 'error',
+            endedAt: Date.now(),
             stalled: false,
             error,
           })),

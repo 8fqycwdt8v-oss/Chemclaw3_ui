@@ -24,45 +24,119 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'rea
 import { ChevronUp, FlaskConical } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { AssistantMessage, ChatMessage, TraceEntry } from '../state/types.ts';
-import { planStepJobs } from '../state/planJobs.ts';
 import { Markdown } from './LazyMarkdown.tsx';
 import { StructureText } from './Molecule.tsx';
 import { TracePanel } from './TracePanel.tsx';
-import {
-  AnswerFooter,
-  CapabilityDegradedPill,
-  PartialAnswerPill,
-  ReviewRequiredPill,
-} from './AnswerBadges.tsx';
+import { StatusStrip } from './StatusStrip.tsx';
+import { PlanStrip } from './PlanStrip.tsx';
+import { ActivityLine } from './ActivityLine.tsx';
+import { ResultBlock } from './ResultBlock.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
-import { PlanItems } from './PlanItems.tsx';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { entitiesOf, messagesFor, useEntityStore } from '../chem/entities.ts';
 import { returnedFigures } from '../chem/provenance.ts';
-import { ElapsedTimer } from '@/components/chem/ElapsedTimer';
+import { formatDuration } from '../state/turnActivity.ts';
 import { EmptyState } from '@/components/chem/Feedback';
 import { cn } from '@/lib/utils';
 
-const PlanChecklist = memo(function PlanChecklist({
-  todos,
+/**
+ * How many stored results are rendered as blocks under one answer.
+ *
+ * A cap rather than all of them, because each block is a fetch the reader did not ask for. Three
+ * covers the shape of nearly every turn — a screen, a lookup and a search — and the rest stay one
+ * click away on their own step in the agent's work, which is where a fourth table would have to be
+ * looked for anyway.
+ */
+const MAX_RESULT_BLOCKS = 3;
+
+/**
+ * The rail's closing row: the answer as a step of the turn.
+ *
+ * The service announces every step except the one that produced the text, so a rail without this
+ * stops at the last tool call — and a reader looking at where a four-minute turn went cannot see
+ * that three of those minutes were the model writing.
+ *
+ * Words rather than tokens, because nothing on this side knows how the service tokenised anything,
+ * and the duration runs from the last step that WAS announced to the turn's end. Absent while the
+ * turn streams, and absent for a turn that produced no text at all — a row claiming an answer
+ * where the card says "the turn finished without producing any answer text" would be the two
+ * halves of one screen disagreeing.
+ *
+ * Exported for its own test. The arithmetic is the whole of it and it is not visible in the
+ * markup — a duration measured from the wrong instant renders as a perfectly plausible number.
+ */
+export function answerStep(message: AssistantMessage): { words: number; duration?: string } | null {
+  if (message.status === 'streaming') return null;
+  const text = message.finalText || message.streamedText;
+  if (!text.trim()) return null;
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+  // The last instant the trace knows about, which is NOT the last row's `at`: a `tool_call` row is
+  // stamped when the call was *issued* and its result closes that same row in place, so measuring
+  // from `at` charges the whole of the last tool's runtime to the answer — and the rail's rows
+  // then sum to more than the turn took.
+  const lastStep = message.trace.reduce(
+    (latest, entry) =>
+      Math.max(latest, entry.at, entry.toolCall?.endedAt ?? 0, entry.job?.endedAt ?? 0),
+    0,
+  );
+  const duration =
+    message.endedAt && lastStep > 0 && message.endedAt > lastStep
+      ? formatDuration(message.endedAt - lastStep)
+      : undefined;
+  return { words, duration };
+}
+
+/**
+ * The turn's results, as data, under the answer.
+ *
+ * A call qualifies when its result is *reachable*, and there are two ways to be reachable: the
+ * service stored it (a `resultRef` to fetch) or it rode along on the event (`resultInline`). They
+ * are independent — the inline cap and the store cap are different settings, and a deployment with
+ * the store switched off still inlines its small results — so testing only the ref dropped every
+ * block in exactly the deployment where no fetch was needed at all.
+ *
+ * A session id is still required for the fetching half, because that route is session-scoped: a
+ * transcript rehydrated from the server has the calls and nothing to fetch against.
+ */
+const ResultBlocks = memo(function ResultBlocks({
   trace,
+  sessionId,
 }: {
-  todos: string[];
-  /** The message's own trace — where `job_started` rows carry the step a launch served. */
   trace: TraceEntry[];
+  sessionId: string | null;
 }): React.JSX.Element | null {
-  // The global feed, because a durable job's ending usually arrives *after* the turn, through the
-  // session's event stream — reading only the trace would leave a chip spinning forever for
-  // exactly the jobs the chip matters for (see `planStepJobs`).
-  const jobFeed = useChatStore((s) => s.jobFeed);
-  const jobs = useMemo(() => planStepJobs(trace, jobFeed), [trace, jobFeed]);
-  if (todos.length === 0) return null;
+  const stored = useMemo(
+    () =>
+      trace.filter(
+        (
+          e,
+        ): e is TraceEntry & {
+          toolCall: { tool: string; resultRef?: string; resultInline?: string };
+        } => e.kind === 'tool_call' && Boolean(e.toolCall?.resultRef || e.toolCall?.resultInline),
+      ),
+    [trace],
+  );
+  if (!sessionId || stored.length === 0) return null;
+  const shown = stored.slice(0, MAX_RESULT_BLOCKS);
   return (
-    <div className="mb-3 rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2.5">
-      <p className="mb-1.5 text-2xs font-medium tracking-wide text-ink-subtle uppercase">Plan</p>
-      <PlanItems todos={todos} jobs={jobs} />
-    </div>
+    <>
+      {shown.map((entry) => (
+        <ResultBlock
+          key={entry.id}
+          sessionId={sessionId}
+          tool={entry.toolCall.tool}
+          resultRef={entry.toolCall.resultRef ?? ''}
+          inline={entry.toolCall.resultInline}
+        />
+      ))}
+      {stored.length > shown.length && (
+        <p className="max-w-prose text-2xs text-ink-subtle">
+          {stored.length - shown.length} further stored result
+          {stored.length - shown.length === 1 ? '' : 's'} — each on its own step below.
+        </p>
+      )}
+    </>
   );
 });
 
@@ -93,100 +167,103 @@ const AssistantBubble = memo(function AssistantBubble({
   const figures = useMemo(() => returnedFigures(message.trace), [message.trace]);
 
   return (
-    <div className="max-w-none" aria-busy={streaming || undefined}>
-      <CapabilityDegradedPill message={message} />
-      {/* Above the text and above the review notice, matching the order the service emits them in:
-          both qualify the whole answer, and "this was cut short" is the one that changes how the
-          rest is read. */}
-      <PartialAnswerPill message={message} />
-      <ReviewRequiredPill message={message} />
-      {message.latestPlan && <PlanChecklist todos={message.latestPlan} trace={message.trace} />}
+    <div className="flex flex-col" aria-busy={streaming || undefined}>
+      {/* Everything that qualifies the answer, ranked: a bar for what stops the reader acting on
+          it, a chip for what they consult. Above the text, because a qualifier placed after it is
+          read once the reader has already believed it. */}
+      <div className="max-w-prose">
+        <StatusStrip message={message} />
+        <PlanStrip message={message} trace={message.trace} />
+        {/* Only when there is no plan to fold it into: the strip above carries the same live row,
+            and two rows saying one thing is the duplication this replaced. */}
+        {!message.latestPlan && <ActivityLine message={message} />}
+      </div>
 
-      {body ? (
-        streaming ? (
-          <div className="text-base leading-relaxed whitespace-pre-wrap">
-            {body}
-            <span className="caret" aria-hidden>
-              ▌
-            </span>
-          </div>
+      <div className="max-w-prose">
+        {body ? (
+          streaming ? (
+            <div className="text-base leading-relaxed whitespace-pre-wrap">
+              {body}
+              <span className="caret" aria-hidden>
+                ▌
+              </span>
+            </div>
+          ) : (
+            <ErrorBoundary
+              fallback={() => (
+                <div className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2">
+                  <p className="text-sm text-warn-ink">
+                    This answer could not be formatted for display. The text as the service sent it:
+                  </p>
+                  <pre className="mt-2 overflow-x-auto font-mono text-xs whitespace-pre-wrap">
+                    {body}
+                  </pre>
+                </div>
+              )}
+            >
+              <Markdown figures={figures}>{body}</Markdown>
+            </ErrorBoundary>
+          )
         ) : (
-          <ErrorBoundary
-            fallback={() => (
-              <div className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2">
-                <p className="text-sm text-warn-ink">
-                  This answer could not be formatted for display. The text as the service sent it:
-                </p>
-                <pre className="mt-2 overflow-x-auto font-mono text-xs whitespace-pre-wrap">
-                  {body}
-                </pre>
-              </div>
-            )}
-          >
-            <Markdown figures={figures}>{body}</Markdown>
-          </ErrorBoundary>
-        )
-      ) : streaming ? (
-        <p className="flex items-center gap-2 text-sm text-ink-muted">
-          {/* "Thinking…" is untrue while the turn is parked on admission control: nothing is
-              running yet. The distinction is the point of the event — a queued turn and a hung
-              server used to look identical from here.
+          // A settled turn with nothing in either field says so. An empty card is
+          // indistinguishable from a service that answered nothing — and from this component
+          // having lost the answer, which is exactly what it used to do. The question and approval
+          // cards are content in their own right, so a turn that ended in one is not "no answer".
+          // While it streams, the activity row above is the whole of what there is to say.
+          message.status === 'done' &&
+          !question &&
+          !approval && (
+            <p className="text-sm text-ink-muted">
+              The turn finished without producing any answer text.
+            </p>
+          )
+        )}
+      </div>
 
-              The elapsed time is a SIBLING node, never concatenated in: a ten-minute turn needs
-              a sign of life, but the sentence itself has to stay one stable string. */}
-          <span aria-hidden className="size-1.5 shrink-0 animate-pulse rounded-full bg-brand" />
-          {message.queued ? 'Waiting for a free slot on the server…' : 'Thinking…'}
-          <ElapsedTimer since={message.at} />
-          {/* The one thing "Thinking…" plus a counter cannot say: nothing has arrived for a
-              minute and a half. A backend that accepted the POST and then died looks exactly like
-              a model working hard, for up to ten and a half minutes. Not an abort — a long turn
-              is legitimate and cutting it off would destroy the answer — a note, and it
-              disappears the moment a frame lands. */}
-          {message.stalled && <span className="text-2xs text-warn-ink">no activity for 90 s</span>}
-        </p>
-      ) : (
-        // A settled turn with nothing in either field says so. An empty card is indistinguishable
-        // from a service that answered nothing — and from this component having lost the answer,
-        // which is exactly what it used to do. The question and approval cards are content in
-        // their own right, so a turn that ended in one is not "no answer".
-        message.status === 'done' &&
-        !question &&
-        !approval && (
-          <p className="text-sm text-ink-muted">
-            The turn finished without producing any answer text.
-          </p>
-        )
-      )}
+      {/* What the tools returned, as the tables they are, at the same depth as the sentence that
+          refers to them. A wide one takes the card's full width; the prose above stays measured. */}
+      <ResultBlocks trace={message.trace} sessionId={sessionId} />
 
-      {message.status === 'aborted' && (
-        <p className="mt-2 text-xs text-ink-muted">Stopped before the answer was complete.</p>
-      )}
+      <div className="max-w-prose">
+        {message.status === 'aborted' && (
+          <p className="mt-2 text-xs text-ink-muted">Stopped before the answer was complete.</p>
+        )}
 
-      {message.error && (
-        // Deliberately NOT role="alert". `failTurn` raises a banner carrying the same sentence,
-        // and that one already announces — two alerts with identical text read it out twice.
-        <div className="mt-2 rounded-lg border border-danger/40 bg-danger-soft px-3 py-2">
-          <p className="text-sm text-danger-ink">{message.error.message}</p>
-        </div>
-      )}
+        {message.error && (
+          // Deliberately NOT role="alert". `failTurn` raises a banner carrying the same sentence,
+          // and that one already announces — two alerts with identical text read it out twice.
+          <div className="mt-2 rounded-lg border border-danger/40 bg-danger-soft px-3 py-2">
+            <p className="text-sm text-danger-ink">{message.error.message}</p>
+          </div>
+        )}
 
-      {question && <QuestionPrompt question={question.question} options={question.options} />}
-      {approval && (
-        <ApprovalPrompt
-          prompt={approval.prompt}
-          sessionId={sessionId}
-          // Stable identities: both come off the store's message and are replaced only by a new
-          // `plan` event, so passing them straight through does not re-run the card's effect.
-          planTodos={message.latestPlan}
-          planHash={message.latestPlanHash}
-        />
-      )}
+        {question && <QuestionPrompt question={question.question} options={question.options} />}
+        {approval && (
+          <ApprovalPrompt
+            prompt={approval.prompt}
+            sessionId={sessionId}
+            // Stable identities: both come off the store's message and are replaced only by a new
+            // `plan` event, so passing them straight through does not re-run the card's effect.
+            planTodos={message.latestPlan}
+            planHash={message.latestPlanHash}
+          />
+        )}
+      </div>
 
-      <AnswerFooter message={message} />
+      {/* No `AnswerFooter` here. It carried the confidence, the unsupported claims and the method
+          line BELOW the answer, and `StatusStrip` above now carries all three — ranked by what the
+          reader has to do about them, and placed before the text because a qualifier read after
+          the answer is read once the reader has already believed it. Rendering both would print
+          one turn's confidence twice. */}
       <TracePanel
         trace={message.trace}
         sessionId={sessionId}
         correlationId={message.correlationId ?? ''}
+        // Our clock, and absent on a rehydrated turn — which is why the summary omits the time
+        // rather than reporting zero.
+        durationMs={message.endedAt ? message.endedAt - message.at : null}
+        plan={message.latestPlan}
+        answer={answerStep(message)}
       />
     </div>
   );
@@ -232,7 +309,7 @@ function BubbleBody({
   if (message.role === 'user') {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-2xl rounded-br-md bg-brand px-4 py-2.5 text-brand-fg shadow-xs">
+        <div className="max-w-[min(85%,42rem)] rounded-2xl rounded-br-md bg-brand px-4 py-2.5 text-brand-fg shadow-xs">
           {/* Plain text, with its structures drawable — see `StructureText`. Not markdown: a
               chemist typed this, and a parser would turn their asterisks into emphasis in the
               middle of a compound name. */}
@@ -387,7 +464,10 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
     >
       <h2 className="sr-only-live">Conversation</h2>
 
-      <div className="mx-auto flex w-full max-w-prose flex-col gap-5">
+      {/* The card is allowed the wide measure; the prose inside it is held to the reading one.
+            That split is what gives a charge table or a grid of structures somewhere to be —
+            below `wide` the two collapse and the transcript is exactly as it was. */}
+      <div className="mx-auto flex w-full max-w-wide flex-col gap-5">
         {contextLost && (
           <div role="alert" className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2.5">
             <p className="text-sm text-warn-ink">

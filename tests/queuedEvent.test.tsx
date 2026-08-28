@@ -80,21 +80,21 @@ describe('the streaming placeholder', () => {
 
     render(<MessageList conversationId={cid} />);
     expect(screen.getByText(/waiting for a free slot/i)).toBeTruthy();
-    expect(screen.queryByText('Thinking…')).toBeNull();
+    expect(screen.queryByText('Thinking')).toBeNull();
   });
 
-  it('says "Thinking…" when the turn was admitted straight away', () => {
+  it('says "Thinking" when the turn was admitted straight away', () => {
     const { cid } = startTurn();
 
     render(<MessageList conversationId={cid} />);
-    expect(screen.getByText('Thinking…')).toBeTruthy();
+    expect(screen.getByText('Thinking')).toBeTruthy();
     expect(screen.queryByText(/waiting for a free slot/i)).toBeNull();
   });
 
   it('drops the notice as soon as the first token arrives', () => {
     // The waiting state needs no clearing: once there is text to show, the placeholder that
     // carried it is not rendered at all. This pins that, because a stale "waiting" line beside a
-    // streaming answer would be worse than the "Thinking…" it replaced.
+    // streaming answer would be worse than the "Thinking" it replaced.
     const { cid, mid } = startTurn();
     const store = useChatStore.getState();
     store.applyEvent(cid, mid, { type: 'queued' });

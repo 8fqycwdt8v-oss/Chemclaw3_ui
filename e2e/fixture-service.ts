@@ -43,6 +43,9 @@ const SID = 'a'.repeat(32);
 const SHARED_SID = 'b'.repeat(32);
 /** The content address of the stored hazard screen below — 64 hex chars, as the service mints. */
 const RESULT_REF = 'c'.repeat(64);
+/** A second stored result, of a different SHAPE — which is what the renderer registry dispatches
+ *  on, so one payload per shape is what stops a renderer shipping green and broken. */
+const VALUES_REF = 'd'.repeat(64);
 
 /** What `screen_hazards` actually returns, of which the streamed preview is the first 200 chars. */
 const HAZARD_RESULT = {
@@ -58,6 +61,9 @@ const HAZARD_RESULT = {
     },
   ],
 };
+
+/** What a property calculator returns: named scalars, no units on the wire, no record list. */
+const PKA_RESULT = { verdict: 'Most acidic site: the carboxylic acid.', pka: 4.76, sd: 1.6 };
 
 const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { 'content-type': 'application/json' });
@@ -81,7 +87,9 @@ type Frame = readonly [event: ChemclawEvent, gapMs: number];
 /**
  * The turn, in the order the backend produces it.
  *
- * Twelve frames covering ten of the seventeen event types, where this used to carry five. The
+ * Fourteen frames covering ten of the seventeen event types, where this used to carry five — and
+ * two stored results of DIFFERENT SHAPES, because the renderer registry dispatches on shape and a
+ * fixture carrying one payload proves one renderer. The
  * three that were *declared and missing* are the ones that cost most: `plan.plan_hash` is what the
  * approval gate posts back, so without it the browser-level approval path was never exercised in
  * its real shape, and `agent` on `tool_call`/`tool_result` is the specialist attribution the trace
@@ -144,6 +152,30 @@ const TURN: readonly Frame[] = [
       tool: 'submit_qm_job',
       message: 'The plan has not been approved, so state-changing tools are held.',
       reason: 'plan_gate',
+      agent: '',
+    },
+    40,
+  ],
+  [{ type: 'tool_call', tool: 'predict_pka', arguments: '{"smiles":"CC(=O)O"}', agent: '' }, 40],
+  [
+    {
+      type: 'tool_result',
+      tool: 'predict_pka',
+      preview: JSON.stringify(PKA_RESULT).slice(0, 200),
+      result_ref: VALUES_REF,
+      // Small enough to ride along, which is the ordinary case for a property lookup — so the
+      // browser tier exercises the path where a block renders with NO fetch at all.
+      result_inline: JSON.stringify(PKA_RESULT),
+      note_ids: [],
+      // Untruncated beside a truncated preview, and what the answer's figure marks are checked
+      // against.
+      numbers: [4.76, 1.6],
+      // The same figures under the tool's own keys. `sd` is not an uncertainty on `pka` as far as
+      // anything here knows, and the surfaces print them as the two values they are.
+      values: [
+        { label: 'pka', value: 4.76, unit: '' },
+        { label: 'sd', value: 1.6, unit: '' },
+      ],
       agent: '',
     },
     40,
@@ -291,11 +323,14 @@ createServer(async (req, res) => {
   // The untruncated result behind the ref the turn streamed.
   if (path.includes('/tool-results/') && req.method === 'GET') {
     const ref = path.split('/tool-results/')[1] ?? '';
-    if (ref !== RESULT_REF) return json(res, 404, { detail: 'unknown result' });
-    const text = JSON.stringify(HAZARD_RESULT);
+    if (ref !== RESULT_REF && ref !== VALUES_REF) {
+      return json(res, 404, { detail: 'unknown result' });
+    }
+    const hazard = ref === RESULT_REF;
+    const text = JSON.stringify(hazard ? HAZARD_RESULT : PKA_RESULT);
     const stored: StoredToolResult = {
       ref,
-      tool: 'screen_hazards',
+      tool: hazard ? 'screen_hazards' : 'predict_pka',
       correlation_id: 'turn-e2e-1',
       byte_size: text.length,
       text,

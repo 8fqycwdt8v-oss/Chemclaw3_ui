@@ -26,7 +26,7 @@ import {
   writtenTolerance,
 } from '../src/chem/provenance.ts';
 import { Markdown } from '../src/components/Markdown.tsx';
-import { CapabilityDegradedPill } from '../src/components/AnswerBadges.tsx';
+import { StatusStrip } from '../src/components/StatusStrip.tsx';
 import type { AssistantMessage, TraceEntry } from '../src/state/types.ts';
 import { toolResultEvent } from './helpers.ts';
 
@@ -300,8 +300,18 @@ describe('capability_degraded as a chemistry statement', () => {
 
   it('renders the loss, not the connector name, above the answer', () => {
     render(
-      <CapabilityDegradedPill
-        message={{ degradedConnectors: ['safety'] } as unknown as AssistantMessage}
+      <StatusStrip
+        message={
+          {
+            degradedConnectors: ['safety'],
+            confidence: null,
+            unsupportedClaims: [],
+            verifiedBy: null,
+            reviewRequired: false,
+            partialReason: null,
+            trace: [],
+          } as unknown as AssistantMessage
+        }
       />,
     );
     expect(screen.getByText(/hazard screen/)).toBeTruthy();

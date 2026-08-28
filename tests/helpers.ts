@@ -42,8 +42,13 @@ export function toolResultEvent(over: Partial<ToolResultEvent> = {}): ToolResult
     tool: 'gather_evidence',
     preview: '',
     result_ref: '',
+    // Both empty, and populated by `normalizeEvent` for the same reason `agent` is: the service
+    // defaults them, so a builder used in `toEqual` has to name them. Empty `result_inline` is
+    // "the result did not ride along", which is every result over the service's inline cap.
+    result_inline: '',
     note_ids: [],
     numbers: [],
+    values: [],
     // `normalizeEvent` always sets this, so a builder used in `toEqual` must too. Empty is the
     // main agent — the same default the backend serialises.
     agent: '',

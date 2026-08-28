@@ -23,7 +23,11 @@ import { expect, type Locator, type Page } from '@playwright/test';
 
 /** The last turn's trace disclosure, expanded, as a locator over its content region. */
 export async function traceRegion(page: Page): Promise<Locator> {
-  const trigger = page.getByRole('button', { name: /Show the agent’s work/ }).last();
+  // The trigger's visible label is now the turn's summary ("6 steps · 2 tools · 4s"), which is
+  // not a stable string to select on — so it names itself for assistive tech, and this reads that
+  // name. Same contract as the `aria-controls` read below: an ARIA property the disclosure owes
+  // anyway, rather than a test hook that can rot without anybody noticing.
+  const trigger = page.getByRole('button', { name: /The agent’s work/ }).last();
   await expect(trigger, 'the last turn rendered no trace at all — no tool was called').toBeVisible({
     timeout: 30_000,
   });

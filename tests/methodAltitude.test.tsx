@@ -7,14 +7,18 @@
  * from a cited table or from a semiempirical estimate, and at that depth nobody does.
  *
  * So two things are asserted here and they pull against each other on purpose: the method must be
- * *up*, and the caveat must stay *down*. A footer carrying five three-line caveats is the
- * annotation clutter `src/chem/provenance.ts` warns trains a reader to skip the footer entirely,
- * which would be worse than the depth was.
+ * *up*, and the caveat must stay *down*. A strip carrying five three-line caveats is the
+ * annotation clutter `src/chem/provenance.ts` warns trains a reader to skip the whole strip, which
+ * would be worse than the depth was.
+ *
+ * The method now rides in the status strip ABOVE the answer rather than in a footer below it, for
+ * the reason the original fix half-solved: a qualifier under the text is still read after the
+ * reader has believed the text.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { AnswerFooter } from '../src/components/AnswerBadges.tsx';
+import { StatusStrip } from '../src/components/StatusStrip.tsx';
 import { TracePanel } from '../src/components/TracePanel.tsx';
 import { methodsUsed } from '../src/chem/provenance.ts';
 import type { AssistantMessage, TraceEntry } from '../src/state/types.ts';
@@ -76,24 +80,24 @@ describe('methodsUsed', () => {
   });
 });
 
-describe('the answer footer', () => {
+describe('the status strip', () => {
   it('names the methods even when no verifier ran', () => {
-    // The footer used to render nothing at all in this case — which is most deployments, because
-    // the verifier is config.
-    render(<AnswerFooter message={answer([call('predict_pka')])} />);
+    // It used to render nothing at all in this case — which is most deployments, because the
+    // verifier is config.
+    render(<StatusStrip message={answer([call('predict_pka')])} />);
 
     expect(screen.getByText('GFN2-xTB · semiempirical')).toBeTruthy();
   });
 
   it('carries no caveat text — that stays one disclosure into the trace', () => {
-    render(<AnswerFooter message={answer([call('predict_pka')])} />);
+    render(<StatusStrip message={answer([call('predict_pka')])} />);
 
     // predict_pka's caveat, verbatim from the backend's manifest. Its place is the trace row.
     expect(document.body.textContent).not.toContain('1.6 units of uncertainty');
   });
 
   it('renders nothing when there is no method, no score and no unsupported claim', () => {
-    const { container } = render(<AnswerFooter message={answer([])} />);
+    const { container } = render(<StatusStrip message={answer([])} />);
     expect(container.textContent).toBe('');
   });
 });
@@ -101,7 +105,9 @@ describe('the answer footer', () => {
 describe('the trace row', () => {
   /** The panel is collapsed until somebody comes to check the work, which is the point of it. */
   const expand = (): void => {
-    fireEvent.click(screen.getByRole('button', { name: /Show the agent/ }));
+    // The trigger says what the work WAS — "1 step · 1 tool" — rather than how much of it there is
+    // to read. `/step/` is the stable part of that summary.
+    fireEvent.click(screen.getByRole('button', { name: /step/ }));
   };
 
   it('draws the structure the call was actually made on', async () => {

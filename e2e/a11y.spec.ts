@@ -82,7 +82,7 @@ for (const theme of ['light', 'dark'] as const) {
       await expect(answer).toContainText('4.76', { timeout: 15_000 });
       // The trace is a disclosure with tool rows and a plan inside — the densest markup here, and
       // the part most likely to grow an unlabelled control.
-      await page.getByRole('button', { name: /Show the agent’s work/ }).click();
+      await page.getByRole('button', { name: /The agent’s work/ }).click();
       await expect(page.getByText('screen_hazards').first()).toBeVisible();
       await scan(page);
     });
@@ -96,8 +96,9 @@ for (const theme of ['light', 'dark'] as const) {
       await page.getByPlaceholder(/Ask about a reaction/).fill('Screen this azide.');
       await page.getByRole('button', { name: 'Send' }).click();
 
-      await page.getByRole('button', { name: /Show the agent’s work/ }).click();
-      await page.getByRole('button', { name: 'See the full result' }).click();
+      // Opened from the block in the answer, which is the path a chemist actually takes now —
+      // the same sheet, reached without opening the trace and hunting for the row.
+      await page.getByRole('button', { name: 'Open full result' }).first().click();
       await expect(page.getByRole('dialog', { name: /full result/ })).toBeVisible();
       await scan(page);
     });

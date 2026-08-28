@@ -109,11 +109,24 @@ export interface Mention {
    * and every other property tool — that is exact. When it named several, the same values attach
    * to each, and the rail says so rather than implying a per-structure result.
    *
-   * `numbers` also carries **no labels and no units**. "predict_pka returned 4.76, 1.6" is the most
-   * that can truthfully be said, and the surface must not dress it up as "pKa = 4.76 ± 1.6" — the
-   * order is not promised and the meaning is not on the wire.
+   * ## The names, when the service could give them
+   *
+   * `numbers` carries no labels and no units, and for a long time "predict_pka returned 4.76, 1.6"
+   * was the most that could truthfully be said here. `tool_result.values` is the service answering
+   * that (`D-2026-08-27-a-number-with-no-name-is-not-a-measurement`): the same figures under the
+   * key path the tool filed each one under, with the unit the payload states beside it.
+   *
+   * What has NOT changed is the rule underneath: the surface still must not dress two values up as
+   * "pKa = 4.76 ± 1.6". `pka 4.76` and `sd 1.6` is what the wire says, printed as the wire says it;
+   * that the second is an uncertainty on the first is a relationship no tool has stated yet.
+   *
+   * Bare numbers when the result was not JSON, because a label guessed out of prose would be the
+   * same invention one paragraph up.
    */
   values?: number[];
+  /** The same figures under the tool's own keys, when the result was structured enough to have
+   *  them. Empty for a prose result, where `values` above is all there is. */
+  named?: { label: string; value: number; unit: string }[];
   /** True when the call this mention belongs to named more than one structure, so `values` cannot
    *  be attributed to this one alone. */
   shared?: boolean;
@@ -346,9 +359,9 @@ export const useEntityStore = create<EntityState>()(() => ({
         // And the figures it returned, joined to the structures it was called on. See
         // `Mention.values` for what that join can and cannot claim; `numbers` and not `preview`,
         // because the preview is cut at an arbitrary byte and this list is not.
-        if (event.numbers.length > 0) {
+        if (event.numbers.length > 0 || event.values?.length) {
           write(conversationId, (slice) =>
-            attachValues(slice, messageId, event.tool, event.numbers),
+            attachValues(slice, messageId, event.tool, event.numbers, event.values ?? []),
           );
         }
         return;
@@ -496,6 +509,7 @@ function attachValues(
   messageId: string,
   tool: string,
   values: number[],
+  named: { label: string; value: number; unit: string }[],
 ): ConversationEntities {
   let touched = false;
   const entities: Record<string, Entity> = {};
@@ -509,7 +523,7 @@ function attachValues(
     const mentions = entity.mentions.map((mention) => {
       if (mention.messageId !== messageId || mention.tool !== tool) return mention;
       changed = true;
-      return { ...mention, values };
+      return { ...mention, values, named };
     });
     entities[key] = changed ? ({ ...entity, mentions } as Entity) : entity;
     touched ||= changed;

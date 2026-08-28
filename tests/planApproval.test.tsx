@@ -14,6 +14,10 @@
  * commits. That is deliberate — the decision is irreversible and attributable, and a single tap
  * was one mis-aimed thumb away from approving work nobody read. The tests go through the dialog
  * rather than around it, because the dialog is part of the contract now.
+ *
+ * The card had a second case — a non-empty `approval_id` meaning a durable interaction hold — and
+ * it is gone with the mechanism (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`): nothing
+ * upstream could open a hold, so the branch was unreachable and its route 404s.
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -56,7 +60,7 @@ beforeEach(() => {
 describe('plan approval', () => {
   it('reads the plan when the card appears, and shows it', async () => {
     vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('h1'));
-    render(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
+    render(<ApprovalPrompt prompt="Approve this plan?" sessionId={SID} />);
 
     expect(await screen.findByText('Run xTB on the aryl bromide')).toBeTruthy();
   });
@@ -64,7 +68,7 @@ describe('plan approval', () => {
   it('posts the hash of the plan that was shown', async () => {
     vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('h1'));
     const decide = vi.spyOn(api, 'decidePlan').mockResolvedValue();
-    render(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
+    render(<ApprovalPrompt prompt="Approve this plan?" sessionId={SID} />);
 
     await decideVia(/approve plan/i);
 
@@ -75,7 +79,7 @@ describe('plan approval', () => {
   it('sends a rejection on the same route rather than as a chat message', async () => {
     vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('h1'));
     const decide = vi.spyOn(api, 'decidePlan').mockResolvedValue();
-    render(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
+    render(<ApprovalPrompt prompt="Approve this plan?" sessionId={SID} />);
 
     await decideVia(/decline/i);
 
@@ -93,7 +97,7 @@ describe('plan approval', () => {
     vi.spyOn(api, 'decidePlan').mockRejectedValue(
       new ApiError('plan_changed', 'the plan changed since it was shown', 409),
     );
-    render(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
+    render(<ApprovalPrompt prompt="Approve this plan?" sessionId={SID} />);
 
     await decideVia(/approve plan/i);
 
@@ -104,21 +108,50 @@ describe('plan approval', () => {
   it('falls back to the composer when the service has no plan route', async () => {
     // Better than a card whose only buttons do nothing — and the wording says which it is.
     vi.spyOn(api, 'getPlan').mockRejectedValue(new ApiError('session_not_found', 'nope', 404));
-    render(<ApprovalPrompt prompt="Approve this plan?" approvalId="" sessionId={SID} />);
+    render(<ApprovalPrompt prompt="Approve this plan?" sessionId={SID} />);
 
     expect(await screen.findByText(/cannot record a plan decision/)).toBeTruthy();
   });
+});
 
-  it('does not touch the plan route for a durable interaction hold', async () => {
-    // The two cases share a card and nothing else: a hold is answered by its own id.
+describe('the plan the card shows', () => {
+  // The service encodes each step's completion as a leading `[x] ` / `[ ] ` prefix on the line,
+  // and `PlanItems` is the one component that knows to parse it off. This card rendered the plan
+  // with a hand-rolled list instead, so the most consequential card in the product showed
+  // `[ ] Run xTB…` as literal text while the checklist a few lines above it — same steps, same
+  // event — rendered them as a proper checklist.
+  it('parses the checkbox prefix off a streamed step instead of printing it', async () => {
     const getPlan = vi.spyOn(api, 'getPlan');
-    const decideApproval = vi.spyOn(api, 'decideApproval').mockResolvedValue();
-    render(<ApprovalPrompt prompt="Save this note?" approvalId="approval-q-42" sessionId={SID} />);
+    render(
+      <ApprovalPrompt
+        prompt="Approve this plan?"
+        sessionId={SID}
+        planTodos={['[x] Check the hazard profile', '[ ] Run xTB on the aryl bromide']}
+        planHash="h-streamed"
+      />,
+    );
 
-    await decideVia(/^approve$/i);
-
-    await waitFor(() => expect(decideApproval).toHaveBeenCalled());
+    // The step text is there without its prefix...
+    expect(await screen.findByText('Run xTB on the aryl bromide')).toBeTruthy();
+    expect(screen.getByText('Check the hazard profile')).toBeTruthy();
+    // ...and the prefix is not rendered anywhere as text.
+    expect(screen.queryByText(/\[[x ]\]/)).toBeNull();
+    // Completion state reaches a screen reader, not only the strikethrough.
+    expect(screen.getByText('Done:')).toBeTruthy();
+    expect(screen.getByText('To do:')).toBeTruthy();
+    // Still no round trip: the stream carried both halves.
     expect(getPlan).not.toHaveBeenCalled();
+  });
+
+  // The fetch fallback returns bare step text with no status, and a checkbox drawn for it would
+  // claim a completion state nobody reported. `PlanItems` renders those as plain bullets.
+  it('renders an unprefixed fetched step without inventing a completion state', async () => {
+    vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('h1', ['Estimate the pKa']));
+    render(<ApprovalPrompt prompt="Approve this plan?" sessionId={SID} />);
+
+    expect(await screen.findByText('Estimate the pKa')).toBeTruthy();
+    expect(screen.queryByText('Done:')).toBeNull();
+    expect(screen.queryByText('To do:')).toBeNull();
   });
 });
 
@@ -133,7 +166,6 @@ describe('the plan the stream already carried', () => {
     render(
       <ApprovalPrompt
         prompt="Approve this plan?"
-        approvalId=""
         sessionId={SID}
         planTodos={['Run xTB on the aryl bromide']}
         planHash="streamed-hash"
@@ -155,7 +187,6 @@ describe('the plan the stream already carried', () => {
     render(
       <ApprovalPrompt
         prompt="Approve this plan?"
-        approvalId=""
         sessionId={SID}
         planTodos={['Run xTB on the aryl bromide']}
         planHash=""

@@ -241,7 +241,6 @@ const AssistantBubble = memo(function AssistantBubble({
         {approval && (
           <ApprovalPrompt
             prompt={approval.prompt}
-            approvalId={approval.approvalId}
             sessionId={sessionId}
             // Stable identities: both come off the store's message and are replaced only by a new
             // `plan` event, so passing them straight through does not re-run the card's effect.

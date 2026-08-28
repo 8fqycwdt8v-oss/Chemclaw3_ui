@@ -188,7 +188,7 @@ export interface TraceEntry {
   jobFailure?: { jobId: string; reason: string };
   question?: { question: string; options: string[] };
   note?: { noteId: string; reference: string };
-  approval?: { prompt: string; approvalId: string };
+  approval?: { prompt: string };
 }
 
 export interface UserMessage {

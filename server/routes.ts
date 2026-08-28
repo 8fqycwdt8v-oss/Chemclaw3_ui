@@ -16,50 +16,36 @@
 const SID = '([0-9a-f]{32})';
 
 /**
- * Approval hold ids.
+ * Knowledge-note ids.
  *
- * Wider than `SID` on purpose, and the reason is worth stating: a hold's id is
- * `approval-{interaction_id}`, and `interaction_id` is an argument the *model* supplies to
- * `record_confirmed_answer`. So unlike a session id — which the service mints as uuid4 hex — its
- * characters are not guaranteed. A pattern that only accepted `[A-Za-z0-9._:-]` refused any id
- * the model happened to write with a space, a slash, or a bracket: the trace panel would render
- * the approval and its Approve button would 404 here, never reaching the service.
+ * Wider than `SID` on purpose, and the reason is worth stating: a note id is `note-{slug}` where
+ * the slug comes from whatever the note is about, and for a compound note that is a name the
+ * *model* wrote. So unlike a session id — which the service mints as uuid4 hex — its characters
+ * are not guaranteed. A pattern that only accepted `[A-Za-z0-9._:-]` would refuse any id the
+ * model happened to write with a space, a slash, or a bracket: the citation would render and its
+ * chip would 404 here, never reaching the service.
  *
  * The set is therefore exactly what `encodeURIComponent` can emit: its unreserved characters
  * `A-Za-z0-9-_.!~*'()` plus `%` for the escapes it produces. Note it does NOT escape `!~*'()`,
- * so `approval-Suzuki(A)` arrives literally — a pattern that merely added `%` would still have
+ * so `note-Pd(OAc)2` arrives literally — a pattern that merely added `%` would still have
  * refused that one. A test pins each case.
  *
  * Widening here is safe in a way it would not be for `SID`: this segment is forwarded
- * still-encoded, and the service uses the decoded value purely as a Temporal workflow-id lookup,
- * never as a filesystem or URL path, so an encoded `/` cannot traverse anything. A *raw* `/`
- * still fails to match, because that would change the route's shape rather than its parameter.
- * The length cap and the closed character set still hold.
- */
-const APPROVAL = "([A-Za-z0-9._:~!*'()%-]{1,128})";
-
-/**
- * Knowledge-note ids.
- *
- * The same argument as `APPROVAL`, from the same cause: a note id is `note-{slug}` where the slug
- * comes from whatever the note is about, and for a compound note that is a name the model wrote.
- * So the set is again exactly what `encodeURIComponent` can emit, and again a raw `/` fails to
- * match because that changes the route's shape rather than its parameter.
- *
- * It gets its own constant rather than sharing `APPROVAL` because the two are the same set for
- * different reasons, and the next time either service tightens or widens its id scheme, only one
- * of these should move.
+ * still-encoded and the service uses the decoded value purely as a lookup key, never as a
+ * filesystem or URL path, so an encoded `/` cannot traverse anything. A *raw* `/` still fails to
+ * match, because that would change the route's shape rather than its parameter. The length cap
+ * and the closed character set still hold.
  */
 const NOTE = "([A-Za-z0-9._:~!*'()%-]{1,128})";
 
 /**
  * Durable job ids.
  *
- * Minted by the service and by Temporal rather than by the model, so unlike `APPROVAL` these are
+ * Minted by the service and by Temporal rather than by the model, so unlike `NOTE` these are
  * not arbitrary in principle — but a connector job's id embeds a workflow id whose shape this
- * repo does not own, and pinning it to a guess is how the approval route spent a release
- * 404-ing every id with a bracket in it. Same closed set, same length cap, same argument: the
- * segment is forwarded still-encoded and the service uses it as a lookup key, never as a path.
+ * repo does not own, and pinning it to a guess is how a route spends a release 404-ing every id
+ * with a bracket in it. Same closed set, same length cap, same argument: the segment is
+ * forwarded still-encoded and the service uses it as a lookup key, never as a path.
  */
 const JOB = "([A-Za-z0-9._:~!*'()%-]{1,128})";
 
@@ -174,13 +160,10 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
-  // The PR-gate review queue.
-  //
-  // A different mechanism from `/approvals` below, despite the similar shape, and worth not
-  // confusing: an approval is a Temporal interaction hold answered mid-turn, a proposal is a
-  // knowledge note waiting to enter the graph. The service calls this "the line that makes
-  // machine-written knowledge safe". Listing is keyset-paginated (`before_id`) and state-filtered
-  // through the query string, which the proxy forwards untouched.
+  // The PR-gate review queue: machine-written knowledge waiting for a human to sign it into the
+  // graph. The service calls this "the line that makes machine-written knowledge safe". Listing
+  // is keyset-paginated (`before_id`) and state-filtered through the query string, which the
+  // proxy forwards untouched.
   { method: 'GET', pattern: /^\/api\/proposals$/, target: () => '/proposals', sse: false },
   {
     method: 'GET',
@@ -212,21 +195,6 @@ export const ROUTES: readonly Route[] = [
     method: 'DELETE',
     pattern: new RegExp(`^/api/jobs/${JOB}$`),
     target: (m) => `/jobs/${m[1]}`,
-    sse: false,
-  },
-
-  // Durable approval holds (the PR-gate's human sign-off).
-  { method: 'GET', pattern: /^\/api\/approvals$/, target: () => '/approvals', sse: false },
-  {
-    method: 'GET',
-    pattern: new RegExp(`^/api/approvals/${APPROVAL}$`),
-    target: (m) => `/approvals/${m[1]}`,
-    sse: false,
-  },
-  {
-    method: 'POST',
-    pattern: new RegExp(`^/api/approvals/${APPROVAL}/decision$`),
-    target: (m) => `/approvals/${m[1]}/decision`,
     sse: false,
   },
 ] as const;

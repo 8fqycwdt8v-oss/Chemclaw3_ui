@@ -171,8 +171,18 @@ export interface NoteProposedEvent {
 export interface ApprovalRequestEvent {
   type: 'approval_request';
   prompt: string;
-  /** The durable hold's handle, answerable via `POST /approvals/{id}/decision`. Empty string
-   *  for a plan-approval prompt, which is answered by sending the next chat message instead. */
+  /**
+   * **Always `""`**, and mirrored only because that is what says so.
+   *
+   * It once carried the handle of a durable interaction hold, answerable via
+   * `POST /approvals/{id}/decision`. The service deleted that whole mechanism
+   * (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`) because nothing could ever open one,
+   * and its upstream model now documents this field as permanently empty: a non-empty value
+   * would name a hold that cannot exist. Nothing in this app branches on it.
+   *
+   * A plan approval — the only shape this event has — is answered on
+   * `POST /sessions/{id}/plan/decision` and bound by the hash on the `plan` event, never by this.
+   */
   approval_id: string;
 }
 

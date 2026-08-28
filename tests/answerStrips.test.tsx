@@ -127,7 +127,7 @@ describe('the plan strip', () => {
         trace={[
           entry({
             kind: 'approval_request',
-            approval: { prompt: 'Approve the plan?', approvalId: '' },
+            approval: { prompt: 'Approve the plan?' },
           }),
         ]}
       />,
@@ -150,7 +150,7 @@ describe('the plan strip', () => {
         trace={[
           entry({
             kind: 'approval_request',
-            approval: { prompt: 'Approve the plan?', approvalId: '' },
+            approval: { prompt: 'Approve the plan?' },
           }),
         ]}
       />,

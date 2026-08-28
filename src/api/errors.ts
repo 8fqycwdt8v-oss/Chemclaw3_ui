@@ -183,8 +183,16 @@ export function errorFromStatus(
         options,
       );
     case 429: {
-      const wait = retryAfterSeconds(retryAfter);
-      if (wait !== null) {
+      // The *presence* of the header picks the kind; parsing it only supplies the number. These
+      // are two decisions and they used to be one: a `Retry-After` this parser could not read —
+      // an HTTP-date from a gateway, a `0`, a stray character — fell through to the terminal
+      // branch, which locks the composer with "the usage budget is exhausted" over a limiter that
+      // refills in seconds, and nothing in the UI clears that lock. Refusing to invent a *wait*
+      // from an unreadable value is right; inventing a *ceiling* from it is not.
+      //
+      // A `rate_limited` carrying zero renders correctly: `Countdown` shows nothing at zero, so
+      // the banner is the sentence without a number.
+      if (retryAfter?.trim()) {
         // The one status whose `detail` is not used. The limiter's is the fixed string "too many
         // requests", which says nothing the kind does not, and the banner appends the wait to
         // this — so a lower-case fragment from the service would land mid-sentence.
@@ -192,7 +200,7 @@ export function errorFromStatus(
           'rate_limited',
           'The service is limiting how fast requests can be made.',
           429,
-          { ...options, retryAfterSeconds: wait },
+          { ...options, retryAfterSeconds: retryAfterSeconds(retryAfter) ?? 0 },
         );
       }
       return new ApiError(

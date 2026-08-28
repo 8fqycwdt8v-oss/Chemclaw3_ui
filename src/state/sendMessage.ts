@@ -11,7 +11,7 @@ import { prefetchMarkdown } from '../components/LazyMarkdown.tsx';
 import { ApiError } from '../api/errors.ts';
 import { streamTurn, TURN_STALL_MS } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
-import type { ComposerLock } from './types.ts';
+import type { Banner, ComposerLock } from './types.ts';
 import { useChatStore } from './chatStore.ts';
 import { useEntityStore } from '../chem/entities.ts';
 import { announceStatus, describeAnswer } from './announce.ts';
@@ -507,11 +507,14 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     if (apiError.kind === 'rate_limited') {
       releaseComposer(false);
       const seconds = Math.ceil(apiError.retryAfterSeconds);
-      useChatStore.getState().setBanner({
-        kind: 'warn',
-        text: `${text} Try again in ${seconds} s.`,
-        retryAfterSeconds: seconds,
-      });
+      // A limiter that sent a `Retry-After` this app could not read is still a limiter, and it
+      // arrives here with no number. Saying "try again in 0 s" would be a countdown to now, so
+      // the sentence loses the figure rather than gaining a wrong one.
+      const banner: Banner =
+        seconds > 0
+          ? { kind: 'warn', text: `${text} Try again in ${seconds} s.`, retryAfterSeconds: seconds }
+          : { kind: 'warn', text: `${text} Try again shortly.` };
+      useChatStore.getState().setBanner(banner);
       return;
     }
 

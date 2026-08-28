@@ -17,6 +17,7 @@ import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router';
 import {
   FileCheck2,
+  FlaskConical,
   MoreHorizontal,
   Plus,
   Search,
@@ -325,12 +326,18 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
       </nav>
 
       <div className="space-y-3 border-t border-border-subtle p-3">
-        {/* The two screens that are not a conversation. In the footer rather than above the list
+        {/* The screens that are not a conversation. In the footer rather than above the list
             because they are where a chemist goes occasionally, and the list is where they go
             every time. */}
         <nav aria-label="Other views" className="flex flex-col gap-1">
           <SidebarLink to="/review" icon={<FileCheck2 />} onNavigate={onNavigate}>
             Review queue
+          </SidebarLink>
+          {/* A design outlives the conversation that drafted it — corrected by somebody who was
+              not in that thread, run a week later — so it needs a way in that is not a session
+              id, the same argument `/jobs` is here on. */}
+          <SidebarLink to="/protocols" icon={<FlaskConical />} onNavigate={onNavigate}>
+            Experiment protocols
           </SidebarLink>
           <SidebarLink to="/jobs" icon={<Server />} onNavigate={onNavigate}>
             Durable runs

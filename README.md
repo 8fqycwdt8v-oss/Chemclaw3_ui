@@ -38,6 +38,13 @@ bearer token.
   above the data, because an empty screen is explicitly not a clearance. The renderers are a
   shape-keyed registry (`src/results/`), so the block in the answer and the panel behind it are one
   component in two sizes, and a tool the service adds tomorrow is legible without a release here.
+- **Carries an experiment protocol as a document, not as an answer.** `/protocols` lists every
+  design; `/protocols/{id}` is the whole thing — the structured request with each field marked
+  _stated_ (with the chemist's own words), _inferred_ or _absent_, the conditions, the charge table,
+  the procedure, the factors, a run sheet with a CSV, the plate drawn as a plate, the hazards, what
+  it rests on, and every revision. It is the one artefact here a human **edits**: a save is a new
+  revision posted against the revision it was written on, so two chemists editing one design get a
+  refusal and a re-read rather than one of them silently losing their work.
 - **Resolves citations.** A `note-…` chip opens the note with its provenance and its validity
   window, so a citation in an old answer that points at a superseded note says so.
 - **Shows what is waiting on you, across conversations.** `/review` carries both gates. The PR gate
@@ -145,7 +152,8 @@ src/        the SPA — api/ auth/ state/ components/
   components/ui/    primitives (button, sheet, alert-dialog, …) on Radix + cva
   components/chem/  composites built from them (StatusDot, ConfirmDialog, …)
   results/          the tool-result renderers, keyed on payload shape, and their registry
-shared/     the event contract, mirrored from the service's api/events.py
+shared/     the contracts mirrored by hand from the service — events.ts (the SSE union,
+            from api/events.py) and protocols.ts (the experiment-design schemas)
 scripts/    dev launcher, server bundler, smoke test, contrast gate
 e2e/        Playwright specs and the SSE fixture service
 public/     theme boot script, favicon — served as-is by the BFF
@@ -274,11 +282,12 @@ proxies answers) and the reasoning are in Chemclaw3: `deploy/jenkins/README.md` 
 ## Backend requirements
 
 The UI reads more of the service than it used to, and the degradation is deliberately split in two.
-**List** routes — `GET /sessions`, `GET /sessions/{id}/messages`, `GET /approvals`,
-`GET /proposals`, `GET /jobs` — swallow a 404 into an empty result, so an older service yields a
-smaller app rather than a banner. **Fetch** routes — `GET /notes/{id}`,
-`GET /sessions/{id}/tool-results/{ref}` — do not, because nothing calls them speculatively: the
-control only exists when the turn said the thing exists, so a 404 there is a real fault.
+**List** routes — `GET /sessions`, `GET /sessions/{id}/messages`, `GET /proposals`, `GET /jobs`,
+`GET /protocols` — swallow a 404 into an empty result, so an older service yields a smaller app
+rather than a banner. **Fetch** routes — `GET /notes/{id}`,
+`GET /sessions/{id}/tool-results/{ref}`, `GET /protocols/{id}` — do not, because nothing calls them
+speculatively: the control only exists when the turn or the list said the thing exists, so a 404
+there is a real fault.
 
 `USER-STORIES.md` records which chemist-facing workflows this reaches and which it does not.
 

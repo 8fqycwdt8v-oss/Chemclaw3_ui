@@ -107,6 +107,78 @@ describe('dispatch', () => {
     expect(done.renderer.summary?.(done.data)?.text).toBe('plateaued');
   });
 
+  it('finds an experiment protocol by its receipt, under a tool name it has never seen', () => {
+    // `renderer.id` IS the value `ResultBlock` stamps as `data-result-block`, so asserting it here
+    // is asserting the block a browser test then looks for by that attribute (`e2e/protocols.spec.ts`).
+    //
+    // Three fields together, because each alone is common: `design_id` would claim anything naming
+    // a design, `checks` anything that validates, and `summary` half the payloads in this app.
+    expect(
+      pick('draft_a_protocol_somehow', {
+        design_id: 'design-0123456789ab',
+        summary: '4 arms across 2 factors.',
+        checks: [],
+        blocking: [],
+      }).id,
+    ).toBe('protocol');
+  });
+
+  it('does not let a protocol receipt fall through to the generic table', () => {
+    // Without its own entry a receipt matched `table`, which finds `checks` first and draws the
+    // check list as though it were the result — the arms, the factors and the link to the document
+    // all absent, with nothing on screen saying anything had been left out.
+    const picked = pick('read_experiment_protocol', {
+      design_id: 'design-0123456789ab',
+      summary: '2 arms.',
+      checks: [{ check_id: 'charge-complete', severity: 'note', passed: true, detail: 'ok' }],
+      blocking: [],
+      arms: [{ arm_id: 'A1', well: 'A1', run_order: 1, levels: {} }],
+    });
+    expect(picked.id).toBe('protocol');
+    expect(picked.wide).toBe(true);
+  });
+
+  it('separates a blocking check from a check that merely failed, and from no checks at all', () => {
+    // `blocking` is the service's own subset of the failed checks that stop execution. Collapsing
+    // the two would either alarm on a note or stay quiet on a blocker — and zero checks is the
+    // absence of a finding, not a clean one, so it is neither.
+    const blocked = pick('draft_experiment_protocol', {
+      design_id: 'design-0123456789ab',
+      summary: 's',
+      checks: [{ check_id: 'a', severity: 'blocker', passed: false, detail: 'd' }],
+      blocking: ['a'],
+    });
+    expect(blocked.renderer.summary?.(blocked.data)).toEqual({
+      text: '1 blocking',
+      tone: 'danger',
+    });
+
+    const warned = pick('draft_experiment_protocol', {
+      design_id: 'design-0123456789ab',
+      summary: 's',
+      checks: [
+        { check_id: 'a', severity: 'warning', passed: false, detail: 'd' },
+        { check_id: 'b', severity: 'note', passed: true, detail: 'd' },
+      ],
+      blocking: [],
+    });
+    expect(warned.renderer.summary?.(warned.data)).toEqual({
+      text: '1 of 2 failed',
+      tone: 'warn',
+    });
+
+    const none = pick('draft_experiment_protocol', {
+      design_id: 'design-0123456789ab',
+      summary: 's',
+      checks: [],
+      blocking: [],
+    });
+    expect(none.renderer.summary?.(none.data)).toEqual({
+      text: 'no checks recorded',
+      tone: 'neutral',
+    });
+  });
+
   it('finds a value strip only when there is no record list to tabulate', () => {
     expect(pick('predict_pka', { pka: 4.76, sd: 1.6 }).id).toBe('values');
     // A payload with both is a table with a header, not a strip.
@@ -176,6 +248,42 @@ describe('a compact card keeps every sentence that qualifies the data', () => {
   it('keeps the empty-index banner, which is the reading rather than the data', () => {
     draw('similar_molecules', { hits: [], index_empty: true, subject: 'compound' }, true);
     expect(screen.getByText(/was not answered/i)).toBeTruthy();
+  });
+
+  it('keeps the protocol’s structural caveat, and says the service trimmed the arms', () => {
+    // Two different subtractions and a card needs both. `Trimmed` reports what THIS view dropped;
+    // `arms_omitted` reports what the service dropped before the card ever saw it — and a reader
+    // who only knew about the first would still be short. The caveat is what stops "no blockers"
+    // being read as "safe to run": these checks read the document, not the chemistry.
+    draw(
+      'draft_experiment_protocol',
+      {
+        design_id: 'design-0123456789ab',
+        revision: 2,
+        status: 'draft',
+        summary: '96 arms across 3 factors.',
+        checks: [],
+        blocking: [],
+        factors: { solvent: ['2-MeTHF', 'CPME'] },
+        arm_count: 96,
+        arms_omitted: 90,
+        arms: Array.from({ length: 6 }, (_, i) => ({
+          arm_id: `A${i + 1}`,
+          well: `A${i + 1}`,
+          run_order: i + 1,
+          levels: { solvent: '2-MeTHF' },
+        })),
+      },
+      true,
+    );
+
+    expect(screen.getByText(/checks are structural/i)).toBeTruthy();
+    expect(screen.getByText(/4 of 6 shown/)).toBeTruthy();
+    expect(screen.getByText(/90 more are in the design itself/)).toBeTruthy();
+    // The way out of the card, which is the only thing that makes six of ninety-six honest.
+    expect(screen.getByRole('link', { name: /Open the full protocol/ }).getAttribute('href')).toBe(
+      '/protocols/design-0123456789ab',
+    );
   });
 
   it('keeps the unresolved-species alert on a charge table', () => {

@@ -28,6 +28,8 @@ import { useAuth } from './auth/AuthContext.tsx';
 import { AppShell } from './App.tsx';
 import { ReviewQueue } from './components/ReviewQueue.tsx';
 import { JobsPanel } from './components/JobsPanel.tsx';
+import { ProtocolsPanel } from './components/ProtocolsPanel.tsx';
+import { ProtocolDocument } from './components/ProtocolDocument.tsx';
 import { Loading } from '@/components/chem/Feedback';
 import { Button } from '@/components/ui/button';
 
@@ -201,9 +203,9 @@ export function AppRoutes(): React.JSX.Element {
       <Route path="/" element={<Bootstrap />} />
       <Route path="/c/:conversationId" element={<ConversationRoute />} />
       <Route path="/s/:sessionId" element={<SessionResolver />} />
-      {/* Neither is a conversation, so both render inside the shell with no conversation: the
-          sidebar, the top bar and the banner stay where they are, and Back returns to the thread
-          the reader came from. */}
+      {/* None of these is a conversation, so they render inside the shell with no conversation:
+          the sidebar, the top bar and the banner stay where they are, and Back returns to the
+          thread the reader came from. */}
       <Route
         path="/review"
         element={
@@ -217,6 +219,27 @@ export function AppRoutes(): React.JSX.Element {
         element={
           <AppShell>
             <JobsPanel />
+          </AppShell>
+        }
+      />
+      {/* The list and one document. The document reads its own `:designId` rather than being
+          handed one, exactly as `ConversationRoute` does: the URL is what says which design is
+          open, so a shared link and a reload land on the same one. A design id is minted by the
+          service and appears in an answer, so it is genuinely worth being in a URL — unlike a
+          session id, which `/s/:sessionId` exists to work around. */}
+      <Route
+        path="/protocols"
+        element={
+          <AppShell>
+            <ProtocolsPanel />
+          </AppShell>
+        }
+      />
+      <Route
+        path="/protocols/:designId"
+        element={
+          <AppShell>
+            <ProtocolDocument />
           </AppShell>
         }
       />

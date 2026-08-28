@@ -32,6 +32,11 @@
     "e2e",
     "scripts",
     "vite.config.ts",
-    "playwright.config.ts"
+    // Every Playwright config, not just the base one. `playwright.full-stack.config.ts` was outside
+    // this list from the day it was written, so nothing checked it — and a config that no checker
+    // reads is the "declaration nobody verifies" shape the rest of this repository refuses.
+    "playwright.config.ts",
+    "playwright.full-stack.config.ts",
+    "playwright.mock-model.config.ts"
   ]
 }

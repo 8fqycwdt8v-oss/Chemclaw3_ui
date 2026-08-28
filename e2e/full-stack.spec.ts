@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { ask as askOn, composer as composerOn } from './live-ui.ts';
 import { toolNames, traceText } from './trace.ts';
 
 /**
@@ -32,24 +33,15 @@ test.afterAll(async () => {
   await page.close();
 });
 
-/** The composer, by the placeholder the shell has always used. */
-const composer = () => page.getByPlaceholder(/Ask about a reaction/);
-
 /**
- * Ask one question and wait for the turn to fully settle.
+ * The composer and `ask()` now live in `e2e/live-ui.ts`, shared with `e2e/mock-model.spec.ts`.
  *
- * Settle is "the Send button is back", not "the composer is enabled": the composer unlocks briefly
- * between turns, and an assertion racing that gap reads a half-rendered answer. The Stop button is
- * present for exactly as long as a turn is streaming, so its disappearance is the honest signal.
+ * They take the page rather than closing over this file's module-level one, so they are bound here
+ * and every scenario below is unchanged. The settle logic — and the comment explaining why it
+ * watches the Stop button rather than the composer's lock — moved with the code.
  */
-async function ask(question: string): Promise<string> {
-  await composer().fill(question);
-  await page.getByRole('button', { name: 'Send' }).click();
-  await expect(page.getByRole('button', { name: 'Stop' })).toBeHidden({ timeout: 220_000 });
-  const answer = page.getByRole('article', { name: 'Assistant answer' }).last();
-  await expect(answer).not.toBeEmpty();
-  return (await answer.textContent()) ?? '';
-}
+const composer = () => composerOn(page);
+const ask = (question: string) => askOn(page, question);
 
 /**
  * The tool identifiers the last turn actually called.

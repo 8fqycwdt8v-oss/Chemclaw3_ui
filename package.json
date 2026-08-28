@@ -24,7 +24,8 @@
     "check:contrast": "node scripts/check-contrast.mjs",
     "check:no-dev-auth": "node scripts/assert-no-dev-auth.mjs",
     "check:openapi": "node --experimental-strip-types scripts/check-openapi.mjs",
-    "test:e2e:full-stack": "playwright test --config playwright.full-stack.config.ts"
+    "test:e2e:full-stack": "playwright test --config playwright.full-stack.config.ts",
+    "test:e2e:mock-model": "playwright test --config playwright.mock-model.config.ts"
   },
   "dependencies": {
     "@azure/msal-browser": "^5.17.1",

@@ -10,7 +10,7 @@
  */
 
 import type { LogLevel } from './lib/logger.ts';
-import { MAX_MESSAGE_CHARS } from '../shared/events.ts';
+import { MAX_MESSAGE_CHARS, isUsableMessageCap } from '../shared/events.ts';
 
 export type AuthMode = 'dev' | 'msal';
 
@@ -113,12 +113,11 @@ function resolve(): RuntimeConfig {
     // A cap of zero, a negative one or a non-number is not a stricter limit — it is a composer
     // that refuses every message, including the one the chemist is typing when the bad value
     // ships. Only a usable number displaces the default.
-    maxMessageChars:
-      typeof w.maxMessageChars === 'number' &&
-      Number.isFinite(w.maxMessageChars) &&
-      w.maxMessageChars > 0
-        ? Math.floor(w.maxMessageChars)
-        : MAX_MESSAGE_CHARS,
+    //
+    // The predicate is shared with the BFF rather than restated here, because the two disagreeing
+    // is what made this guard unreachable: the BFF clamped a bad value up to 1 before it crossed
+    // `/config.js`, and 1 passes any test for "usable" that only asks about the sign.
+    maxMessageChars: isUsableMessageCap(w.maxMessageChars) ? w.maxMessageChars : MAX_MESSAGE_CHARS,
   };
 }
 

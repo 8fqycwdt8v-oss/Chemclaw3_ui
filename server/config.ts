@@ -6,7 +6,7 @@
  * at BUILD time, which is exactly what we are working around).
  */
 
-import { MAX_MESSAGE_CHARS } from '../shared/events.ts';
+import { MAX_MESSAGE_CHARS, isUsableMessageCap } from '../shared/events.ts';
 
 export type AuthMode = 'dev' | 'msal';
 
@@ -43,6 +43,28 @@ const MODES: Record<string, AuthMode> = { dev: 'dev', msal: 'msal' };
  */
 const authMode: AuthMode = MODES[rawAuthMode] ?? 'dev';
 const authModeIsValid = rawAuthMode in MODES;
+
+/**
+ * `MAX_MESSAGE_CHARS` as given, resolved beside a validity flag — the same pair as
+ * `rawAuthMode`/`authModeIsValid` above, for the same reason.
+ *
+ * This used to be `Math.max(1, Math.floor(num(...)))` inline in `cfg`, and clamping *up* is the
+ * destructive reading of a bad value: `0` means "refuse every message", not "use the default", and
+ * a deployment that wrote it (the "0 means unlimited" convention, or a Helm `| default 0`) got a
+ * one-character composer with no error anywhere. Worse, the clamp ran at the one layer that hid
+ * the value from `src/env.ts`, whose guard against a zero cap can only ever see what crosses
+ * `/config.js` — `1` passes it. The backend refuses the same value rather than clamping it
+ * (`service_max_message_chars: Field(default=100_000, gt=0)`), and this is that posture on this
+ * side of the wire: the resolved value is never a cap nobody can send through, and the refusal is
+ * `validateConfig`'s.
+ *
+ * Whitespace is "unset", matching `str()` and `bool()` — `num()` does not trim, which is how `" "`
+ * used to parse as 0 and clamp to 1.
+ */
+const rawMaxMessageChars = str('MAX_MESSAGE_CHARS');
+const parsedMaxMessageChars = rawMaxMessageChars ? Number(rawMaxMessageChars) : MAX_MESSAGE_CHARS;
+const maxMessageCharsIsValid = isUsableMessageCap(parsedMaxMessageChars);
+const maxMessageChars = maxMessageCharsIsValid ? parsedMaxMessageChars : MAX_MESSAGE_CHARS;
 
 /** Read once, because both `cfg.allowFraming` and the CSP built below have to agree. */
 const allowFraming = bool('ALLOW_FRAMING', false);
@@ -142,6 +164,10 @@ export interface BffConfig {
   reviewerRoles: string[];
   /** The service's `CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`, told to this process rather than guessed. */
   maxMessageChars: number;
+  /** The raw `MAX_MESSAGE_CHARS` as given, so a value that is not a cap can be named in the
+   *  refusal rather than guessed at. */
+  rawMaxMessageChars: string;
+  maxMessageCharsIsValid: boolean;
   csp: string;
   logLevel: string;
   /** How much the BROWSER records, served through `/config.js`. Separate from `logLevel`, which
@@ -193,9 +219,11 @@ export const cfg: BffConfig = {
   // old default, and one that lowered it got a composer inviting a message the service rejects
   // with a 422 after the whole body has been uploaded. Same rule as `REVIEWER_ROLES` above — the
   // value is the backend's and there is no route that publishes it, so it is told to this process
-  // per deployment. The shared constant is the fallback, so an unset variable keeps today's
-  // behaviour exactly.
-  maxMessageChars: Math.max(1, Math.floor(num('MAX_MESSAGE_CHARS', MAX_MESSAGE_CHARS))),
+  // per deployment. The shared constant is the fallback, so an unset variable — or one that is not
+  // a usable cap, which `validateConfig` refuses — keeps today's behaviour exactly.
+  maxMessageChars,
+  rawMaxMessageChars,
+  maxMessageCharsIsValid,
   sseHeartbeatMs: num('SSE_HEARTBEAT_MS', 15_000),
   upstreamConnectTimeoutMs: num('UPSTREAM_CONNECT_TIMEOUT_MS', 10_000),
   // Time to RECEIVE a request, not to answer one, so this bounds nothing about a 600 s turn or a
@@ -247,6 +275,14 @@ export function validateConfig(c: BffConfig = cfg): string[] {
     problems.push(
       `AUTH_MODE ${JSON.stringify(c.rawAuthMode)} is not a valid mode (expected "msal" or ` +
         '"dev"). Refusing to start rather than falling back to unauthenticated access.',
+    );
+  }
+
+  if (!c.maxMessageCharsIsValid) {
+    problems.push(
+      `MAX_MESSAGE_CHARS ${JSON.stringify(c.rawMaxMessageChars)} is not a message cap (expected a ` +
+        'whole number of characters above zero, e.g. 100000). Zero is not "unlimited" here — it ' +
+        'is a composer that refuses every message — so this is refused rather than clamped.',
     );
   }
 

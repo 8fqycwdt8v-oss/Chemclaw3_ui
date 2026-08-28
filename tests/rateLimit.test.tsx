@@ -72,12 +72,28 @@ describe('errorFromStatus on 429', () => {
     expect(err.retryAfterSeconds).toBe(0);
   });
 
-  it('ignores a header it cannot act on rather than inventing a wait', () => {
+  it('invents no wait from a header it cannot act on, and no ceiling either', () => {
     // An HTTP-date is legal in the header and is not what the service sends; reading it as
     // seconds would produce NaN, and treating NaN as a pause is worse than having no number.
-    const err = errorFromStatus(429, 'too many requests', 'Wed, 21 Oct 2026 07:28:00 GMT');
+    //
+    // But "I cannot read this" is not "there was no header", and the two used to land in the same
+    // branch — the terminal one, which locks the composer for the life of the page over a limit
+    // that refills in seconds. The header's *presence* is what tells the three 429s apart, which
+    // is what this mapper's own docstring says; only the number comes from parsing it.
+    for (const header of ['Wed, 21 Oct 2026 07:28:00 GMT', '0', '12s', '-5']) {
+      const err = errorFromStatus(429, 'too many requests', header);
 
-    expect(err.kind).toBe('budget_exhausted');
+      expect(err.kind).toBe('rate_limited');
+      expect(err.retryable).toBe(true);
+      // No number: `Countdown` renders nothing at zero, so the banner simply carries no wait.
+      expect(err.retryAfterSeconds).toBe(0);
+    }
+  });
+
+  it('treats a blank header as no header', () => {
+    // A proxy that emits the field with nothing in it has said nothing, and there is no third
+    // meaning to give it.
+    expect(errorFromStatus(429, 'budget exhausted', '   ').kind).toBe('budget_exhausted');
   });
 });
 
@@ -136,6 +152,31 @@ describe('sendMessage on a rate limit', () => {
     expect(useChatStore.getState().banner?.retryAfterSeconds).toBe(20);
     expect(useChatStore.getState().banner?.text).toContain('20 s');
     // And the question is back where it was typed, so the wait is all that is left to do.
+    expect(useChatStore.getState().drafts[cid]).toBe('hello');
+  });
+
+  it('leaves the composer usable when the wait is unreadable', async () => {
+    // The gateway case: something in front of the service answers 429 with an HTTP-date. The
+    // limit still refills in seconds, so locking the composer — the only branch with no way out
+    // in the whole UI — is the one response that must not happen.
+    const stub = stubFetch((url, init) => {
+      if (url.endsWith('/sessions') && init?.method === 'POST') {
+        return new Response(JSON.stringify({ session_id: 'd'.repeat(32) }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return rateLimited('Wed, 21 Oct 2026 07:28:00 GMT');
+    });
+    restore = stub.restore;
+
+    const cid = useChatStore.getState().createConversation();
+    await sendMessage({ conversationId: cid, text: 'hello', auth: devAuth });
+
+    expect(useChatStore.getState().composerLock).toBe(false);
+    // No invented number, and no "0 s" either — the countdown has nothing to show.
+    expect(useChatStore.getState().banner?.retryAfterSeconds).toBeUndefined();
+    expect(useChatStore.getState().banner?.text).not.toContain('0 s');
     expect(useChatStore.getState().drafts[cid]).toBe('hello');
   });
 
@@ -201,6 +242,70 @@ describe('the banner', () => {
 
     act(() => vi.advanceTimersByTime(1_000));
     expect(screen.queryByText('0s')).toBeNull();
+  });
+
+  it('counts the second refusal down, not the first one twice', () => {
+    // A limiter that refuses twice in a row is the ordinary case, and the banner is *replaced*
+    // rather than remounted — `Countdown` adjusts in render and re-runs its effect on the new
+    // `seconds`. Without the effect's `clearInterval`, the first interval keeps ticking beside
+    // the second: the display drops 2 s per second and reads a number that was never true, and a
+    // third refusal makes it 3 Hz. This is the one consequence of a missing cleanup that a
+    // chemist can see, and it is the number the widget exists to show.
+    useChatStore.setState({
+      banner: {
+        kind: 'warn',
+        text: 'Too many requests. Try again in 30 s.',
+        retryAfterSeconds: 30,
+      },
+    });
+    render(
+      <MemoryRouter>
+        <TopBar />
+      </MemoryRouter>,
+    );
+    act(() => vi.advanceTimersByTime(5_000));
+    expect(screen.getByText('25s')).toBeTruthy();
+
+    act(() =>
+      useChatStore.setState({
+        banner: {
+          kind: 'warn',
+          text: 'Too many requests. Try again in 10 s.',
+          retryAfterSeconds: 10,
+        },
+      }),
+    );
+    expect(screen.getByText('10s')).toBeTruthy();
+
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(screen.getByText('8s')).toBeTruthy();
+  });
+
+  it('takes its timer with it when the banner goes away', () => {
+    // The other half of the same cleanup, and the half that is silent: React 19 no-ops a
+    // `setState` on an unmounted tree, so a 1 Hz interval left running for the life of the tab
+    // shows up in neither the console nor a test that only reads the screen. The count is read
+    // *after* advancing, because `TopBar`'s health probe legitimately leaves one-shot timers
+    // pending at the moment of unmount — those drain, an interval does not.
+    useChatStore.setState({
+      banner: {
+        kind: 'warn',
+        text: 'Too many requests. Try again in 30 s.',
+        retryAfterSeconds: 30,
+      },
+    });
+    const { unmount } = render(
+      <MemoryRouter>
+        <TopBar />
+      </MemoryRouter>,
+    );
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(screen.getByText('28s')).toBeTruthy();
+
+    unmount();
+    act(() => vi.advanceTimersByTime(30_000));
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('shows nothing extra on a banner that carries no wait', () => {

@@ -730,3 +730,20 @@ export const SESSION_ID_RE = /^[0-9a-f]{32}$/;
  * or a static preview with no server behind it.
  */
 export const MAX_MESSAGE_CHARS = 100_000;
+
+/**
+ * Whether a configured cap is one anybody can serve — the *one* place that decision is taken.
+ *
+ * Both halves of `/config.js` need it and neither may disagree with the other: the BFF reads
+ * `MAX_MESSAGE_CHARS` from the environment and refuses to boot on a value that is not a cap
+ * (`server/config.ts`), and the SPA re-checks what crossed the bridge and keeps the default
+ * instead (`src/env.ts`), because a browser has nowhere to refuse to. Two hand-written copies of
+ * one predicate is how the first version of this went wrong in the opposite direction: the BFF
+ * clamped a bad value up to `1` before the SPA's guard could see it, so `MAX_MESSAGE_CHARS=0`
+ * shipped a one-character composer while the guard against exactly that stayed green.
+ *
+ * A positive integer, mirroring the backend's own `Field(default=100_000, gt=0)`. Zero is not
+ * "unlimited" and a fraction is not a character count.
+ */
+export const isUsableMessageCap = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0;

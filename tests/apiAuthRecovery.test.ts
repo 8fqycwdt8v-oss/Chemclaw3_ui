@@ -3,8 +3,8 @@
  *
  * `handleUnauthorized` used to have exactly one caller in the app — the turn send path in
  * `state/sendMessage.ts`. Every other route (the conversation list, the transcript, the review
- * queue, the jobs panel, the approvals inbox, plan decisions, attachment upload, and both detail
- * fetches) went through `api/client.ts`'s `request`, which threw `unauthorized` and stopped. The
+ * queue, the jobs panel, plan decisions, attachment upload, and both detail fetches) went through
+ * `api/client.ts`'s `request`, which threw `unauthorized` and stopped. The
  * user read "Your session has expired. Please sign in again." with nothing to click.
  *
  * These tests are written against `api.*` rather than against `request` directly, because the
@@ -149,10 +149,10 @@ describe('the routes that swallow a 404', () => {
     restore = stub.restore;
     const auth = provider(true);
 
-    // `listApprovals` maps a 404 to `[]` so an older service leaves an empty inbox rather than a
-    // banner. A 401 must not take that path — it would render "no approvals" to someone who is
-    // simply signed out.
-    expect(await api.listApprovals(auth)).toEqual([]);
+    // `listProposals` maps a 404 to `[]` so an older service leaves an empty queue rather than a
+    // banner. A 401 must not take that path — it would render "nothing to review" to someone who
+    // is simply signed out.
+    expect(await api.listProposals(auth)).toEqual([]);
     expect(auth.asked).toBe(1);
     expect(stub.calls).toHaveLength(2);
   });

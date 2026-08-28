@@ -245,7 +245,6 @@ describe('plan approval reaching the message', () => {
     });
     const message = assistantOf(cid, mid);
     const approval = message.trace.findLast((e) => e.kind === 'approval_request')?.approval;
-    expect(approval?.approvalId).toBe('');
     expect(approval?.prompt).toBe('This plan is waiting for your decision.');
     expect(message.latestPlan).toEqual(['[ ] compute the pKa']);
     expect(message.latestPlanHash).toBe('h');

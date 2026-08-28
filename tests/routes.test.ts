@@ -20,9 +20,6 @@ describe('proxy route whitelist', () => {
       ['POST', `/api/sessions/${SID}/attachments`, `/sessions/${SID}/attachments`],
       ['GET', `/api/sessions/${SID}/plan`, `/sessions/${SID}/plan`],
       ['POST', `/api/sessions/${SID}/plan/decision`, `/sessions/${SID}/plan/decision`],
-      ['GET', '/api/approvals', '/approvals'],
-      ['GET', '/api/approvals/approval-q-42', '/approvals/approval-q-42'],
-      ['POST', '/api/approvals/approval-q-42/decision', '/approvals/approval-q-42/decision'],
       ['GET', `/api/sessions/${SID}/tool-results/${REF}`, `/sessions/${SID}/tool-results/${REF}`],
       ['GET', '/api/notes/note-suzuki-42', '/notes/note-suzuki-42'],
       ['GET', '/api/profiles', '/profiles'],
@@ -77,6 +74,21 @@ describe('proxy route whitelist', () => {
     }
   });
 
+  it('does not proxy the deleted approval-hold routes', () => {
+    // `D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold` deleted `GET /approvals`,
+    // `GET /approvals/{id}` and `POST /approvals/{id}/decision` from the service: nothing could
+    // ever open a hold, so the three consumers were a control that read as real and was not.
+    // Whitelisting them again would proxy straight to a 404 and re-teach the whole shape — the
+    // Approve button that silently does nothing, which is worse than no button at all.
+    for (const [method, path] of [
+      ['GET', '/api/approvals'],
+      ['GET', '/api/approvals/approval-q-42'],
+      ['POST', '/api/approvals/approval-q-42/decision'],
+    ] as const) {
+      expect(resolveRoute(method, path), `${method} ${path}`).toBeNull();
+    }
+  });
+
   it('refuses a malformed session id, which also blocks traversal', () => {
     for (const bad of [
       '/api/sessions/../../etc/passwd/messages',
@@ -94,59 +106,6 @@ describe('proxy route whitelist', () => {
     // Reading the plan and deciding on it are separate routes, not one path with two verbs.
     expect(resolveRoute('POST', `/api/sessions/${SID}/plan`)).toBeNull();
     expect(resolveRoute('GET', `/api/sessions/${SID}/plan/decision`)).toBeNull();
-  });
-
-  describe('approval ids', () => {
-    // A hold's id is `approval-{interaction_id}`, and interaction_id is supplied by the MODEL —
-    // so its characters are not guaranteed the way a uuid4-hex session id's are. Each of these
-    // previously 404'd at the proxy, which showed up as an Approve button that silently did
-    // nothing while the approval rendered fine in the trace panel.
-    const reachable = [
-      'approval-q-42',
-      'approval-9f2c1a',
-      'approval-interaction_7',
-      'approval-ns:batch.7',
-    ];
-    it.each(reachable)('passes through a plain id: %s', (id) => {
-      const encoded = encodeURIComponent(id);
-      expect(resolveRoute('POST', `/api/approvals/${encoded}/decision`)).toMatchObject({
-        path: `/approvals/${encoded}/decision`,
-      });
-    });
-
-    // Ids the client's encodeURIComponent genuinely rewrites, so the segment reaching the proxy
-    // contains `%` escapes.
-    it.each(['approval-q 42', 'approval-batch/7', 'approval-a+b', 'approval-#7'])(
-      'passes through a percent-escaped id: %s',
-      (id) => {
-        const encoded = encodeURIComponent(id);
-        expect(encoded).toContain('%'); // the case only has teeth if escaping happened
-        expect(resolveRoute('POST', `/api/approvals/${encoded}/decision`)).toMatchObject({
-          path: `/approvals/${encoded}/decision`,
-        });
-        expect(resolveRoute('GET', `/api/approvals/${encoded}`)).toMatchObject({
-          path: `/approvals/${encoded}`,
-        });
-      },
-    );
-
-    // encodeURIComponent leaves !~*'() alone, so these arrive literally. Adding only `%` to the
-    // pattern would still have refused them — which is exactly the bug this test exists for.
-    it.each(['approval-Suzuki(A)', 'approval-run*2', "approval-o'brien", 'approval-x!y~z'])(
-      'passes through an id encodeURIComponent does not escape: %s',
-      (id) => {
-        expect(encodeURIComponent(id)).toBe(id); // unchanged, so the raw characters must match
-        expect(resolveRoute('POST', `/api/approvals/${id}/decision`)).toMatchObject({
-          path: `/approvals/${id}/decision`,
-        });
-      },
-    );
-
-    it('still refuses an id with a raw path separator or over the length cap', () => {
-      // A raw (unencoded) slash would change the route's shape, not just its parameter.
-      expect(resolveRoute('GET', '/api/approvals/approval-a/b')).toBeNull();
-      expect(resolveRoute('GET', `/api/approvals/${'a'.repeat(129)}`)).toBeNull();
-    });
   });
 
   describe('tool-result refs', () => {
@@ -174,7 +133,7 @@ describe('proxy route whitelist', () => {
   });
 
   describe('note ids', () => {
-    // Same argument as approval ids, same cause: a note id is `note-{slug}` and the slug comes
+    // A note id is `note-{slug}`, and the slug comes
     // from whatever the note is about, which for a compound note is a name the model wrote.
     it.each(['note-suzuki-42', 'note-2-MeTHF', "note-o'brien", 'note-Pd(OAc)2'])(
       'passes through %s',

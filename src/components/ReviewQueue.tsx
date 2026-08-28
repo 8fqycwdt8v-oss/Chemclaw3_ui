@@ -1,30 +1,31 @@
 /**
- * The two things waiting on a human, on one screen.
+ * Knowledge waiting on a human.
  *
- * They are genuinely different mechanisms and are kept visibly apart rather than merged into one
- * "inbox", because deciding them means different things:
+ * A **proposal** is machine-written knowledge waiting to enter the graph. Deciding it commits or
+ * refuses bytes in a repository, and the service calls this gate "the line that makes
+ * machine-written knowledge safe".
  *
- *  - a **hold** is a Temporal interaction the agent parked mid-turn. Answering it lets that turn
- *    continue. It is the same decision the conversation offers inline; this is where the ones you
- *    walked away from live, since nothing else in the app would ever show them again.
- *  - a **proposal** is machine-written knowledge waiting to enter the graph. Deciding it commits
- *    or refuses bytes in a repository, and the service calls this gate "the line that makes
- *    machine-written knowledge safe".
- *
- * The screen shows both to everyone. Only the decision controls are role-gated, because
+ * The screen shows proposals to everyone. Only the decision controls are role-gated, because
  * `GET /proposals` already narrows what a non-reviewer sees to their own, and a chemist reading
  * why their note was rejected is exactly who this page is for.
+ *
+ * **This screen used to carry a second section, for durable interaction "holds".** It is gone,
+ * and the reason is worth keeping: the service deleted that whole mechanism
+ * (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`) because nothing could ever open one, so
+ * `GET /approvals` now 404s. The list call swallowed that into `[]`, which meant this page showed
+ * a confident, permanently empty inbox describing a decision that could not occur — the exact
+ * "a control that reads as real and is not" failure the deletion upstream was written against.
+ *
+ * The slot is deliberately left empty rather than refilled here. The gate that *does* block work
+ * is the plan approval, which is answered per session on `POST /sessions/{id}/plan/decision` and
+ * currently lives only as an inline card in a live turn — so it survives no reload. Giving it a
+ * home on this page is a real change with a real design behind it, not a rename of a dead one.
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { FileCheck2, Inbox } from 'lucide-react';
+import { FileCheck2 } from 'lucide-react';
 import { useAuth, useIsReviewer } from '../auth/AuthContext.tsx';
-import {
-  api,
-  type PendingApproval,
-  type ProposalDetail,
-  type ProposalSummary,
-} from '../api/client.ts';
+import { api, type ProposalDetail, type ProposalSummary } from '../api/client.ts';
 import { relativeTime } from '../lib/format.ts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -246,55 +247,6 @@ function ProposalSheet({
   );
 }
 
-/** The holds a chemist walked away from, which nothing else in the app would show again. */
-function Holds(): React.JSX.Element {
-  const { auth, ready } = useAuth();
-  const [holds, setHolds] = useState<PendingApproval[] | null>(null);
-
-  useEffect(() => {
-    if (!ready) return;
-    let cancelled = false;
-    void api
-      .listApprovals(auth)
-      .then((list) => !cancelled && setHolds(list))
-      .catch(() => !cancelled && setHolds([]));
-    return () => {
-      cancelled = true;
-    };
-  }, [auth, ready]);
-
-  if (!holds) return <Loading>Looking for holds…</Loading>;
-  if (holds.length === 0) {
-    return (
-      <EmptyState icon={<Inbox className="size-5" />} title="Nothing is waiting on you">
-        A hold appears here when the agent parks a turn for a Yes or No and the conversation is
-        closed before you answer it.
-      </EmptyState>
-    );
-  }
-
-  return (
-    <ul className="flex flex-col gap-2">
-      {holds.map((hold, i) => (
-        <li
-          key={hold.approval_id ?? i}
-          className="rounded-lg border border-border-subtle bg-surface-raised p-3"
-        >
-          <p className="text-sm">{hold.question ?? 'The agent is waiting for a decision.'}</p>
-          <p className="mt-1 font-mono text-2xs text-ink-subtle">{hold.approval_id}</p>
-          {/* Deliberately not decided from here. A hold's whole point is that it belongs to a
-              turn, and answering it out of that context means answering a question whose
-              surrounding reasoning is not on screen. Open the conversation and answer it there. */}
-          <p className="mt-2 text-2xs text-ink-muted">
-            Answer it in the conversation it belongs to — the reasoning around the question is what
-            makes it answerable.
-          </p>
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 function Proposals(): React.JSX.Element {
   const { auth, ready } = useAuth();
   const [proposals, setProposals] = useState<ProposalSummary[] | null>(null);
@@ -371,14 +323,6 @@ export function ReviewQueue(): React.JSX.Element {
             Knowledge the agent wrote, held at the gate until a human signs it into the graph.
           </p>
           <Proposals />
-        </section>
-
-        <section aria-labelledby="holds-heading">
-          <h2 id="holds-heading" className="mb-1 text-lg font-semibold tracking-tight">
-            Holds waiting on a decision
-          </h2>
-          <p className="mb-3 text-sm text-ink-muted">Turns the agent parked for a Yes or No.</p>
-          <Holds />
         </section>
       </div>
     </div>

@@ -15,7 +15,12 @@ await build({
   target: 'node22',
   format: 'esm',
   packages: 'bundle',
-  sourcemap: true,
+  // No source map: the Dockerfile copies `dist/` whole into the runtime image, so a
+  // `dist/server.js.map` ships the BFF's full TypeScript — the route whitelist, the header drop
+  // rules, the auth-posture probe — to anyone who can pull the image. Nothing consumes it (there is
+  // no debugger attached in production), and `vite.config.ts` already suppresses the client map for
+  // the same reason.
+  sourcemap: false,
   // ESM output that bundles CJS dependencies needs these shims available.
   banner: {
     js: [

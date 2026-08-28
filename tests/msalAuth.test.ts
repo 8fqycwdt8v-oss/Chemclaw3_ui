@@ -321,8 +321,16 @@ describe('signing in and out', () => {
     // the data the credential was protecting — on a shared analytical-development workstation,
     // the next chemist to sign in read the previous one's unpublished route out of the sidebar,
     // before any token was involved.
-    const { useChatStore, flushChatPersistence } = await import('../src/state/chatStore.ts');
+    const { useChatStore, flushChatPersistence, hydrateChatForAccount, chatStorageKey } =
+      await import('../src/state/chatStore.ts');
     const { createMsalAuth } = await import('../src/auth/msalAuth.ts');
+
+    // The transcript now lives in this account's own slot, keyed by its Entra object id — which is
+    // the fix: the next chemist to sign in reads THEIR slot, not this one. Point the store at it
+    // the way the auth bootstrap does.
+    const OID = 'oid-of-the-first-chemist';
+    hydrateChatForAccount(OID);
+    const key = chatStorageKey(OID);
 
     const cid = useChatStore.getState().createConversation();
     useChatStore.getState().appendUserMessage(cid, 'the unpublished route');
@@ -330,12 +338,14 @@ describe('signing in and out', () => {
     // The disk write is throttled and may have been coalesced with an earlier test's write in
     // this same module instance; force it out before asserting on what actually persisted.
     flushChatPersistence();
-    expect(localStorage.getItem('chemclaw3.chat.v2')).toContain('the unpublished route');
+    expect(localStorage.getItem(key)).toContain('the unpublished route');
+    // And it is NOT under the old global key, which is what leaked between accounts.
+    expect(localStorage.getItem('chemclaw3.chat.v2')).toBeNull();
 
     const auth = await createMsalAuth();
     await auth.logout();
 
-    expect(localStorage.getItem('chemclaw3.chat.v2')).toBeNull();
+    expect(localStorage.getItem(key)).toBeNull();
     expect(sessionStorage.getItem('chemclaw.lastReauth')).toBeNull();
     // And in memory too: `logoutRedirect` navigates, but a redirect that is blocked or slow must
     // not leave the previous account's transcript on screen.

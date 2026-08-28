@@ -87,7 +87,36 @@ const BFF_OWNED = new Set([
   'x-content-type-options',
   'x-frame-options',
   'referrer-policy',
+  // The BFF, not the upstream, decides what may be written on the app origin and who may read a
+  // response cross-origin. A relayed `Set-Cookie` is a persistent write on this origin under a
+  // service that neither issued nor guards it; a relayed `Access-Control-Allow-Origin: *` (which a
+  // misconfigured backend CORS layer can emit) placed on this origin would let any site read
+  // authenticated responses. Both are decisions this front door owns and does not delegate — the
+  // whole `access-control-*` family is caught by `bffOwnsResponseHeader`, this set names the rest.
+  'set-cookie',
 ]);
+
+/**
+ * Whether a response header is the BFF's to decide rather than the upstream's to dictate.
+ *
+ * The `access-control-*` family is matched by prefix because CORS is several headers
+ * (`-allow-origin`, `-allow-credentials`, `-expose-headers`, `-allow-methods`, …) and letting any
+ * one through on this origin is the hole; the rest are exact names in `BFF_OWNED`.
+ */
+function bffOwnsResponseHeader(key: string): boolean {
+  return BFF_OWNED.has(key) || key.startsWith('access-control-');
+}
+
+/**
+ * Client-assertable identity/routing request headers the BFF must not forward upstream.
+ *
+ * Covers the `X-Forwarded-*` family (`-For`, `-Host`, `-Proto`, `-Port`, …), the bare `Forwarded`
+ * header, `X-Real-IP`, the URL-rewrite pair (`X-Original-URL`/`X-Rewrite-URL`) and
+ * `X-Http-Method-Override`. Each is browser-settable and each is trusted by some upstream config,
+ * so a proxy that relayed them would let a client spoof its own edge address, path or method.
+ */
+const FORWARDING_HEADERS =
+  /^(?:x-forwarded-|forwarded$|x-real-ip$|x-original-url$|x-rewrite-url$|x-http-method-override$)/;
 
 const isEventStream = (headers: IncomingHttpHeaders): boolean =>
   String(headers['content-type'] ?? '').includes('text/event-stream');
@@ -141,6 +170,13 @@ function buildUpstreamHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
     // trap removed before somebody adds a reader. A header that arrives from a browser and is
     // named like one the system trusts elsewhere is the shape of the next mistake, not this one.
     if (key.startsWith('x-chemclaw-')) continue;
+    // Client-assertable identity/routing headers. A browser can set every one of these, and a
+    // backend behind this proxy may trust them: uvicorn honours `X-Forwarded-For`/`Forwarded`
+    // under `--proxy-headers`, and `X-Original-URL`/`X-Rewrite-URL`/`X-Http-Method-Override` are
+    // classic ways to smuggle a different path or verb past a gateway's own routing/authz. The
+    // BFF is the trust boundary; it forges none of these, so it forwards none of them. Same shape
+    // as the x-chemclaw- rule above — remove the header that lets a browser impersonate the edge.
+    if (FORWARDING_HEADERS.test(key)) continue;
     headers[key] = value;
   }
   // Never let the upstream compress an event stream: a compressor buffers until its window
@@ -203,7 +239,7 @@ export function proxy(
       }
       const out: http.OutgoingHttpHeaders = {};
       for (const [key, value] of Object.entries(upstreamRes.headers)) {
-        if (value === undefined || HOP_BY_HOP.has(key) || BFF_OWNED.has(key)) continue;
+        if (value === undefined || HOP_BY_HOP.has(key) || bffOwnsResponseHeader(key)) continue;
         out[key] = value;
       }
 

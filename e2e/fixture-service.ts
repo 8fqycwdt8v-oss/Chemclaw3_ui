@@ -409,4 +409,7 @@ createServer(async (req, res) => {
   }
 
   json(res, 404, { detail: 'not found' });
-}).listen(port, () => console.log(`fixture service on :${port}`));
+  // Loopback only, matching the care `playwright.config.ts` takes to bind the BFF under test to
+  // 127.0.0.1: a test fixture has no reason to be reachable from off the host, and binding
+  // 0.0.0.0 would expose a stub that answers with canned data to anything on the network.
+}).listen(port, '127.0.0.1', () => console.log(`fixture service on 127.0.0.1:${port}`));

@@ -23,6 +23,14 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+# Least privilege for GITHUB_TOKEN. Without this the workflow inherits the repository default,
+# which can be write-all, while it runs `npm ci`/build/test — package-controlled code — with that
+# token in the environment. This gate only reads the checkout, so read-only is all it needs; both
+# sibling repos pin the same. (The trigger is `pull_request`, not `pull_request_target`, so a fork
+# PR already runs without secrets — this narrows the token on same-repo runs too.)
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest

@@ -160,6 +160,10 @@ export interface BffConfig {
   maxBodyBytes: number;
   /** Largest request body forwarded on the attachment upload route. */
   maxUploadBytes: number;
+  /** Batches one IP may POST to `/api/client-events` per minute before it is 429'd. The route is
+   *  unauthenticated by design (it reports pre-sign-in failures), so this is its only bound on
+   *  rate. */
+  clientEventsRatePerMin: number;
   warmSessions: boolean;
   reviewerRoles: string[];
   /** The service's `CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`, told to this process rather than guessed. */
@@ -248,6 +252,7 @@ export const cfg: BffConfig = {
   maxBodyBytes: num('MAX_BODY_BYTES', 2 * 1024 * 1024),
   // Attachments stream through the same pipe and are legitimately much larger.
   maxUploadBytes: num('MAX_UPLOAD_BYTES', 32 * 1024 * 1024),
+  clientEventsRatePerMin: Math.max(1, Math.floor(num('CLIENT_EVENTS_RATE_PER_MIN', 60))),
   csp: buildCsp(authMode, allowFraming),
   logLevel: str('LOG_LEVEL', 'info'),
   // Defaults to `info` rather than to this process's own level: the two are independent knobs and

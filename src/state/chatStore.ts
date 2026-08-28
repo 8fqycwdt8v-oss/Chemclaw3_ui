@@ -655,6 +655,51 @@ export function forgetLocalHistory(): void {
   useChatStore.persist.clearStorage();
 }
 
+/**
+ * The persisted-history key, partitioned by account.
+ *
+ * `chemclaw3.chat.v2` is frozen as the *base* — see the persist config below for why bumping it is
+ * a wipe — but the transcripts under it belong to whoever was signed in when they were written, and
+ * that identity was never in the key. On a shared analytical-development workstation the store
+ * rehydrated the previous chemist's conversations before the next one's identity was known, because
+ * one global key served everybody and it was cleared only on an explicit sign-out. Scoping the key
+ * by the Entra object id (`oid`) makes each account's history its own storage slot; `'anon'` is the
+ * pre-sign-in slot, and dev's shared `dev-user` principal gets its own by the same rule.
+ */
+export const CHAT_STORAGE_BASE = 'chemclaw3.chat.v2';
+
+/** The persisted-history key for a given account `oid` (`'anon'` before one is known). */
+export function chatStorageKey(oid: string | null | undefined): string {
+  return `${CHAT_STORAGE_BASE}.${oid ?? 'anon'}`;
+}
+
+/**
+ * Point the persisted store at an account's own slot and load it — the account-aware other half of
+ * `skipHydration: true`.
+ *
+ * Rehydration is deferred (`skipHydration`) precisely so it cannot happen before identity is known;
+ * the auth bootstrap calls this once the provider — and therefore the `oid` — has resolved. Re-keying
+ * before the read is what stops one account's transcript being served to the next, and it is a no-op
+ * when the slot is already correct so a re-render cannot re-read history needlessly.
+ */
+let hydratedName: string | null = null;
+
+export function hydrateChatForAccount(oid: string | null | undefined): void {
+  const name = chatStorageKey(oid);
+  // Once per account, not once per caller. The auth bootstrap can run this on every mount (a test
+  // remounting `AuthGate`, StrictMode's double-invoke), and a second `rehydrate()` is not
+  // harmless: `rehydrate` reads the *throttled* on-disk value and `set(..., replace)`s it over
+  // memory, so a re-read after the store has moved on (a freshly created conversation not yet
+  // flushed) would clobber live state with a stale snapshot. Reading the slot once, when the
+  // account first becomes known, is both sufficient and what the app actually wants.
+  if (hydratedName === name) return;
+  if (useChatStore.persist.getOptions().name !== name) {
+    useChatStore.persist.setOptions({ name });
+  }
+  hydratedName = name;
+  void useChatStore.persist.rehydrate();
+}
+
 export const useChatStore = create<ChatState>()(
   persist(
     (set, get) => ({
@@ -1162,12 +1207,23 @@ export const useChatStore = create<ChatState>()(
       // Bumped to v2 to force a clean slate on iPhone/mobile browsers that kept serving the old
       // v1 persisted state (poisoned sessions) after the recent fixes.
       //
-      // The KEY is frozen from here on. Schema changes go through `version` + `migrate` below:
-      // bumping the key again is a silent wipe of everyone's local history, which is only ever
-      // acceptable as the emergency it was the first time.
-      name: 'chemclaw3.chat.v2',
+      // The base KEY (`chemclaw3.chat.v2`) is frozen from here on. Schema changes go through
+      // `version` + `migrate` below: bumping the base key is a silent wipe of everyone's local
+      // history, which is only ever acceptable as the emergency it was the first time.
+      //
+      // The full key is per-account (`chemclaw3.chat.v2.<oid>`; see `chatStorageKey`). It starts on
+      // the `'anon'` slot and is re-pointed to the signed-in account's slot by
+      // `hydrateChatForAccount`, which the auth bootstrap calls once identity is known. Paired with
+      // `skipHydration` below: nothing is read off disk until that call, so one chemist's transcript
+      // is never rehydrated into the next chemist's session on a shared workstation.
+      name: chatStorageKey(null),
       version: 3,
       storage: chatStorage,
+
+      // Do NOT auto-load on store creation: which account's slot to read is not known until the
+      // auth provider resolves. `hydrateChatForAccount` performs the deferred read against the
+      // right slot. (A test that needs persisted state can call `useChatStore.persist.rehydrate()`.)
+      skipHydration: true,
 
       migrate: migratePersisted,
 

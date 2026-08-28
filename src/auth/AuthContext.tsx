@@ -18,7 +18,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { authReady } from './bootstrap.ts';
 import { pendingAuth } from './pendingAuth.ts';
-import { useChatStore } from '../state/chatStore.ts';
+import { useChatStore, hydrateChatForAccount } from '../state/chatStore.ts';
 import { config } from '../env.ts';
 import type { AuthProvider } from './types.ts';
 
@@ -43,6 +43,11 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
     authReady
       .then((provider) => {
         if (cancelled) return;
+        // Identity is now known, so load persisted history from THIS account's slot — not before,
+        // and not from the global key that used to serve one chemist's transcript to the next on a
+        // shared workstation. The store deferred its own hydration (`skipHydration`) for exactly
+        // this call.
+        hydrateChatForAccount(provider.account?.id);
         setAuth(provider);
         setReady(true);
         // `account` is a getter on the MSAL provider, so consumers are told to re-read it rather

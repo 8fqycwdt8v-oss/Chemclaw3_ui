@@ -33,6 +33,7 @@ const base: BffConfig = {
   maxUpstreamSockets: 512,
   maxBodyBytes: 2 * 1024 * 1024,
   maxUploadBytes: 32 * 1024 * 1024,
+  clientEventsRatePerMin: 60,
   warmSessions: true,
   reviewerRoles: [],
   maxMessageChars: 100_000,

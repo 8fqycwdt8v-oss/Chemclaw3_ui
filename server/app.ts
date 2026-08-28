@@ -82,10 +82,18 @@ function createAssetHandler(): (
     gzip: true,
     brotli: true,
     setHeaders(res, pathname) {
-      // Only caching lives here now: it is the one header that genuinely depends on which file
-      // is being served. Hashed assets are immutable; index.html must never be cached or a
-      // deploy won't take.
-      if (pathname === '/index.html' || pathname === '/') {
+      // Only caching lives here now: it is the one header that genuinely depends on which file is
+      // being served. Hashed assets are immutable; the HTML shell must never be cached, or a deploy
+      // won't take AND an authenticated shell can sit in a shared cache for the next visitor.
+      //
+      // The shell is served for the root, for /index.html, and — via `single` — for any client
+      // deep link with no file extension (`/c/abc`). The previous check matched only the first two,
+      // so every deep link was served with no cache-control at all. Testing the final segment's
+      // extension is testing which file sirv serves: every hashed asset has one and is served
+      // directly; an extensionless path falls back to index.html, which is HTML.
+      const servesHtmlShell =
+        pathname === '/' || pathname === '/index.html' || !/\.[^/]+$/.test(pathname);
+      if (servesHtmlShell) {
         res.setHeader('cache-control', 'no-cache');
       }
     },

@@ -55,11 +55,17 @@ let cached: { at: number; value: Readiness } | null = null;
  */
 let inFlight: Promise<Readiness> | null = null;
 
-function probe(): Promise<Readiness> {
+/**
+ * One credential-less GET against the upstream, resolving its status code (0 if unreachable).
+ *
+ * The single low-level request the two probes below share. No Authorization header is ever sent —
+ * `/readyz` needs none, and the auth-posture probe's entire point is to arrive anonymous.
+ */
+function requestStatus(path: string): Promise<number> {
   const upstream = new URL(cfg.apiUrl);
   const transport = upstream.protocol === 'https:' ? https : http;
 
-  return new Promise<Readiness>((resolve) => {
+  return new Promise<number>((resolve) => {
     // Deliberately NOT the proxy's keep-alive agent: a probe must not queue behind the turn
     // stream that is holding every socket in that pool, or it would report a busy pod as a dead
     // one. `agent: false` gives this request a connection of its own.
@@ -69,7 +75,7 @@ function probe(): Promise<Readiness> {
         hostname: upstream.hostname,
         port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
         method: 'GET',
-        path: '/readyz',
+        path,
         headers: { host: upstream.host, accept: 'application/json' },
         agent: false,
         timeout: PROBE_TIMEOUT_MS,
@@ -80,19 +86,53 @@ function probe(): Promise<Readiness> {
         // own route, and forwarding it here would republish an internal detail on a route that is
         // unauthenticated by design.
         res.resume();
-        resolve({
-          ready: status >= 200 && status < 300,
-          upstreamStatus: status,
-          detail: status >= 200 && status < 300 ? '' : 'upstream not ready',
-        });
+        resolve(status);
       },
     );
     req.on('timeout', () => req.destroy(new Error('timeout')));
-    req.on('error', () =>
-      resolve({ ready: false, upstreamStatus: 0, detail: 'upstream unreachable' }),
-    );
+    req.on('error', () => resolve(0));
     req.end();
   });
+}
+
+/**
+ * Is the backend still an auth boundary?
+ *
+ * The BFF forwards the browser's bearer verbatim and performs no verification of its own — which is
+ * correct (no confused deputy), but it makes `CHEMCLAW_ENTRA_REQUIRED=true` on the *backend* the
+ * only thing standing between an `msal` UI and anonymous access. A UI in `msal` mode pointed at a
+ * backend still in its dev posture serves everyone with no token at all, and nothing in this
+ * process could tell. So in `msal` mode readiness asks the one question that catches it: a
+ * credential-less `GET /sessions` — a route that must be authenticated — should be refused with
+ * 401 or 403. Any other answer (a 200 above all) means the backend is accepting anonymous callers
+ * and this deployment's sign-in is a facade.
+ *
+ * Only a definite non-401/403 *response* flags it. A network error or timeout here is left to the
+ * `/readyz` probe's own reachability verdict rather than being read as "anonymous accepted", so a
+ * flaky backend cannot be mistaken for an open one.
+ */
+async function upstreamAcceptsAnonymous(): Promise<boolean> {
+  const status = await requestStatus('/sessions');
+  return status !== 0 && status !== 401 && status !== 403;
+}
+
+async function probe(): Promise<Readiness> {
+  const status = await requestStatus('/readyz');
+  if (status < 200 || status >= 300) {
+    return {
+      ready: false,
+      upstreamStatus: status,
+      detail: status === 0 ? 'upstream unreachable' : 'upstream not ready',
+    };
+  }
+
+  // The backend is up. In `msal` mode, also insist it is still enforcing identity — otherwise a
+  // pod that answers `/readyz` happily is serving every `/api` route to anyone who can reach it.
+  if (cfg.authMode === 'msal' && (await upstreamAcceptsAnonymous())) {
+    return { ready: false, upstreamStatus: status, detail: 'upstream accepts anonymous' };
+  }
+
+  return { ready: true, upstreamStatus: status, detail: '' };
 }
 
 /** Readiness now: from cache when it is fresh, from the probe already running when it is not. */

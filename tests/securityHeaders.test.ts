@@ -35,6 +35,11 @@ beforeAll(async () => {
       'content-type': 'text/html',
       'content-security-policy': 'default-src *',
       'x-content-type-options': 'off',
+      // A misconfigured backend CORS layer, and a backend trying to set a cookie: both are
+      // decisions about THIS origin that the BFF, not the upstream, must own.
+      'access-control-allow-origin': '*',
+      'access-control-allow-credentials': 'true',
+      'set-cookie': 'upstream_session=forged; Path=/',
     });
     res.end('<script>alert(document.domain)</script>');
   });
@@ -80,6 +85,17 @@ describe('every surface this process serves', () => {
 
     expect(headers.get('content-security-policy')).not.toBe('default-src *');
     expect(headers.get('x-content-type-options')).toBe('nosniff');
+  });
+
+  it('does not relay an upstream Set-Cookie or CORS grant onto this origin', async () => {
+    const headers = await get('/api/notes/x');
+
+    // A relayed `Set-Cookie` is a persistent write on the app origin under a service that does not
+    // guard it; a relayed `Access-Control-Allow-Origin: *` would let any site read authenticated
+    // responses. Both are the BFF's to decide, so neither reaches the browser.
+    expect(headers.get('set-cookie')).toBeNull();
+    expect(headers.get('access-control-allow-origin')).toBeNull();
+    expect(headers.get('access-control-allow-credentials')).toBeNull();
   });
 });
 

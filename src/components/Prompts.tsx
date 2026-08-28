@@ -75,11 +75,35 @@ function DecisionControls({
   error: string | null;
   onDecide: (approved: boolean) => void;
 }): React.JSX.Element {
-  if (state === 'approved' || state === 'rejected') {
+  if (state === 'rejected') {
+    return <p className="text-sm text-ink-muted">You declined this plan. Nothing will run.</p>;
+  }
+  if (state === 'approved') {
+    // **What this used to say was "The agent will pick it up on its next run", and both halves
+    // misled.** Nothing runs when a decision is recorded — the approval is a row, and the agent
+    // acts on the *next request*, which is something the chemist has to send. And the approval is
+    // spent when that turn ends (the service consumes every live approval session-wide at turn
+    // end), so it authorizes one request rather than the rest of the conversation. A reader who
+    // took the old sentence literally waited for work that was never going to start.
     return (
-      <p className="text-sm text-ink-muted">
-        You {state} this request. The agent will pick it up on its next run.
-      </p>
+      <div className="flex flex-col gap-2">
+        <p className="text-sm text-ink-muted">
+          Approved. This covers your <span className="font-medium text-ink">next request only</span>{' '}
+          — the agent acts when you ask again, and the approval is spent when that turn ends.
+        </p>
+        {/* One click instead of retyping the ask, and deliberately still a click: an auto-send
+            would spend the approval on a turn nobody chose to start, and if the model revises the
+            plan mid-turn the new plan is unapproved and the decision is consumed for nothing. */}
+        <div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => prefillAndSend('Go ahead with the approved plan.')}
+          >
+            Continue
+          </Button>
+        </div>
+      </div>
     );
   }
   return (

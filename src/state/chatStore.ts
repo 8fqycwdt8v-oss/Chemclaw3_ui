@@ -450,7 +450,12 @@ export interface ChatState {
   clearAll: () => void;
   setSessionId: (conversationId: string, sessionId: string, contextLost?: boolean) => void;
   hydrateTranscript: (conversationId: string, messages: ChatMessage[]) => void;
-  attachPlan: (conversationId: string, todos: string[], planHash: string) => void;
+  attachPlan: (
+    conversationId: string,
+    todos: string[],
+    planHash: string,
+    awaitingApproval?: boolean,
+  ) => void;
 
   appendUserMessage: (conversationId: string, text: string) => string;
   startAssistantMessage: (conversationId: string) => string;
@@ -799,12 +804,20 @@ export const useChatStore = create<ChatState>()(
         });
       },
 
-      attachPlan(conversationId, todos, planHash) {
+      attachPlan(conversationId, todos, planHash, awaitingApproval = false) {
         // The session's current plan, read back after a reload. `latestPlan` is stream-only state
         // — the transcript stores the messages, not the plan — so a rehydrated conversation lost
         // its checklist while the session, per `GET /sessions/{id}/plan`, was still proposing one.
         // Attached to the newest assistant message because that is where the live stream would
         // have left it: the latest plan belongs to the latest turn.
+        //
+        // **`awaitingApproval` restores the decision, not just the checklist.** The card is built
+        // from an `approval_request` trace entry, and a reload rebuilds a conversation from the
+        // stored transcript — which carries messages and tool calls and no signals at all. So the
+        // plan came back and the Approve button did not, while the gate went on refusing every
+        // state-changing call: the only way out was to send another message purely to make the
+        // service re-emit the event. The same read that restores the checklist already answers
+        // this (`PlanStatus.approved`); it was being fetched and thrown away.
         set((s) => {
           const conversation = s.conversations[conversationId];
           if (!conversation || todos.length === 0) return {};
@@ -813,7 +826,30 @@ export const useChatStore = create<ChatState>()(
           const target = conversation.messages[index];
           if (!target || target.role !== 'assistant') return {};
           const messages = conversation.messages.slice();
-          messages[index] = { ...target, latestPlan: todos, latestPlanHash: planHash };
+          // Never a second card: a rehydrate can run more than once for one conversation (the
+          // effect re-fires on `messageCount`), and appending each time would stack Approve
+          // buttons on one message.
+          const already = target.trace.some((e) => e.kind === 'approval_request');
+          const trace =
+            awaitingApproval && !already
+              ? [
+                  ...target.trace,
+                  {
+                    id: `${target.id}-approval`,
+                    at: Date.now(),
+                    kind: 'approval_request' as const,
+                    // The surface's own wording, and deliberately so: this card is derived from
+                    // the plan route's `approved: false`, not from a prompt the service sent, and
+                    // quoting the service's sentence would claim an event that never arrived.
+                    approval: {
+                      prompt:
+                        'This plan is still waiting for your decision, so the agent cannot carry ' +
+                        'out its state-changing steps yet.',
+                    },
+                  },
+                ]
+              : target.trace;
+          messages[index] = { ...target, latestPlan: todos, latestPlanHash: planHash, trace };
           return {
             conversations: {
               ...s.conversations,

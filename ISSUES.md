@@ -40,11 +40,12 @@ a heading describing a decision that could not occur.
 All of it is gone. `tests/routes.test.ts` pins the three routes as _not_ whitelisted, so
 re-adding a consumer without the producer fails rather than shipping quiet.
 
-**What is not solved by this.** The gate that does block work — the plan approval — still lives
-only as an inline card in a live turn. `state/transcript.ts` does not rehydrate `approval_request`,
-so a reload loses the card while the service keeps refusing every state-changing call, and the
-only recovery is to send another message. Giving it a durable home (this page is the obvious one,
-reading `GET /sessions/{id}/plan`) is open work, not something this change did.
+**The half that was left open is now closed, elsewhere.** A pending plan approval used to survive
+no reload: `state/transcript.ts` does not rehydrate `approval_request`, so the card was lost while
+the service kept refusing every state-changing call, and the only recovery was to send another
+message. The fix turned out not to need this page at all — `App.tsx` was already calling
+`GET /sessions/{id}/plan` on exactly that path to restore the checklist, and throwing `approved`
+away. It now carries it, and `chatStore.attachPlan` re-attaches the decision beside the plan.
 
 ## Closed: three ways to serve an unauthenticated UI by accident
 

@@ -32,6 +32,7 @@
  * plan rather than a model that has said nothing at all.
  */
 
+import { isRefusal } from '../lib/refusals.ts';
 import type { AssistantMessage, TraceEntry } from './types.ts';
 
 /** Where the plan has got to, when the service told us. */
@@ -244,7 +245,11 @@ export function summarizeTurn(trace: readonly TraceEntry[]): TurnSummary {
     if (entry.kind === 'tool_call') toolCalls += 1;
     if (entry.kind === 'job_started') jobs += 1;
     if (entry.kind === 'tool_failed') {
-      if (entry.toolFailure?.reason === 'plan_gate') held += 1;
+      // `isRefusal`, not a comparison against one member: this counter and `TracePanel`'s badge
+      // ask the same question, and asking it twice is how a widened set reaches one and not the
+      // other — leaving a turn that reads "1 failure" in the summary and "needs plan approval" on
+      // the row it is counting.
+      if (isRefusal(entry.toolFailure?.reason)) held += 1;
       else problems += 1;
     }
     if (entry.kind === 'job_failed') problems += 1;

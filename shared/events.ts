@@ -266,6 +266,25 @@ export interface CapabilityDegradedEvent {
   connectors: string[];
 }
 
+/**
+ * The kinds of deliberate refusal a `tool_failed` can carry.
+ *
+ * Mirrors the backend's `core/turn_signals.RefusalReason`, which is the single definition its
+ * classification table and its wire model both import. `src/lib/refusals.ts` is what turns one of
+ * these into something a chemist can act on; nothing else in this app should switch on the raw
+ * string.
+ */
+export type RefusalReason = 'dry_run' | 'undeclared_write' | 'plan_gate' | 'repeat' | 'authz';
+
+/** Every member of `RefusalReason`, for the normalizer and for exhaustiveness checks. */
+export const REFUSAL_REASONS: readonly RefusalReason[] = [
+  'dry_run',
+  'undeclared_write',
+  'plan_gate',
+  'repeat',
+  'authz',
+];
+
 export interface ToolFailedEvent {
   type: 'tool_failed';
   /** One tool call raised; the turn continues. Distinct from `error`, which ends it: the model
@@ -275,14 +294,19 @@ export interface ToolFailedEvent {
   /**
    * What KIND of failure this is, where the kind is a decision somebody made rather than a fault.
    *
-   * Exactly one member today: `plan_gate`, the pre-execution approval refusing a state-changing
-   * call. That refusal is the control working, and a surface that renders it beside a database
-   * outage reports a correctly-gated turn as a broken one — the mistake the backend's own
-   * `evals/live.py` made, by matching one phrase of the refusal sentence.
+   * A refusal is the control working, and a surface that renders it beside a database outage
+   * reports a correctly-gated turn as a broken one — the mistake the backend's own `evals/live.py`
+   * made, by matching one phrase of the refusal sentence.
+   *
+   * **Five members, and this mirror said one for a release.** The backend's
+   * `agent/audit.refusal_reason` has classified five gates since it was written, but only
+   * `plan_gate` reached the wire — so a dry run the chemist themselves asked for, a role denial, a
+   * write a narrowed agent was never given, and a repeat the guard stopped all arrived here
+   * indistinguishable from an unreachable pod, and this UI rendered all four in the failure red.
    *
    * `null` is "an ordinary failure", which is every failure emitted before the field existed.
    */
-  reason?: 'plan_gate' | null;
+  reason?: RefusalReason | null;
   /** The specialist that raised this event; **empty means the main agent**, which is what every
    *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
    *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
@@ -617,7 +641,11 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         // A closed set upstream, so an unrecognised value normalises to `null` rather than passing
         // through: "a reason this build does not know" must read as an ordinary failure, never as
         // a refusal it cannot render.
-        reason: o.reason === 'plan_gate' ? 'plan_gate' : null,
+        // A closed set upstream, so an unrecognised value normalises to `null` rather than
+        // passing through: "a reason this build does not know" must read as an ordinary failure,
+        // never as a refusal it cannot render. Derived from `REFUSAL_REASONS` rather than written
+        // as a chain of comparisons, so a sixth member is mirrored by adding it in one place.
+        reason: REFUSAL_REASONS.find((r) => r === o.reason) ?? null,
         agent: asString(o.agent),
       };
     case 'tool_result':

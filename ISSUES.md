@@ -227,6 +227,29 @@ Reopen PR #11 rather than rebuilding — the branch is retained.
 
 ---
 
+## Found by the 2026-08-28 live campaign
+
+- **`transcript.spec.ts` fails three assertions on `main`, on both projects** — `getByText('Answer
+  number 199')` is not visible in "renders a window of a 200-message transcript", "content-visibility
+  does not hide text from find-in-page or the a11y tree", and "Load earlier keeps the reader where
+  they were". Six failures, one cause, and it is **not** the campaign's branch: that branch changes
+  only `e2e/`, `playwright*.config.ts`, `package.json` and `tsconfig.json`, and touches no `src/`,
+  `server/` or fixture code. It is also not a browser mismatch — the run used Chromium
+  151.0.7922.34, which is exactly what `@playwright/test@1.62.1` pins.
+  The remaining 65 tests pass in 57s. Worth reproducing against a CI run before assuming the
+  windowing itself regressed, since the last three messages of a virtualised list are precisely the
+  region a viewport or scroll-anchoring difference would move.
+
+- **`npm run build` without `ALLOW_DEV_AUTH=true` produces a client the fixture tier cannot use, and
+  the failure is 40 timeouts rather than a message.** Every test needing an authenticated view dies
+  on a 30s `locator.click` timeout; the actual cause reaches the log only as a browser-side
+  `unhandled.rejection` — `AUTH_MODE=dev is not permitted in this production build`. `start.sh`
+  passes the flag when `AUTH_MODE=dev`; a bare `npm run build` before `npm run test:e2e` does not,
+  and nothing in the Playwright output says so. A line in `playwright.config.ts`'s `webServer`
+  comment, or a preflight assertion on `dist/client`, would turn 40 mystery timeouts into one
+  sentence. Cost this campaign two wrong hypotheses (load, then the branch's own patch) before the
+  log was read closely enough.
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.

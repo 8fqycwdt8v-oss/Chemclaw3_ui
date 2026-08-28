@@ -17,6 +17,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { StatusStrip } from '../src/components/StatusStrip.tsx';
 import { PlanStrip } from '../src/components/PlanStrip.tsx';
 import { TracePanel } from '../src/components/TracePanel.tsx';
+import { answerStep } from '../src/components/MessageList.tsx';
 import type { AssistantMessage, TraceEntry } from '../src/state/types.ts';
 
 vi.mock('../src/auth/AuthContext.tsx', () => ({
@@ -134,6 +135,29 @@ describe('the plan strip', () => {
     expect(screen.getByText('screen')).toBeTruthy();
   });
 
+  it('opens itself when the approval arrives mid-turn', () => {
+    // The case that actually happens. `useState(awaiting)` reads the trace once at mount, and a
+    // live turn mounts its strip long before it asks for anything — so every real approval left
+    // the plan folded away behind a reader being asked to approve it, while the rehydrated case
+    // this was first written against passed.
+    const props = { message: message({ latestPlan: ['[ ] screen'] }), trace: [] as TraceEntry[] };
+    const { rerender } = render(<PlanStrip {...props} />);
+    expect(screen.queryByText('screen')).toBeNull();
+
+    rerender(
+      <PlanStrip
+        {...props}
+        trace={[
+          entry({
+            kind: 'approval_request',
+            approval: { prompt: 'Approve the plan?', approvalId: '' },
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText('screen')).toBeTruthy();
+  });
+
   it('renders nothing at all when the turn had no plan', () => {
     const { container } = render(<PlanStrip message={message()} trace={trace} />);
     expect(container.firstChild).toBeNull();
@@ -181,16 +205,19 @@ describe('the step rail', () => {
   });
 
   it('reads a sweep as one row naming every source and what it returned', () => {
+    // One entry, because the fold happens in the store as the events arrive — see
+    // `chatStore.test.ts`. The rail's job here is only to read it: who was asked, and what did
+    // each contribute.
     render(
       <TracePanel
         trace={[
           entry({
             kind: 'evidence_source',
+            evidenceSweep: [
+              { source: 'graph', chunks: 6, failed: false },
+              { source: 'lexical', chunks: 0, failed: true },
+            ],
             evidenceSource: { source: 'graph', chunks: 6, failed: false },
-          }),
-          entry({
-            kind: 'evidence_source',
-            evidenceSource: { source: 'lexical', chunks: 0, failed: true },
           }),
         ]}
       />,
@@ -202,6 +229,24 @@ describe('the step rail', () => {
     // owns the index.
     expect(screen.getByText('graph').parentElement?.textContent).toContain('6');
     expect(screen.getByText('lexical').parentElement?.textContent).toContain('failed');
+  });
+
+  it('still draws a trace persisted before the sweep field existed', () => {
+    // A transcript in a reader's browser from before the fold moved to the store carries only
+    // `evidenceSource`. It is one source rather than a sweep of five, and drawing nothing at all
+    // for it would look exactly like a retrieval that never happened.
+    render(
+      <TracePanel
+        trace={[
+          entry({
+            kind: 'evidence_source',
+            evidenceSource: { source: 'graph', chunks: 6, failed: false },
+          }),
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /The agent’s work/ }));
+    expect(screen.getByText('graph').parentElement?.textContent).toContain('6');
   });
 
   it('says how long a call took, and says nothing when it never saw it end', () => {
@@ -365,5 +410,60 @@ describe('the step rail', () => {
     fireEvent.click(screen.getByRole('button'));
     expect(screen.getByText('1 step')).toBeTruthy();
     expect(screen.getByText('1 added · 1 ticked off')).toBeTruthy();
+  });
+});
+
+describe('the answer’s own step is measured from where the work stopped', () => {
+  it('runs from the last thing that ENDED, not the last thing that started', () => {
+    // A `tool_call` row is stamped when the call was ISSUED and its result closes that same row in
+    // place, so measuring from `at` charges the whole of the last tool's runtime to the answer:
+    // here a 3-minute call inside a turn that ended 9 seconds after it, reported as 3m 9s of
+    // writing. The rail's rows then sum to more than the turn took, which is how the error shows
+    // up to a reader.
+    const step = answerStep(
+      message({
+        endedAt: 189_000,
+        trace: [
+          entry({
+            kind: 'tool_call',
+            at: 0,
+            toolCall: { tool: 'run_crest', arguments: '{}', result: 'ok', endedAt: 180_000 },
+          }),
+        ],
+      }),
+    );
+    expect(step).toEqual({ words: 2, duration: '9s' });
+  });
+
+  it('counts a durable job’s ending too', () => {
+    // Same argument, other row: a `job_started` row is stamped at the launch and settled in place
+    // when the job reports, which for a durable job is usually minutes later.
+    const step = answerStep(
+      message({
+        endedAt: 65_000,
+        trace: [
+          entry({
+            kind: 'job_started',
+            at: 0,
+            job: { jobId: 'calc-1', kind: 'calc', settled: true, endedAt: 60_000 },
+          }),
+        ],
+      }),
+    );
+    expect(step?.duration).toBe('5s');
+  });
+
+  it('says nothing about a duration the turn never recorded', () => {
+    // A transcript rehydrated from the server has no `endedAt` of ours. A row inventing one from
+    // the clock would report the age of the transcript as the time spent writing it.
+    expect(answerStep(message({ trace: [entry({ kind: 'tool_call', at: 0 })] }))).toEqual({
+      words: 2,
+    });
+  });
+
+  it('claims no answer step for a turn that produced no text', () => {
+    // The card says "the turn finished without producing any answer text"; a row underneath it
+    // reporting "0 words" would be the two halves of one screen disagreeing.
+    expect(answerStep(message({ finalText: '', streamedText: '' }))).toBeNull();
   });
 });

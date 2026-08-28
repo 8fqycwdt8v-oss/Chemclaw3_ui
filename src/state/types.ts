@@ -148,6 +148,22 @@ export interface TraceEntry {
    */
   evidenceSource?: { source: string; chunks: number; failed: boolean };
   /**
+   * Every source in one sweep, in the order they reported.
+   *
+   * `gather_evidence` asks all of them at once and the service reports each separately, so a
+   * five-source sweep arrives as five events. They are folded into ONE entry as they arrive, for
+   * two reasons: it is how a reader reads them — "who was asked, and what did each contribute" is
+   * one line, not five — and a row per source spends the trace's own `MAX_TRACE_ENTRIES` budget on
+   * retrieval, evicting the tool calls and results at the front of a retrieval-heavy turn.
+   *
+   * `evidenceSource` stays beside it, holding the first source of the sweep, so a trace persisted
+   * before this field existed still renders.
+   */
+  evidenceSweep?: { source: string; chunks: number; failed: boolean }[];
+  /** When the last source of the sweep reported, by our clock — so the row can say how long the
+   *  whole sweep took. Absent for a sweep of one, which took no measurable time of its own. */
+  evidenceSweepEndedAt?: number;
+  /**
    * A durable job.
    *
    * `settled` is the `job_started` row's version of `toolCall.failed`, and exists for the same

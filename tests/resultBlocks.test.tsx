@@ -13,6 +13,7 @@
  * how many it did not — a silent truncation would read as "that is all the turn stored".
  */
 
+import { StrictMode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MessageList } from '../src/components/MessageList.tsx';
@@ -199,6 +200,60 @@ describe('a stored result becomes a block in the answer', () => {
     render(<MessageList conversationId={cid} />);
     expect(await screen.findByText('organic-azide')).toBeTruthy();
     expect(calls.filter((u) => u.includes('tool-results'))).toHaveLength(0);
+  });
+
+  it('renders under StrictMode, which mounts every component twice', async () => {
+    // `main.tsx` wraps the app in `StrictMode`, so in development every component is mounted,
+    // unmounted and remounted. A "still mounted?" flag initialised once at declaration is set to
+    // false by that first cleanup and never set back: the fetch returns 200, the setState is
+    // skipped, and the block renders nothing for ever — in development only, so the browser tier
+    // built against a production bundle would have gone on passing over it.
+    render(
+      <StrictMode>
+        <MessageList conversationId={seed(1)} />
+      </StrictMode>,
+    );
+    expect(await screen.findByText('organic-azide')).toBeTruthy();
+  });
+
+  it('renders an inlined result that was never stored', async () => {
+    // The inline cap and the store cap are different settings. A deployment with the result store
+    // off still inlines its small results, and selecting on the ref alone dropped every block in
+    // exactly the deployment that needed no fetch at all.
+    const cid = seed(1);
+    const store = useChatStore.getState();
+    const conversation = store.conversations[cid]!;
+    const assistant = conversation.messages.findLast((m) => m.role === 'assistant');
+    if (assistant?.role !== 'assistant') throw new Error('no assistant message');
+    useChatStore.setState((state) => ({
+      conversations: {
+        ...state.conversations,
+        [cid]: {
+          ...conversation,
+          messages: conversation.messages.map((m) =>
+            m.id === assistant.id
+              ? {
+                  ...assistant,
+                  trace: assistant.trace.map((e) =>
+                    e.kind === 'tool_call' && e.toolCall
+                      ? {
+                          ...e,
+                          toolCall: { ...e.toolCall, resultRef: undefined, resultInline: HAZARD },
+                        }
+                      : e,
+                  ),
+                }
+              : m,
+          ),
+        },
+      },
+    }));
+
+    render(<MessageList conversationId={cid} />);
+    expect(await screen.findByText('organic-azide')).toBeTruthy();
+    expect(calls.filter((u) => u.includes('tool-results'))).toHaveLength(0);
+    // And no control offering a panel that could only 404 — there is nothing stored to open.
+    expect(screen.queryByText('Open full result')).toBeNull();
   });
 
   it('offers nothing for a transcript with no session to fetch against', () => {

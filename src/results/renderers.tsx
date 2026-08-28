@@ -70,17 +70,43 @@ const SEVERITY_TONE: Record<string, 'danger' | 'warn' | 'neutral'> = {
 };
 
 /**
+ * Does this cell start with something a spreadsheet will read as a formula?
+ *
+ * Excel, LibreOffice and Sheets all evaluate a cell beginning `=`, `+`, `-` or `@` — and a
+ * leading tab or carriage return only moves the decision one character along. The payload here is
+ * a tool result: `props` names a solvent the corpus was asked about, a run sheet names a reagent,
+ * and every one of those strings came from outside this browser. A cell reading
+ * `=HYPERLINK("http://…"&A1)` is the classic form, and it runs when the chemist opens the file,
+ * not when anyone reviews it.
+ *
+ * `-` is the awkward one, because `-40` is a temperature and every table here has some. The test
+ * that works is whether the WHOLE cell is a number, not whether it starts like one: `-1+1e1*A1`
+ * opens with a digit after the minus and is a formula all the same.
+ */
+function isFormula(text: string): boolean {
+  if (text === '') return false;
+  const head = text[0]!;
+  if (head === '=' || head === '+' || head === '@' || head === '\t' || head === '\r') return true;
+  return head === '-' && !Number.isFinite(Number(text));
+}
+
+/**
  * Turn records into a CSV a spreadsheet will open without argument.
  *
  * RFC 4180 quoting, which is three rules and worth doing properly: a field containing a comma, a
  * quote or a newline is quoted, and an embedded quote is doubled. A run sheet retyped into Excel by
  * hand is where the transcription error enters a campaign, and a chemist handed a markdown table
  * has no other option.
+ *
+ * Plus one rule RFC 4180 does not have, because the spreadsheets do: a cell that would be read as
+ * a formula is prefixed with a single quote, which every one of them treats as "this is text" and
+ * strips on display. Quoting alone does not help — `"=cmd|…"` evaluates exactly the same.
  */
 export function toCsv(headers: string[], records: Json[]): string {
   const cell = (value: unknown): string => {
     if (value === null || value === undefined) return '';
-    const text = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    const raw = typeof value === 'object' ? JSON.stringify(value) : String(value);
+    const text = isFormula(raw) ? `'${raw}` : raw;
     return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   };
   return [headers.join(','), ...records.map((r) => headers.map((h) => cell(r[h])).join(','))].join(
@@ -98,15 +124,25 @@ export function DownloadCsv({
   name: string;
 }): React.JSX.Element {
   // An object URL rather than a data: URI — a large table exceeds what some browsers will accept
-  // in a URL — revoked as soon as the click has been dispatched.
+  // in a URL.
   const download = (): void => {
     const blob = new Blob([toCsv(headers, records)], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
     link.download = `${name}.csv`;
+    // In the document, and revoked a tick later. Both matter: Firefox ignores a click on a
+    // detached anchor, and every browser starts the download asynchronously — revoking in the
+    // same tick races the fetch the click just scheduled and yields an empty or failed save. A
+    // timeout is the only handle available, since there is no event for "the download has read
+    // the blob".
+    link.style.display = 'none';
+    document.body.appendChild(link);
     link.click();
-    URL.revokeObjectURL(url);
+    window.setTimeout(() => {
+      link.remove();
+      URL.revokeObjectURL(url);
+    }, 0);
   };
   return (
     <Button variant="outline" size="xs" onClick={download}>

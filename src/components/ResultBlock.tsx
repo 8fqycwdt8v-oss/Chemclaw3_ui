@@ -119,7 +119,17 @@ export function ResultBlock({
   const requested = useRef<string | null>(null);
   /** Whether this component is still mounted. See below for why it is not a cleanup flag. */
   const mounted = useRef(true);
-  useEffect(() => () => void (mounted.current = false), []);
+  useEffect(() => {
+    // Re-armed on every mount, not only initialised once. `StrictMode` — which `main.tsx` uses —
+    // mounts, unmounts and remounts every component in development, and a flag that is only ever
+    // set to `false` by that first cleanup stays false for the life of the component: the fetch
+    // returns 200 and the block renders nothing, in development, for ever. The production build
+    // does not double-invoke, so the browser tier would have gone on passing over it.
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   // The guard is a ref and the cancellation is mount-scoped, and both of those are the fix for the
   // same bug: written the obvious way — `state.status` in the dependency list, `cancelled` set in
@@ -208,22 +218,28 @@ export function ResultBlock({
       </div>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border-subtle px-3 py-1.5">
-        <Button
-          variant="link"
-          size="xs"
-          className="-ml-2 px-2 no-underline hover:underline"
-          onClick={() => setSheet(true)}
-        >
-          <Table2 aria-hidden className="size-3.5" />
-          Open full result
-        </Button>
+        {/* Only when there is something to fetch. A result can arrive complete on the event and
+            still have no ref — the store is off, the write failed — and a control that opens a
+            panel which can only 404 is worse than no control. The card is already the whole
+            result in that case. */}
+        {resultRef && (
+          <Button
+            variant="link"
+            size="xs"
+            className="-ml-2 px-2 no-underline hover:underline"
+            onClick={() => setSheet(true)}
+          >
+            <Table2 aria-hidden className="size-3.5" />
+            Open full result
+          </Button>
+        )}
         {/* The join a reviewer asks for, and the one a card without it cannot make. */}
         <span className="ml-auto font-mono text-2xs text-ink-subtle">
           {result.byte_size.toLocaleString()} B
         </span>
       </div>
 
-      {sheet && (
+      {sheet && resultRef && (
         <ResultSheet
           sessionId={sessionId}
           resultRef={resultRef}

@@ -23,7 +23,7 @@
  * cannot drift.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronRight } from 'lucide-react';
 import type { AssistantMessage, TraceEntry } from '../state/types.ts';
 import { planPosition } from '../state/turnActivity.ts';
@@ -85,6 +85,16 @@ export function PlanStrip({
   const jobs = useMemo(() => planStepJobs(trace, jobFeed), [trace, jobFeed]);
   const awaitingApproval = trace.some((e) => e.kind === 'approval_request');
   const [open, setOpen] = useState(awaitingApproval);
+  // Opened when the approval ARRIVES, not only when the strip happens to mount after one.
+  // `useState(awaitingApproval)` reads the trace once, so a turn that asks for approval mid-stream
+  // — which is every live one; the rehydrated case is the exception — left the plan folded away
+  // behind a reader being asked to approve it. Tracked so it fires on the transition rather than
+  // on every render, which would fight a reader who closed it again.
+  const wasAwaiting = useRef(awaitingApproval);
+  useEffect(() => {
+    if (awaitingApproval && !wasAwaiting.current) setOpen(true);
+    wasAwaiting.current = awaitingApproval;
+  }, [awaitingApproval]);
 
   if (!todos || todos.length === 0) return null;
 

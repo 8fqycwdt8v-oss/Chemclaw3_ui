@@ -275,3 +275,83 @@ describe('plan approval reaching the message', () => {
     expect(assistantOf(cid, mid).latestPlan).toBeNull();
   });
 });
+
+describe('one evidence sweep is one trace entry', () => {
+  const sweep = (
+    cid: string,
+    mid: string,
+    reports: { source: string; chunks: number; failed?: boolean }[],
+  ): void => {
+    for (const r of reports) {
+      useChatStore.getState().applyEvent(cid, mid, {
+        type: 'evidence_source',
+        source: r.source,
+        chunks: r.chunks,
+        ...(r.failed === undefined ? {} : { failed: r.failed }),
+      });
+    }
+  };
+
+  it('folds consecutive sources into one entry carrying every report', () => {
+    // `gather_evidence` asks every source at once and the service reports each separately, so a
+    // five-source sweep arrives as five events. Folding at the store rather than at the rail is
+    // what keeps a retrieval-heavy turn from spending its bounded `MAX_TRACE_ENTRIES` on
+    // retrieval and evicting its own early tool calls — and the result blocks hanging off them.
+    const store = useChatStore.getState();
+    const cid = store.createConversation();
+    const mid = useChatStore.getState().startAssistantMessage(cid);
+
+    sweep(cid, mid, [
+      { source: 'graph', chunks: 6 },
+      { source: 'lexical', chunks: 0, failed: true },
+      { source: 'eln', chunks: 2 },
+    ]);
+
+    const trace = assistantOf(cid, mid).trace;
+    expect(trace).toHaveLength(1);
+    expect(trace[0]?.evidenceSweep).toEqual([
+      { source: 'graph', chunks: 6, failed: false },
+      { source: 'lexical', chunks: 0, failed: true },
+      { source: 'eln', chunks: 2, failed: false },
+    ]);
+    // "failed" and "0" are different answers, and the fold must not flatten one into the other: a
+    // dark source is a question about the corpus, a broken one is a page for whoever owns it.
+    expect(trace[0]?.evidenceSweep?.filter((s) => s.failed)).toHaveLength(1);
+  });
+
+  it('starts a new entry when anything happened in between', () => {
+    // Consecutive is the whole test, and it is the right one: the events of one `gather_evidence`
+    // call arrive together. A second call after a tool call is a second sweep, and merging the two
+    // would report one retrieval where there were two.
+    const store = useChatStore.getState();
+    const cid = store.createConversation();
+    const mid = useChatStore.getState().startAssistantMessage(cid);
+
+    sweep(cid, mid, [{ source: 'graph', chunks: 6 }]);
+    useChatStore
+      .getState()
+      .applyEvent(cid, mid, { type: 'tool_call', tool: 'screen_hazards', arguments: '{}' });
+    sweep(cid, mid, [{ source: 'graph', chunks: 1 }]);
+
+    const kinds = assistantOf(cid, mid).trace.map((e) => e.kind);
+    expect(kinds).toEqual(['evidence_source', 'tool_call', 'evidence_source']);
+  });
+
+  it('keeps the first source under the field a rehydrated transcript reads', () => {
+    // A trace persisted before `evidenceSweep` existed carries only `evidenceSource`, and the rail
+    // falls back to it. Writing both keeps that fallback exercised rather than theoretical.
+    const store = useChatStore.getState();
+    const cid = store.createConversation();
+    const mid = useChatStore.getState().startAssistantMessage(cid);
+    sweep(cid, mid, [
+      { source: 'graph', chunks: 6 },
+      { source: 'eln', chunks: 2 },
+    ]);
+
+    expect(assistantOf(cid, mid).trace[0]?.evidenceSource).toEqual({
+      source: 'graph',
+      chunks: 6,
+      failed: false,
+    });
+  });
+});

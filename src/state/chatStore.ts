@@ -262,6 +262,32 @@ function closeToolCall(
  * A launch row already dropped by `MAX_TRACE_ENTRIES`, or a completion for a job launched in a
  * different turn, simply finds nothing and leaves the trace alone.
  */
+/**
+ * Fold one source's report into the sweep already standing, when there is one.
+ *
+ * A sweep arrives as one event per source, and both the reading and the cost say it is one step:
+ * the rail draws "graph 6 · lexical failed" as one line, and a row per source spends the trace's
+ * bounded `MAX_TRACE_ENTRIES` budget on retrieval — a retrieval-heavy turn evicting its own early
+ * tool calls, and the result blocks that hang off them.
+ *
+ * Consecutive is the whole test, and it is the right one: the events of one `gather_evidence` call
+ * arrive together, and anything between them ends the sweep. Returns `null` when this event starts
+ * a new one, which is the caller's cue to append rather than merge.
+ */
+function foldIntoSweep(trace: TraceEntry[], entry: TraceEntry): TraceEntry[] | null {
+  const last = trace[trace.length - 1];
+  const reported = entry.evidenceSweep?.[0];
+  if (!last || last.kind !== 'evidence_source' || !last.evidenceSweep || !reported) return null;
+  const merged: TraceEntry = {
+    ...last,
+    // The sweep's own end, so the row can say how long every source took together. The entry's
+    // `at` stays the first source's, which is when the sweep began.
+    evidenceSweepEndedAt: entry.at,
+    evidenceSweep: [...last.evidenceSweep, reported],
+  };
+  return [...trace.slice(0, -1), merged];
+}
+
 function settleJob(trace: TraceEntry[], jobId: string): TraceEntry[] {
   const index = trace.findIndex(
     (entry) => entry.kind === 'job_started' && entry.job?.jobId === jobId && !entry.job.settled,
@@ -306,16 +332,24 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
     // dark source and a broken one sit side by side and are told apart by name. Dropping the
     // successes here made that row unbuildable, and left "which sources were even asked?"
     // answerable only by reading the service's logs.
-    case 'evidence_source':
+    case 'evidence_source': {
+      const reported = {
+        source: event.source,
+        chunks: event.chunks,
+        failed: event.failed === true,
+      };
       return {
         ...base,
         kind: 'evidence_source',
-        evidenceSource: {
-          source: event.source,
-          chunks: event.chunks,
-          failed: event.failed === true,
-        },
+        // A sweep of one. Every entry is born a sweep so that `foldIntoSweep` has something to
+        // merge INTO and something to merge FROM without a second shape: the first source of a
+        // run stands as a one-source sweep, and each one after it is folded in.
+        evidenceSweep: [reported],
+        // The same source again, under the field a trace persisted before `evidenceSweep`
+        // existed carries. Rehydrated transcripts still render from it.
+        evidenceSource: reported,
       };
+    }
     case 'job_started':
       return {
         ...base,
@@ -875,9 +909,14 @@ export const useChatStore = create<ChatState>()(
             } else if (event.type === 'job_completed' || event.type === 'job_failed') {
               base = settleJob(base, event.job_id);
             }
+            // One sweep is one row. `gather_evidence` asks every source at once and the service
+            // reports each separately, so this is a *merge* rather than an append — both because
+            // that is how a reader reads them and because a row per source spends the bounded
+            // trace on retrieval, evicting the early tool calls of a retrieval-heavy turn.
+            const folded = event.type === 'evidence_source' ? foldIntoSweep(base, entry) : null;
             return {
               ...m,
-              trace: [...base, entry].slice(-MAX_TRACE_ENTRIES),
+              trace: (folded ?? [...base, entry]).slice(-MAX_TRACE_ENTRIES),
               latestPlan: event.type === 'plan' ? event.todos : m.latestPlan,
               // The hash of the plan as rendered, so the approval card can bind a decision to
               // exactly what was shown without a second round trip that races the next revision.

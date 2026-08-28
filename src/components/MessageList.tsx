@@ -62,15 +62,26 @@ const MAX_RESULT_BLOCKS = 3;
  * turn streams, and absent for a turn that produced no text at all — a row claiming an answer
  * where the card says "the turn finished without producing any answer text" would be the two
  * halves of one screen disagreeing.
+ *
+ * Exported for its own test. The arithmetic is the whole of it and it is not visible in the
+ * markup — a duration measured from the wrong instant renders as a perfectly plausible number.
  */
-function answerStep(message: AssistantMessage): { words: number; duration?: string } | null {
+export function answerStep(message: AssistantMessage): { words: number; duration?: string } | null {
   if (message.status === 'streaming') return null;
   const text = message.finalText || message.streamedText;
   if (!text.trim()) return null;
   const words = text.trim().split(/\s+/).filter(Boolean).length;
-  const lastStep = message.trace[message.trace.length - 1]?.at;
+  // The last instant the trace knows about, which is NOT the last row's `at`: a `tool_call` row is
+  // stamped when the call was *issued* and its result closes that same row in place, so measuring
+  // from `at` charges the whole of the last tool's runtime to the answer — and the rail's rows
+  // then sum to more than the turn took.
+  const lastStep = message.trace.reduce(
+    (latest, entry) =>
+      Math.max(latest, entry.at, entry.toolCall?.endedAt ?? 0, entry.job?.endedAt ?? 0),
+    0,
+  );
   const duration =
-    message.endedAt && lastStep && message.endedAt > lastStep
+    message.endedAt && lastStep > 0 && message.endedAt > lastStep
       ? formatDuration(message.endedAt - lastStep)
       : undefined;
   return { words, duration };
@@ -79,10 +90,14 @@ function answerStep(message: AssistantMessage): { words: number; duration?: stri
 /**
  * The turn's results, as data, under the answer.
  *
- * Only calls whose result the service actually stored: an empty `resultRef` means "not stored" and
- * the service guarantees that is its only meaning, so there is exactly one condition to check.
- * Only with a session id, because the fetch route is session-scoped — a transcript rehydrated from
- * the server has the calls but nothing to fetch against.
+ * A call qualifies when its result is *reachable*, and there are two ways to be reachable: the
+ * service stored it (a `resultRef` to fetch) or it rode along on the event (`resultInline`). They
+ * are independent — the inline cap and the store cap are different settings, and a deployment with
+ * the store switched off still inlines its small results — so testing only the ref dropped every
+ * block in exactly the deployment where no fetch was needed at all.
+ *
+ * A session id is still required for the fetching half, because that route is session-scoped: a
+ * transcript rehydrated from the server has the calls and nothing to fetch against.
  */
 const ResultBlocks = memo(function ResultBlocks({
   trace,
@@ -97,8 +112,8 @@ const ResultBlocks = memo(function ResultBlocks({
         (
           e,
         ): e is TraceEntry & {
-          toolCall: { tool: string; resultRef: string; resultInline?: string };
-        } => e.kind === 'tool_call' && Boolean(e.toolCall?.resultRef),
+          toolCall: { tool: string; resultRef?: string; resultInline?: string };
+        } => e.kind === 'tool_call' && Boolean(e.toolCall?.resultRef || e.toolCall?.resultInline),
       ),
     [trace],
   );
@@ -111,7 +126,7 @@ const ResultBlocks = memo(function ResultBlocks({
           key={entry.id}
           sessionId={sessionId}
           tool={entry.toolCall.tool}
-          resultRef={entry.toolCall.resultRef}
+          resultRef={entry.toolCall.resultRef ?? ''}
           inline={entry.toolCall.resultInline}
         />
       ))}

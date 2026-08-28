@@ -49,12 +49,35 @@ const BATCH_SIZE = 20;
 const FLUSH_INTERVAL_MS = 5_000;
 
 /**
- * Consecutive sink failures after which the transport gives up for the life of the page.
+ * How the sink waits out a failing endpoint, and the ceiling on that wait.
  *
- * A sink that retries a broken endpoint forever is the same defect this module exists to report,
- * one layer down — and it cannot log its own failure without recursing.
+ * A sink that retries a broken endpoint on every flush is the defect this module exists to report,
+ * one layer down — and it cannot log its own failure without recursing. The first answer to that
+ * was a latch: three consecutive non-2xx responses and the transport gave up **for the life of the
+ * page**. That is the wrong shape for a diagnostic channel, and the arithmetic says why. The BFF
+ * refuses a batch with a 429 when the pod is over its per-minute budget
+ * (`server/clientEvents.ts`), a rolling restart answers a few requests with a 502, and either is
+ * three responses in fifteen seconds at the sink's own cadence — after which a chemist's browser
+ * reported nothing for the rest of the session, silently, exactly when something was wrong enough
+ * to be worth reporting. Recovery was a page reload nobody knew to do.
+ *
+ * So: exponential backoff, capped, and it recovers. Five seconds, then 10, 20, 40 … to five
+ * minutes, reset by the first success. A `Retry-After` on the response wins when it asks for
+ * longer, because the server saying when to come back is better information than a doubling
+ * client's guess.
  */
-const MAX_SINK_FAILURES = 3;
+const SINK_BACKOFF_BASE_MS = 5_000;
+const SINK_BACKOFF_MAX_MS = 300_000;
+
+/**
+ * Entries held while the sink is backed off, oldest dropped first.
+ *
+ * The backoff is what makes this bound necessary: a page that keeps logging through a five-minute
+ * wait would otherwise grow the queue without limit, which is the failure mode `RING_SIZE` already
+ * refuses for the ring buffer. Dropping the oldest is the right end to drop from — the entries
+ * around the current failure are the ones somebody will read.
+ */
+const MAX_QUEUED_ENTRIES = 500;
 
 export interface LogEntry {
   /** ISO-8601, so an entry lines up with the backend's own JSON records without a parse guess. */
@@ -66,8 +89,23 @@ export interface LogEntry {
   correlationId: string;
   /** The backend session this entry belongs to, when one was known. */
   sessionId: string;
-  /** Whatever the call site had that a reader would need. Never PII by construction: call sites
-   *  pass ids, statuses and counts, never message text. */
+  /**
+   * Whatever the call site had that a reader would need.
+   *
+   * This said "never PII by construction: call sites pass ids, statuses and counts, never message
+   * text", and no construction enforced any of it — the type is `Record<string, unknown>` and
+   * three call sites pass a free-form string today: `ErrorBoundary` sends `error.message`, and
+   * `main.tsx` sends `String(reason)` and `event.message` from the two global handlers. Those
+   * strings come from wherever the throw did, so an entry *can* carry text this rule says it
+   * cannot. Deleting the claim rather than the fields is deliberate: an unhandled rejection with
+   * its message removed is a log line that says something broke and refuses to say what, which is
+   * the state this module was written to end.
+   *
+   * What is true is a convention, and it is on the call site: pass ids, statuses, counts and
+   * enumerable reasons; never the transcript, a draft, a token, a cookie or an address. Whatever
+   * is passed leaves the browser (`startClientEventSink`) and is written into the UI pod's log by
+   * `server/clientEvents.ts`, which bounds and de-controls it but cannot know what it means.
+   */
   context?: Record<string, unknown>;
 }
 
@@ -203,13 +241,26 @@ export function diagnosticsText(): string {
  * route), so the batch is written to the UI pod's log where an operator is already looking.
  */
 export function startClientEventSink(): () => void {
+  /** Consecutive failures. Only ever sets how long to wait; it can no longer stop the sink. */
   let failures = 0;
+  /** Nothing is posted before this instant. `0` is "now", which is the ordinary state. */
+  let nextAttemptAt = 0;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   const url = `${config.apiBase.replace(/\/$/, '')}/client-events`;
 
+  const backOff = (retryAfterSeconds: number): void => {
+    failures += 1;
+    const doubling = Math.min(SINK_BACKOFF_BASE_MS * 2 ** (failures - 1), SINK_BACKOFF_MAX_MS);
+    // The server's own number wins when it asks for longer — a 429 from the BFF's per-minute
+    // budget knows when the window turns over and this client does not — and is still capped, so
+    // a hostile or mistaken header cannot silence the sink for the rest of the day.
+    const asked = Math.min(retryAfterSeconds * 1_000, SINK_BACKOFF_MAX_MS);
+    nextAttemptAt = Date.now() + Math.max(doubling, asked);
+  };
+
   const send = (entries: LogEntry[]): void => {
-    if (entries.length === 0 || failures >= MAX_SINK_FAILURES) return;
+    if (entries.length === 0) return;
     const body = JSON.stringify({
       app_version: config.appVersion,
       // Once per batch rather than once per entry: it is constant for the page, and repeating it
@@ -226,13 +277,39 @@ export function startClientEventSink(): () => void {
       cache: 'no-store',
     })
       .then((res) => {
-        failures = res.ok ? 0 : failures + 1;
+        if (res.ok) {
+          failures = 0;
+          nextAttemptAt = 0;
+          return;
+        }
+        const retryAfter = Number(res.headers.get('retry-after') ?? '');
+        backOff(Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 0);
+        requeue(entries);
       })
       .catch(() => {
         // Never logged: reporting a reporting failure through the logger is a loop, and the ring
         // buffer is what the crash screen shows anyway.
-        failures += 1;
+        backOff(0);
+        requeue(entries);
       });
+  };
+
+  /**
+   * Put a refused batch back at the front of the queue, oldest first out under the bound.
+   *
+   * The batch used to be dropped on failure, which combined with the latch meant a transient blip
+   * cost both the entries in flight and every entry after them. Holding them is what makes the
+   * backoff worth having: when the endpoint comes back, what was recorded during the outage is
+   * still there to send.
+   */
+  const requeue = (entries: LogEntry[]): void => {
+    queue = [...entries, ...queue].slice(-MAX_QUEUED_ENTRIES);
+    schedule(Math.max(0, nextAttemptAt - Date.now()));
+  };
+
+  const schedule = (delay: number): void => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(flush, delay);
   };
 
   const flush = (): void => {
@@ -241,9 +318,25 @@ export function startClientEventSink(): () => void {
       timer = null;
     }
     if (queue.length === 0) return;
-    const batch = queue;
-    queue = [];
+    const wait = nextAttemptAt - Date.now();
+    if (wait > 0) {
+      // Backed off: hold what is queued (bounded) and come back when the wait is over, rather
+      // than posting into an endpoint that has just refused and burning the next attempt.
+      queue = queue.slice(-MAX_QUEUED_ENTRIES);
+      schedule(wait);
+      return;
+    }
+    // At most `BATCH_SIZE` per POST, even when a backoff has left hundreds queued, and this is
+    // the constraint the requeue above would otherwise break in two ways at once: `keepalive`
+    // requests are capped at 64 KiB by the browser (an oversized body is rejected, so the batch
+    // would fail for ever), and the BFF writes only the first `MAX_ENTRIES` (50) of a batch, so
+    // everything past that would be dropped in silence at the far end.
+    const batch = queue.slice(0, BATCH_SIZE);
+    queue = queue.slice(BATCH_SIZE);
     send(batch);
+    // A backlog drains at the sink's ordinary cadence rather than as a burst of parallel POSTs
+    // into an endpoint that has only just recovered.
+    if (queue.length > 0) schedule(FLUSH_INTERVAL_MS);
   };
 
   sink = (entries) => {
@@ -266,6 +359,12 @@ export function startClientEventSink(): () => void {
     window.removeEventListener('pagehide', flush);
     document.removeEventListener('visibilitychange', onHide);
     flush();
+    // A backed-off flush re-arms the timer; a stopped sink must not leave one running to post
+    // into a page that has torn its transport down.
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
     sink = null;
   };
 }

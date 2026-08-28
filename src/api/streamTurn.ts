@@ -76,6 +76,16 @@ export interface StreamTurnOptions {
    */
   onCorrelationId?: (correlationId: string) => void;
   /**
+   * The service has taken this turn: the POST came back 2xx and the event stream is open.
+   *
+   * Called at most once, and the caller needs it because *nothing else here distinguishes a turn
+   * that is running on the server from one that was never sent*. Everything before this line — the
+   * token, the request, the response headers, the content type — is pre-flight, and a failure in
+   * it means the service has no turn to finish. `sendMessage` gates detach recovery on this rather
+   * than on the error's kind; see the comment there.
+   */
+  onAccepted?: () => void;
+  /**
    * The stream went quiet for `stallAfterMs`, and later (with `false`) that it came back.
    *
    * Reported rather than acted on: this function deliberately does not abort, because a long turn
@@ -155,6 +165,10 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       withReference(),
     );
   }
+
+  // Past every pre-flight check: the service answered 2xx with an event stream, so the turn is
+  // running there and will be written to the session transcript even if this socket dies.
+  opts.onAccepted?.();
 
   let answer: AnswerEvent | null = null;
 

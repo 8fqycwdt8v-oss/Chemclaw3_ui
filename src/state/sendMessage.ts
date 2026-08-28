@@ -183,6 +183,21 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   /** Assigned inside the try, and read by the catch and finally below. */
   let messageId = '';
 
+  /**
+   * Whether the service took this turn — the POST was answered 2xx and the stream opened.
+   *
+   * The one fact detach recovery may be gated on, and the reason it is a flag rather than an error
+   * kind is measured. Recovery used to run for `stream` and `network`, and everything that goes
+   * wrong *before* the request is sent arrives as one of those two: a `getToken()` that throws is
+   * not an `ApiError`, so the catch below wrapped it as `stream`, and `stream` is documented as
+   * "plausibly recoverable by polling the session transcript". Driven with an MSAL silent refresh
+   * that fails between two turns — a real class, and the one a 60-90 minute token guarantees — the
+   * chemist got the banner "Connection lost — the turn is still running on the server; recovering
+   * the answer…", a composer locked for **630 seconds**, and **212** poll attempts, for a turn the
+   * service had never heard of. The failure then surfaced anyway, ten and a half minutes late.
+   */
+  let turnAccepted = false;
+
   const stop = (): void => {
     // Server first, then socket: the backend detaches on disconnect
     // (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so aborting the fetch alone would
@@ -272,12 +287,18 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   };
 
   const runOnce = async (sessionId: string): Promise<void> => {
+    // Per attempt: a replay after a 401 or a `session_not_found` starts a new turn, and what the
+    // previous attempt got as far as says nothing about this one.
+    turnAccepted = false;
     await streamTurn({
       sessionId,
       message: text,
       dryRun,
       signal: abort.signal,
       getToken: () => auth.getAccessToken(),
+      onAccepted() {
+        turnAccepted = true;
+      },
       onCorrelationId(id) {
         // Kept in three places, each for a different reader: the store, so the trace panel can
         // show a reference on a turn that SUCCEEDED; the logger's context, so every subsequent
@@ -423,7 +444,12 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // server-side (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so a broken stream is a
     // *recoverable* state — the answer will land in the session transcript. Poll it back rather
     // than surfacing a dead-end banner for work that is still happening.
-    if (apiError.kind === 'stream' || apiError.kind === 'network') {
+    //
+    // Only for a turn the service actually accepted, though: see `turnAccepted`. A failure the
+    // request never survived leaves nothing to recover, and polling for it costs the chemist ten
+    // and a half minutes of a locked composer and a banner that says the opposite of what
+    // happened.
+    if (turnAccepted && (apiError.kind === 'stream' || apiError.kind === 'network')) {
       const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
       if (sessionId) {
         useChatStore.getState().setBanner({

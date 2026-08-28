@@ -362,6 +362,74 @@ describe('sendMessage', () => {
     });
   });
 
+  /**
+   * The other half of "a dropped connection is not a Stop": a turn that was never sent at all.
+   *
+   * Detach recovery is right for a stream that broke *after* the service took the turn, and wrong
+   * for anything that failed before it — there is no turn to recover, so the poll can only run out
+   * its clock. It used to be gated on the error's KIND, and every pre-flight failure arrives as one
+   * of the two kinds it polled on.
+   */
+  describe('a turn the service never accepted', () => {
+    it('fails at once instead of polling for an answer nobody is producing', async () => {
+      // A token that works for the session mint and then fails — an MSAL silent refresh timing
+      // out between two turns, which a 60-90 minute access token guarantees will happen inside a
+      // conversation. Measured before the fix: the banner read "Connection lost — the turn is
+      // still running on the server; recovering the answer…", the composer stayed locked for
+      // **630 s**, and recovery made **212** attempts at a turn that had never been POSTed.
+      vi.useFakeTimers();
+      try {
+        let tokens = 0;
+        const auth: AuthProvider = {
+          mode: 'msal',
+          account: null,
+          async getAccessToken() {
+            tokens += 1;
+            if (tokens === 1) return 'good';
+            throw new Error('BrowserAuthError: monitor_window_timeout');
+          },
+          async login() {},
+          async logout() {},
+          async handleUnauthorized() {
+            return false;
+          },
+        };
+        let polls = 0;
+        const stub = stubFetch((url, init) => {
+          if (url.endsWith('/sessions') && init?.method === 'POST') {
+            return new Response(JSON.stringify({ session_id: 'n'.repeat(32) }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          polls += 1;
+          return new Response('[]', {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        });
+        restore = stub.restore;
+
+        const cid = useChatStore.getState().createConversation();
+        const turn = sendMessage({ conversationId: cid, text: 'pKa?', auth });
+        // One tick is all a pre-flight failure may cost. The poll's own interval is 3 s, so
+        // anything that entered recovery would still be sitting in it here.
+        await vi.advanceTimersByTimeAsync(10);
+        await turn;
+
+        expect(polls).toBe(0);
+        expect(useChatStore.getState().composerLock).toBe(false);
+        expect(useChatStore.getState().banner?.kind).toBe('error');
+        expect(useChatStore.getState().conversations[cid]?.messages[1]).toMatchObject({
+          role: 'assistant',
+          status: 'error',
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    }, 20_000);
+  });
+
   describe('a repeated identical question, mid detach-recovery', () => {
     it('does not return the earlier answer to the same question as this turn’s recovered answer', async () => {
       // The chemist asks 'dup?', gets an answer, then asks the exact same text again (e.g. via

@@ -37,6 +37,24 @@ export interface Readiness {
 
 let cached: { at: number; value: Readiness } | null = null;
 
+/**
+ * The probe that is running right now, so N concurrent probes cost one upstream call.
+ *
+ * The cache alone does not do this and cannot: it is written when a probe *resolves*, so every
+ * request that arrives while one is in flight misses it and starts another. Measured against a
+ * `/readyz` that takes 120 ms — a realistic figure for a check that touches a database and a
+ * connector — 40 concurrent probes produced **40** upstream requests. That is the shape of a
+ * readiness storm: a rolling restart, or a load balancer with several health-checking members,
+ * turns the check into load on the very service it is asking about, precisely when it is least
+ * able to take it.
+ *
+ * A single in-flight promise is the whole fix, and it is a `Promise` rather than a lock because
+ * every waiter then gets the same answer instead of taking turns re-asking. Cleared in `finally`
+ * so a rejected probe — `probe()` never rejects today, and this must not become the reason it
+ * cannot — does not pin a poisoned promise for the life of the process.
+ */
+let inFlight: Promise<Readiness> | null = null;
+
 function probe(): Promise<Readiness> {
   const upstream = new URL(cfg.apiUrl);
   const transport = upstream.protocol === 'https:' ? https : http;
@@ -77,12 +95,20 @@ function probe(): Promise<Readiness> {
   });
 }
 
-/** Readiness now, from cache when it is fresh. */
+/** Readiness now: from cache when it is fresh, from the probe already running when it is not. */
 export async function readiness(): Promise<Readiness> {
   if (cached && Date.now() - cached.at < PROBE_CACHE_MS) return cached.value;
-  const value = await probe();
-  cached = { at: Date.now(), value };
-  return value;
+  inFlight ??= probe()
+    .then((value) => {
+      // Stamped when the answer arrives rather than when the probe started, so the cache window
+      // is time the answer has actually been stale for.
+      cached = { at: Date.now(), value };
+      return value;
+    })
+    .finally(() => {
+      inFlight = null;
+    });
+  return inFlight;
 }
 
 /** Test seam: the cache is process-wide, so a second test would read the first one's answer. */

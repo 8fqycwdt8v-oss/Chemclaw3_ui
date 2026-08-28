@@ -1,31 +1,45 @@
 /**
- * Knowledge waiting on a human.
+ * What is waiting on a human — across every conversation, not inside one.
+ *
+ * Two gates, two sections, and the difference between them is what the page is for.
  *
  * A **proposal** is machine-written knowledge waiting to enter the graph. Deciding it commits or
  * refuses bytes in a repository, and the service calls this gate "the line that makes
  * machine-written knowledge safe".
  *
- * The screen shows proposals to everyone. Only the decision controls are role-gated, because
- * `GET /proposals` already narrows what a non-reviewer sees to their own, and a chemist reading
- * why their note was rejected is exactly who this page is for.
+ * A **plan** is work the agent cannot start. Under `harness_autonomy="plan_only"` every
+ * state-changing step is refused until a human approves the exact plan they were shown, and until
+ * this section existed that decision was reachable only from inside the turn that raised it: the
+ * card lives in a live conversation, a reload recovers it only for a conversation somebody opens,
+ * and a chemist who closed the tab holds no session id. So a plan could sit blocking work with
+ * nothing anywhere able to say which conversation it was in. `GET /plans/pending` is the route
+ * that answers it, and this is the only screen that asks.
  *
- * **This screen used to carry a second section, for durable interaction "holds".** It is gone,
- * and the reason is worth keeping: the service deleted that whole mechanism
- * (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`) because nothing could ever open one, so
- * `GET /approvals` now 404s. The list call swallowed that into `[]`, which meant this page showed
- * a confident, permanently empty inbox describing a decision that could not occur — the exact
- * "a control that reads as real and is not" failure the deletion upstream was written against.
+ * **The section it replaces is why the counts are rendered.** This page used to carry an inbox for
+ * durable interaction "holds". The service deleted that whole mechanism
+ * (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`) because nothing could ever open one, and
+ * the list call swallowed the resulting 404 into `[]` — so the page showed a confident,
+ * permanently empty inbox describing a decision that could not occur. An empty list is not a
+ * finding on its own, so this one never renders as one: the service reports what its scan covered,
+ * and an empty `plans` says whether the deployment gates plans at all and whether the answer was
+ * complete. A failed call says it failed.
  *
- * The slot is deliberately left empty rather than refilled here. The gate that *does* block work
- * is the plan approval, which is answered per session on `POST /sessions/{id}/plan/decision` and
- * currently lives only as an inline card in a live turn — so it survives no reload. Giving it a
- * home on this page is a real change with a real design behind it, not a rename of a dead one.
+ * **It does not decide in place.** The service binds a decision to the hash of the plan as
+ * displayed, so deciding from here would be safe; it would not be *informed*. A plan is approved
+ * on the strength of the reasoning that produced it, which is one click away in the conversation
+ * — the same argument the deleted holds section made for linking back rather than answering here.
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { FileCheck2 } from 'lucide-react';
+import { FileCheck2, ListChecks } from 'lucide-react';
+import { Link } from 'react-router';
 import { useAuth, useIsReviewer } from '../auth/AuthContext.tsx';
-import { api, type ProposalDetail, type ProposalSummary } from '../api/client.ts';
+import {
+  api,
+  type PendingPlans as PendingPlansView,
+  type ProposalDetail,
+  type ProposalSummary,
+} from '../api/client.ts';
 import { relativeTime } from '../lib/format.ts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -247,6 +261,135 @@ function ProposalSheet({
   );
 }
 
+/**
+ * Why this list is empty — the sentence the deleted holds inbox could not say.
+ *
+ * Three emptinesses, and only the last one means "you are up to date". Separating them is the
+ * whole reason the service returns counts beside the rows.
+ */
+function NoPlansWaiting({ view }: { view: PendingPlansView }): React.JSX.Element {
+  if (view.considered === 0) {
+    return (
+      <EmptyState icon={<ListChecks className="size-5" />} title="No conversations to check">
+        This service holds no conversation of yours yet. A plan can only wait on you once the agent
+        has proposed one.
+      </EmptyState>
+    );
+  }
+  if (view.gated === 0) {
+    return (
+      <EmptyState icon={<ListChecks className="size-5" />} title="Nothing here asks before it acts">
+        None of your conversations runs under a profile that holds work for approval, so no plan can
+        be waiting. This is how the deployment is configured, not an empty queue.
+      </EmptyState>
+    );
+  }
+  return (
+    <EmptyState icon={<ListChecks className="size-5" />} title="No plan is waiting on you">
+      Every plan the agent has proposed has been answered. One appears here as soon as a turn ends
+      holding work it may not start.
+    </EmptyState>
+  );
+}
+
+/** How much of the answer is missing, said plainly — a short list that looks complete is worse. */
+function PartialScan({ unread }: { unread: number }): React.JSX.Element | null {
+  if (unread === 0) return null;
+  return (
+    <p role="status" className="text-xs text-ink-muted">
+      {unread} older {unread === 1 ? 'conversation was' : 'conversations were'} not checked, so this
+      list may be short. Open one from the sidebar to see its plan.
+    </p>
+  );
+}
+
+/**
+ * Plans this chemist has not decided, in every conversation at once.
+ *
+ * The failure is surfaced rather than folded into an empty list: `api.listPendingPlans` lets the
+ * error through for exactly this, because "we could not ask" and "nothing is waiting" are opposite
+ * things to tell somebody whose work is blocked.
+ */
+function PlanInbox(): React.JSX.Element {
+  const { auth, ready } = useAuth();
+  const [view, setView] = useState<PendingPlansView | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    void api
+      .listPendingPlans(auth)
+      .then((next) => {
+        if (cancelled) return;
+        setView(next);
+        setFailed(false);
+      })
+      .catch(() => !cancelled && setFailed(true));
+    return () => {
+      cancelled = true;
+    };
+  }, [auth, ready]);
+
+  if (failed) {
+    return (
+      <p role="alert" className="text-sm text-danger-ink">
+        The service could not be asked which plans are waiting. This is not the same as nothing
+        waiting — a plan already approved still executes, and one that is not still blocks.
+      </p>
+    );
+  }
+  if (!view) return <Loading>Reading the plan gate…</Loading>;
+  if (view.plans.length === 0) {
+    return (
+      <div className="flex flex-col gap-3">
+        <NoPlansWaiting view={view} />
+        <PartialScan unread={view.unread} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <ul className="flex flex-col gap-2">
+        {view.plans.map((pending) => (
+          <li
+            key={pending.session_id}
+            className="rounded-lg border border-warn/40 bg-surface-raised p-3"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">{pending.title ?? 'Untitled conversation'}</span>
+              <Badge tone="warn">
+                {pending.plan.length} {pending.plan.length === 1 ? 'step' : 'steps'}
+              </Badge>
+              <span className="text-2xs text-ink-subtle">
+                last active {when(pending.updated_at)}
+              </span>
+            </div>
+            {/* The steps themselves, not a count of them: what is being approved is the work, and
+                a row that hid it would send a chemist into the conversation to find out whether it
+                is even the one they are looking for. */}
+            <ol className="mt-2 flex list-decimal flex-col gap-1 pl-5 text-sm text-ink-muted">
+              {pending.plan.map((step, index) => (
+                <li key={`${index}-${step}`}>{step}</li>
+              ))}
+            </ol>
+            <div className="mt-3">
+              <Button asChild size="sm" variant="outline">
+                {/* `/s/:sessionId` adopts the server session into a local conversation, which is
+                    the only route that can turn an id from this list into something readable. The
+                    decision is answered there, beside the reasoning that produced the plan. */}
+                <Link to={`/s/${pending.session_id}`}>Open the conversation to decide</Link>
+              </Button>
+            </div>
+          </li>
+        ))}
+      </ul>
+      <PartialScan unread={view.unread} />
+    </div>
+  );
+}
+
 function Proposals(): React.JSX.Element {
   const { auth, ready } = useAuth();
   const [proposals, setProposals] = useState<ProposalSummary[] | null>(null);
@@ -315,6 +458,18 @@ export function ReviewQueue(): React.JSX.Element {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-8">
+        {/* First, because it is the section that blocks work: a proposal waits, a plan stops. */}
+        <section aria-labelledby="plans-heading">
+          <h2 id="plans-heading" className="mb-1 text-lg font-semibold tracking-tight">
+            Plans waiting on you
+          </h2>
+          <p className="mb-3 text-sm text-ink-muted">
+            Work the agent has planned and may not start until you approve it — from every
+            conversation, including the ones you have closed.
+          </p>
+          <PlanInbox />
+        </section>
+
         <section aria-labelledby="proposals-heading">
           <h2 id="proposals-heading" className="mb-1 text-lg font-semibold tracking-tight">
             Notes waiting for review

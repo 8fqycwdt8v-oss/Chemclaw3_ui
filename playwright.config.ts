@@ -13,6 +13,7 @@
  */
 
 import { defineConfig, devices } from '@playwright/test';
+import { CLIENT_DIR } from './e2e/preflight.ts';
 
 const PORT = 4321;
 const FIXTURE_PORT = 4322;
@@ -35,6 +36,11 @@ export default defineConfig({
   // on disk, and fails if any of them is not ignored here — and fails in the other direction too,
   // if a spec no dedicated config owns gets ignored and therefore runs nowhere.
   testIgnore: /(?:full-stack|mock-model)\.spec\.ts/,
+  // Runs before the web server and before any browser, and its failure is the entire output of the
+  // run. It exists for one measured failure mode: a `dist/client` built without ALLOW_DEV_AUTH,
+  // which this tier cannot sign into and which reports itself as 40 locator timeouts rather than
+  // as a message. See `e2e/preflight.ts`.
+  globalSetup: './e2e/preflight.ts',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
@@ -63,7 +69,7 @@ export default defineConfig({
     // a non-loopback bind, and this suite runs unauthenticated. Binding loopback is the honest way
     // to satisfy that — the server really is only reachable from this machine — rather than
     // setting ALLOW_INSECURE_AUTH and teaching the test harness to wave the check through.
-    command: `node --experimental-strip-types e2e/fixture-service.ts ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 CLIENT_DIR=dist/client node dist/server.js`,
+    command: `node --experimental-strip-types e2e/fixture-service.ts ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
     url: `http://127.0.0.1:${PORT}/api/healthz`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,

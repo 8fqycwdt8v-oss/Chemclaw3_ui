@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 /**
  * A long transcript.
@@ -10,7 +10,17 @@ import { expect, test } from '@playwright/test';
  * which is what happens for free when you prepend content to a scroller.
  */
 
-const STORAGE_KEY = 'chemclaw3.chat.v2';
+/**
+ * The persisted-history slot, which is per ACCOUNT — `chemclaw3.chat.v2.<oid>`, not the bare base.
+ *
+ * This read `chemclaw3.chat.v2`, the key the store used before `chatStorageKey` partitioned it, so
+ * the seed below landed in a slot nothing reads: `hydrateChatForAccount` looked in the dev
+ * principal's slot, found it empty, and every test here ran against a conversation the app had
+ * never heard of — failing on `getByText('Answer number 199')`, which reads exactly like the
+ * windowing having regressed. `dev-user` is the `AUTH_MODE=dev` principal this tier signs in as
+ * (`src/auth/devAuth.ts`); `tests/e2eSeed.test.ts` is what keeps this string and that one together.
+ */
+const STORAGE_KEY = 'chemclaw3.chat.v2.dev-user';
 const CONVERSATION = 'e2e-long-transcript';
 const TOTAL = 200;
 
@@ -66,8 +76,25 @@ test.beforeEach(async ({ page }) => {
   );
 });
 
-test('renders a window of a 200-message transcript, not all of it', async ({ page }) => {
+/**
+ * Open the seeded conversation, and fail on the seed rather than on the transcript.
+ *
+ * A seed the app does not read renders the "isn't on this device" panel, and every assertion below
+ * then fails five seconds later on a message locator — which points a reader at `MessageList`
+ * instead of at the key. Checking the panel first turns that into one sentence.
+ */
+async function openSeeded(page: Page): Promise<void> {
   await page.goto(`/c/${CONVERSATION}`);
+  await expect(
+    page.getByRole('heading', { name: /isn’t on this device/ }),
+    `the app did not rehydrate the seed at ${STORAGE_KEY} — the persist slot is per-account ` +
+      `(chatStorageKey), so this is the seed being written to a key nothing reads, not the ` +
+      `transcript failing to render`,
+  ).toHaveCount(0);
+}
+
+test('renders a window of a 200-message transcript, not all of it', async ({ page }) => {
+  await openSeeded(page);
 
   // The newest message is the one that must be on screen.
   await expect(page.getByText(`Answer number ${TOTAL - 1}`)).toBeVisible();
@@ -79,7 +106,7 @@ test('renders a window of a 200-message transcript, not all of it', async ({ pag
 test('content-visibility does not hide text from find-in-page or the a11y tree', async ({
   page,
 }) => {
-  await page.goto(`/c/${CONVERSATION}`);
+  await openSeeded(page);
   // Wait for the pin to have landed. Acting while the transcript is still settling detaches the
   // node mid-scroll, which is a race in the test and not a property of the page.
   await expect(page.getByText(`Answer number ${TOTAL - 1}`)).toBeVisible();
@@ -103,7 +130,7 @@ test('content-visibility does not hide text from find-in-page or the a11y tree',
 });
 
 test('Load earlier keeps the reader where they were', async ({ page }) => {
-  await page.goto(`/c/${CONVERSATION}`);
+  await openSeeded(page);
 
   await expect(page.getByText(`Answer number ${TOTAL - 1}`)).toBeVisible();
 

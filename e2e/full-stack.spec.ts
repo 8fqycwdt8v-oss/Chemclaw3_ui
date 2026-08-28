@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { ask as askOn, composer as composerOn } from './live-ui.ts';
+import { readinessProblems } from './readiness.ts';
 import { toolNames, traceText } from './trace.ts';
 
 /**
@@ -190,20 +191,17 @@ test('8 · /readyz reports every connector healthy', async ({ request }) => {
   const res = await request.get('/api/readyz');
   expect(res.ok(), `readyz returned ${res.status()}`).toBe(true);
 
-  const body = JSON.stringify(await res.json());
-  for (const connector of [
-    'props',
-    'rxnpredict',
-    'chem',
-    'safety',
-    'calc',
-    'bo',
-    'molfp',
-    'rxnfp',
-  ]) {
-    expect(body, `${connector} missing from /readyz`).toContain(connector);
-  }
-  // `mock-vendor` is `unprobed`, not `unhealthy`: it serves no REST health route, and its manifest
-  // correctly declares no `health_url`. `unreachable` anywhere is the real failure.
-  expect(body).not.toContain('unreachable');
+  // This used to look for each of eight connector names in the stringified body. The route returns
+  // `{status, connectors_unhealthy}` and withholds the names on purpose — it is unauthenticated,
+  // so a roster would publish the deployment's capability surface and which parts of it are
+  // currently down (see `e2e/readiness.ts`). The loop therefore could not pass against a healthy
+  // stack, and the `not.toContain('unreachable')` that followed it asserted nothing at all, since
+  // a body naming no connector names no state either.
+  //
+  // The count is the assertion the old one was reaching for, and it is stronger: `mock-vendor` is
+  // `unprobed` rather than unhealthy — it serves no REST health route and its manifest correctly
+  // declares no `health_url` — so it is not in this number, while any bundle that IS probed and
+  // does not answer is.
+  const body = await res.json();
+  expect(readinessProblems(body).join('; '), JSON.stringify(body)).toBe('');
 });

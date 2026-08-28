@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { ask, composer } from './live-ui.ts';
+import { readinessProblems } from './readiness.ts';
 import { toolNames, traceRegion, traceText } from './trace.ts';
 
 /**
@@ -224,18 +225,20 @@ test('7 · the review queue renders against the real service', async ({ page }) 
   await expect(page.getByText('Looking for holds…')).toHaveCount(0);
 });
 
-test('8 · /readyz reports the connectors this tier depends on', async ({ request }) => {
+test('8 · /readyz reports a deployment that can serve', async ({ request }) => {
   const res = await request.get('/api/readyz');
   expect(res.ok(), `readyz returned ${res.status()}`).toBe(true);
 
-  const body = JSON.stringify(await res.json());
-
-  // Deliberately NOT the full-stack suite's eight-connector list. That list is what
-  // `make live-e2e-full-stack` brings up; this tier's bring-up is smaller, and repeating a list
-  // nothing here requires would make the test fail for a reason unrelated to anything it asserts.
-  // `calc` is named because scenario 4 launches `compute_reaction_energy` through it — so this is
-  // exactly the readiness this file's own scenarios depend on, and no more.
-  expect(body, 'calc missing from /readyz').toContain('calc');
-  // `unreachable` anywhere is the real failure: a connector that is probed and does not answer.
-  expect(body).not.toContain('unreachable');
+  // This used to assert `calc` appeared in the body, on the belief that the route lists the
+  // connectors it probed. It does not — it returns `{status, connectors_unhealthy}` and withholds
+  // the names deliberately, because the route is unauthenticated (see `e2e/readiness.ts`). So the
+  // assertion could not pass against any healthy stack, and its companion
+  // `not.toContain('unreachable')` was vacuously true of a body that names no connector at all.
+  //
+  // What is left is what the route can actually answer, and it is the readiness this file's own
+  // scenarios depend on: the service is serving, and nothing it probed is down — scenario 4
+  // launches `compute_reaction_energy` through `calc`, and a `calc` that is down is one of the
+  // bundles this count is counting.
+  const body = await res.json();
+  expect(readinessProblems(body).join('; '), JSON.stringify(body)).toBe('');
 });

@@ -80,27 +80,25 @@ were paths to "no sign-in required" that nobody chose, and each looked like a wo
 
 ---
 
-## Issue 4: `GET /sessions` cannot populate a conversation list on its own
+## Closed: `GET /sessions` could not populate a conversation list (was Issue 4)
 
-**Repo:** Chemclaw3 (backend)
+**The fix this asked for shipped upstream, and this side did not notice for a release.**
+`SessionSummary` is now `{session_id, created_at, updated_at, title}` — the title derived
+server-side from the session's first user message at write time, which is the same rule this UI
+applies locally, and `updated_at` the newest `session_messages` row. Both come off tables the
+listing already read, exactly as this entry proposed.
 
-`SessionSummary` is `{session_id, created_at}`. A sidebar needs a name and a recency, and neither
-is derivable from that:
+`src/api/client.ts` still declared two fields, so both arrived and were **dropped in transit**, and
+`Sidebar.tsx` carried a comment asserting in the present tense that "the server has never sent one"
+while it was sending one. The visible cost was the one this entry described: ten restored
+conversations were ten identical "Earlier conversation" rows until nine had been clicked, and the
+list ordered by when a session was _started_ rather than by when it was last used.
 
-- **No title.** A session is minted before anyone has spoken, so the server has no name for it at
-  creation, and nothing revisits the row afterwards.
-- **No last-activity.** `created_at` is when the session was _started_. Sorting by it puts a
-  session opened last Tuesday and abandoned above one used an hour ago.
-
-**Mitigated client-side, at a cost.** A restored conversation is renamed from the first user
-message in its transcript — but only once it is opened, because that is when
-`GET /sessions/{id}/messages` runs. So the sidebar still reads "Earlier conversation" for every
-session the chemist has not clicked into, and fixing that from here would mean fetching every
-transcript on boot to read one line out of each.
-
-**Fix:** add `title` and `updated_at` to `SessionSummary`. The title can be derived server-side
-from the session's first user message at write time — the same rule this UI applies locally — and
-`updated_at` is the newest `session_messages` row. Both come off tables the listing already reads.
+Both are consumed now, each with the fallback a service that predates the field needs, and
+`tests/sessionListing.test.tsx` drives all four cases. The shape is the same one
+`shared/events.ts` has been caught by six times — a contract mirrored by hand in another
+repository, with nothing mechanical between the two checkouts. `npm run check:openapi` is the
+mechanism that would have caught it, and it needs a running service.
 
 ---
 
@@ -227,28 +225,66 @@ Reopen PR #11 rather than rebuilding — the branch is retained.
 
 ---
 
-## Found by the 2026-08-28 live campaign
+## Closed: found by the 2026-08-28 live campaign, root-caused 2026-08-28
 
-- **`transcript.spec.ts` fails three assertions on `main`, on both projects** — `getByText('Answer
-  number 199')` is not visible in "renders a window of a 200-message transcript", "content-visibility
-  does not hide text from find-in-page or the a11y tree", and "Load earlier keeps the reader where
-  they were". Six failures, one cause, and it is **not** the campaign's branch: that branch changes
-  only `e2e/`, `playwright*.config.ts`, `package.json` and `tsconfig.json`, and touches no `src/`,
-  `server/` or fixture code. It is also not a browser mismatch — the run used Chromium
-  151.0.7922.34, which is exactly what `@playwright/test@1.62.1` pins.
-  The remaining 65 tests pass in 57s. Worth reproducing against a CI run before assuming the
-  windowing itself regressed, since the last three messages of a virtualised list are precisely the
-  region a viewport or scroll-anchoring difference would move.
+- **`transcript.spec.ts` failed three assertions on both projects — and the windowing was never
+  broken.** The spec seeded `localStorage` under `chemclaw3.chat.v2`, the persist key from before
+  `chatStorageKey` partitioned the store by account. The live key is
+  `chemclaw3.chat.v2.<oid>`, so under `AUTH_MODE=dev` the app read
+  `chemclaw3.chat.v2.dev-user`, found it empty, and rendered "That conversation isn't on this
+  device" — which every assertion then met five seconds later as `getByText('Answer number 199')`
+  timing out, i.e. as a virtualisation regression. Measured before: 6 failed / 65 passed. After
+  fixing the key: 6 passed. The seed now names the account slot, `openSeeded()` fails on the
+  panel rather than on a message locator, and `tests/e2eSeed.test.ts` computes the key from
+  `chatStorageKey` + the dev provider's own account id and compares it with what the spec
+  literally writes — so the next re-keying is a red unit test rather than six browser timeouts.
 
-- **`npm run build` without `ALLOW_DEV_AUTH=true` produces a client the fixture tier cannot use, and
-  the failure is 40 timeouts rather than a message.** Every test needing an authenticated view dies
-  on a 30s `locator.click` timeout; the actual cause reaches the log only as a browser-side
-  `unhandled.rejection` — `AUTH_MODE=dev is not permitted in this production build`. `start.sh`
-  passes the flag when `AUTH_MODE=dev`; a bare `npm run build` before `npm run test:e2e` does not,
-  and nothing in the Playwright output says so. A line in `playwright.config.ts`'s `webServer`
-  comment, or a preflight assertion on `dist/client`, would turn 40 mystery timeouts into one
-  sentence. Cost this campaign two wrong hypotheses (load, then the branch's own patch) before the
-  log was read closely enough.
+- **A bare `npm run build` produced a client the fixture tier could not sign into, and said so as
+  40 timeouts.** Now a Playwright `globalSetup` (`e2e/preflight.ts`): it reads `dist/client`,
+  looks for the dev provider's own literal in the emitted chunks, and refuses the run with the
+  sentence naming `ALLOW_DEV_AUTH=true` and the browser-side rejection text somebody would
+  otherwise grep for. It runs before the web server and before any browser, and it runs even when
+  `reuseExistingServer` skips the command. Measured: the failure now costs under a second and one
+  sentence, against ~20 minutes and two wrong hypotheses. `tests/e2ePreflight.test.ts` drives the
+  predicate against directories it builds, in all four directions.
+
+## Closed: two live scenarios asserted a `/readyz` shape the service does not return
+
+Scenario 8 of both `e2e/mock-model.spec.ts` and `e2e/full-stack.spec.ts` stringified the body of
+`GET /api/readyz` and searched it for connector _names_ — `calc` in one, eight of them in the
+other. The front door returns `{"status": "ready" | "database unreachable",
+"connectors_unhealthy": <int>}` and withholds the names deliberately: the route is one of three
+unauthenticated ones, so a roster would publish the deployment's internal capability surface plus
+a live signal of which parts of it are down to anything that can reach the Route. The names are on
+`/metrics` (`chemclaw_connectors_unhealthy`) and in the WARNING each failed probe logs.
+
+So neither assertion could pass against a healthy stack — and each closed with
+`expect(body).not.toContain('unreachable')`, which is **vacuously true** of a body that names no
+connector: the half meant to catch a real outage asserted nothing. The contract now lives once, in
+`e2e/readiness.ts`, driven by `tests/readyzContract.test.ts` against the bodies the service
+actually emits. Both scenarios call it.
+
+## Closed: a rehydrated transcript lost every tool result
+
+`TranscriptToolCall.result_ref` is the same handle `ToolResultEvent.result_ref` carries on the live
+stream, and the service added it to `GET /sessions/{id}/messages` for one stated reason: without it
+"a reload was the one path on which a result stopped being reachable". `result` is 400 characters of
+prose _about_ the data; the bytes are behind `GET /sessions/{id}/tool-results/{ref}`.
+
+This repo's `TranscriptToolCall` did not declare it and `state/transcript.ts` did not carry it, so
+after a reload `ResultBlock` under the answer and the trace panel's "full result" — both of which
+gate on `toolCall.resultRef` — silently disappeared, leaving rows that looked exactly like calls
+whose results were never stored. Carried now, and only when non-empty: the service distinguishes
+"there is nothing to fetch" from "the full text is fetchable", and a control that 404s is worse
+than no control. Two cases in `tests/transcript.test.ts`.
+
+## Open: `DELETE /sessions/{id}` exists upstream and this UI never calls it
+
+Deleting a conversation here removes it from `localStorage` only; the ownership row and its stored
+messages stay. Not filed as a defect because it may be the intended posture — a transcript is a
+record — but the two halves should agree deliberately rather than by omission. The route is not in
+the BFF whitelist either, so adopting it is a whitelist entry plus a confirmation dialog that says
+which of the two erasures it performs.
 
 ## Known gaps in the UI rebuild
 

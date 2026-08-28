@@ -140,18 +140,27 @@ async function orEmpty<T>(route: string, load: () => Promise<T[]>): Promise<T[]>
 /**
  * One of the caller's sessions, as `GET /sessions` lists them.
  *
- * There is deliberately no `title`. It was declared optional with a note that the service does not
- * send one and that whoever removed it should fix the sidebar's copy in the same commit — this is
- * that commit. The title is now recovered from the transcript when the conversation is opened
- * (`chatStore.hydrateTranscript`), so the placeholder is genuinely temporary rather than
- * permanent, and an optional field nobody can ever populate is gone.
+ * `title` and `updated_at` are the fix ISSUES.md Issue 4 asked for, and the service has shipped
+ * them. This type carried neither for a release afterwards, so both crossed the wire and were
+ * dropped here — the sidebar labelled every unopened restored conversation "Earlier conversation"
+ * under a code comment asserting, in the present tense, that the server had never sent a name.
  *
- * `created_at` is when the session was *started*, not its last activity. Sorting a conversation
- * list by it is wrong and the sidebar does not; see ISSUES.md.
+ * All three of the optional fields are optional for one reason: a service that predates them omits
+ * them, and the degradation for each is stated where it is applied (`Sidebar.tsx`).
+ *
+ * `created_at` is when the session was *started*; `updated_at` is its newest stored message. A
+ * conversation list is ordered by the second — "what have I been working on" rather than "what did
+ * I once open".
  */
 export interface SessionSummary {
   session_id: string;
   created_at?: string;
+  /** The newest `session_messages` row. Falls back to `created_at` when absent. */
+  updated_at?: string;
+  /** The session's name, derived server-side from its first user message. `null` means the
+   *  session's first turn predates the field — distinguishable from an empty name, and only one
+   *  of those is worth reporting. */
+  title?: string | null;
 }
 
 /** One tool call as the transcript records it. `arguments` and `result` are truncated server-side
@@ -160,6 +169,21 @@ export interface TranscriptToolCall {
   tool: string;
   arguments: string;
   result: string | null;
+  /**
+   * The handle the full result is fetchable by — the same one `ToolResultEvent.result_ref` carries
+   * on the live stream, resolving through `GET /sessions/{id}/tool-results/{ref}`.
+   *
+   * The service added it to this route because without it "a reload was the one path on which a
+   * result stopped being reachable": `result` is 400 characters of prose *about* the data, and the
+   * bytes live in `tool_result_blobs`. Three states, and the surface acts differently on each —
+   * `result === null` is "ran, ending unknown"; `result` set with an empty ref is "these 400
+   * characters are all there is", because the bytes were never stored or retention has swept them;
+   * `result` set with a ref is "the full text is fetchable now".
+   *
+   * Optional here rather than defaulted, so a service that predates the field reads as the middle
+   * state instead of as a ref that will 404.
+   */
+  result_ref?: string;
 }
 
 export interface TranscriptMessage {

@@ -27,6 +27,48 @@ const firstAssistant = (remote: TranscriptMessage[]): AssistantMessage => {
 };
 
 describe('transcriptToMessages', () => {
+  it('carries a stored call’s result_ref, which is the only way back to the full result', () => {
+    // `TranscriptToolCall.result_ref` is the same handle `ToolResultEvent.result_ref` carries live,
+    // and the service added it to this route for one stated reason: without it "a reload was the
+    // one path on which a result stopped being reachable". `result` is 400 characters of prose
+    // about the data; the bytes are behind `GET /sessions/{id}/tool-results/{ref}`.
+    //
+    // Dropped here, a rehydrated conversation loses `ResultBlock` under the answer AND the trace
+    // panel's "full result" affordance — both gate on `toolCall.resultRef` — and does so silently:
+    // the row still renders, with the preview, looking exactly like a call whose result was never
+    // stored.
+    const ref = 'a'.repeat(64);
+    const assistant = firstAssistant([
+      message({
+        role: 'assistant',
+        text: 'Two structural alerts.',
+        tool_calls: [
+          {
+            tool: 'screen_hazards',
+            arguments: '{"smiles":"CCO"}',
+            result: '{"flags":',
+            result_ref: ref,
+          },
+        ],
+      }),
+    ]);
+    expect(assistant.trace[0]?.toolCall?.resultRef).toBe(ref);
+  });
+
+  it('leaves resultRef absent when the service says there is nothing to fetch', () => {
+    // The middle of the service's three states: a result exists, and only these 400 characters of
+    // it — the bytes were never stored or retention has swept them. An empty string must not
+    // become a ref, or every rehydrated call would render a control that 404s.
+    const assistant = firstAssistant([
+      message({
+        role: 'assistant',
+        text: 'Done.',
+        tool_calls: [{ tool: 'predict_pka', arguments: '{}', result: 'pKa 9.2', result_ref: '' }],
+      }),
+    ]);
+    expect(assistant.trace[0]?.toolCall).not.toHaveProperty('resultRef');
+  });
+
   it('carries the tool calls of a stored message into its trace', () => {
     const assistant = firstAssistant([
       message({

@@ -74,21 +74,35 @@ function useServerSessions(): 'idle' | 'degraded' {
         useChatStore.setState((s) => {
           const next = { ...s.conversations };
           const ids: string[] = [];
+          // An unparseable timestamp is not a timestamp. `Date.parse` answers NaN, and a NaN in
+          // `updatedAt` sorts unpredictably and renders as "Invalid Date" — so each falls through
+          // to the next thing that is actually a time.
+          const time = (value: string | undefined, fallback: number): number => {
+            const parsed = value ? Date.parse(value) : NaN;
+            return Number.isFinite(parsed) ? parsed : fallback;
+          };
           for (const summary of additions) {
-            const created = summary.created_at ? Date.parse(summary.created_at) : Date.now();
+            const created = time(summary.created_at, Date.now());
+            // `updated_at` is the newest stored message; `created_at` is when the session was
+            // started. Ordering and the recency column both read this one, so the fallback matters
+            // only against a service that predates the field — where start time is the only time
+            // there is.
+            const updated = time(summary.updated_at, created);
             const conversation = {
               ...newConversation(),
               sessionId: summary.session_id,
-              // A placeholder with a short life now: opening this conversation reads its
-              // transcript, and `hydrateTranscript` renames it from the first thing that was
-              // actually asked. It used to be `summary.title?.trim() || …`, which looked like it
-              // was preferring a server-supplied name — the server has never sent one, so the
-              // guard was decoration in front of a constant.
-              title: 'Earlier conversation',
+              // The service names a session from its first user message at write time, which is
+              // the same rule `hydrateTranscript` applies locally when the conversation is opened.
+              // The placeholder is what is left when it cannot: `null` for a session whose first
+              // turn predates the field, absent from a service that predates it entirely. That
+              // used to be the only outcome — this comment claimed the server had never sent a
+              // name while it was sending one — and ten restored conversations were ten identical
+              // rows until nine had been clicked.
+              title: summary.title?.trim() || 'Earlier conversation',
               createdAt: created,
               // Was left at Date.now() from newConversation(), so every conversation restored
               // from the server read "just now" — the one thing a timestamp exists to deny.
-              updatedAt: created,
+              updatedAt: updated,
               // The backend has a transcript for this one, so the rehydrate effect should read it.
               sessionOrigin: 'server' as const,
             };

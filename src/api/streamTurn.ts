@@ -76,13 +76,15 @@ export interface StreamTurnOptions {
    */
   onCorrelationId?: (correlationId: string) => void;
   /**
-   * The service has taken this turn: the POST came back 2xx and the event stream is open.
+   * The service has taken this turn: the POST was answered `2xx`.
    *
    * Called at most once, and the caller needs it because *nothing else here distinguishes a turn
-   * that is running on the server from one that was never sent*. Everything before this line — the
-   * token, the request, the response headers, the content type — is pre-flight, and a failure in
-   * it means the service has no turn to finish. `sendMessage` gates detach recovery on this rather
-   * than on the error's kind; see the comment there.
+   * that is running on the server from one that never started*. `token_unavailable` above names
+   * the one pre-flight failure that has its own kind; everything else that can go wrong before
+   * this line — and everything `sendMessage` itself can throw while setting the turn up — reaches
+   * its outer catch as a bare error and is wrapped as `stream`, which is the kind that means "the
+   * turn may still be running, poll for it". This is the fact that tells those apart, and
+   * `sendMessage` gates detach recovery on it rather than on the kind; see the comment there.
    */
   onAccepted?: () => void;
   /**
@@ -111,7 +113,25 @@ export interface StreamTurnOptions {
  * Never retries internally — see the module docstring.
  */
 export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> {
-  const token = await opts.getToken();
+  let token: string | null;
+  try {
+    token = await opts.getToken();
+  } catch (err) {
+    // The provider itself failed before any request was opened — `msalAuth.getAccessToken`
+    // deliberately rethrows a silent-refresh failure that is not `InteractionRequiredAuthError`
+    // rather than resolving it, precisely so a network blip does not force a sign-in redirect.
+    // Left uncaught, this used to escape as a bare, non-`ApiError` rejection that `sendMessage`'s
+    // outer catch could only wrap as `kind: 'stream'` — the same kind a mid-turn disconnect gets
+    // — which sent a turn that never reached the network into the ten-minute "the turn may still
+    // be running server-side" recovery poll. It cannot be: `fetch` below has not been called yet.
+    if (opts.signal.aborted) throw new ApiError('aborted', 'Stopped.');
+    throw new ApiError(
+      'token_unavailable',
+      'Could not obtain a valid session token. Check your connection and try again.',
+      undefined,
+      { retryable: true },
+    );
+  }
 
   let res: Response;
   try {
@@ -141,6 +161,13 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
     );
   }
 
+  // The service answered 2xx: it has this turn, and it will run it to completion and write it to
+  // the session transcript whether or not this socket survives. Announced HERE rather than after
+  // the content-type check below, because a 200 that is not an event stream means something
+  // between us and the service swallowed the stream — the turn is still the service's, and
+  // recovery is still the right answer for it.
+  opts.onAccepted?.();
+
   // Known before the first frame, so every error below can quote it — including the ones that
   // happen when no frame ever arrives.
   let correlationId = correlationFrom(res);
@@ -165,10 +192,6 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       withReference(),
     );
   }
-
-  // Past every pre-flight check: the service answered 2xx with an event stream, so the turn is
-  // running there and will be written to the session transcript even if this socket dies.
-  opts.onAccepted?.();
 
   let answer: AnswerEvent | null = null;
 

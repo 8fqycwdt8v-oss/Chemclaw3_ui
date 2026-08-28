@@ -71,6 +71,10 @@ beforeEach(() => {
 afterEach(() => {
   restore?.();
   restore = null;
+  // Spies too, and not only in the test that installs one: a fake-timer test that times out keeps
+  // running after vitest has failed it, so its own `finally` restores the spy *during the next
+  // test*. That turned one real failure into two confusing ones while this file was being written.
+  vi.restoreAllMocks();
 });
 
 describe('sendMessage', () => {
@@ -366,38 +370,29 @@ describe('sendMessage', () => {
    * The other half of "a dropped connection is not a Stop": a turn that was never sent at all.
    *
    * Detach recovery is right for a stream that broke *after* the service took the turn, and wrong
-   * for anything that failed before it — there is no turn to recover, so the poll can only run out
-   * its clock. It used to be gated on the error's KIND, and every pre-flight failure arrives as one
-   * of the two kinds it polled on.
+   * for anything that failed before one existed — there is nothing to recover, so the poll can
+   * only run out its clock behind a banner saying the opposite of what happened.
+   *
+   * `token_unavailable` (the pair of tests above) names the one such failure that has a kind of
+   * its own. These two are about the rest of them, which have no kind at all: the catch in
+   * `sendMessage` wraps any non-`ApiError` as `stream`, the kind that means "poll for it". The
+   * first case below is the live example, and the second is the control that keeps the narrowing
+   * honest.
    */
   describe('a turn the service never accepted', () => {
-    it('fails at once instead of polling for an answer nobody is producing', async () => {
-      // A token that works for the session mint and then fails — an MSAL silent refresh timing
-      // out between two turns, which a 60-90 minute access token guarantees will happen inside a
-      // conversation. Measured before the fix: the banner read "Connection lost — the turn is
-      // still running on the server; recovering the answer…", the composer stayed locked for
-      // **630 s**, and recovery made **212** attempts at a turn that had never been POSTed.
+    it('fails at once when a setup write throws, instead of polling for a turn nobody started', async () => {
+      // `chatStore` records a `QuotaExceededError` out of `appendUserMessage` as a real class, and
+      // the five setup writes are inside the `try` precisely so it is handled. Handled meant this:
+      // measured on this tree with the acceptance flag ignored, the chemist got the banner
+      // "Connection lost — the turn is still running on the server; recovering the answer…" and
+      // **210** poll attempts over **630 s**, for a turn nothing had sent. The error the poll was
+      // hiding then surfaced anyway, ten and a half minutes late.
       vi.useFakeTimers();
       try {
-        let tokens = 0;
-        const auth: AuthProvider = {
-          mode: 'msal',
-          account: null,
-          async getAccessToken() {
-            tokens += 1;
-            if (tokens === 1) return 'good';
-            throw new Error('BrowserAuthError: monitor_window_timeout');
-          },
-          async login() {},
-          async logout() {},
-          async handleUnauthorized() {
-            return false;
-          },
-        };
         let polls = 0;
         const stub = stubFetch((url, init) => {
           if (url.endsWith('/sessions') && init?.method === 'POST') {
-            return new Response(JSON.stringify({ session_id: 'n'.repeat(32) }), {
+            return new Response(JSON.stringify({ session_id: 'q'.repeat(32) }), {
               status: 200,
               headers: { 'content-type': 'application/json' },
             });
@@ -411,8 +406,15 @@ describe('sendMessage', () => {
         restore = stub.restore;
 
         const cid = useChatStore.getState().createConversation();
-        const turn = sendMessage({ conversationId: cid, text: 'pKa?', auth });
-        // One tick is all a pre-flight failure may cost. The poll's own interval is 3 s, so
+        // A session already exists — the second message in a conversation, which is what makes the
+        // recovery branch reachable at all.
+        useChatStore.getState().setSessionId(cid, 'q'.repeat(32), false);
+        vi.spyOn(useChatStore.getState(), 'appendUserMessage').mockImplementation(() => {
+          throw new DOMException('exceeded the quota', 'QuotaExceededError');
+        });
+
+        const turn = sendMessage({ conversationId: cid, text: 'pKa?', auth: devAuth });
+        // One tick is all a failure before the stream may cost. The poll's own interval is 3 s, so
         // anything that entered recovery would still be sitting in it here.
         await vi.advanceTimersByTimeAsync(10);
         await turn;
@@ -420,10 +422,53 @@ describe('sendMessage', () => {
         expect(polls).toBe(0);
         expect(useChatStore.getState().composerLock).toBe(false);
         expect(useChatStore.getState().banner?.kind).toBe('error');
-        expect(useChatStore.getState().conversations[cid]?.messages[1]).toMatchObject({
-          role: 'assistant',
-          status: 'error',
+      } finally {
+        vi.restoreAllMocks();
+        vi.useRealTimers();
+      }
+    }, 20_000);
+
+    it('still polls when `fetch` itself rejected, because that one may have been sent', async () => {
+      // The control, and the reason the gate is not simply "accepted or nothing". A `fetch`
+      // rejection is `kind: network`, and `fetch` rejects as readily after the request bytes are
+      // on the wire as before — a dropped Wi-Fi mid-POST is exactly the case
+      // D-2026-08-27-a-disconnect-is-a-detach-not-a-stop built this recovery for. So that kind
+      // keeps its poll unconditionally, and this test fails if a later simplification folds the
+      // two kinds back together under the acceptance flag.
+      vi.useFakeTimers();
+      try {
+        let turnAttempts = 0;
+        const stub = stubFetch((url, init) => {
+          if (url.endsWith('/sessions') && init?.method === 'POST') {
+            return new Response(JSON.stringify({ session_id: 'r'.repeat(32) }), {
+              status: 200,
+              headers: { 'content-type': 'application/json' },
+            });
+          }
+          if (url.endsWith('/messages') && (init?.method ?? 'GET') === 'GET') {
+            // The detached turn's answer, committed to the transcript while the browser was away.
+            return new Response(
+              JSON.stringify([
+                { role: 'user', text: 'pKa?' },
+                { role: 'assistant', text: 'recovered answer' },
+              ]),
+              { status: 200, headers: { 'content-type': 'application/json' } },
+            );
+          }
+          turnAttempts += 1;
+          return Promise.reject(new TypeError('Failed to fetch'));
         });
+        restore = stub.restore;
+
+        const cid = useChatStore.getState().createConversation();
+        const turn = sendMessage({ conversationId: cid, text: 'pKa?', auth: devAuth });
+        await vi.advanceTimersByTimeAsync(10_000);
+        await turn;
+
+        expect(turnAttempts).toBe(1);
+        const message = useChatStore.getState().conversations[cid]?.messages[1];
+        expect(message).toMatchObject({ role: 'assistant', status: 'done' });
+        expect(message && 'finalText' in message && message.finalText).toBe('recovered answer');
       } finally {
         vi.useRealTimers();
       }
@@ -501,6 +546,86 @@ describe('sendMessage', () => {
         'second answer',
       );
     }, 20_000);
+  });
+
+  /**
+   * A hard token-acquisition failure — `msalAuth.getAccessToken` rethrowing something other than
+   * `InteractionRequiredAuthError` — is not a dropped connection, even though both used to reach
+   * `sendMessage`'s outer catch as a bare rejection wrapped into `kind: 'stream'`. That misreading
+   * sent a turn that was never opened into the ten-minute "the server may still be running it"
+   * recovery poll. `'token_unavailable'` (`tests/streamTurn.test.ts`, `tests/apiAuthRecovery.test.ts`)
+   * is the unit-level fix; these two are the end-to-end guarantee that `sendMessage` actually shows
+   * an immediate, retryable failure instead.
+   */
+  describe('the token provider failing before any request is opened', () => {
+    const failingAuth: AuthProvider = {
+      mode: 'msal',
+      account: null,
+      getAccessToken: () => Promise.reject(new Error('acquireTokenSilent: network is down')),
+      login: async () => undefined,
+      logout: async () => undefined,
+      handleUnauthorized: async () => false,
+    };
+
+    it('fails immediately, with no polling, when the session already exists', async () => {
+      let messagesPolled = false;
+      const stub = stubFetch((url, init) => {
+        if (url.endsWith('/sessions') && init?.method === 'POST') {
+          return new Response(JSON.stringify({ session_id: 'n'.repeat(32) }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/messages') && (init?.method ?? 'GET') === 'GET') {
+          messagesPolled = true;
+          return new Response(JSON.stringify([]), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        throw new Error('the turn stream must never be reached');
+      });
+      restore = stub.restore;
+
+      // A session that already exists, minted while `getAccessToken` still worked — the shape a
+      // second message in the same conversation has, and the one where the store's `sessionId`
+      // would make the (wrong) recovery branch look plausible if this failure were misread as a
+      // dropped connection.
+      const cid = useChatStore.getState().createConversation();
+      useChatStore.setState((s) => ({
+        conversations: {
+          ...s.conversations,
+          [cid]: { ...s.conversations[cid]!, sessionId: 'n'.repeat(32) },
+        },
+      }));
+
+      await sendMessage({ conversationId: cid, text: 'hello', auth: failingAuth });
+
+      expect(messagesPolled).toBe(false);
+      const message = useChatStore.getState().conversations[cid]?.messages[1];
+      expect(message && 'error' in message && message.error?.kind).toBe('token_unavailable');
+      const banner = useChatStore.getState().banner;
+      expect(banner?.kind).toBe('error');
+      expect(banner?.text).not.toContain('Connection lost');
+      expect(banner?.action).toBe('retry');
+      expect(useChatStore.getState().composerLock).toBe(false);
+    });
+
+    it('fails immediately when minting the very first session fails the same way', async () => {
+      const stub = stubFetch(() => {
+        throw new Error('nothing should ever be fetched');
+      });
+      restore = stub.restore;
+
+      const cid = useChatStore.getState().createConversation();
+      await sendMessage({ conversationId: cid, text: 'hello', auth: failingAuth });
+
+      expect(stub.calls).toHaveLength(0);
+      const message = useChatStore.getState().conversations[cid]?.messages[1];
+      expect(message && 'error' in message && message.error?.kind).toBe('token_unavailable');
+      expect(useChatStore.getState().banner?.action).toBe('retry');
+      expect(useChatStore.getState().composerLock).toBe(false);
+    });
   });
 
   describe('an in-stream empty_answer', () => {

@@ -81,6 +81,15 @@ export interface TraceEntry {
      */
     unresolved?: boolean;
     /**
+     * When the ending arrived, by our clock.
+     *
+     * Paired with the entry's own `at` this is the duration of the call — the one number that
+     * turns a list of tool names into a reading of where a turn's time went. Our clock and not
+     * the service's, because nothing on the wire carries one; a reloaded transcript therefore has
+     * no duration at all, which the rail renders as a dash rather than as zero.
+     */
+    endedAt?: number;
+    /**
      * Content address of the untruncated result, when the service stored one.
      *
      * Carried on the trace rather than fetched eagerly: the point of the backend's split is that
@@ -99,6 +108,25 @@ export interface TraceEntry {
      * are different facts and the second of which switches the check off.
      */
     numbers?: number[];
+    /**
+     * The same figures, each under the key the tool filed it under.
+     *
+     * Beside `numbers` rather than replacing it, because the two answer different questions: the
+     * bare list is what `provenance.ts` checks the answer's written figures against, where a name
+     * is noise, and this is what a surface *prints*, where a number with no name is not a
+     * measurement. Empty for a result that was not JSON — the service refuses to guess a label out
+     * of prose, and so does everything downstream of it.
+     */
+    values?: { label: string; value: number; unit: string }[];
+    /**
+     * The whole result, when it was small enough for the service to send with the event.
+     *
+     * An optimisation and never a presence check: `resultRef` is still what says a result was
+     * stored, and a result over the service's inline cap arrives with this empty and is fetched
+     * exactly as before. What it buys is the common case — an ICH limit, a pKa — rendering with
+     * the turn instead of paying a round trip for a payload smaller than the preview beside it.
+     */
+    resultInline?: string;
   };
   toolFailure?: {
     tool: string;
@@ -120,6 +148,22 @@ export interface TraceEntry {
    */
   evidenceSource?: { source: string; chunks: number; failed: boolean };
   /**
+   * Every source in one sweep, in the order they reported.
+   *
+   * `gather_evidence` asks all of them at once and the service reports each separately, so a
+   * five-source sweep arrives as five events. They are folded into ONE entry as they arrive, for
+   * two reasons: it is how a reader reads them — "who was asked, and what did each contribute" is
+   * one line, not five — and a row per source spends the trace's own `MAX_TRACE_ENTRIES` budget on
+   * retrieval, evicting the tool calls and results at the front of a retrieval-heavy turn.
+   *
+   * `evidenceSource` stays beside it, holding the first source of the sweep, so a trace persisted
+   * before this field existed still renders.
+   */
+  evidenceSweep?: { source: string; chunks: number; failed: boolean }[];
+  /** When the last source of the sweep reported, by our clock — so the row can say how long the
+   *  whole sweep took. Absent for a sweep of one, which took no measurable time of its own. */
+  evidenceSweepEndedAt?: number;
+  /**
    * A durable job.
    *
    * `settled` is the `job_started` row's version of `toolCall.failed`, and exists for the same
@@ -137,12 +181,14 @@ export interface TraceEntry {
     summary?: JobSummary;
     settled?: boolean;
     planStep?: string;
+    /** When the ending reached us, for the same reason `toolCall.endedAt` exists. */
+    endedAt?: number;
   };
   /** `reason` may legitimately be empty; the service does not always have one. */
   jobFailure?: { jobId: string; reason: string };
   question?: { question: string; options: string[] };
   note?: { noteId: string; reference: string };
-  approval?: { prompt: string; approvalId: string };
+  approval?: { prompt: string };
 }
 
 export interface UserMessage {
@@ -224,6 +270,19 @@ export interface AssistantMessage {
    * never as a hash that will match. Null when no plan has been seen at all.
    */
   latestPlanHash: string | null;
+  /**
+   * When the turn stopped, however it stopped — answered, aborted or failed.
+   *
+   * What makes the summary line able to say how long the turn took. Deliberately *our* clock and
+   * not the service's: nothing on the wire carries a turn duration, so this is the wait the reader
+   * actually had, which is the number they would have counted themselves.
+   *
+   * Optional rather than required, and absent on every message written before it existed — a
+   * persisted transcript is read back by this same type, and a required field would make every
+   * stored turn structurally invalid for the sake of a duration nobody recorded. Absent means
+   * "not known", and the summary simply omits the time.
+   */
+  endedAt?: number | null;
   /**
    * The service's own id for the turn that produced this message.
    *

@@ -93,13 +93,15 @@ export interface LogEntry {
    * Whatever the call site had that a reader would need.
    *
    * This said "never PII by construction: call sites pass ids, statuses and counts, never message
-   * text", and no construction enforced any of it — the type is `Record<string, unknown>` and
-   * three call sites pass a free-form string today: `ErrorBoundary` sends `error.message`, and
-   * `main.tsx` sends `String(reason)` and `event.message` from the two global handlers. Those
-   * strings come from wherever the throw did, so an entry *can* carry text this rule says it
-   * cannot. Deleting the claim rather than the fields is deliberate: an unhandled rejection with
-   * its message removed is a log line that says something broke and refuses to say what, which is
-   * the state this module was written to end.
+   * text", and no construction enforced any of it — the type is `Record<string, unknown>`, and
+   * every call site that reports a *thrown* error passes that error's own message: `ErrorBoundary`
+   * (`error.message`), both global handlers in `main.tsx` (`String(reason)`, `event.message`), and
+   * `api/client.ts` (`auth.token_acquisition_failed`). Those strings come from wherever the throw
+   * did, so an entry *can* carry text this rule says it cannot — and the set grows whenever
+   * somebody reports a new failure, which is the other reason the claim could not hold. Deleting
+   * it rather than the fields is deliberate: an unhandled rejection with its message removed is a
+   * log line that says something broke and refuses to say what, which is the state this module was
+   * written to end.
    *
    * What is true is a convention, and it is on the call site: pass ids, statuses, counts and
    * enumerable reasons; never the transcript, a draft, a token, a cookie or an address. Whatever

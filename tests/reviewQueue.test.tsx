@@ -88,7 +88,7 @@ function serve(): void {
         headers: { 'content-type': 'application/json' },
       });
     }
-    // /approvals and anything else.
+    // Anything else.
     return new Response(JSON.stringify([]), {
       status: 200,
       headers: { 'content-type': 'application/json' },

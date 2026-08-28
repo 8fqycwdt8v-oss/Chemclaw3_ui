@@ -204,7 +204,7 @@ describe('the trace panel footer', () => {
     );
     // The panel is collapsed by default and Radix does not render its content until it opens, so
     // the footer sits behind the same disclosure as the rest of the working.
-    fireEvent.click(view.getByRole('button', { name: /Show the agent/ }));
+    fireEvent.click(view.getByRole('button', { name: /The agent’s work/ }));
     expect(view.getByText(/Reference corr-shown/)).toBeTruthy();
   });
 
@@ -212,7 +212,7 @@ describe('the trace panel footer', () => {
     const view = render(
       <TracePanel trace={[{ id: 't1', at: 0, kind: 'plan', plan: { todos: ['x'] } }]} />,
     );
-    fireEvent.click(view.getByRole('button', { name: /Show the agent/ }));
+    fireEvent.click(view.getByRole('button', { name: /The agent’s work/ }));
     expect(view.queryByText(/Reference/)).toBeNull();
   });
 });

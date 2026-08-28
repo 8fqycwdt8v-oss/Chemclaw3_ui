@@ -4,7 +4,7 @@
  * Endpoints verified against 8fqycwdt8v-oss/Chemclaw3 (`src/chemclaw/api/routes/`).
  *
  * Two policies live here and are worth telling apart, because the difference is not stylistic.
- * The *list* routes — sessions, transcripts, approvals — swallow a 404 into an empty result, so
+ * The *list* routes — sessions, transcripts, proposals — swallow a 404 into an empty result, so
  * this UI runs against an older service with a smaller sidebar rather than a banner. The *fetch*
  * routes — one tool result, one note — do not, because nothing calls them speculatively: the
  * affordance only exists when the turn said the thing exists, so a 404 there is a real fault and
@@ -26,8 +26,8 @@ import { ApiError, CORRELATION_HEADER, errorFromStatus, readFailure } from './er
  *
  * Before this union, `handleUnauthorized` had exactly one caller in the whole app
  * (`state/sendMessage.ts`, the turn path). Every other route — the conversation list, the
- * transcript, the review queue, the jobs panel, the approvals inbox, plan decisions, attachment
- * upload, and both detail fetches — surfaced "Your session has expired. Please sign in again." with
+ * transcript, the review queue, the jobs panel, plan decisions, attachment upload, and both
+ * detail fetches — surfaced "Your session has expired. Please sign in again." with
  * no way to act on it. Widening the parameter rather than threading a second argument through
  * eighteen signatures is what makes the recovery uniform: `request` below asks once, and every
  * route inherits it.
@@ -50,7 +50,27 @@ export const recoverFrom = async (auth: TokenGetter): Promise<boolean> =>
   typeof auth === 'function' ? false : auth.handleUnauthorized();
 
 async function send(path: string, auth: TokenGetter, init: RequestInit): Promise<Response> {
-  const token = await tokenFrom(auth);
+  let token: string | null;
+  try {
+    token = await tokenFrom(auth);
+  } catch (err) {
+    // The provider failed before any request was opened — `msalAuth.getAccessToken` rethrows a
+    // silent-refresh failure that is not `InteractionRequiredAuthError` rather than resolving it,
+    // so a network blip does not force a sign-in redirect. Left uncaught, this reached every
+    // caller of `request` (session creation among them) as a bare, non-`ApiError` rejection —
+    // which `sendMessage`'s outer catch could only classify as `kind: 'stream'`, the same kind a
+    // genuinely detached turn gets, sending a request that was never sent into a ten-minute poll
+    // of a session transcript for an answer that can never land there.
+    logger.warn('auth.token_acquisition_failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    throw new ApiError(
+      'token_unavailable',
+      'Could not obtain a valid session token. Check your connection and try again.',
+      undefined,
+      { retryable: true },
+    );
+  }
   try {
     return await fetch(`${config.apiBase}${path}`, {
       ...init,
@@ -167,21 +187,13 @@ export interface AttachmentSummary {
   excerpt: string;
 }
 
-export interface PendingApproval {
-  approval_id?: string;
-  /** What the agent asked, so an inbox row is readable without opening it. */
-  question?: string;
-  requested_by?: string;
-  [key: string]: unknown;
-}
-
 /**
  * One knowledge note waiting to enter the graph, as the PR gate records it.
  *
- * Not to be confused with `PendingApproval` despite the shape: an approval is a Temporal
- * interaction hold answered mid-turn, a proposal is machine-written knowledge waiting for a human
- * to sign it into the record. The service calls the gate "the line that makes machine-written
- * knowledge safe"; these are the things standing on it.
+ * The service calls the gate "the line that makes machine-written knowledge safe"; these are the
+ * things standing on it. Deciding one commits or refuses bytes in a repository, which is why the
+ * decision route is role-gated upstream and why the reviewer is shown the file rather than a
+ * summary of it.
  */
 export interface ProposalSummary {
   id: number;
@@ -481,21 +493,6 @@ export const api = {
       `/notes/${encodeURIComponent(noteId)}?hops=${encodeURIComponent(String(hops))}`,
       getToken,
     );
-  },
-
-  /** Pending approvals. Degrades to `[]` like `listSessions` — a service whose approval routes
-   *  are missing answers 404, and an empty inbox is the honest reading of that. */
-  listApprovals(getToken: TokenGetter): Promise<PendingApproval[]> {
-    return orEmpty('/approvals', () => request<PendingApproval[]>('/approvals', getToken));
-  },
-
-  /** Deliver the human Yes/No to a durable approval hold. Deliberately an HTTP route on the
-   *  backend and not an agent tool — the agent proposes, a human signs off. */
-  decideApproval(approvalId: string, approved: boolean, getToken: TokenGetter): Promise<void> {
-    return request<void>(`/approvals/${encodeURIComponent(approvalId)}/decision`, getToken, {
-      method: 'POST',
-      body: JSON.stringify({ approved }),
-    });
   },
 
   /**

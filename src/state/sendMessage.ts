@@ -184,17 +184,19 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   let messageId = '';
 
   /**
-   * Whether the service took this turn — the POST was answered 2xx and the stream opened.
+   * Whether the service took this turn — the POST was answered `2xx`.
    *
-   * The one fact detach recovery may be gated on, and the reason it is a flag rather than an error
-   * kind is measured. Recovery used to run for `stream` and `network`, and everything that goes
-   * wrong *before* the request is sent arrives as one of those two: a `getToken()` that throws is
-   * not an `ApiError`, so the catch below wrapped it as `stream`, and `stream` is documented as
-   * "plausibly recoverable by polling the session transcript". Driven with an MSAL silent refresh
-   * that fails between two turns — a real class, and the one a 60-90 minute token guarantees — the
-   * chemist got the banner "Connection lost — the turn is still running on the server; recovering
-   * the answer…", a composer locked for **630 seconds**, and **212** poll attempts, for a turn the
-   * service had never heard of. The failure then surfaced anyway, ten and a half minutes late.
+   * The fact detach recovery is gated on, rather than the error's kind, and it composes with
+   * `token_unavailable` rather than duplicating it. That kind (`src/api/errors.ts`) names the one
+   * pre-flight failure that has a classification of its own: the auth provider refusing to produce
+   * a token. What it cannot name is everything else that fails before the stream exists, because
+   * those failures have no kind — the catch below wraps any non-`ApiError` as `stream`, which is
+   * documented as "plausibly recoverable by polling the session transcript", and it is not. The
+   * five setup writes at the top of the `try` are the live example: `chatStore` records a
+   * `QuotaExceededError` from `appendUserMessage`, and with a session already minted that threw a
+   * chemist into the banner "Connection lost — the turn is still running on the server; recovering
+   * the answer…" with the composer locked, for a turn nothing had sent. Measured on the merged
+   * tree with this flag ignored: **630 s** and **210** poll attempts; with it, one tick.
    */
   let turnAccepted = false;
 
@@ -445,11 +447,20 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // *recoverable* state — the answer will land in the session transcript. Poll it back rather
     // than surfacing a dead-end banner for work that is still happening.
     //
-    // Only for a turn the service actually accepted, though: see `turnAccepted`. A failure the
-    // request never survived leaves nothing to recover, and polling for it costs the chemist ten
-    // and a half minutes of a locked composer and a banner that says the opposite of what
-    // happened.
-    if (turnAccepted && (apiError.kind === 'stream' || apiError.kind === 'network')) {
+    // The two kinds are gated differently because they are different claims, and reading them as
+    // one is what sent turns that never existed into a ten-minute poll:
+    //
+    //  - `network` is `fetch` itself rejecting, which happens as readily *after* the request bytes
+    //    are on the wire as before. Whether the service got it is genuinely unknowable from here,
+    //    and a dropped Wi-Fi mid-POST is the case detach recovery was built for, so it keeps its
+    //    poll unconditionally.
+    //  - `stream` is only ever a real claim about a running turn when a stream actually existed.
+    //    It is also the kind the catch above stamps on any non-`ApiError`, including one thrown by
+    //    this function's own setup writes — for which there is nothing to recover and nothing to
+    //    wait for. `turnAccepted` is what tells those apart; see its docstring.
+    const mayStillBeRunning =
+      apiError.kind === 'network' || (turnAccepted && apiError.kind === 'stream');
+    if (mayStillBeRunning) {
       const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
       if (sessionId) {
         useChatStore.getState().setBanner({

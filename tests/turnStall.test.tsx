@@ -140,7 +140,9 @@ describe('what the reader is told', () => {
     const view = render(<MessageList conversationId={cid} />);
     expect(view.getByText(/no activity for 90 s/)).toBeTruthy();
     // The turn is still running and still says so: this qualifies the wait, it does not end it.
-    expect(view.getByText('Thinking…')).toBeTruthy();
+    // The sentence is the activity row's now rather than a fixed "Thinking…", and it is the row
+    // this notice hangs off — a stall note with no statement of what is stalled says nothing.
+    expect(view.getByText('Thinking')).toBeTruthy();
 
     act(() => useChatStore.getState().setTurnStalled(cid, mid, false));
     expect(screen.queryByText(/no activity for 90 s/)).toBeNull();

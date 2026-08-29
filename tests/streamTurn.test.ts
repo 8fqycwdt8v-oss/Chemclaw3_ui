@@ -69,6 +69,25 @@ describe('streamTurn', () => {
     expect(answerText).toBe('Partial work.');
   });
 
+  it('keeps reading past a spend-cap error too, for the same reason', async () => {
+    // `loop_cap_reached`'s sibling in the unit that costs money: the backend bounds a turn's
+    // billed tokens as well as its iterations, and both guards stop a turn that has been
+    // streaming all along. A separate case rather than a parametrisation of the one above,
+    // because what is being asserted is precisely that `PARTIAL_ANSWER_CODES` has *both* — the
+    // failure this guards against is a new backend code arriving and nobody adding it here, and
+    // the cost of that is the partial answer lost from the screen and from the transcript.
+    const { events, answerText } = await collect(
+      sseFrames([
+        { type: 'token', text: 'Partial ' },
+        errorEvent({ code: 'spend_cap_reached', message: 'reached its 1,000,000-token budget' }),
+        { type: 'token', text: 'work.' },
+        answerEvent({ text: 'Partial work.' }),
+      ]),
+    );
+    expect(events.map((e) => e.type)).toEqual(['token', 'error', 'token', 'answer']);
+    expect(answerText).toBe('Partial work.');
+  });
+
   it('still ends the turn on every other error code', async () => {
     // The exception is one code, not a general softening. A `turn_timeout` or an `internal` has no
     // answer behind it, and reading on would hang until the stream closed.

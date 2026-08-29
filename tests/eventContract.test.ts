@@ -192,18 +192,31 @@ describe('the event contract carries every field of every member', () => {
  * `Chemclaw3`'s `tests/test_event_contract.py`, which fails on the side that makes the change and
  * names this file.
  */
+/**
+ * `shared/events.ts` parsed with the TypeScript compiler API — the same compiler that type-checks
+ * it, so there is no second idea of what the file says.
+ *
+ * One helper because two describe blocks below read different things out of the same file (the
+ * `ChemclawEvent` members' fields, and the `ErrorCode` union's literals). Two *walkers* are right —
+ * they extract genuinely different properties — but two *parsers* would be two copies of the
+ * cwd-relative-path decision, and the second copy would silently re-derive a choice the first one
+ * documents.
+ *
+ * Repo-root relative, as `tests/delivery.test.ts` reads the Jenkinsfile: vitest runs from the root,
+ * and `import.meta.url` is not a file: URL under this environment.
+ */
+const eventsSource = (): ts.SourceFile =>
+  ts.createSourceFile(
+    'shared/events.ts',
+    readFileSync('shared/events.ts', 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+
 describe('the fixture is checked against the declarations, not trusted', () => {
   /** Every member of `ChemclawEvent`, as `discriminator -> declared field names`. */
   const declared = (): Map<string, Set<string>> => {
-    // Repo-root relative, as `tests/delivery.test.ts` reads the Jenkinsfile: vitest runs from the
-    // root, and `import.meta.url` is not a file: URL under this environment.
-    const file = 'shared/events.ts';
-    const source = ts.createSourceFile(
-      file,
-      readFileSync(file, 'utf8'),
-      ts.ScriptTarget.Latest,
-      true,
-    );
+    const source = eventsSource();
 
     const interfaces = new Map<string, ts.InterfaceDeclaration>();
     let union: ts.TypeAliasDeclaration | undefined;
@@ -273,4 +286,86 @@ describe('the fixture is checked against the declarations, not trusted', () => {
       ).toEqual([]);
     },
   );
+});
+
+/**
+ * `ErrorCode` (the type) and `ERROR_CODES` (the runtime set) are two hand-maintained lists of the
+ * same vocabulary, and nothing bound them to each other.
+ *
+ * **What the drift costs is specific, not cosmetic.** `normalizeEvent` gates on `ERROR_CODES` and
+ * maps anything absent to `internal`. So a code added to the union and forgotten in the set does
+ * not merely lose its copy — it arrives as `internal`, which is **not** in
+ * `PARTIAL_ANSWER_CODES`, so `streamTurn` treats it as terminal and throws. That runs the
+ * `finally`, whose `reader.cancel()` the BFF turns into a destroyed upstream request and FastAPI
+ * into a client disconnect: the backend's turn is cancelled before it records the transcript, and
+ * the partial answer is lost from the screen *and* from the stored conversation.
+ *
+ * That is exactly the failure `spend_cap_reached` was added to `PARTIAL_ANSWER_CODES` to prevent,
+ * reachable again through a one-line omission in a different file. Both lists happened to be
+ * updated together when that code arrived; nothing would have noticed if they had not been.
+ *
+ * Parsed with the compiler API rather than imported, because the *type* has no runtime existence —
+ * importing `ERROR_CODES` proves only what the set holds, and the union is the half a reader edits
+ * first.
+ */
+describe('the error-code union and its runtime set are one vocabulary', () => {
+  /** The `ErrorCode` union's string members, read off the declaration. */
+  const unionMembers = (): Set<string> => {
+    const file = eventsSource();
+    for (const statement of file.statements) {
+      if (!ts.isTypeAliasDeclaration(statement) || statement.name.text !== 'ErrorCode') continue;
+      if (!ts.isUnionTypeNode(statement.type)) {
+        throw new Error('ErrorCode is no longer a union; this check needs updating');
+      }
+      const members = new Set<string>();
+      for (const node of statement.type.types) {
+        // **Loud on anything that is not a string literal, rather than skipping it.** A `continue`
+        // here reads as harmless and is the one thing that would quietly hollow this test out: an
+        // ordinary refactor — extracting three codes into `type TimeoutCode = 'a' | 'b' | 'c'` and
+        // writing `ErrorCode = 'internal' | TimeoutCode | …` — leaves the alias unresolved, so
+        // those three go unchecked while the test still passes. That is precisely the change a
+        // maintainer reaches for when adding a `PartialAnswerCode` alias, i.e. the moment this
+        // check matters most.
+        //
+        // Resolving type references would mean a type *checker* rather than a parse, and the
+        // cheaper honest answer is to refuse: whoever writes that alias sees this message and
+        // teaches the test about it deliberately.
+        if (!ts.isLiteralTypeNode(node) || !ts.isStringLiteral(node.literal)) {
+          throw new Error(
+            `ErrorCode member \`${node.getText(file)}\` is not a string literal, so this check ` +
+              'cannot see the codes behind it. Inline it, or teach unionMembers to resolve it — ' +
+              'silently skipping it would leave those codes unverified.',
+          );
+        }
+        members.add(node.literal.text);
+      }
+      return members;
+    }
+    throw new Error('no ErrorCode declaration found in shared/events.ts');
+  };
+
+  it('every code the type declares is one the normaliser will actually accept', () => {
+    const declared = unionMembers();
+    expect(declared.size).toBeGreaterThan(5);
+
+    // Round-tripped through `normalizeEvent` rather than compared against an imported constant:
+    // what matters is not that two lists match but that a declared code *survives normalisation*,
+    // which is the property the failure above turns on.
+    for (const code of declared) {
+      const event = normalizeEvent({
+        type: 'error',
+        message: 'x',
+        code,
+        retryable: false,
+        correlation_id: 'c1',
+      });
+      expect(event, `normalizeEvent dropped the ${code} event entirely`).not.toBeNull();
+      expect(
+        (event as { code: string }).code,
+        `'${code}' is declared in the ErrorCode union but missing from ERROR_CODES, so it ` +
+          `normalises to 'internal' — and 'internal' is not in PARTIAL_ANSWER_CODES, so a turn ` +
+          `carrying it would be cancelled and its partial answer lost`,
+      ).toBe(code);
+    }
+  });
 });

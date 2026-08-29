@@ -576,6 +576,246 @@ function StructureHits({ data, tool, compact, onUsed }: ResultViewProps): React.
   );
 }
 
+/* ── The experiment protocol ──────────────────────────────────────────────────
+ *
+ * `draft_experiment_protocol`, `structure_experiment_request` and `read_experiment_protocol` all
+ * return a `ProtocolReceipt` (`shared/protocols.ts`). It is the only tool result in this app that
+ * is a *pointer at a document a human will edit* rather than a reading to consult, which changes
+ * two things about how it is drawn.
+ *
+ * **The card is never the protocol.** `arms` is capped by the service and `arms_omitted` says by
+ * how much; the whole design lives at `/protocols/{design_id}`, and the link is part of the result
+ * rather than a nicety, because a chemist who acts on the four arms a compact card shows when the
+ * design has ninety-six has been misled by it.
+ *
+ * **A check list read as "clean" is the dangerous reading**, exactly as an empty hazard table is.
+ * Checks are structural — they know the document, not the chemistry — so the caveat saying so is
+ * pinned whether or not anything failed, and the compact card keeps it while dropping rows.
+ */
+
+/**
+ * What the receipt says about itself, as a count and a state.
+ *
+ * One function, read by the registry's header chip and by the card's own strip, so the two cannot
+ * word the same fact differently. Deliberately a count rather than a judgement: `blocking` is the
+ * service's own subset of failed checks that stop execution, and `passed === false` is a check that
+ * failed without necessarily blocking — collapsing them would either alarm on a note or stay quiet
+ * on a blocker.
+ *
+ * The fourth state is the one the three-way rule does not name and this document can reach: a
+ * receipt with **no checks at all** — an older service, or a design checked by nothing. "All checks
+ * passed" over zero checks is a clearance nobody issued, so it is neutral and says what it is. Same
+ * argument as the campaign renderer's withheld plateau verdict.
+ */
+function protocolVerdict(data: Json): {
+  text: string;
+  tone: 'neutral' | 'ok' | 'warn' | 'danger';
+} {
+  const blocking = strings(data.blocking);
+  if (blocking.length > 0) {
+    return { text: `${blocking.length} blocking`, tone: 'danger' };
+  }
+  const checks = rows(data.checks);
+  const failed = checks.filter((check) => check.passed === false);
+  if (failed.length > 0) {
+    return { text: `${failed.length} of ${checks.length} failed`, tone: 'warn' };
+  }
+  if (checks.length === 0) return { text: 'no checks recorded', tone: 'neutral' };
+  return { text: `${checks.length} checks passed`, tone: 'ok' };
+}
+
+/**
+ * Check severity is an ordered vocabulary upstream, and the tone has to preserve the order.
+ *
+ * Exported because the document view draws the same checks in the same three tones, and a second
+ * copy of this map is a second answer to "how serious is a warning" — the shape `SEVERITY_TONE`
+ * above already has one caller too many for comfort.
+ */
+export const CHECK_TONE: Record<string, 'danger' | 'warn' | 'neutral'> = {
+  blocker: 'danger',
+  warning: 'warn',
+  note: 'neutral',
+};
+
+/** One arm as a flat record — what the CSV writes and what the table reads, derived once. */
+function armRecords(data: Json, factorNames: string[]): Json[] {
+  return rows(data.arms).map((arm) => {
+    const levels = isObject(arm.levels) ? arm.levels : {};
+    const named: Json = {};
+    for (const name of factorNames) named[name] = str(levels[name]);
+    return {
+      arm: str(arm.arm_id),
+      well: str(arm.well),
+      run_order: num(arm.run_order) ?? '',
+      ...named,
+      temperature_c: num(arm.temperature_c) ?? '',
+      time_h: num(arm.time_h) ?? '',
+      solvent: str(arm.solvent),
+      control: str(arm.control),
+      replicate_of: str(arm.replicate_of),
+      note: str(arm.note),
+    };
+  });
+}
+
+function ProtocolResult({ data, tool, compact }: ResultViewProps): React.JSX.Element {
+  const verdict = protocolVerdict(data);
+  const designId = str(data.design_id);
+  const checks = rows(data.checks);
+  const blocking = new Set(strings(data.blocking));
+  // Failed first, and blockers before the rest of them: a reader scanning a compact card sees the
+  // thing that stops the design before the thing that merely qualifies it.
+  const failing = checks
+    .filter((check) => check.passed === false)
+    .sort((a, b) => Number(blocking.has(str(b.check_id))) - Number(blocking.has(str(a.check_id))));
+  const shownChecks = take(failing, compact, 3);
+
+  const factorEntries = isObject(data.factors)
+    ? Object.entries(data.factors).map(([name, levels]) => ({ name, levels: strings(levels) }))
+    : [];
+  const factorNames = factorEntries.map((entry) => entry.name);
+  const records = armRecords(data, factorNames);
+  const headers = records.length > 0 ? Object.keys(records[0]!) : [];
+  const shownArms = take(records, compact, 4);
+  const omitted = num(data.arms_omitted) ?? 0;
+  const armCount = num(data.arm_count) ?? records.length;
+
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={verdict.tone}>{verdict.text}</Badge>
+        <span className="text-2xs text-ink-subtle">
+          revision {num(data.revision) ?? '—'} · {str(data.status) || 'unknown status'} · {armCount}{' '}
+          arm{armCount === 1 ? '' : 's'}
+        </span>
+      </div>
+
+      {/* Kept on the compact card, always. These checks read the document — that every factor level
+          is charged, that a plate has room for its arms — and none of them read the chemistry. A
+          card that dropped this to save a line would let "no blockers" be read as "safe to run". */}
+      <p
+        role="note"
+        className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
+      >
+        These checks are structural: they test that the document is complete and self-consistent.
+        Nothing blocking is <strong>not</strong> a finding that the experiment is safe or that it
+        will answer the question — a hazard screen and a person are what decide that.
+      </p>
+
+      {failing.length > 0 && (
+        <>
+          <Table
+            label="Checks this design did not pass"
+            headers={['Severity', 'Check', 'What it found']}
+            body={shownChecks.map((check, i) => (
+              <tr key={`${str(check.check_id)}-${i}`}>
+                <Cell>
+                  <Badge tone={CHECK_TONE[str(check.severity)] ?? 'neutral'}>
+                    {str(check.severity)}
+                    {blocking.has(str(check.check_id)) && (
+                      <span className="font-normal opacity-80">blocks</span>
+                    )}
+                  </Badge>
+                </Cell>
+                <Cell>
+                  <span className="font-mono text-2xs break-all">{str(check.check_id)}</span>
+                </Cell>
+                <Cell>{str(check.detail)}</Cell>
+              </tr>
+            ))}
+          />
+          <Trimmed shown={shownChecks.length} total={failing.length} />
+        </>
+      )}
+
+      {factorEntries.length > 0 && (
+        <div>
+          <h3 className="mb-1.5 text-2xs font-medium tracking-wide text-ink-subtle uppercase">
+            Factors
+          </h3>
+          <Table
+            label="The factors this design varies, and their levels"
+            headers={['Factor', 'Levels']}
+            body={factorEntries.map((factor) => (
+              <tr key={factor.name}>
+                <Cell>{factor.name}</Cell>
+                <Cell>
+                  <span className="flex flex-wrap gap-1">
+                    {factor.levels.map((level, i) => (
+                      <Badge key={`${level}-${i}`} tone="neutral">
+                        {level}
+                      </Badge>
+                    ))}
+                  </span>
+                </Cell>
+              </tr>
+            ))}
+          />
+        </div>
+      )}
+
+      {records.length > 0 && (
+        <div>
+          <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+            <h3 className="text-2xs font-medium tracking-wide text-ink-subtle uppercase">
+              Arms, in run order
+            </h3>
+            {/* On the compact card too, for the reason the run sheet's is: this is the table that
+                leaves the screen and goes to a bench, and a retyped run sheet is where the
+                transcription error enters a campaign. */}
+            <DownloadCsv headers={headers} records={records} name={`${tool}-${designId}`} />
+          </div>
+          <Table
+            label="The arms of this design, in run order"
+            headers={headers}
+            body={shownArms.map((record, i) => (
+              <tr key={i}>
+                {headers.map((header) => {
+                  const value = record[header];
+                  return typeof value === 'number' ? (
+                    <Cell key={header} numeric>
+                      {formatScientificNumber(value)}
+                    </Cell>
+                  ) : (
+                    <Cell key={header}>{String(value ?? '')}</Cell>
+                  );
+                })}
+              </tr>
+            ))}
+          />
+          <Trimmed shown={shownArms.length} total={records.length} />
+        </div>
+      )}
+
+      {/* Said whether or not the card trimmed anything: `Trimmed` above reports what THIS view
+          dropped, and this reports what the service dropped before the card ever saw it. Two
+          different subtractions, and a reader who only knew about the first would still be short. */}
+      {omitted > 0 && (
+        <p className="text-2xs text-ink-subtle">
+          The service sent {records.length} of {armCount} arms with this result; {omitted} more are
+          in the design itself.
+        </p>
+      )}
+
+      {designId && (
+        // A plain anchor rather than a router `Link`. This registry is a view over a payload and
+        // imports no router — which is what lets a renderer be drawn in the answer, in a portalled
+        // sheet, and in a test, without a `Routes` in the room. The target is a different top-level
+        // view, so the navigation it costs is one a reader would pay anyway.
+        <p className="text-sm">
+          <a
+            href={`/protocols/${designId}`}
+            className="text-brand-ink underline underline-offset-2 focus-ring"
+          >
+            Open the full protocol
+          </a>{' '}
+          <span className="font-mono text-2xs text-ink-subtle">{designId}</span>
+        </p>
+      )}
+    </>
+  );
+}
+
 /**
  * A run of numbers whose shape is the reading — a campaign's running best, a scan profile.
  *
@@ -1541,6 +1781,24 @@ const RENDERERS: (ResultRenderer & { matches: (tool: string, data: Json) => bool
     // not want one, which is why the fallback below is the generic table rather than this.
     matches: (tool, data) => tool === 'generate_screening_design' && !!firstRecordList(data),
     View: RunSheet,
+  },
+  {
+    id: 'protocol',
+    generic: false,
+    title: () => 'Experiment protocol',
+    wide: true,
+    summary: protocolVerdict,
+    // Shape-keyed, so a fourth protocol tool renders on the day it ships. Three fields together,
+    // because each alone is common: `design_id` alone would claim any payload naming a design,
+    // `checks` alone would claim a validation result from anything, and `summary` is on half the
+    // payloads in this app. The three together are a receipt.
+    //
+    // Above `series`/`values`/`table` deliberately. Without this entry a receipt fell through to
+    // the generic table, which found `checks` first and drew the check list as though it were the
+    // result — a design's arms, its factors and the link to the document itself all absent, with
+    // nothing on screen saying anything had been left out.
+    matches: (_tool, data) => 'design_id' in data && 'checks' in data && 'summary' in data,
+    View: ProtocolResult,
   },
   {
     id: 'series',

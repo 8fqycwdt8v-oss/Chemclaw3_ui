@@ -58,6 +58,23 @@ const JOB = "([A-Za-z0-9._:~!*'()%-]{1,128})";
  */
 const RESULT_REF = '([0-9a-f]{64})';
 
+/**
+ * An experiment design's id.
+ *
+ * As narrow as `SID` and `RESULT_REF`, and for the same reason: the service mints it as
+ * `design-` plus twelve lowercase hex characters, so the whole set is known and a segment matching
+ * it cannot contain `/`, `.` or an encoded escape. This is deliberately NOT the `NOTE`/`JOB`
+ * treatment — those are wide because their ids embed something this repo does not own (a slug the
+ * model wrote, a Temporal workflow id). A design id embeds nothing.
+ *
+ * The revision selectors (`?revision=`, `?from=`, `?to=`) are not matched here at all. This
+ * resolver is handed the pathname alone — `server/app.ts` slices the query string off, forwards it
+ * untouched and lets the service validate it — which is the same arrangement `GET /jobs` and
+ * `GET /proposals` already run under. `src/api/client.ts` coerces each to an integer before it
+ * builds the URL, so a non-integer is not a request this app can make.
+ */
+const DESIGN = '(design-[0-9a-f]{12})';
+
 export interface Route {
   method: string;
   pattern: RegExp;
@@ -202,6 +219,41 @@ export const ROUTES: readonly Route[] = [
     method: 'DELETE',
     pattern: new RegExp(`^/api/jobs/${JOB}$`),
     target: (m) => `/jobs/${m[1]}`,
+    sse: false,
+  },
+
+  // Experiment protocols — the one document in this system a human edits rather than reads.
+  //
+  // Five routes and no more. There is deliberately no DELETE: a design is retired by moving its
+  // status to `abandoned`, which is a recorded act with an author and a reason, where a delete
+  // would take the revision history of a document somebody may have run with it.
+  //
+  // A new revision is POSTed to a *collection* rather than PUT to the design, because that is what
+  // it is: revisions accumulate, and the body names the `parent_revision` it was written against
+  // so the service can refuse a write built on a revision that is no longer the head.
+  { method: 'GET', pattern: /^\/api\/protocols$/, target: () => '/protocols', sse: false },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/protocols/${DESIGN}$`),
+    target: (m) => `/protocols/${m[1]}`,
+    sse: false,
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/protocols/${DESIGN}/revisions$`),
+    target: (m) => `/protocols/${m[1]}/revisions`,
+    sse: false,
+  },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/protocols/${DESIGN}/diff$`),
+    target: (m) => `/protocols/${m[1]}/diff`,
+    sse: false,
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/protocols/${DESIGN}/status$`),
+    target: (m) => `/protocols/${m[1]}/status`,
     sse: false,
   },
 ] as const;

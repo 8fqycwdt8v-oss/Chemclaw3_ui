@@ -33,10 +33,18 @@ import type {
   PendingPlans,
   ProposalDetail,
   ProposalSummary,
+  ProtocolView,
+  RevisionWritten,
   SessionSummary,
   StoredToolResult,
   TranscriptMessage,
 } from '../src/api/client.ts';
+import type {
+  DesignDiff,
+  DesignRevision,
+  DesignSummary,
+  ProtocolReceipt,
+} from '../shared/protocols.ts';
 
 const port = Number(process.argv[2] ?? 4322);
 const SID = 'a'.repeat(32);
@@ -47,6 +55,8 @@ const RESULT_REF = 'c'.repeat(64);
 /** A second stored result, of a different SHAPE — which is what the renderer registry dispatches
  *  on, so one payload per shape is what stops a renderer shipping green and broken. */
 const VALUES_REF = 'd'.repeat(64);
+/** A third, because the protocol receipt is a third shape and shape is what the registry keys on. */
+const PROTOCOL_REF = 'e'.repeat(64);
 
 /** What `screen_hazards` actually returns, of which the streamed preview is the first 200 chars. */
 const HAZARD_RESULT = {
@@ -65,6 +75,73 @@ const HAZARD_RESULT = {
 
 /** What a property calculator returns: named scalars, no units on the wire, no record list. */
 const PKA_RESULT = { verdict: 'Most acidic site: the carboxylic acid.', pka: 4.76, sd: 1.6 };
+
+/** The design every protocol route below answers about. */
+const DESIGN_ID = 'design-0123456789ab';
+
+/**
+ * What a protocol tool returns into the conversation — a THIRD result shape in the turn.
+ *
+ * The registry dispatches on shape, so one payload per shape is what stops a renderer shipping
+ * green and broken. This one also carries a non-zero `arms_omitted`, which is the sentence that
+ * keeps the card honest: two of four arms with nothing saying so is a run sheet a chemist would
+ * work from as though it were the whole design.
+ */
+const PROTOCOL_RECEIPT: ProtocolReceipt = {
+  design_id: DESIGN_ID,
+  revision: 2,
+  title: 'Amination solvent screen',
+  mode: 'screen',
+  status: 'draft',
+  summary: '4 arms across 2 factors; 1 check did not pass.',
+  checks: [
+    {
+      check_id: 'plate-fits',
+      severity: 'blocker',
+      passed: false,
+      detail: '4 arms were laid out on a plate with 2 free wells.',
+    },
+    {
+      check_id: 'charge-complete',
+      severity: 'note',
+      passed: true,
+      detail: 'Every species charged.',
+    },
+  ],
+  blocking: ['plate-fits'],
+  factors: { solvent: ['2-MeTHF', 'CPME'], base: ['K3PO4', 'Cs2CO3'] },
+  arm_count: 4,
+  arms: [
+    {
+      arm_id: 'arm-1',
+      well: 'A1',
+      run_order: 1,
+      levels: { solvent: '2-MeTHF', base: 'K3PO4' },
+      temperature_c: 80,
+      time_h: 16,
+      solvent: '2-MeTHF',
+      control: '',
+      replicate_of: '',
+      note: '',
+    },
+    {
+      arm_id: 'arm-2',
+      well: 'A2',
+      run_order: 2,
+      levels: { solvent: 'CPME', base: 'K3PO4' },
+      temperature_c: 80,
+      time_h: 16,
+      solvent: 'CPME',
+      control: '',
+      replicate_of: '',
+      note: '',
+    },
+  ],
+  arms_omitted: 2,
+  plate_format: 24,
+  evidence_count: 1,
+  changed_paths: ['base.setpoints', 'arms'],
+};
 
 const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { 'content-type': 'application/json' });
@@ -88,9 +165,10 @@ type Frame = readonly [event: ChemclawEvent, gapMs: number];
 /**
  * The turn, in the order the backend produces it.
  *
- * Fourteen frames covering ten of the seventeen event types, where this used to carry five — and
- * two stored results of DIFFERENT SHAPES, because the renderer registry dispatches on shape and a
- * fixture carrying one payload proves one renderer. The
+ * Sixteen frames covering ten of the seventeen event types, where this used to carry five — and
+ * three stored results of DIFFERENT SHAPES, because the renderer registry dispatches on shape and
+ * a fixture carrying one payload proves one renderer. Three is also `MAX_RESULT_BLOCKS`, so this
+ * turn sits exactly on the cap the answer renders. The
  * three that were *declared and missing* are the ones that cost most: `plan.plan_hash` is what the
  * approval gate posts back, so without it the browser-level approval path was never exercised in
  * its real shape, and `agent` on `tool_call`/`tool_result` is the specialist attribution the trace
@@ -177,6 +255,31 @@ const TURN: readonly Frame[] = [
         { label: 'pka', value: 4.76, unit: '' },
         { label: 'sd', value: 1.6, unit: '' },
       ],
+      agent: '',
+    },
+    40,
+  ],
+  [
+    {
+      type: 'tool_call',
+      tool: 'draft_experiment_protocol',
+      arguments: '{"goal":"screen the amination solvent"}',
+      agent: '',
+    },
+    40,
+  ],
+  [
+    {
+      type: 'tool_result',
+      tool: 'draft_experiment_protocol',
+      preview: JSON.stringify(PROTOCOL_RECEIPT).slice(0, 200),
+      result_ref: PROTOCOL_REF,
+      // Inline, so the browser tier exercises the protocol block with no fetch at all — and the
+      // ref is still there, so "Open full result" reaches the panel behind it.
+      result_inline: JSON.stringify(PROTOCOL_RECEIPT),
+      note_ids: [],
+      numbers: [],
+      values: [],
       agent: '',
     },
     40,
@@ -303,6 +406,172 @@ const JOB: JobRecordSummary = {
   completed_at: '2026-08-01T09:00:00Z',
 };
 
+/* ── The experiment design ────────────────────────────────────────────────────
+ *
+ * Mutable across the process's life on purpose: the browser spec edits the protocol and then reads
+ * it back, and a fixture that answered with the same revision either way would let a save that
+ * wrote nothing pass. `HEAD` moves when a revision is posted.
+ */
+
+const DESIGN_SUMMARY: DesignSummary = {
+  design_id: DESIGN_ID,
+  title: 'Amination solvent screen',
+  mode: 'screen',
+  status: 'draft',
+  project: 'PRJ-4',
+  opened_by: 'chemist@example.com',
+  head_revision: 2,
+  arms: 2,
+  blockers: 1,
+  created_at: '2026-08-20T09:00:00Z',
+  updated_at: '2026-08-21T09:00:00Z',
+};
+
+/** The revision the browser edits, built at whatever number the fixture is currently on. */
+const DESIGN_REVISION = (at: number, temperature: number): DesignRevision => ({
+  design_id: DESIGN_ID,
+  revision: at,
+  kind: 'protocol',
+  author_kind: at > 2 ? 'human' : 'agent',
+  author: at > 2 ? 'chemist@example.com' : 'chemclaw',
+  parent_revision: at - 1,
+  change_note: at > 2 ? 'Raised the temperature.' : 'Drafted from the structured request.',
+  checks: PROTOCOL_RECEIPT.checks,
+  created_at: '2026-08-21T09:00:00Z',
+  design: {
+    request: {
+      title: 'Amination solvent screen',
+      goal: 'Find a solvent that keeps selectivity above 9:1.',
+      mode: 'screen',
+      reaction_smiles: '',
+      components: [
+        {
+          name_as_written: 'the aryl bromide',
+          smiles: 'Brc1ccccc1',
+          role: 'starting-material',
+          resolution: 'resolved from the corpus',
+        },
+      ],
+      objectives: ['yield', 'selectivity'],
+      // One of each basis: the three render very differently and the difference is the whole
+      // honesty story of this screen.
+      scale: { value: '250 mg', basis: 'stated', quote: 'run it on 250 mg of the bromide' },
+      plate_format: { value: '24', basis: 'inferred', quote: '' },
+      max_runs: { value: '', basis: 'absent', quote: '' },
+      deadline: { value: '', basis: 'absent', quote: '' },
+      forbidden: ['DMF'],
+      prior_work: '',
+      project: 'PRJ-4',
+      notes: '',
+    },
+    base: {
+      setpoints: {
+        temperature_c: temperature,
+        time_h: 16,
+        pressure_bar: null,
+        atmosphere: 'N2',
+        concentration_molar: 0.2,
+        solvent: '2-MeTHF',
+        ph: null,
+      },
+      charge: [
+        {
+          component: 'aryl bromide',
+          smiles: 'Brc1ccccc1',
+          role: 'starting-material',
+          equivalents: 1,
+          amount_mmol: 1.59,
+          mass_mg: 250,
+          volume_ml: null,
+          limiting: true,
+          note: '',
+        },
+      ],
+      steps: [
+        {
+          index: 0,
+          kind: 'charge',
+          text: 'Charge the vessel with the aryl bromide and the base.',
+          components: ['aryl bromide'],
+          temperature_c: null,
+          duration_h: null,
+        },
+      ],
+      analytics: [
+        { name: 'HPLC', timing: 'at 16 h', method: 'UV 254 nm', measures: ['conversion'] },
+      ],
+      in_process_controls: ['Take a sample at 4 h.'],
+      hazards: ['Aryl bromide is a lachrymator.'],
+      waste: 'Halogenated aqueous.',
+      expected: { yield_percent: 72, selectivity: '9:1', basis: 'precedent', detail: '' },
+    },
+    factors: [
+      {
+        name: 'solvent',
+        kind: 'categorical',
+        role: 'solvent',
+        unit: '',
+        levels: [
+          { label: '2-MeTHF', smiles: '', value: null, unit: '', rationale: 'green' },
+          { label: 'CPME', smiles: '', value: null, unit: '', rationale: 'higher boiling' },
+        ],
+      },
+    ],
+    arms: [
+      {
+        arm_id: 'arm-1',
+        levels: { solvent: '2-MeTHF' },
+        setpoints: null,
+        control: '',
+        replicate_of: '',
+        note: '',
+      },
+      {
+        arm_id: 'arm-ctl',
+        levels: { solvent: 'CPME' },
+        setpoints: null,
+        control: 'positive',
+        replicate_of: '',
+        note: 'Known-good conditions.',
+      },
+    ],
+    layout: {
+      plate_format: 24,
+      rows: 2,
+      columns: 2,
+      randomized: true,
+      seed: 7,
+      wells: [
+        { label: 'A1', row: 1, column: 1, arm_id: 'arm-1', run_order: 2 },
+        { label: 'B2', row: 2, column: 2, arm_id: 'arm-ctl', run_order: 1 },
+      ],
+    },
+    evidence: [
+      {
+        kind: 'precedent',
+        ref: 'note-suzuki-42',
+        tool: 'similar_reactions',
+        summary: 'A close analogue ran at 80 °C in 2-MeTHF.',
+        supports: ['base.setpoints.temperature_c'],
+      },
+    ],
+  },
+});
+
+const DESIGN_DIFF: DesignDiff = {
+  from_revision: 2,
+  to_revision: 3,
+  changes: [
+    { path: 'base.setpoints.temperature_c', kind: 'changed', before: '80', after: '100' },
+    { path: 'arms[0].note', kind: 'added', before: '', after: 'repeat if conversion stalls' },
+  ],
+};
+
+/** The head, which the browser spec moves by saving a revision. */
+let head = 2;
+/** The base temperature, so a save is visible when the document is read back. */
+let temperature = 80;
+
 const NOTE = (id: string): NoteView => ({
   note: {
     id,
@@ -342,19 +611,22 @@ createServer(async (req, res) => {
   // The untruncated result behind the ref the turn streamed.
   if (path.includes('/tool-results/') && req.method === 'GET') {
     const ref = path.split('/tool-results/')[1] ?? '';
-    if (ref !== RESULT_REF && ref !== VALUES_REF) {
-      return json(res, 404, { detail: 'unknown result' });
-    }
-    const hazard = ref === RESULT_REF;
-    const text = JSON.stringify(hazard ? HAZARD_RESULT : PKA_RESULT);
-    const stored: StoredToolResult = {
+    const stored: Record<string, { tool: string; payload: unknown }> = {
+      [RESULT_REF]: { tool: 'screen_hazards', payload: HAZARD_RESULT },
+      [VALUES_REF]: { tool: 'predict_pka', payload: PKA_RESULT },
+      [PROTOCOL_REF]: { tool: 'draft_experiment_protocol', payload: PROTOCOL_RECEIPT },
+    };
+    const found = stored[ref];
+    if (!found) return json(res, 404, { detail: 'unknown result' });
+    const text = JSON.stringify(found.payload);
+    const result: StoredToolResult = {
       ref,
-      tool: hazard ? 'screen_hazards' : 'predict_pka',
+      tool: found.tool,
       correlation_id: 'turn-e2e-1',
       byte_size: text.length,
       text,
     };
-    return json(res, 200, stored);
+    return json(res, 200, result);
   }
 
   // One knowledge note, so a citation chip resolves instead of prefilling a question.
@@ -406,6 +678,57 @@ createServer(async (req, res) => {
       rationale: 'Decide whether 2-MeTHF or CPME favours the coupling.',
     };
     return json(res, 200, status);
+  }
+
+  // Experiment protocols.
+  if (path === '/protocols' && req.method === 'GET') {
+    const designs: DesignSummary[] = [{ ...DESIGN_SUMMARY, head_revision: head }];
+    return json(res, 200, { designs });
+  }
+  if (path === `/protocols/${DESIGN_ID}` && req.method === 'GET') {
+    const asked = Number(url.searchParams.get('revision') ?? head);
+    const view: ProtocolView = {
+      revision: DESIGN_REVISION(asked, asked >= 3 ? temperature : 80),
+      history: Array.from({ length: head - 1 }, (_, i) => head - i).map((at) => ({
+        revision: at,
+        kind: 'protocol' as const,
+        author_kind: at > 2 ? ('human' as const) : ('agent' as const),
+        author: at > 2 ? 'chemist@example.com' : 'chemclaw',
+        change_note: at > 2 ? 'Raised the temperature.' : 'Drafted from the structured request.',
+        created_at: '2026-08-21T09:00:00Z',
+        blockers: 1,
+      })),
+    };
+    return json(res, 200, view);
+  }
+  if (path === `/protocols/${DESIGN_ID}/revisions` && req.method === 'POST') {
+    // Read the body: the spec asserts the edited value comes back on the next read, and a fixture
+    // that ignored what was posted would let a save that wrote nothing pass.
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => (body += chunk));
+    req.on('end', () => {
+      const posted = JSON.parse(body) as {
+        document: { base: { setpoints: { temperature_c: number | null } } };
+      };
+      temperature = posted.document.base.setpoints.temperature_c ?? temperature;
+      head += 1;
+      const written: RevisionWritten = {
+        revision: head,
+        checks: PROTOCOL_RECEIPT.checks,
+        changed_paths: ['base.setpoints.temperature_c'],
+      };
+      json(res, 200, written);
+    });
+    return;
+  }
+  if (path === `/protocols/${DESIGN_ID}/diff` && req.method === 'GET') {
+    return json(res, 200, DESIGN_DIFF);
+  }
+  if (path === `/protocols/${DESIGN_ID}/status` && req.method === 'POST') {
+    req.resume();
+    res.writeHead(204);
+    return res.end();
   }
 
   json(res, 404, { detail: 'not found' });

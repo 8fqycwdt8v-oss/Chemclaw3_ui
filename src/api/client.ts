@@ -14,6 +14,15 @@
 import { config } from '../env.ts';
 import { logger } from '../lib/logger.ts';
 import type { AuthProvider } from '../auth/types.ts';
+import type {
+  DesignDiff,
+  DesignRevision,
+  DesignStatus,
+  DesignSummary,
+  ExperimentDesign,
+  ProtocolCheck,
+  RevisionSummary,
+} from '../../shared/protocols.ts';
 import { ApiError, CORRELATION_HEADER, errorFromStatus, readFailure } from './errors.ts';
 
 /**
@@ -336,6 +345,26 @@ export interface PendingPlans {
 }
 
 /**
+ * One design at one revision, plus every revision of it — as `GET /protocols/{id}` returns them.
+ *
+ * The history rides along with the document rather than living on a route of its own, and that is
+ * what makes the revision picker free: opening a design at revision 3 already knows there is a 4,
+ * so a reader can never be looking at an old revision without the screen being able to say so.
+ */
+export interface ProtocolView {
+  revision: DesignRevision;
+  history: RevisionSummary[];
+}
+
+/** What `POST /protocols/{id}/revisions` answers with: the revision it wrote, re-checked. */
+export interface RevisionWritten {
+  revision: number;
+  /** Re-run against the saved document, so an edit that introduced a blocker says so at once. */
+  checks: ProtocolCheck[];
+  changed_paths: string[];
+}
+
+/**
  * POST one file to a session's attachment route, reporting progress.
  *
  * XHR rather than `fetch`, which is the one place in this client that deviates: `fetch` still
@@ -641,5 +670,129 @@ export const api = {
       }
       throw err;
     }
+  },
+
+  /**
+   * Experiment designs, newest activity first as the service orders them.
+   *
+   * A list route, so it degrades to `[]` on a 404 like every other one: a deployment whose service
+   * predates protocols yields a screen that says nothing is here rather than a banner about a
+   * feature that does not exist for it.
+   *
+   * The envelope is unwrapped here rather than at the caller. `{"designs": [...]}` is the service's
+   * shape and `orEmpty` is written over arrays; unwrapping inside it is what lets the 404 fold into
+   * an empty *list* instead of into an object nobody can read a length off.
+   */
+  async listProtocols(
+    getToken: TokenGetter,
+    options: { status?: DesignStatus; project?: string; limit?: number } = {},
+  ): Promise<DesignSummary[]> {
+    const query = new URLSearchParams();
+    if (options.status) query.set('status', options.status);
+    if (options.project) query.set('project', options.project);
+    // Floored to an integer: the service validates it, but a fractional or `NaN` limit is a bug on
+    // this side and sending it would get a 422 back describing the wrong problem.
+    if (options.limit !== undefined && Number.isFinite(options.limit)) {
+      query.set('limit', String(Math.trunc(options.limit)));
+    }
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    return orEmpty('/protocols', async () => {
+      const body = await request<{ designs: DesignSummary[] }>(`/protocols${suffix}`, getToken);
+      return body.designs;
+    });
+  },
+
+  /**
+   * One design — at its head, or at the revision asked for.
+   *
+   * Not swallowed. Unlike the list, this is opened by a click on a row that exists, so a 404 here
+   * is a design that vanished between the list and the open, which is a fault a reader should see
+   * rather than an empty document that looks like a design with nothing in it.
+   */
+  getProtocol(designId: string, getToken: TokenGetter, revision?: number): Promise<ProtocolView> {
+    // Coerced rather than interpolated: `revision` reaches this from a URL and from a history row,
+    // and the BFF forwards the query string untouched, so this is where it stops being arbitrary.
+    const suffix =
+      revision !== undefined && Number.isFinite(revision)
+        ? `?revision=${encodeURIComponent(String(Math.trunc(revision)))}`
+        : '';
+    return request<ProtocolView>(`/protocols/${encodeURIComponent(designId)}${suffix}`, getToken);
+  },
+
+  /**
+   * Write a new revision of a design.
+   *
+   * `parentRevision` is the revision the edit was written against and is deliberately not defaulted
+   * to "whatever the head is now" — that is the same argument `decidePlan` makes about `planHash`,
+   * and it has the same failure if it is dropped: a save that silently rebased onto somebody else's
+   * revision would discard their edit while telling this chemist theirs succeeded. The service
+   * answers 409 when it is not the head, and that is re-kinded to `revision_conflict` here, because
+   * 409 on the message route means a turn is already running and only the caller knows which route
+   * it asked.
+   *
+   * `changeNote` is required by the surface rather than by this function: a revision with no stated
+   * reason tells the next reader nothing about why the numbers moved.
+   */
+  async putProtocolRevision(
+    designId: string,
+    document: ExperimentDesign,
+    parentRevision: number,
+    changeNote: string,
+    getToken: TokenGetter,
+  ): Promise<RevisionWritten> {
+    try {
+      return await request<RevisionWritten>(
+        `/protocols/${encodeURIComponent(designId)}/revisions`,
+        getToken,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            document,
+            parent_revision: parentRevision,
+            change_note: changeNote,
+          }),
+        },
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409) {
+        throw new ApiError('revision_conflict', err.message, 409);
+      }
+      throw err;
+    }
+  },
+
+  /** What changed between two revisions. Opened by a click, so nothing is swallowed. */
+  getProtocolDiff(
+    designId: string,
+    from: number,
+    to: number,
+    getToken: TokenGetter,
+  ): Promise<DesignDiff> {
+    const query = new URLSearchParams({
+      from: String(Math.trunc(from)),
+      to: String(Math.trunc(to)),
+    });
+    return request<DesignDiff>(
+      `/protocols/${encodeURIComponent(designId)}/diff?${query.toString()}`,
+      getToken,
+    );
+  },
+
+  /**
+   * Move a design's status, with the reason recorded beside it.
+   *
+   * 204: the service records the move and returns nothing. `reason` is what makes an `abandoned`
+   * design readable a year later — it is the only field that says why a design nobody ran exists.
+   */
+  setProtocolStatus(
+    designId: string,
+    status: DesignStatus,
+    reason: string,
+    getToken: TokenGetter,
+  ): Promise<void> {
+    return request<void>(`/protocols/${encodeURIComponent(designId)}/status`, getToken, {
+      method: 'POST',
+      body: JSON.stringify({ status, reason }),
+    });
   },
 };

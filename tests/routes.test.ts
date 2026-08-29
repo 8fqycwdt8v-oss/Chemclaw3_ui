@@ -5,6 +5,8 @@ import { resolveRoute } from '../server/routes.ts';
 const SID = 'a'.repeat(32);
 /** A stored result's ref is the SHA-256 hex digest of the result text: 64 lowercase hex chars. */
 const REF = 'b'.repeat(64);
+/** A design id is `design-` plus twelve lowercase hex characters, and nothing else. */
+const DESIGN = 'design-0123456789ab';
 
 describe('proxy route whitelist', () => {
   it('resolves every route the UI actually calls', () => {
@@ -30,6 +32,11 @@ describe('proxy route whitelist', () => {
       ['GET', '/api/jobs', '/jobs'],
       ['GET', '/api/jobs/qm-7', '/jobs/qm-7'],
       ['DELETE', '/api/jobs/qm-7', '/jobs/qm-7'],
+      ['GET', '/api/protocols', '/protocols'],
+      ['GET', `/api/protocols/${DESIGN}`, `/protocols/${DESIGN}`],
+      ['POST', `/api/protocols/${DESIGN}/revisions`, `/protocols/${DESIGN}/revisions`],
+      ['GET', `/api/protocols/${DESIGN}/diff`, `/protocols/${DESIGN}/diff`],
+      ['POST', `/api/protocols/${DESIGN}/status`, `/protocols/${DESIGN}/status`],
     ];
     for (const [method, path, upstream] of cases) {
       expect(resolveRoute(method, path), `${method} ${path}`).toMatchObject({ path: upstream });
@@ -184,6 +191,66 @@ describe('proxy route whitelist', () => {
       });
       expect(resolveRoute('DELETE', '/api/jobs/a/b')).toBeNull();
       expect(resolveRoute('DELETE', `/api/jobs/${'j'.repeat(129)}`)).toBeNull();
+    });
+  });
+
+  describe('experiment protocols', () => {
+    it('takes a design id as `design-` plus twelve lowercase hex, and nothing else', () => {
+      // As narrow as a session id and for the same reason: the service mints the whole string, so
+      // there is nothing here this repo does not own — unlike a note id, whose slug is a name the
+      // model wrote, or a job id, which embeds a workflow id this repo cannot pin. That narrowness
+      // is also the traversal protection: a segment matching it holds no separator and no escape.
+      for (const bad of [
+        'design-0123456789AB', // uppercase
+        'design-0123456789a', // eleven
+        'design-0123456789abc', // thirteen
+        'design_0123456789ab',
+        '0123456789ab',
+        'design-../../etc/passwd',
+        `design-${'0'.repeat(12)}/extra`,
+      ]) {
+        expect(resolveRoute('GET', `/api/protocols/${bad}`), bad).toBeNull();
+      }
+    });
+
+    it('offers each protocol route by one verb only', () => {
+      // A revision is written by POSTing to the collection; a design is read by GET. Nothing here
+      // deletes: a design is retired by a status move, which records who did it and why, where a
+      // DELETE would take the revision history of a document somebody may have run with.
+      for (const [method, path] of [
+        ['POST', `/api/protocols/${DESIGN}`],
+        ['DELETE', `/api/protocols/${DESIGN}`],
+        ['PUT', `/api/protocols/${DESIGN}`],
+        ['DELETE', `/api/protocols/${DESIGN}/revisions`],
+        ['GET', `/api/protocols/${DESIGN}/revisions`],
+        ['GET', `/api/protocols/${DESIGN}/status`],
+        ['POST', `/api/protocols/${DESIGN}/diff`],
+        ['POST', '/api/protocols'],
+      ] as const) {
+        expect(resolveRoute(method, path), `${method} ${path}`).toBeNull();
+      }
+    });
+
+    it('refuses a protocol path that is not one of the five', () => {
+      // The whitelist is the whole boundary. A sub-path this UI never calls must not be reachable
+      // just because its prefix is, which is exactly what a `startsWith('/api/protocols')` proxy
+      // would have given away.
+      for (const path of [
+        `/api/protocols/${DESIGN}/export`,
+        `/api/protocols/${DESIGN}/revisions/3`,
+        '/api/protocols/all',
+        '/api/protocols/../jobs',
+      ]) {
+        expect(resolveRoute('GET', path), path).toBeNull();
+      }
+    });
+
+    it('labels a design route by its shape, never by the design it names', () => {
+      // A per-design metric label mints a time series per document, which is the same leak the
+      // session id gets its `{id}` for.
+      expect(resolveRoute('GET', `/api/protocols/${DESIGN}/diff`)?.template).toBe(
+        '/protocols/{id}/diff',
+      );
     });
   });
 });

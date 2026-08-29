@@ -22,6 +22,12 @@ export type ApiErrorKind =
    *  `turn_in_flight`, which is why `api.decidePlan` re-kinds it instead of `errorFromStatus`
    *  guessing from a number that means two different things on two different routes. */
   | 'plan_changed'
+  /** 409 on the protocol-revision route only — the design moved between being opened for editing
+   *  and being saved, so this edit was written against a revision that is no longer the head and
+   *  saving it would silently discard whatever landed in between. Re-kinded by
+   *  `api.putProtocolRevision` for exactly the reason `plan_changed` is: the status alone cannot be
+   *  told apart from `turn_in_flight`, and only the caller knows which route it asked. */
+  | 'revision_conflict'
   /** 422 — message over the backend's character cap. */
   | 'message_too_long'
   /** 429 without a `Retry-After` — the turn/token budget is spent, or too many concurrent event

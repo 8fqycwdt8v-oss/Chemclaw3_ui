@@ -113,6 +113,21 @@ for (const theme of ['light', 'dark'] as const) {
       await scan(page);
     });
 
+    test('the protocol document, and the editor over it', async ({ page }) => {
+      // The densest page in the app: five scrolling tables, a plate grid whose row and column
+      // headers are the only thing locating a well, and then a modal form of two dozen numeric
+      // inputs over the top of it. Every one of those inputs is labelled by its own species or arm
+      // rather than by "Temperature" repeated eleven times, which is a property axe checks and a
+      // reader would otherwise learn by tabbing.
+      await page.goto('/protocols/design-0123456789ab');
+      await expect(page.getByRole('region', { name: /Plate map/ })).toBeVisible();
+      await scan(page);
+
+      await page.getByRole('button', { name: /Edit this protocol/ }).click();
+      await expect(page.getByLabel(/Change note/)).toBeVisible();
+      await scan(page);
+    });
+
     test('the conversation that is not on this device', async ({ page }) => {
       // A new page, a new focus target, and the one state reached by a link rather than a click.
       await page.goto('/c/does-not-exist');

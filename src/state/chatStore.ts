@@ -998,10 +998,12 @@ export const useChatStore = create<ChatState>()(
         }
 
         if (event.type === 'error') {
-          // The only `error` that reaches here: `streamTurn` throws on every other code, and this
-          // one arrives BEFORE the answer it qualifies (the backend calls `loop_cap_reached` "the
-          // only member that shares its turn with an answer"). So it marks the answer partial
-          // rather than failing the message — `failTurn` is still what a real failure calls.
+          // The only `error`s that reach here: `streamTurn` throws on every other code, and these
+          // arrive BEFORE the answer they qualify (the backend names `loop_cap_reached` and
+          // `spend_cap_reached` as the codes that share their turn with an answer — a runaway
+          // guard of iterations or of spend). So this marks the answer partial rather than failing
+          // the message — `failTurn` is still what a real failure calls. The membership itself is
+          // `PARTIAL_ANSWER_CODES` in `api/streamTurn.ts`, which is the one place it stays true.
           set((s) =>
             updateAssistant(s, conversationId, messageId, (m) => ({
               ...m,

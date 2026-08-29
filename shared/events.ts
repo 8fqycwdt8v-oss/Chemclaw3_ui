@@ -228,6 +228,7 @@ export type ErrorCode =
   | 'turn_timeout'
   | 'budget_exhausted'
   | 'loop_cap_reached'
+  | 'spend_cap_reached'
   | 'bad_tool_arguments'
   | 'empty_answer';
 
@@ -238,6 +239,7 @@ const ERROR_CODES = new Set<string>([
   'turn_timeout',
   'budget_exhausted',
   'loop_cap_reached',
+  'spend_cap_reached',
   'bad_tool_arguments',
   'empty_answer',
 ]);

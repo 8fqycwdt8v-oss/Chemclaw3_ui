@@ -39,10 +39,12 @@ export const TURN_STALL_MS = 90_000;
 /**
  * Error codes that qualify the answer still to come, rather than replacing it.
  *
- * The backend documents `loop_cap_reached` as "the only member that shares its turn with an
- * answer": the runaway guard stops a turn that has been streaming text all along, so the event
- * arrives after those tokens and BEFORE the `AnswerEvent` they add up to — the same
- * "mark it partial while it is still arriving" ordering `capability_degraded` uses.
+ * The backend documents two codes as sharing their turn with an answer — `loop_cap_reached` and
+ * `spend_cap_reached`: a runaway guard, of iterations or of spend, stops a turn that has been
+ * streaming text all along, so the event arrives after those tokens and BEFORE the `AnswerEvent`
+ * they add up to — the same "mark it partial while it is still arriving" ordering
+ * `capability_degraded` uses. (`budget_exhausted` is not one of them despite naming a budget: it
+ * refuses a turn *before* it starts, so there is no partial answer to keep.)
  *
  * Treating it as terminal cost more than the badge. Throwing here runs the `finally` below, whose
  * `reader.cancel()` the BFF turns into a destroyed upstream request and FastAPI into a client
@@ -54,7 +56,10 @@ export const TURN_STALL_MS = 90_000;
  * future code the backend orders before an answer belongs here, and one place is where that stays
  * true.
  */
-const PARTIAL_ANSWER_CODES: ReadonlySet<ErrorCode> = new Set<ErrorCode>(['loop_cap_reached']);
+const PARTIAL_ANSWER_CODES: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
+  'loop_cap_reached',
+  'spend_cap_reached',
+]);
 
 export interface StreamTurnOptions {
   sessionId: string;

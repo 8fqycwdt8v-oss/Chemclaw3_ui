@@ -687,8 +687,22 @@ createServer(async (req, res) => {
   }
   if (path === `/protocols/${DESIGN_ID}` && req.method === 'GET') {
     const asked = Number(url.searchParams.get('revision') ?? head);
+    // Spread FLAT, because that is the wire shape. This fixture emitted a nested
+    // `{ revision: {...} }` that the service has never returned, so the end-to-end run — the one
+    // test in this repository whose whole justification is "renders against a real proxied
+    // response rather than a stubbed one" — was proving the app against an invention.
     const view: ProtocolView = {
-      revision: DESIGN_REVISION(asked, asked >= 3 ? temperature : 80),
+      ...DESIGN_REVISION(asked, asked >= 3 ? temperature : 80),
+      summary: { ...DESIGN_SUMMARY, head_revision: head },
+      status_history: [
+        {
+          status: 'approved' as const,
+          revision: 2,
+          actor: 'chemist@example.com',
+          reason: 'The precedent runs at 80 °C.',
+          created_at: '2026-08-21T10:00:00Z',
+        },
+      ],
       history: Array.from({ length: head - 1 }, (_, i) => head - i).map((at) => ({
         revision: at,
         kind: 'protocol' as const,

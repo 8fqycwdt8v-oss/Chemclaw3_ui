@@ -39,7 +39,6 @@ import { CHECK_TONE, DownloadCsv } from '../results/renderers.tsx';
 import type {
   DesignDiff,
   DesignStatus,
-  DesignSummary,
   EvidenceRef,
   ExperimentDesign,
   ProtocolCheck,
@@ -312,16 +311,6 @@ export function ProtocolDocument(): React.JSX.Element {
     view: ProtocolView | null;
     error: string | null;
   } | null>(null);
-  /**
-   * This design's row in the index, read only for its `status`.
-   *
-   * `GET /protocols/{id}` returns the document and its history and carries no status — status is a
-   * property of the design rather than of a revision, and it lives on `DesignSummary`. Rather than
-   * inventing one from the revision's `kind`, which is a different question ("was this revision a
-   * request or a protocol"), the status is read from the list route and simply not shown when this
-   * design is not in what came back. A missing badge is a smaller lie than a wrong one.
-   */
-  const [summary, setSummary] = useState<DesignSummary | null>(null);
   /** The revision being read. `undefined` is the head, which is what a fresh open wants. */
   const [at, setAt] = useState<number | undefined>(undefined);
   const [nonce, setNonce] = useState(0);
@@ -356,23 +345,6 @@ export function ProtocolDocument(): React.JSX.Element {
       cancelled = true;
     };
   }, [auth, ready, designId, at, nonce]);
-
-  useEffect(() => {
-    if (!ready || !designId) return;
-    let cancelled = false;
-    void api
-      .listProtocols(auth)
-      .then((list) => {
-        if (cancelled) return;
-        setSummary(list.find((row) => row.design_id === designId) ?? null);
-      })
-      // Quiet: nothing asked for this read, and its only consequence is one badge. A banner over a
-      // failure the reader did not cause and cannot act on is the same mistake `ResultBlock` names.
-      .catch(() => !cancelled && setSummary(null));
-    return () => {
-      cancelled = true;
-    };
-  }, [auth, ready, designId, nonce]);
 
   const showDiff = async (from: number, to: number): Promise<void> => {
     try {
@@ -458,10 +430,13 @@ export function ProtocolDocument(): React.JSX.Element {
     );
   }
 
-  const { revision, history } = view;
-  const design = revision.design;
-  const head = history.reduce((best, row) => Math.max(best, row.revision), revision.revision);
-  const stale = revision.revision !== head;
+  // Flat, because that is what the service sends: `revision` is a NUMBER and the revision's own
+  // fields sit beside it. This used to destructure a `revision` object the service has never
+  // returned, so `design` was `undefined` and the first field below threw — green in every stub in
+  // this repository, because every stub emitted the invented shape too.
+  const { design, history, summary, status_history: signOffs } = view;
+  const head = history.reduce((best, row) => Math.max(best, row.revision), view.revision);
+  const stale = view.revision !== head;
   const records = runSheetRecords(design);
   const headers = records.length > 0 ? Object.keys(records[0]!) : [];
 
@@ -483,16 +458,14 @@ export function ProtocolDocument(): React.JSX.Element {
             {summary && (
               <Badge tone={STATUS_TONE[summary.status] ?? 'neutral'}>{summary.status}</Badge>
             )}
-            <Badge tone="neutral">{revision.kind}</Badge>
+            <Badge tone="neutral">{view.kind}</Badge>
             <span className="text-2xs text-ink-subtle">
-              revision {revision.revision} of {head} · {revision.author_kind} {revision.author} ·{' '}
-              {when(revision.created_at)}
+              revision {view.revision} of {head} · {view.author_kind} {view.author} ·{' '}
+              {when(view.created_at)}
             </span>
           </div>
 
-          {revision.change_note && (
-            <p className="text-sm text-ink-muted">“{revision.change_note}”</p>
-          )}
+          {view.change_note && <p className="text-sm text-ink-muted">“{view.change_note}”</p>}
 
           {/* A reader looking at an old revision has to be told, or every number on this page is
               being read as current. The link out is what makes the notice actionable rather than
@@ -502,7 +475,7 @@ export function ProtocolDocument(): React.JSX.Element {
               role="status"
               className="flex flex-wrap items-center gap-2 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
             >
-              You are reading revision {revision.revision}. Revision {head} is the current one.
+              You are reading revision {view.revision}. Revision {head} is the current one.
               <Button size="xs" variant="outline" onClick={() => setAt(undefined)}>
                 Open the current revision
               </Button>
@@ -523,7 +496,7 @@ export function ProtocolDocument(): React.JSX.Element {
               <Pencil aria-hidden className="size-3.5" />
               Edit this protocol
             </Button>
-            <Button size="sm" variant="outline" onClick={() => void askToRevise(revision.revision)}>
+            <Button size="sm" variant="outline" onClick={() => void askToRevise(view.revision)}>
               <MessageSquarePlus aria-hidden className="size-3.5" />
               Ask Claude to revise
             </Button>
@@ -573,11 +546,28 @@ export function ProtocolDocument(): React.JSX.Element {
                 />
               ))}
             </div>
+
+            {/* What the panel above promises. A move is recorded against the revision it was made
+                on, and the badge cannot show that: a revision landing on an approved design
+                demotes it back to `draft`, so the only place "the chemist approved revision 3"
+                survives is here. Rendering it is also the only thing that makes the reason worth
+                storing — a record nobody can read answers no question. */}
+            {signOffs.length > 0 && (
+              <ul className="flex flex-col gap-1 border-t border-border-subtle pt-2 text-2xs text-ink-subtle">
+                {signOffs.map((event) => (
+                  <li key={`${event.status}-${event.created_at}`}>
+                    <span className="font-medium text-ink-muted">{event.status}</span> at revision{' '}
+                    {event.revision} · {event.actor || 'unknown'} · {when(event.created_at)}
+                    {event.reason && <span> — “{event.reason}”</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </header>
 
         <Section title="Checks">
-          <ChecksStrip checks={revision.checks} />
+          <ChecksStrip checks={view.checks} />
         </Section>
 
         <Section title="What was asked for">
@@ -868,7 +858,7 @@ export function ProtocolDocument(): React.JSX.Element {
                   {row.author} {when(row.created_at)}
                 </span>
                 <span className="flex gap-1.5">
-                  {row.revision !== revision.revision && (
+                  {row.revision !== view.revision && (
                     <>
                       <Button size="xs" variant="ghost" onClick={() => setAt(row.revision)}>
                         Open
@@ -876,7 +866,7 @@ export function ProtocolDocument(): React.JSX.Element {
                       <Button
                         size="xs"
                         variant="ghost"
-                        onClick={() => void showDiff(row.revision, revision.revision)}
+                        onClick={() => void showDiff(row.revision, view.revision)}
                       >
                         <FileDiff aria-hidden className="size-3" />
                         Compare
@@ -905,9 +895,9 @@ export function ProtocolDocument(): React.JSX.Element {
         <ProtocolEditor
           // Keyed on the revision being edited, so a reload after a conflict remounts the form on
           // the new head rather than merging the new document into a stale draft.
-          key={revision.revision}
+          key={view.revision}
           designId={designId}
-          revision={revision}
+          revision={view}
           open={editing}
           onOpenChange={setEditing}
           onSaved={(written) => {

@@ -19,7 +19,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { api } from '../src/api/client.ts';
 import { ApiError } from '../src/api/errors.ts';
 import { jsonError, stubFetch } from './helpers.ts';
-import type { DesignRevision, DesignSummary, ExperimentDesign } from '../shared/protocols.ts';
+import type {
+  DesignOut,
+  DesignRevision,
+  DesignSummary,
+  ExperimentDesign,
+} from '../shared/protocols.ts';
 
 const DESIGN = 'design-0123456789ab';
 
@@ -111,6 +116,9 @@ const REVISION: DesignRevision = {
   created_at: '2026-08-21T09:00:00Z',
 };
 
+/** One whole read, in the service's own shape — a `DesignRevision` flat, plus what rides along. */
+const READ: DesignOut = { ...REVISION, summary: SUMMARY, history: [], status_history: [] };
+
 describe('listProtocols', () => {
   it('unwraps the envelope and passes the filters through', async () => {
     const stub = stubFetch(() => ok({ designs: [SUMMARY] }));
@@ -146,18 +154,24 @@ describe('listProtocols', () => {
 
 describe('getProtocol', () => {
   it('reads the head when no revision is named', async () => {
-    const stub = stubFetch(() => ok({ revision: REVISION, history: [] }));
+    const stub = stubFetch(() => ok(READ));
     restore = stub.restore;
 
     const view = await api.getProtocol(DESIGN, token);
 
-    expect(view.revision.revision).toBe(2);
+    // FLAT. `revision` is a number and the revision's own fields sit beside it — the shape the
+    // service returns. This assertion used to read `view.revision.revision`, against a stub that
+    // agreed with it and with nothing else.
+    expect(view.revision).toBe(2);
+    expect(view.design).toEqual(DOCUMENT);
+    expect(view.summary?.status).toBe('draft');
+    expect(view.status_history).toEqual([]);
     expect(stub.calls[0]!.url).toContain(`/protocols/${DESIGN}`);
     expect(stub.calls[0]!.url).not.toContain('revision=');
   });
 
   it('asks for one revision as an integer', async () => {
-    const stub = stubFetch(() => ok({ revision: REVISION, history: [] }));
+    const stub = stubFetch(() => ok(READ));
     restore = stub.restore;
 
     await api.getProtocol(DESIGN, token, 1);

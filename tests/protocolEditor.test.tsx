@@ -147,7 +147,7 @@ function open(handlers: { onSaved?: (r: number) => void; onReload?: () => void }
   render(
     <ProtocolEditor
       designId={DESIGN}
-      revision={REVISION}
+      revision={{ ...REVISION, summary: null, history: [], status_history: [] }}
       open
       onOpenChange={() => {}}
       onSaved={handlers.onSaved ?? (() => {})}

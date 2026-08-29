@@ -16,12 +16,11 @@ import { logger } from '../lib/logger.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import type {
   DesignDiff,
-  DesignRevision,
+  DesignOut,
   DesignStatus,
   DesignSummary,
   ExperimentDesign,
   ProtocolCheck,
-  RevisionSummary,
 } from '../../shared/protocols.ts';
 import { ApiError, CORRELATION_HEADER, errorFromStatus, readFailure } from './errors.ts';
 
@@ -350,11 +349,19 @@ export interface PendingPlans {
  * The history rides along with the document rather than living on a route of its own, and that is
  * what makes the revision picker free: opening a design at revision 3 already knows there is a 4,
  * so a reader can never be looking at an old revision without the screen being able to say so.
+ * The header row rides along for the same reason, which is why nothing here fetches the list a
+ * second time to find out what status to draw.
+ *
+ * **It is `DesignOut` — the service's own FLAT shape — and it used to be a nested one this app
+ * invented.** `{ revision: DesignRevision }` reads better and was never what came back: the
+ * service puts the revision's fields at the top level, so `view.revision` is a *number* and
+ * `revision.design` was `undefined` against the real front door — the document page threw on its
+ * first field. The unit stubs, the component stub and the end-to-end fixture all emitted the
+ * invented shape, so nothing in this repository could see it. Holding the service's shape is the
+ * fix; a translation layer would only be one more place to be confidently wrong about somebody
+ * else's contract.
  */
-export interface ProtocolView {
-  revision: DesignRevision;
-  history: RevisionSummary[];
-}
+export type ProtocolView = DesignOut;
 
 /** What `POST /protocols/{id}/revisions` answers with: the revision it wrote, re-checked. */
 export interface RevisionWritten {

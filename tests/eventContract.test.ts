@@ -192,18 +192,31 @@ describe('the event contract carries every field of every member', () => {
  * `Chemclaw3`'s `tests/test_event_contract.py`, which fails on the side that makes the change and
  * names this file.
  */
+/**
+ * `shared/events.ts` parsed with the TypeScript compiler API — the same compiler that type-checks
+ * it, so there is no second idea of what the file says.
+ *
+ * One helper because two describe blocks below read different things out of the same file (the
+ * `ChemclawEvent` members' fields, and the `ErrorCode` union's literals). Two *walkers* are right —
+ * they extract genuinely different properties — but two *parsers* would be two copies of the
+ * cwd-relative-path decision, and the second copy would silently re-derive a choice the first one
+ * documents.
+ *
+ * Repo-root relative, as `tests/delivery.test.ts` reads the Jenkinsfile: vitest runs from the root,
+ * and `import.meta.url` is not a file: URL under this environment.
+ */
+const eventsSource = (): ts.SourceFile =>
+  ts.createSourceFile(
+    'shared/events.ts',
+    readFileSync('shared/events.ts', 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+  );
+
 describe('the fixture is checked against the declarations, not trusted', () => {
   /** Every member of `ChemclawEvent`, as `discriminator -> declared field names`. */
   const declared = (): Map<string, Set<string>> => {
-    // Repo-root relative, as `tests/delivery.test.ts` reads the Jenkinsfile: vitest runs from the
-    // root, and `import.meta.url` is not a file: URL under this environment.
-    const file = 'shared/events.ts';
-    const source = ts.createSourceFile(
-      file,
-      readFileSync(file, 'utf8'),
-      ts.ScriptTarget.Latest,
-      true,
-    );
+    const source = eventsSource();
 
     const interfaces = new Map<string, ts.InterfaceDeclaration>();
     let union: ts.TypeAliasDeclaration | undefined;
@@ -296,26 +309,35 @@ describe('the fixture is checked against the declarations, not trusted', () => {
  * first.
  */
 describe('the error-code union and its runtime set are one vocabulary', () => {
-  const source = () =>
-    ts.createSourceFile(
-      'shared/events.ts',
-      readFileSync('shared/events.ts', 'utf8'),
-      ts.ScriptTarget.Latest,
-      true,
-    );
-
   /** The `ErrorCode` union's string members, read off the declaration. */
   const unionMembers = (): Set<string> => {
-    for (const statement of source().statements) {
+    const file = eventsSource();
+    for (const statement of file.statements) {
       if (!ts.isTypeAliasDeclaration(statement) || statement.name.text !== 'ErrorCode') continue;
       if (!ts.isUnionTypeNode(statement.type)) {
         throw new Error('ErrorCode is no longer a union; this check needs updating');
       }
       const members = new Set<string>();
       for (const node of statement.type.types) {
-        if (ts.isLiteralTypeNode(node) && ts.isStringLiteral(node.literal)) {
-          members.add(node.literal.text);
+        // **Loud on anything that is not a string literal, rather than skipping it.** A `continue`
+        // here reads as harmless and is the one thing that would quietly hollow this test out: an
+        // ordinary refactor — extracting three codes into `type TimeoutCode = 'a' | 'b' | 'c'` and
+        // writing `ErrorCode = 'internal' | TimeoutCode | …` — leaves the alias unresolved, so
+        // those three go unchecked while the test still passes. That is precisely the change a
+        // maintainer reaches for when adding a `PartialAnswerCode` alias, i.e. the moment this
+        // check matters most.
+        //
+        // Resolving type references would mean a type *checker* rather than a parse, and the
+        // cheaper honest answer is to refuse: whoever writes that alias sees this message and
+        // teaches the test about it deliberately.
+        if (!ts.isLiteralTypeNode(node) || !ts.isStringLiteral(node.literal)) {
+          throw new Error(
+            `ErrorCode member \`${node.getText(file)}\` is not a string literal, so this check ` +
+              'cannot see the codes behind it. Inline it, or teach unionMembers to resolve it — ' +
+              'silently skipping it would leave those codes unverified.',
+          );
         }
+        members.add(node.literal.text);
       }
       return members;
     }

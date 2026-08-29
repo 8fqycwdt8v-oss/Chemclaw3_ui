@@ -52,7 +52,6 @@ const revision = (at: number): DesignRevision => ({
   kind: 'protocol',
   author_kind: 'agent',
   author: 'chemclaw',
-  parent_revision: at - 1,
   change_note: 'Drafted from the structured request.',
   checks: [
     { check_id: 'plate-fits', severity: 'blocker', passed: false, detail: '8 arms, 6 wells.' },

@@ -308,9 +308,21 @@ export function errorFromEvent(event: {
  *
  * `loc` is trimmed of its `body`/`document` prefix, because a chemist reads
  * `base.setpoints.time_h`, not the transport's framing of it.
+ *
+ * **The third shape is an object, and it is the one this function was first written blind to.**
+ * `POST /protocols/{id}/revisions` answers a stale edit with
+ * `{"code": "revision_conflict", "message": …}` — a `detail` that is neither a string nor an array
+ * — so the message naming the head revision was dropped and `errorFromStatus`'s 409 default put
+ * "A turn is already running for this conversation." on a banner about a concurrent *edit*. The
+ * `code` is not rendered: `client.ts` already re-kinds that status, and a machine-readable code is
+ * for the code that branches on it, not for the chemist.
  */
 function detailText(detail: unknown): string | undefined {
   if (typeof detail === 'string') return detail;
+  if (detail && !Array.isArray(detail) && typeof detail === 'object') {
+    const message = (detail as { message?: unknown }).message;
+    return typeof message === 'string' && message ? message : undefined;
+  }
   if (!Array.isArray(detail)) return undefined;
   const parts = detail
     .map((item) => {

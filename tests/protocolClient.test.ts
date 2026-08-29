@@ -109,7 +109,6 @@ const REVISION: DesignRevision = {
   kind: 'protocol',
   author_kind: 'agent',
   author: 'chemclaw',
-  parent_revision: 1,
   change_note: 'Drafted from the structured request.',
   design: DOCUMENT,
   checks: [],
@@ -212,12 +211,25 @@ describe('putProtocolRevision', () => {
     expect(body.document.base.setpoints.solvent).toBe('2-MeTHF');
   });
 
-  it('re-kinds the 409 so a caller can tell it from a turn already running', async () => {
-    const stub = stubFetch(() => jsonError(409, 'parent_revision 2 is not the head'));
+  it('re-kinds the 409 and keeps the message the service put inside the object', async () => {
+    // **The service's own shape**: this route answers a stale edit with a `detail` *object*
+    // (`{"code": "revision_conflict", "message": …}`), not a string, which is what `jsonError`
+    // sends and what this test used to assert against. `readFailure` kept only strings, so the
+    // sentence naming the head revision was dropped and the banner fell back to the generic 409
+    // — "A turn is already running for this conversation." — on a conflict about an *edit*.
+    const stub = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            detail: { code: 'revision_conflict', message: 'parent_revision 2 is not the head' },
+          }),
+          { status: 409, headers: { 'content-type': 'application/json' } },
+        ),
+    );
     restore = stub.restore;
 
     await expect(api.putProtocolRevision(DESIGN, DOCUMENT, 2, 'note', token)).rejects.toMatchObject(
-      { kind: 'revision_conflict', status: 409 },
+      { kind: 'revision_conflict', status: 409, message: 'parent_revision 2 is not the head' },
     );
   });
 

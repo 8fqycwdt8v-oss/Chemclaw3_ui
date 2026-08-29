@@ -347,7 +347,11 @@ async function streamTurn(res: ServerResponse): Promise<void> {
 const SESSIONS: SessionSummary[] = [];
 
 const SHARED_TRANSCRIPT: TranscriptMessage[] = [
-  { index: 1, role: 'user', text: 'What did we decide about the ligand?', tool_calls: [] },
+  // 0-based, and it is `_transcript`'s `enumerate(stored)` that says so — the assistant reply
+  // below is index 1. Bumping this to 1 gave two messages one index, which is a key a client
+  // renders duplicates under; `ProtocolStep.index` next door is `ge=1` and that is a different
+  // field with a different contract.
+  { index: 0, role: 'user', text: 'What did we decide about the ligand?', tool_calls: [] },
   {
     index: 1,
     role: 'assistant',
@@ -434,7 +438,6 @@ const DESIGN_REVISION = (at: number, temperature: number): DesignRevision => ({
   kind: 'protocol',
   author_kind: at > 2 ? 'human' : 'agent',
   author: at > 2 ? 'chemist@example.com' : 'chemclaw',
-  parent_revision: at - 1,
   change_note: at > 2 ? 'Raised the temperature.' : 'Drafted from the structured request.',
   checks: PROTOCOL_RECEIPT.checks,
   created_at: '2026-08-21T09:00:00Z',

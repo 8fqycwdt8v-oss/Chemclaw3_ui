@@ -146,6 +146,29 @@ describe('PlateMap', () => {
     expect(screen.getByText('one')).toBeTruthy();
   });
 
+  it('numbers the columns the way it letters the rows, whatever origin the layout arrives on', () => {
+    // `axisSpan` returns an origin of 0 or 1, and the two axes used different rules: rows go by
+    // their position in the drawn grid, columns went by the index + 1. On a 1-based layout — one
+    // this producer cannot emit, which is exactly why no fixture caught it — that read A..B down
+    // the side and 2..3 across the top, so the cell labelled `A1` sat under a header saying `2`.
+    render(
+      <PlateMap
+        layout={layout({
+          rows: 2,
+          columns: 2,
+          wells: [
+            well({ label: 'A1', row: 1, column: 1, arm_id: 'one-based' }),
+            well({ label: 'B2', row: 2, column: 2, arm_id: 'other' }),
+          ],
+        })}
+      />,
+    );
+    const table = screen.getByRole('table');
+    expect(within(table).getByRole('rowheader', { name: 'A' })).toBeTruthy();
+    expect(within(table).getByRole('columnheader', { name: '1' })).toBeTruthy();
+    expect(within(table).queryByRole('columnheader', { name: '3' })).toBeNull();
+  });
+
   it('says whether the run order can be reproduced, not just whether it was shuffled', () => {
     // A randomised layout with no seed is one nobody can lay out again — a fact about the
     // experiment rather than about this drawing.

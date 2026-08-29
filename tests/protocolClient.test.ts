@@ -109,7 +109,6 @@ const REVISION: DesignRevision = {
   kind: 'protocol',
   author_kind: 'agent',
   author: 'chemclaw',
-  parent_revision: 1,
   change_note: 'Drafted from the structured request.',
   design: DOCUMENT,
   checks: [],
@@ -212,12 +211,25 @@ describe('putProtocolRevision', () => {
     expect(body.document.base.setpoints.solvent).toBe('2-MeTHF');
   });
 
-  it('re-kinds the 409 so a caller can tell it from a turn already running', async () => {
-    const stub = stubFetch(() => jsonError(409, 'parent_revision 2 is not the head'));
+  it('re-kinds the 409 and keeps the message the service put inside the object', async () => {
+    // **The service's own shape**: this route answers a stale edit with a `detail` *object*
+    // (`{"code": "revision_conflict", "message": …}`), not a string, which is what `jsonError`
+    // sends and what this test used to assert against. `readFailure` kept only strings, so the
+    // sentence naming the head revision was dropped and the banner fell back to the generic 409
+    // — "A turn is already running for this conversation." — on a conflict about an *edit*.
+    const stub = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            detail: { code: 'revision_conflict', message: 'parent_revision 2 is not the head' },
+          }),
+          { status: 409, headers: { 'content-type': 'application/json' } },
+        ),
+    );
     restore = stub.restore;
 
     await expect(api.putProtocolRevision(DESIGN, DOCUMENT, 2, 'note', token)).rejects.toMatchObject(
-      { kind: 'revision_conflict', status: 409 },
+      { kind: 'revision_conflict', status: 409, message: 'parent_revision 2 is not the head' },
     );
   });
 
@@ -241,22 +253,31 @@ describe('getProtocolDiff and setProtocolStatus', () => {
     const diff = await api.getProtocolDiff(DESIGN, 1, 2, token);
 
     expect(diff.changes).toEqual([]);
+    // **The names the route binds.** This asserted `from`/`to`, which the service does not read —
+    // FastAPI ignores an unknown query parameter, so every comparison answered 200 with the
+    // route's defaults (revision 1 against the head) while the header printed the numbers the
+    // chemist clicked. The test agreed with the client and with nothing else.
     const url = new URL(stub.calls[0]!.url, 'http://x');
-    expect(url.searchParams.get('from')).toBe('1');
-    expect(url.searchParams.get('to')).toBe('2');
+    expect(url.searchParams.get('from_revision')).toBe('1');
+    expect(url.searchParams.get('to_revision')).toBe('2');
+    expect(url.searchParams.get('from')).toBeNull();
   });
 
-  it('records a status move with its reason, and reads the 204 as success', async () => {
+  it('records a status move against the revision on screen, with its reason', async () => {
     const stub = stubFetch(() => ok(null, 204));
     restore = stub.restore;
 
     await expect(
-      api.setProtocolStatus(DESIGN, 'abandoned', 'superseded by the DoE', token),
+      api.setProtocolStatus(DESIGN, 'abandoned', 3, 'superseded by the DoE', token),
     ).resolves.toBeUndefined();
 
     expect(stub.calls[0]!.url).toContain(`/protocols/${DESIGN}/status`);
+    // `expected_revision` is `parent_revision`'s twin for a sign-off: the service refuses a move
+    // that names anything but the head, so a colleague's save between reading and clicking is a
+    // 409 rather than this chemist's name on a document they never saw.
     expect(JSON.parse(String(stub.calls[0]!.init?.body))).toEqual({
       status: 'abandoned',
+      expected_revision: 3,
       reason: 'superseded by the DoE',
     });
   });

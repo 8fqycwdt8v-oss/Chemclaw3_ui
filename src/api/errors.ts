@@ -295,6 +295,51 @@ export function errorFromEvent(event: {
  * present on every response the service writes, including the ones with no body at all; the body's
  * `correlation_id` is the fallback for a response that carries one there instead.
  */
+/**
+ * The service's `detail`, as a sentence, whatever shape it arrived in.
+ *
+ * **A pydantic validation error is an array of objects, and dropping it made every rejected edit
+ * read as the wrong thing.** `detail` was kept only when it was a string, so a 422 from
+ * `POST /protocols/{id}/revisions` fell through to `errorFromStatus`'s message-route default and
+ * told a chemist "That message exceeds the service's length limit." — for typing `0` into
+ * "Time (h)", or clearing a factor level's label. Those are ordinary states of the editor's own
+ * controls, and the actual reason (`Input should be greater than 0`, and the field it came from)
+ * was discarded on the way.
+ *
+ * `loc` is trimmed of its `body`/`document` prefix, because a chemist reads
+ * `base.setpoints.time_h`, not the transport's framing of it.
+ *
+ * **The third shape is an object, and it is the one this function was first written blind to.**
+ * `POST /protocols/{id}/revisions` answers a stale edit with
+ * `{"code": "revision_conflict", "message": …}` — a `detail` that is neither a string nor an array
+ * — so the message naming the head revision was dropped and `errorFromStatus`'s 409 default put
+ * "A turn is already running for this conversation." on a banner about a concurrent *edit*. The
+ * `code` is not rendered: `client.ts` already re-kinds that status, and a machine-readable code is
+ * for the code that branches on it, not for the chemist.
+ */
+function detailText(detail: unknown): string | undefined {
+  if (typeof detail === 'string') return detail;
+  if (detail && !Array.isArray(detail) && typeof detail === 'object') {
+    const message = (detail as { message?: unknown }).message;
+    return typeof message === 'string' && message ? message : undefined;
+  }
+  if (!Array.isArray(detail)) return undefined;
+  const parts = detail
+    .map((item) => {
+      const entry = item as { loc?: unknown; msg?: unknown };
+      if (typeof entry?.msg !== 'string') return '';
+      const where = Array.isArray(entry.loc)
+        ? entry.loc
+            .filter((step) => step !== 'body' && step !== 'document')
+            .map(String)
+            .join('.')
+        : '';
+      return where ? `${where}: ${entry.msg}` : entry.msg;
+    })
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join('; ') : undefined;
+}
+
 export async function readFailure(
   res: Response,
 ): Promise<{ detail?: string; correlationId: string }> {
@@ -302,7 +347,7 @@ export async function readFailure(
   try {
     const body = (await res.json()) as { detail?: unknown; correlation_id?: unknown };
     return {
-      detail: typeof body?.detail === 'string' ? body.detail : undefined,
+      detail: detailText(body?.detail),
       correlationId:
         fromHeader || (typeof body?.correlation_id === 'string' ? body.correlation_id : ''),
     };

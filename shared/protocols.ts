@@ -263,19 +263,6 @@ export interface ExperimentDesign {
 }
 
 /** One revision of a design, with the document as it stood at that revision. */
-export interface DesignRevision {
-  design_id: string;
-  revision: number;
-  kind: 'request' | 'protocol';
-  author_kind: 'agent' | 'human';
-  author: string;
-  parent_revision: number;
-  change_note: string;
-  design: ExperimentDesign;
-  checks: ProtocolCheck[];
-  created_at: string;
-}
-
 /** A revision as the history lists it — everything but the document itself. */
 export interface RevisionSummary {
   revision: number;
@@ -315,8 +302,10 @@ export interface StatusEvent {
  * green unit suite and a green end-to-end run. A fixture is only evidence when it is the service's
  * shape.
  *
- * Not `extends DesignRevision`: the service does not send `parent_revision` here, and inheriting
- * the field would put the same class of invented promise back one level down.
+ * `DesignRevision` below is *derived* from this rather than declared beside it, for the same
+ * reason: it used to be a hand-written interface carrying a `parent_revision` the service never
+ * sends on any read, and every fixture spread it into a `DesignOut` — where TypeScript's
+ * excess-property check does not fire on a spread, so the invented field rode along silently.
  */
 export interface DesignOut {
   design_id: string;
@@ -334,6 +323,15 @@ export interface DesignOut {
   /** Who approved, ran or abandoned this design and at which revision. */
   status_history: StatusEvent[];
 }
+
+/**
+ * The per-revision half of `DesignOut` — what differs from one revision to the next.
+ *
+ * An alias rather than an interface so it cannot drift from what the service actually returns:
+ * `summary`, `history` and `status_history` are facts about the *design*, and a fixture that
+ * builds one revision does not want to restate them.
+ */
+export type DesignRevision = Omit<DesignOut, 'summary' | 'history' | 'status_history'>;
 
 export interface DesignSummary {
   design_id: string;

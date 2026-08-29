@@ -347,6 +347,10 @@ async function streamTurn(res: ServerResponse): Promise<void> {
 const SESSIONS: SessionSummary[] = [];
 
 const SHARED_TRANSCRIPT: TranscriptMessage[] = [
+  // 0-based, and it is `_transcript`'s `enumerate(stored)` that says so — the assistant reply
+  // below is index 1. Bumping this to 1 gave two messages one index, which is a key a client
+  // renders duplicates under; `ProtocolStep.index` next door is `ge=1` and that is a different
+  // field with a different contract.
   { index: 0, role: 'user', text: 'What did we decide about the ligand?', tool_calls: [] },
   {
     index: 1,
@@ -434,7 +438,6 @@ const DESIGN_REVISION = (at: number, temperature: number): DesignRevision => ({
   kind: 'protocol',
   author_kind: at > 2 ? 'human' : 'agent',
   author: at > 2 ? 'chemist@example.com' : 'chemclaw',
-  parent_revision: at - 1,
   change_note: at > 2 ? 'Raised the temperature.' : 'Drafted from the structured request.',
   checks: PROTOCOL_RECEIPT.checks,
   created_at: '2026-08-21T09:00:00Z',
@@ -489,7 +492,7 @@ const DESIGN_REVISION = (at: number, temperature: number): DesignRevision => ({
       ],
       steps: [
         {
-          index: 0,
+          index: 1,
           kind: 'charge',
           text: 'Charge the vessel with the aryl bromide and the base.',
           components: ['aryl bromide'],
@@ -535,15 +538,19 @@ const DESIGN_REVISION = (at: number, temperature: number): DesignRevision => ({
         note: 'Known-good conditions.',
       },
     ],
+    // The plate the producer would actually emit: `PLATE_SHAPES[24]` is 4x6, and `place()` writes
+    // 0-based `row`/`column` with `label = row_label(row) + str(column + 1)`. This declared a 2x2
+    // 24-well plate with 1-based wells — a shape the service cannot produce and `layout_fits` now
+    // refuses — which is what let the map's 0-based column headers look right in every test.
     layout: {
       plate_format: 24,
-      rows: 2,
-      columns: 2,
+      rows: 4,
+      columns: 6,
       randomized: true,
       seed: 7,
       wells: [
-        { label: 'A1', row: 1, column: 1, arm_id: 'arm-1', run_order: 2 },
-        { label: 'B2', row: 2, column: 2, arm_id: 'arm-ctl', run_order: 1 },
+        { label: 'A1', row: 0, column: 0, arm_id: 'arm-1', run_order: 2 },
+        { label: 'B2', row: 1, column: 1, arm_id: 'arm-ctl', run_order: 1 },
       ],
     },
     evidence: [
@@ -740,9 +747,27 @@ createServer(async (req, res) => {
     return json(res, 200, DESIGN_DIFF);
   }
   if (path === `/protocols/${DESIGN_ID}/status` && req.method === 'POST') {
-    req.resume();
-    res.writeHead(204);
-    return res.end();
+    // Read the body and enforce the compare-and-set, the way the service does. A fixture that
+    // answered 204 to anything would let the app ship without sending `expected_revision` at all —
+    // which is exactly how the nested-`revision` invention above survived an end-to-end run.
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => (body += chunk));
+    req.on('end', () => {
+      const posted = JSON.parse(body) as { expected_revision?: number };
+      if (posted.expected_revision !== head) {
+        json(res, 409, {
+          detail: {
+            code: 'revision_conflict',
+            message: `revision ${String(posted.expected_revision)} is not the head (${head})`,
+          },
+        });
+        return;
+      }
+      res.writeHead(204);
+      res.end();
+    });
+    return;
   }
 
   json(res, 404, { detail: 'not found' });

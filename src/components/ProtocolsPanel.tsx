@@ -61,10 +61,12 @@ export function ProtocolsPanel(): React.JSX.Element {
   const [loaded, setLoaded] = useState<{
     key: string;
     list: DesignSummary[];
+    error?: string;
   } | null>(null);
 
   const key = `${status}|${submittedProject}`;
   const designs = loaded?.key === key ? loaded.list : null;
+  const failed = loaded?.key === key ? loaded.error : undefined;
   const filtered = status !== '' || submittedProject !== '';
 
   useEffect(() => {
@@ -76,7 +78,19 @@ export function ProtocolsPanel(): React.JSX.Element {
         ...(submittedProject ? { project: submittedProject } : {}),
       })
       .then((list) => !cancelled && setLoaded({ key: `${status}|${submittedProject}`, list }))
-      .catch(() => !cancelled && setLoaded({ key: `${status}|${submittedProject}`, list: [] }));
+      // **A broken service is not an empty lab.** This caught everything into an empty list, so a
+      // 500 and an expired session both rendered "No experiment design yet" — the 404-only policy
+      // `client.ts` documents, applied to every status. `listProtocols` already swallows the 404,
+      // so anything arriving here is a fault a reader should be shown.
+      .catch(
+        (err: unknown) =>
+          !cancelled &&
+          setLoaded({
+            key: `${status}|${submittedProject}`,
+            list: [],
+            error: err instanceof Error ? err.message : 'Could not read the design list.',
+          }),
+      );
     return () => {
       cancelled = true;
     };
@@ -151,7 +165,16 @@ export function ProtocolsPanel(): React.JSX.Element {
 
         {!designs && <Loading>Reading the designs…</Loading>}
 
-        {designs?.length === 0 && (
+        {failed && (
+          <p
+            role="status"
+            className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
+          >
+            {failed}
+          </p>
+        )}
+
+        {!failed && designs?.length === 0 && (
           <EmptyState
             icon={<FlaskConical className="size-5" />}
             title={filtered ? 'No design matches that' : 'No experiment design yet'}

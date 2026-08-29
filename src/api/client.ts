@@ -775,9 +775,14 @@ export const api = {
     to: number,
     getToken: TokenGetter,
   ): Promise<DesignDiff> {
+    // **`from_revision`/`to_revision`, which is what the route binds.** These were `from`/`to`;
+    // FastAPI ignores an unknown query parameter, so every comparison silently answered **200**
+    // with the route's defaults — revision 1 against the head — while `RevisionDiff`'s header
+    // printed the two numbers the chemist had actually clicked. A wrong diff is worse than a
+    // failed one here: the diff is the record of what an expert changed.
     const query = new URLSearchParams({
-      from: String(Math.trunc(from)),
-      to: String(Math.trunc(to)),
+      from_revision: String(Math.trunc(from)),
+      to_revision: String(Math.trunc(to)),
     });
     return request<DesignDiff>(
       `/protocols/${encodeURIComponent(designId)}/diff?${query.toString()}`,
@@ -786,20 +791,27 @@ export const api = {
   },
 
   /**
-   * Move a design's status, with the reason recorded beside it.
+   * Move a design's status, against the revision the chemist was reading, with the reason beside it.
    *
    * 204: the service records the move and returns nothing. `reason` is what makes an `abandoned`
    * design readable a year later — it is the only field that says why a design nobody ran exists.
+   *
+   * **`expectedRevision` is the revision on screen, and the service refuses anything else with a
+   * 409.** It is `parent_revision`'s twin for a sign-off: without it the service stamped whatever
+   * the head had become, so a chemist who read revision 1, thought about it, and clicked Approve
+   * after a colleague saved revision 2 had their name recorded against a document they never saw —
+   * with no race required, just the seconds between reading and clicking.
    */
   setProtocolStatus(
     designId: string,
     status: DesignStatus,
+    expectedRevision: number,
     reason: string,
     getToken: TokenGetter,
   ): Promise<void> {
     return request<void>(`/protocols/${encodeURIComponent(designId)}/status`, getToken, {
       method: 'POST',
-      body: JSON.stringify({ status, reason }),
+      body: JSON.stringify({ status, expected_revision: expectedRevision, reason }),
     });
   },
 };

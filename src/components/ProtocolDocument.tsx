@@ -166,7 +166,13 @@ function RequestValue({ label, field }: { label: string; field: RequestField }):
   );
 }
 
-function ChecksStrip({ checks }: { checks: ProtocolCheck[] }): React.JSX.Element {
+function ChecksStrip({
+  checks,
+  kind,
+}: {
+  checks: ProtocolCheck[];
+  kind: 'request' | 'protocol';
+}): React.JSX.Element {
   const failing = checks.filter((check) => !check.passed);
   const blockers = failing.filter((check) => check.severity === 'blocker');
 
@@ -185,6 +191,13 @@ function ChecksStrip({ checks }: { checks: ProtocolCheck[] }): React.JSX.Element
           // Not "passed": zero checks is the absence of a finding, not a clean one. Same three-way
           // rule the campaign renderer applies to a plateau verdict the service declined to give.
           <Badge tone="neutral">no checks recorded</Badge>
+        ) : kind === 'request' ? (
+          // **Most of these did not run.** At the request stage the service reports every
+          // protocol-only check as a passing `note` reading "not checked yet — this design holds
+          // only the ask", precisely so a UI would not look like it had skipped them. Rendering
+          // that as "14 checks passed" turned the opposite claim into a green badge, on a design
+          // with no charge table, no procedure and no evidence.
+          <Badge tone="neutral">the ask only — the procedure has not been checked</Badge>
         ) : (
           <Badge tone="ok">
             {checks.length} check{checks.length === 1 ? '' : 's'} passed
@@ -354,9 +367,17 @@ export function ProtocolDocument(): React.JSX.Element {
     }
   };
 
-  const moveStatus = async (status: DesignStatus): Promise<void> => {
+  /**
+   * Record a sign-off against the revision on screen — never against "whatever the head is".
+   *
+   * `atRevision` is passed in rather than read from a state variable because the service refuses a
+   * move that names anything but the head, and the revision this reader is looking at is the only
+   * honest answer: a colleague's save between opening the page and pressing the button now gives a
+   * 409 and a banner, instead of the chemist's name on a document they never read.
+   */
+  const moveStatus = async (status: DesignStatus, atRevision: number): Promise<void> => {
     try {
-      await api.setProtocolStatus(designId, status, statusReason.trim(), auth);
+      await api.setProtocolStatus(designId, status, atRevision, statusReason.trim(), auth);
       setStatusReason('');
       setNotice(`Status recorded as ${status}.`);
       reload();
@@ -542,7 +563,7 @@ export function ProtocolDocument(): React.JSX.Element {
                   description="The move is recorded against you with the reason you wrote. It does not change the document; earlier revisions stay readable."
                   confirmLabel={`Mark ${status}`}
                   variant={status === 'abandoned' ? 'destructive' : 'default'}
-                  onConfirm={() => void moveStatus(status)}
+                  onConfirm={() => void moveStatus(status, view.revision)}
                 />
               ))}
             </div>
@@ -567,7 +588,7 @@ export function ProtocolDocument(): React.JSX.Element {
         </header>
 
         <Section title="Checks">
-          <ChecksStrip checks={view.checks} />
+          <ChecksStrip checks={view.checks} kind={view.kind} />
         </Section>
 
         <Section title="What was asked for">

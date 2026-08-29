@@ -77,7 +77,7 @@ const DOCUMENT: ExperimentDesign = {
     ],
     steps: [
       {
-        index: 0,
+        index: 1,
         kind: 'charge',
         text: 'Charge the vessel.',
         components: [],
@@ -112,7 +112,6 @@ const REVISION: DesignRevision = {
   kind: 'protocol',
   author_kind: 'agent',
   author: 'chemclaw',
-  parent_revision: 3,
   change_note: 'Drafted.',
   design: DOCUMENT,
   checks: [],

@@ -166,13 +166,22 @@ export function PlateMap({
               <th className="sticky left-0 z-10 bg-surface px-1 py-1">
                 <span className="sr-only-live">Row</span>
               </th>
-              {columnIndices.map((column) => (
+              {columnIndices.map((column, columnIndex) => (
                 <th
                   key={column}
                   scope="col"
                   className="px-1 py-1 text-center text-2xs font-medium text-ink-subtle"
                 >
-                  {column}
+                  {/* The header is the cell's **position in the drawn grid**, not its index, which
+                      is the same rule the row letters have always used (`rowLabel(rowIndex)`).
+                      `place()` emits a 0-based index and writes the label as
+                      `row_label(row) + str(column + 1)`, so drawing the raw index put well `A1`
+                      under a header reading `0` and left a 24-well plate with no column 6 —
+                      invisible because every fixture here declared a 1-based origin the producer
+                      cannot emit. Position rather than `column + 1` because `axisSpan` returns an
+                      origin of 0 *or* 1, and the value rule is right for only one of them: a
+                      1-based layout numbered its columns 2..7 while its rows still read A..D. */}
+                  {columnIndex + 1}
                 </th>
               ))}
             </tr>

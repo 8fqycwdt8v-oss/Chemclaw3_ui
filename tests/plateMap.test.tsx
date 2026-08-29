@@ -31,15 +31,19 @@ const well = (over: Partial<Well> & Pick<Well, 'label' | 'row' | 'column'>): Wel
  * `tsc -b` — already a CI step — is the drift check on this fixture.
  */
 const layout = (over: Partial<PlateLayout> = {}): PlateLayout => ({
-  plate_format: 96,
-  rows: 2,
-  columns: 3,
+  // A real format: `PLATE_SHAPES[24]` is 4x6, and `place()` writes 0-based row/column with
+  // `label = row_label(row) + str(column + 1)`. This said `96, rows: 2, columns: 3` with
+  // 1-based wells — a shape the producer cannot emit, and the reason the map's 0-based column
+  // headers read correctly here while showing `0` against well `A1` in the real app.
+  plate_format: 24,
+  rows: 4,
+  columns: 6,
   randomized: false,
   seed: null,
   wells: [
-    well({ label: 'A1', row: 1, column: 1, arm_id: 'arm-1', run_order: 3 }),
-    well({ label: 'A2', row: 1, column: 2, arm_id: 'arm-2', run_order: 1 }),
-    well({ label: 'B3', row: 2, column: 3, arm_id: 'arm-ctl', run_order: 2 }),
+    well({ label: 'A1', row: 0, column: 0, arm_id: 'arm-1', run_order: 3 }),
+    well({ label: 'A2', row: 0, column: 1, arm_id: 'arm-2', run_order: 1 }),
+    well({ label: 'B3', row: 1, column: 2, arm_id: 'arm-ctl', run_order: 2 }),
   ],
   ...over,
 });
@@ -84,13 +88,16 @@ describe('PlateMap', () => {
   it('draws rows × columns with labels down the side and across the top', () => {
     render(<PlateMap layout={layout()} />);
 
-    const grid = screen.getByRole('region', { name: /Plate map, 2 rows by 3 columns/ });
+    const grid = screen.getByRole('region', { name: /Plate map, 4 rows by 6 columns/ });
     const table = within(grid).getByRole('table');
-    // Two body rows plus the header row.
-    expect(within(table).getAllByRole('row')).toHaveLength(3);
+    // Four body rows plus the header row — a 24-well plate is 4x6, which is what the fixture now
+    // declares. The columns are 1..6: `place()` emits a 0-based index and labels well `A1` as
+    // column 0, so a header showing the raw index put `A1` under `0` and left no column 6.
+    expect(within(table).getAllByRole('row')).toHaveLength(5);
     expect(within(table).getByRole('rowheader', { name: 'A' })).toBeTruthy();
     expect(within(table).getByRole('rowheader', { name: 'B' })).toBeTruthy();
-    for (const column of ['1', '2', '3']) {
+    expect(within(table).queryByRole('columnheader', { name: '0' })).toBeNull();
+    for (const column of ['1', '2', '3', '4', '5', '6']) {
       expect(within(table).getByRole('columnheader', { name: column })).toBeTruthy();
     }
   });
@@ -116,10 +123,10 @@ describe('PlateMap', () => {
   });
 
   it('leaves an unused well empty rather than putting a value in it', () => {
-    // 6 cells, 3 occupied. A glyph in the other three would read as data across 96 of them.
+    // 24 cells, 3 occupied. A glyph in the other 21 would read as data across 96 of them.
     const { container } = render(<PlateMap layout={layout()} />);
-    expect(container.querySelectorAll('td')).toHaveLength(6);
-    expect(container.querySelectorAll('td .border-dashed')).toHaveLength(3);
+    expect(container.querySelectorAll('td')).toHaveLength(24);
+    expect(container.querySelectorAll('td .border-dashed')).toHaveLength(21);
   });
 
   it('draws a 0-based layout without losing its last row', () => {
@@ -137,6 +144,29 @@ describe('PlateMap', () => {
     );
     expect(screen.getByText('zero')).toBeTruthy();
     expect(screen.getByText('one')).toBeTruthy();
+  });
+
+  it('numbers the columns the way it letters the rows, whatever origin the layout arrives on', () => {
+    // `axisSpan` returns an origin of 0 or 1, and the two axes used different rules: rows go by
+    // their position in the drawn grid, columns went by the index + 1. On a 1-based layout — one
+    // this producer cannot emit, which is exactly why no fixture caught it — that read A..B down
+    // the side and 2..3 across the top, so the cell labelled `A1` sat under a header saying `2`.
+    render(
+      <PlateMap
+        layout={layout({
+          rows: 2,
+          columns: 2,
+          wells: [
+            well({ label: 'A1', row: 1, column: 1, arm_id: 'one-based' }),
+            well({ label: 'B2', row: 2, column: 2, arm_id: 'other' }),
+          ],
+        })}
+      />,
+    );
+    const table = screen.getByRole('table');
+    expect(within(table).getByRole('rowheader', { name: 'A' })).toBeTruthy();
+    expect(within(table).getByRole('columnheader', { name: '1' })).toBeTruthy();
+    expect(within(table).queryByRole('columnheader', { name: '3' })).toBeNull();
   });
 
   it('says whether the run order can be reproduced, not just whether it was shuffled', () => {

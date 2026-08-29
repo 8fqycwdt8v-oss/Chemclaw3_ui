@@ -367,9 +367,17 @@ export function ProtocolDocument(): React.JSX.Element {
     }
   };
 
-  const moveStatus = async (status: DesignStatus): Promise<void> => {
+  /**
+   * Record a sign-off against the revision on screen — never against "whatever the head is".
+   *
+   * `atRevision` is passed in rather than read from a state variable because the service refuses a
+   * move that names anything but the head, and the revision this reader is looking at is the only
+   * honest answer: a colleague's save between opening the page and pressing the button now gives a
+   * 409 and a banner, instead of the chemist's name on a document they never read.
+   */
+  const moveStatus = async (status: DesignStatus, atRevision: number): Promise<void> => {
     try {
-      await api.setProtocolStatus(designId, status, statusReason.trim(), auth);
+      await api.setProtocolStatus(designId, status, atRevision, statusReason.trim(), auth);
       setStatusReason('');
       setNotice(`Status recorded as ${status}.`);
       reload();
@@ -555,7 +563,7 @@ export function ProtocolDocument(): React.JSX.Element {
                   description="The move is recorded against you with the reason you wrote. It does not change the document; earlier revisions stay readable."
                   confirmLabel={`Mark ${status}`}
                   variant={status === 'abandoned' ? 'destructive' : 'default'}
-                  onConfirm={() => void moveStatus(status)}
+                  onConfirm={() => void moveStatus(status, view.revision)}
                 />
               ))}
             </div>

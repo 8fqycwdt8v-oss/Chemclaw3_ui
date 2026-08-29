@@ -747,9 +747,27 @@ createServer(async (req, res) => {
     return json(res, 200, DESIGN_DIFF);
   }
   if (path === `/protocols/${DESIGN_ID}/status` && req.method === 'POST') {
-    req.resume();
-    res.writeHead(204);
-    return res.end();
+    // Read the body and enforce the compare-and-set, the way the service does. A fixture that
+    // answered 204 to anything would let the app ship without sending `expected_revision` at all —
+    // which is exactly how the nested-`revision` invention above survived an end-to-end run.
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => (body += chunk));
+    req.on('end', () => {
+      const posted = JSON.parse(body) as { expected_revision?: number };
+      if (posted.expected_revision !== head) {
+        json(res, 409, {
+          detail: {
+            code: 'revision_conflict',
+            message: `revision ${String(posted.expected_revision)} is not the head (${head})`,
+          },
+        });
+        return;
+      }
+      res.writeHead(204);
+      res.end();
+    });
+    return;
   }
 
   json(res, 404, { detail: 'not found' });

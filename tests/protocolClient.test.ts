@@ -263,17 +263,21 @@ describe('getProtocolDiff and setProtocolStatus', () => {
     expect(url.searchParams.get('from')).toBeNull();
   });
 
-  it('records a status move with its reason, and reads the 204 as success', async () => {
+  it('records a status move against the revision on screen, with its reason', async () => {
     const stub = stubFetch(() => ok(null, 204));
     restore = stub.restore;
 
     await expect(
-      api.setProtocolStatus(DESIGN, 'abandoned', 'superseded by the DoE', token),
+      api.setProtocolStatus(DESIGN, 'abandoned', 3, 'superseded by the DoE', token),
     ).resolves.toBeUndefined();
 
     expect(stub.calls[0]!.url).toContain(`/protocols/${DESIGN}/status`);
+    // `expected_revision` is `parent_revision`'s twin for a sign-off: the service refuses a move
+    // that names anything but the head, so a colleague's save between reading and clicking is a
+    // 409 rather than this chemist's name on a document they never saw.
     expect(JSON.parse(String(stub.calls[0]!.init?.body))).toEqual({
       status: 'abandoned',
+      expected_revision: 3,
       reason: 'superseded by the DoE',
     });
   });

@@ -347,7 +347,7 @@ async function streamTurn(res: ServerResponse): Promise<void> {
 const SESSIONS: SessionSummary[] = [];
 
 const SHARED_TRANSCRIPT: TranscriptMessage[] = [
-  { index: 0, role: 'user', text: 'What did we decide about the ligand?', tool_calls: [] },
+  { index: 1, role: 'user', text: 'What did we decide about the ligand?', tool_calls: [] },
   {
     index: 1,
     role: 'assistant',
@@ -489,7 +489,7 @@ const DESIGN_REVISION = (at: number, temperature: number): DesignRevision => ({
       ],
       steps: [
         {
-          index: 0,
+          index: 1,
           kind: 'charge',
           text: 'Charge the vessel with the aryl bromide and the base.',
           components: ['aryl bromide'],
@@ -535,15 +535,19 @@ const DESIGN_REVISION = (at: number, temperature: number): DesignRevision => ({
         note: 'Known-good conditions.',
       },
     ],
+    // The plate the producer would actually emit: `PLATE_SHAPES[24]` is 4x6, and `place()` writes
+    // 0-based `row`/`column` with `label = row_label(row) + str(column + 1)`. This declared a 2x2
+    // 24-well plate with 1-based wells — a shape the service cannot produce and `layout_fits` now
+    // refuses — which is what let the map's 0-based column headers look right in every test.
     layout: {
       plate_format: 24,
-      rows: 2,
-      columns: 2,
+      rows: 4,
+      columns: 6,
       randomized: true,
       seed: 7,
       wells: [
-        { label: 'A1', row: 1, column: 1, arm_id: 'arm-1', run_order: 2 },
-        { label: 'B2', row: 2, column: 2, arm_id: 'arm-ctl', run_order: 1 },
+        { label: 'A1', row: 0, column: 0, arm_id: 'arm-1', run_order: 2 },
+        { label: 'B2', row: 1, column: 1, arm_id: 'arm-ctl', run_order: 1 },
       ],
     },
     evidence: [

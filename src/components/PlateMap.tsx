@@ -172,7 +172,12 @@ export function PlateMap({
                   scope="col"
                   className="px-1 py-1 text-center text-2xs font-medium text-ink-subtle"
                 >
-                  {column}
+                  {/* `column + 1`, because `place()` emits a 0-based index and writes the label as
+                      `row_label(row) + str(column + 1)`. The raw index put the cell labelled `A1`
+                      under a header reading `0`, and left a 24-well plate with no column 6 —
+                      invisible because every fixture here used a 1-based origin the producer
+                      cannot emit. Rows were already right: they go through `rowLabel`. */}
+                  {column + 1}
                 </th>
               ))}
             </tr>

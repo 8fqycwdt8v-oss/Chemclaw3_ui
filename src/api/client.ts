@@ -775,9 +775,14 @@ export const api = {
     to: number,
     getToken: TokenGetter,
   ): Promise<DesignDiff> {
+    // **`from_revision`/`to_revision`, which is what the route binds.** These were `from`/`to`;
+    // FastAPI ignores an unknown query parameter, so every comparison silently answered **200**
+    // with the route's defaults — revision 1 against the head — while `RevisionDiff`'s header
+    // printed the two numbers the chemist had actually clicked. A wrong diff is worse than a
+    // failed one here: the diff is the record of what an expert changed.
     const query = new URLSearchParams({
-      from: String(Math.trunc(from)),
-      to: String(Math.trunc(to)),
+      from_revision: String(Math.trunc(from)),
+      to_revision: String(Math.trunc(to)),
     });
     return request<DesignDiff>(
       `/protocols/${encodeURIComponent(designId)}/diff?${query.toString()}`,

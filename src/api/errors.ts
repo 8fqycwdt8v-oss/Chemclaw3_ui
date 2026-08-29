@@ -295,6 +295,39 @@ export function errorFromEvent(event: {
  * present on every response the service writes, including the ones with no body at all; the body's
  * `correlation_id` is the fallback for a response that carries one there instead.
  */
+/**
+ * The service's `detail`, as a sentence, whatever shape it arrived in.
+ *
+ * **A pydantic validation error is an array of objects, and dropping it made every rejected edit
+ * read as the wrong thing.** `detail` was kept only when it was a string, so a 422 from
+ * `POST /protocols/{id}/revisions` fell through to `errorFromStatus`'s message-route default and
+ * told a chemist "That message exceeds the service's length limit." — for typing `0` into
+ * "Time (h)", or clearing a factor level's label. Those are ordinary states of the editor's own
+ * controls, and the actual reason (`Input should be greater than 0`, and the field it came from)
+ * was discarded on the way.
+ *
+ * `loc` is trimmed of its `body`/`document` prefix, because a chemist reads
+ * `base.setpoints.time_h`, not the transport's framing of it.
+ */
+function detailText(detail: unknown): string | undefined {
+  if (typeof detail === 'string') return detail;
+  if (!Array.isArray(detail)) return undefined;
+  const parts = detail
+    .map((item) => {
+      const entry = item as { loc?: unknown; msg?: unknown };
+      if (typeof entry?.msg !== 'string') return '';
+      const where = Array.isArray(entry.loc)
+        ? entry.loc
+            .filter((step) => step !== 'body' && step !== 'document')
+            .map(String)
+            .join('.')
+        : '';
+      return where ? `${where}: ${entry.msg}` : entry.msg;
+    })
+    .filter(Boolean);
+  return parts.length > 0 ? parts.join('; ') : undefined;
+}
+
 export async function readFailure(
   res: Response,
 ): Promise<{ detail?: string; correlationId: string }> {
@@ -302,7 +335,7 @@ export async function readFailure(
   try {
     const body = (await res.json()) as { detail?: unknown; correlation_id?: unknown };
     return {
-      detail: typeof body?.detail === 'string' ? body.detail : undefined,
+      detail: detailText(body?.detail),
       correlationId:
         fromHeader || (typeof body?.correlation_id === 'string' ? body.correlation_id : ''),
     };

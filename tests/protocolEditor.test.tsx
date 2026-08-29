@@ -77,7 +77,7 @@ const DOCUMENT: ExperimentDesign = {
     ],
     steps: [
       {
-        index: 0,
+        index: 1,
         kind: 'charge',
         text: 'Charge the vessel.',
         components: [],

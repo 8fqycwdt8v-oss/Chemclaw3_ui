@@ -241,9 +241,14 @@ describe('getProtocolDiff and setProtocolStatus', () => {
     const diff = await api.getProtocolDiff(DESIGN, 1, 2, token);
 
     expect(diff.changes).toEqual([]);
+    // **The names the route binds.** This asserted `from`/`to`, which the service does not read —
+    // FastAPI ignores an unknown query parameter, so every comparison answered 200 with the
+    // route's defaults (revision 1 against the head) while the header printed the numbers the
+    // chemist clicked. The test agreed with the client and with nothing else.
     const url = new URL(stub.calls[0]!.url, 'http://x');
-    expect(url.searchParams.get('from')).toBe('1');
-    expect(url.searchParams.get('to')).toBe('2');
+    expect(url.searchParams.get('from_revision')).toBe('1');
+    expect(url.searchParams.get('to_revision')).toBe('2');
+    expect(url.searchParams.get('from')).toBeNull();
   });
 
   it('records a status move with its reason, and reads the 204 as success', async () => {

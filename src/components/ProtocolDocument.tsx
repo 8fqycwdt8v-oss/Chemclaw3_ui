@@ -465,9 +465,7 @@ export function ProtocolDocument(): React.JSX.Element {
             </span>
           </div>
 
-          {view.change_note && (
-            <p className="text-sm text-ink-muted">“{view.change_note}”</p>
-          )}
+          {view.change_note && <p className="text-sm text-ink-muted">“{view.change_note}”</p>}
 
           {/* A reader looking at an old revision has to be told, or every number on this page is
               being read as current. The link out is what makes the notice actionable rather than

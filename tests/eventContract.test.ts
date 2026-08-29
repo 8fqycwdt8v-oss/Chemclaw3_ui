@@ -274,3 +274,76 @@ describe('the fixture is checked against the declarations, not trusted', () => {
     },
   );
 });
+
+/**
+ * `ErrorCode` (the type) and `ERROR_CODES` (the runtime set) are two hand-maintained lists of the
+ * same vocabulary, and nothing bound them to each other.
+ *
+ * **What the drift costs is specific, not cosmetic.** `normalizeEvent` gates on `ERROR_CODES` and
+ * maps anything absent to `internal`. So a code added to the union and forgotten in the set does
+ * not merely lose its copy — it arrives as `internal`, which is **not** in
+ * `PARTIAL_ANSWER_CODES`, so `streamTurn` treats it as terminal and throws. That runs the
+ * `finally`, whose `reader.cancel()` the BFF turns into a destroyed upstream request and FastAPI
+ * into a client disconnect: the backend's turn is cancelled before it records the transcript, and
+ * the partial answer is lost from the screen *and* from the stored conversation.
+ *
+ * That is exactly the failure `spend_cap_reached` was added to `PARTIAL_ANSWER_CODES` to prevent,
+ * reachable again through a one-line omission in a different file. Both lists happened to be
+ * updated together when that code arrived; nothing would have noticed if they had not been.
+ *
+ * Parsed with the compiler API rather than imported, because the *type* has no runtime existence —
+ * importing `ERROR_CODES` proves only what the set holds, and the union is the half a reader edits
+ * first.
+ */
+describe('the error-code union and its runtime set are one vocabulary', () => {
+  const source = () =>
+    ts.createSourceFile(
+      'shared/events.ts',
+      readFileSync('shared/events.ts', 'utf8'),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+
+  /** The `ErrorCode` union's string members, read off the declaration. */
+  const unionMembers = (): Set<string> => {
+    for (const statement of source().statements) {
+      if (!ts.isTypeAliasDeclaration(statement) || statement.name.text !== 'ErrorCode') continue;
+      if (!ts.isUnionTypeNode(statement.type)) {
+        throw new Error('ErrorCode is no longer a union; this check needs updating');
+      }
+      const members = new Set<string>();
+      for (const node of statement.type.types) {
+        if (ts.isLiteralTypeNode(node) && ts.isStringLiteral(node.literal)) {
+          members.add(node.literal.text);
+        }
+      }
+      return members;
+    }
+    throw new Error('no ErrorCode declaration found in shared/events.ts');
+  };
+
+  it('every code the type declares is one the normaliser will actually accept', () => {
+    const declared = unionMembers();
+    expect(declared.size).toBeGreaterThan(5);
+
+    // Round-tripped through `normalizeEvent` rather than compared against an imported constant:
+    // what matters is not that two lists match but that a declared code *survives normalisation*,
+    // which is the property the failure above turns on.
+    for (const code of declared) {
+      const event = normalizeEvent({
+        type: 'error',
+        message: 'x',
+        code,
+        retryable: false,
+        correlation_id: 'c1',
+      });
+      expect(event, `normalizeEvent dropped the ${code} event entirely`).not.toBeNull();
+      expect(
+        (event as { code: string }).code,
+        `'${code}' is declared in the ErrorCode union but missing from ERROR_CODES, so it ` +
+          `normalises to 'internal' — and 'internal' is not in PARTIAL_ANSWER_CODES, so a turn ` +
+          `carrying it would be cancelled and its partial answer lost`,
+      ).toBe(code);
+    }
+  });
+});

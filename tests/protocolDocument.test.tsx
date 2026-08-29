@@ -17,7 +17,12 @@ import { cleanup, render, screen, waitFor, within } from '@testing-library/react
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { ProtocolDocument } from '../src/components/ProtocolDocument.tsx';
 import { stubFetch } from './helpers.ts';
-import type { DesignRevision, DesignSummary, RevisionSummary } from '../shared/protocols.ts';
+import type {
+  DesignRevision,
+  DesignSummary,
+  RevisionSummary,
+  StatusEvent,
+} from '../shared/protocols.ts';
 
 vi.mock('../src/auth/AuthContext.tsx', () => {
   const value = { auth: { getAccessToken: async () => null, mode: 'dev' }, ready: true };
@@ -102,6 +107,17 @@ const revision = (at: number): DesignRevision => ({
   },
 });
 
+/** What `GET /protocols/{id}` carries about who signed off, and on which revision. */
+const SIGN_OFFS: StatusEvent[] = [
+  {
+    status: 'approved',
+    revision: 2,
+    actor: 'chemist@example.com',
+    reason: 'The precedent runs at 80 °C.',
+    created_at: '2026-08-21T10:00:00Z',
+  },
+];
+
 const HISTORY: RevisionSummary[] = [
   {
     revision: 4,
@@ -136,8 +152,17 @@ function serve(): void {
       });
     }
     const asked = new URL(url, 'http://x').searchParams.get('revision');
+    // FLAT, and spread from the revision, because that is what `GET /protocols/{id}` returns. This
+    // stub used to nest it under `revision:`, agreeing with a type this app invented and with
+    // nothing the service sends — so every assertion below passed while the real page threw on
+    // `design.request.title`.
     return new Response(
-      JSON.stringify({ revision: revision(asked ? Number(asked) : served), history: HISTORY }),
+      JSON.stringify({
+        ...revision(asked ? Number(asked) : served),
+        summary: SUMMARY,
+        history: HISTORY,
+        status_history: SIGN_OFFS,
+      }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     );
   });
@@ -218,11 +243,28 @@ describe('ProtocolDocument', () => {
     );
   });
 
-  it('shows the design’s status from the index, since the document route does not carry one', async () => {
-    // Status is a property of the design rather than of a revision. Deriving one from the
-    // revision's `kind` would answer a different question in the same badge.
+  it('shows the design’s status from the read itself, not from a second request', async () => {
+    // The header row rides along with the document, so the badge costs no extra round trip. This
+    // test's own name used to say the opposite — "since the document route does not carry one" —
+    // which was the invented contract talking.
     serve();
     open();
     expect(await screen.findByText('draft')).toBeTruthy();
+  });
+
+  it('names who signed off and on which revision, which the badge cannot', async () => {
+    // A revision landing on an approved design demotes it back to `draft`, so the status badge is
+    // about the head and the sign-off is about a document. Only this line can say the chemist
+    // approved revision 2 — and only rendering it makes the reason worth storing.
+    serve();
+    open();
+    // Matched on the whole row rather than on a string: the status, the revision and the reason
+    // are three elements, and a text query for the sentence would find none of them.
+    const row = await screen.findByText(
+      (_content, element) =>
+        element?.tagName === 'LI' && /approved.*revision 2/s.test(element.textContent ?? ''),
+    );
+    expect(row.textContent).toContain('chemist@example.com');
+    expect(row.textContent).toContain('The precedent runs at 80 °C.');
   });
 });

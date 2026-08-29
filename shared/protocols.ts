@@ -287,6 +287,54 @@ export interface RevisionSummary {
   blockers: number;
 }
 
+/**
+ * One recorded lifecycle move: which revision somebody signed off on, and why.
+ *
+ * The header's `status` describes the HEAD and moves with it — a revision landing on an approved
+ * design demotes it back to `draft`, because an approval is a statement about a document and the
+ * document changed. So the badge can never say which document a chemist actually approved, and
+ * this is the only thing that can.
+ */
+export interface StatusEvent {
+  status: DesignStatus;
+  /** The head revision at the instant of the move. */
+  revision: number;
+  actor: string;
+  reason: string;
+  created_at: string;
+}
+
+/**
+ * What `GET /protocols/{id}` returns: one revision, FLAT, with the design's header and history
+ * beside it.
+ *
+ * Transcribed from the service rather than shaped for the screen, which is the whole point.
+ * `client.ts` used to declare this as `{ revision: DesignRevision; history: RevisionSummary[] }`,
+ * and every fixture and stub in this repository emitted that nested shape — so `revision.design`
+ * was `undefined` against the real service and the document page threw on its first field, under a
+ * green unit suite and a green end-to-end run. A fixture is only evidence when it is the service's
+ * shape.
+ *
+ * Not `extends DesignRevision`: the service does not send `parent_revision` here, and inheriting
+ * the field would put the same class of invented promise back one level down.
+ */
+export interface DesignOut {
+  design_id: string;
+  /** The header row — status, counts, timestamps. `null` for a design with no header yet. */
+  summary: DesignSummary | null;
+  revision: number;
+  kind: 'request' | 'protocol';
+  author_kind: 'agent' | 'human';
+  author: string;
+  change_note: string;
+  created_at: string;
+  design: ExperimentDesign;
+  checks: ProtocolCheck[];
+  history: RevisionSummary[];
+  /** Who approved, ran or abandoned this design and at which revision. */
+  status_history: StatusEvent[];
+}
+
 export interface DesignSummary {
   design_id: string;
   title: string;

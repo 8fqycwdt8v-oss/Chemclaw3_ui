@@ -32,7 +32,7 @@ import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import type {
   Analytic,
-  DesignRevision,
+  DesignOut,
   ExperimentDesign,
   FactorLevel,
   ProtocolArm,
@@ -153,8 +153,15 @@ export function ProtocolEditor({
   onReload,
 }: {
   designId: string;
-  /** The revision being edited. Its `revision` number is the `parent_revision` the save posts. */
-  revision: DesignRevision;
+  /**
+   * The read being edited — `GET /protocols/{id}`'s own flat shape. Its `revision` NUMBER is the
+   * `parent_revision` the save posts.
+   *
+   * `DesignOut` rather than `DesignRevision`: the service does not return a nested revision object
+   * here, and typing it as one is how `revision.design` came to be `undefined` on the document
+   * page under a green suite.
+   */
+  revision: DesignOut;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** The new revision number, so the document view can move to it. */

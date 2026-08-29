@@ -97,7 +97,6 @@ const DOCUMENT: ExperimentDesign = {
       arm_id: 'arm-1',
       levels: { solvent: '2-MeTHF' },
       setpoints: null,
-      charge_overrides: [],
       control: '',
       replicate_of: '',
       note: '',

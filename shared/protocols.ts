@@ -210,7 +210,12 @@ export interface ProtocolArm {
   /** Factor name → the level's `label`. */
   levels: Record<string, string>;
   setpoints: Setpoints | null;
-  charge_overrides: ChargeLine[];
+  /**
+   * There is deliberately no per-arm charge override. An arm that varies an *amount* declares that
+   * amount as a continuous factor, which says the same thing in the vocabulary the design already
+   * has; the field existed, had no producer, and inlined the whole `ChargeLine` model into every
+   * tool schema. A control that genuinely differs says so in `note`.
+   */
   control: '' | 'positive' | 'negative' | 'blank';
   /** The `arm_id` this is a replicate of, or empty. */
   replicate_of: string;

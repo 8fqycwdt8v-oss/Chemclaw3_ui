@@ -48,7 +48,6 @@ const arm = (id: string, control: ProtocolArm['control']): ProtocolArm => ({
   arm_id: id,
   levels: {},
   setpoints: null,
-  charge_overrides: [],
   control,
   replicate_of: '',
   note: '',

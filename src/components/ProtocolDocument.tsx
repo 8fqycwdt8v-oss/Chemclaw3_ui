@@ -46,6 +46,7 @@ import type {
   Setpoints,
 } from '../../shared/protocols.ts';
 import type { Json } from '../results/shape.ts';
+import { setpointsFor } from '../../shared/protocols.ts';
 import { Molecule } from './Molecule.tsx';
 import { PlateMap } from './PlateMap.tsx';
 import { RevisionDiff } from './RevisionDiff.tsx';
@@ -258,24 +259,44 @@ function Conditions({ setpoints }: { setpoints: Setpoints }): React.JSX.Element 
 function runSheetRecords(design: ExperimentDesign): Json[] {
   const wells = new Map(design.layout?.wells.map((well) => [well.arm_id, well]) ?? []);
   const factorNames = design.factors.map((factor) => factor.name);
-  return design.arms.map((arm) => {
+  const records = design.arms.map((arm) => {
     const well = wells.get(arm.arm_id);
     const levels: Json = {};
     for (const name of factorNames) levels[name] = arm.levels[name] ?? '';
-    const setpoints = arm.setpoints ?? design.base.setpoints;
+    // Field by field, not `arm.setpoints ?? base` — see `setpointsFor`.
+    const setpoints = setpointsFor(design.base.setpoints, arm);
+    // **The fixed columns are display labels, and that is load-bearing rather than cosmetic.**
+    // A factor name matches `^[a-z][a-z0-9_]*$`, so a solvent screen — the canonical HTE case —
+    // declares a factor literally named `solvent`; with the fixed keys spelled the same way, the
+    // later literal silently won the object and the level never reached the page or the CSV. Every
+    // label here carries a capital, a space or a slash, so no factor name can collide with one.
     return {
-      arm: arm.arm_id,
-      well: well?.label ?? '',
-      run_order: well?.run_order ?? '',
+      Arm: arm.arm_id,
+      Well: well?.label ?? '',
+      Run: well?.run_order ?? '',
       ...levels,
-      temperature_c: setpoints.temperature_c ?? '',
-      time_h: setpoints.time_h ?? '',
-      solvent: setpoints.solvent,
-      control: arm.control,
-      replicate_of: arm.replicate_of,
-      note: arm.note,
+      'T /°C': setpoints.temperature_c ?? '',
+      't /h': setpoints.time_h ?? '',
+      Solvent: setpoints.solvent,
+      Atmosphere: setpoints.atmosphere,
+      'p /bar': setpoints.pressure_bar ?? '',
+      'c /M': setpoints.concentration_molar ?? '',
+      pH: setpoints.ph ?? '',
+      Control: arm.control,
+      'Replicate of': arm.replicate_of,
+      Note: arm.note,
     };
   });
+  // A randomised design's whole point is that it is *run* in an order the plate does not show, so
+  // the sheet is sorted by that order — as the service's own `run_sheet_rows` does, and as this
+  // table's heading and aria-label both already claimed.
+  return wells.size > 0
+    ? [...records].sort((a, b) => {
+        const left = typeof a.Run === 'number' ? a.Run : Number.POSITIVE_INFINITY;
+        const right = typeof b.Run === 'number' ? b.Run : Number.POSITIVE_INFINITY;
+        return left - right;
+      })
+    : records;
 }
 
 function Evidence({ evidence }: { evidence: EvidenceRef[] }): React.JSX.Element {

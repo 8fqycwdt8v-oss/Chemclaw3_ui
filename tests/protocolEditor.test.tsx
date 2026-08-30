@@ -239,6 +239,22 @@ describe('ProtocolEditor', () => {
     });
   });
 
+  it('clears the box when the override behind it is cleared', async () => {
+    // The input is a draft of the field, not a second source of truth for it. `text` was seeded
+    // once and never resynchronised and the arm `<li>` key is stable, so "Clear override" set the
+    // arm's setpoints to null while the box went on showing the old number — the form said 60 °C
+    // for an arm that would be saved inheriting the base's 80 °C, and the Save posted the null.
+    serve();
+    open();
+
+    const box = screen.getByLabelText(/arm-1 temperature/) as HTMLInputElement;
+    fireEvent.change(box, { target: { value: '60' } });
+    expect(box.value).toBe('60');
+
+    fireEvent.click(screen.getByRole('button', { name: /clear override/i }));
+    expect((screen.getByLabelText(/arm-1 temperature/) as HTMLInputElement).value).toBe('');
+  });
+
   it('says somebody else edited it, offers the re-read, and does not re-post', async () => {
     // The 409 the `parent_revision` exists to produce. Re-posting these values against the new
     // parent would discard whatever landed in between while reporting success.

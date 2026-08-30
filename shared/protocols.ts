@@ -413,3 +413,24 @@ export interface ProtocolRead {
   design: ExperimentDesign;
   markdown: string;
 }
+
+/**
+ * An arm's own setpoints over the shared body's, **field by field**.
+ *
+ * The one authority on this is the service's `ExperimentDesign.setpoints_for`, and this is a
+ * transcription of it rather than a second opinion. `arm.setpoints ?? design.base.setpoints` — what
+ * this replaced — falls back only when the arm states *nothing*, so an arm overriding one field
+ * lost every other: an arm setting `temperature_c: 60` rendered a run-sheet row with no reaction
+ * time and no solvent, beside rows that had both. That is the bug the service measured, fixed and
+ * documented, reimplemented on the surface a chemist actually reads.
+ *
+ * A field counts as stated when it is not the model's default: `null` for the numbers, `''` for the
+ * two strings.
+ */
+export function setpointsFor(base: Setpoints, arm: ProtocolArm): Setpoints {
+  if (arm.setpoints === null) return base;
+  const stated = Object.fromEntries(
+    Object.entries(arm.setpoints).filter(([, value]) => value !== null && value !== ''),
+  );
+  return { ...base, ...stated };
+}

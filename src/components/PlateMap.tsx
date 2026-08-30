@@ -81,10 +81,14 @@ function WellCell({
     );
   }
   return (
-    <td className="p-0.5">
+    <td className="p-0.5" aria-label={`${well.label} · ${well.arm_id}`}>
       <div
         // The label is what a chemist reads off the plate itself, so it is the cell's accessible
-        // name even though the visible text is the arm.
+        // name even though the visible text is the arm. `title` alone does not do that: on a
+        // non-interactive `<div>` inside the `<td>` it contributes nothing to the cell's name, so
+        // the well id was announced by neither — measured, the cell's accessible name was
+        // "arm-1 run 1" and `getByRole('cell', { name: /A1/ })` found nothing. `aria-label` on the
+        // cell itself is what makes the claim true; `title` stays for the sighted hover.
         title={`${well.label} · ${well.arm_id}${control ? ` · ${control} control` : ''}`}
         className={cn(
           'flex h-11 w-16 flex-col justify-center gap-0.5 rounded-md border px-1.5 py-1',

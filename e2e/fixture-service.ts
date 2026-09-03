@@ -93,6 +93,7 @@ const PROTOCOL_RECEIPT: ProtocolReceipt = {
   title: 'Amination solvent screen',
   mode: 'screen',
   status: 'draft',
+  has_protocol: true,
   summary: '4 arms across 2 factors; 1 check did not pass.',
   checks: [
     {

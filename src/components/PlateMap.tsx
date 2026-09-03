@@ -81,15 +81,22 @@ function WellCell({
     );
   }
   return (
-    <td className="p-0.5" aria-label={`${well.label} · ${well.arm_id}`}>
+    // **One string, and it has to carry everything the cell shows.** `title` on the inner
+    // non-interactive `<div>` contributes nothing to the cell's accessible name, so the well id —
+    // what a chemist reads off the plate itself — was announced by neither: measured, the name was
+    // "arm-1 run 1" and `getByRole('cell', { name: /A1/ })` found nothing.
+    //
+    // **`aria-label` on a `role=cell` *replaces* name-from-content, and the first fix forgot that.**
+    // Measured again with `dom-accessibility-api`: the names went from "arm-1 run 2" and
+    // "arm-2 negative" to "A1 · arm-1" and "A2 · arm-2" — the well id bought at the price of the run
+    // order **and of the control marking**, so a screen-reader user could no longer tell a control
+    // well from an ordinary one (`●` is `aria-hidden` and `negative` had left the name). Trading one
+    // fact for two is not a fix. This names all of them.
+    <td className="p-0.5" aria-label={describeWell(well, control)}>
       <div
-        // The label is what a chemist reads off the plate itself, so it is the cell's accessible
-        // name even though the visible text is the arm. `title` alone does not do that: on a
-        // non-interactive `<div>` inside the `<td>` it contributes nothing to the cell's name, so
-        // the well id was announced by neither — measured, the cell's accessible name was
-        // "arm-1 run 1" and `getByRole('cell', { name: /A1/ })` found nothing. `aria-label` on the
-        // cell itself is what makes the claim true; `title` stays for the sighted hover.
-        title={`${well.label} · ${well.arm_id}${control ? ` · ${control} control` : ''}`}
+        // The same string for the sighted hover, because two spellings of one cell is how they
+        // come to disagree.
+        title={describeWell(well, control)}
         className={cn(
           'flex h-11 w-16 flex-col justify-center gap-0.5 rounded-md border px-1.5 py-1',
           control
@@ -112,6 +119,21 @@ function WellCell({
       </div>
     </td>
   );
+}
+
+/**
+ * One well as a sentence — the cell's accessible name and its hover title, from one place.
+ *
+ * Everything the cell shows plus the thing it does not: the well id. `aria-label` on a `role=cell`
+ * replaces name-from-content outright, so anything left out of this string is not merely
+ * un-emphasised to a screen reader, it is *gone* — which is how an earlier version traded the run
+ * order and the control marking for the well id.
+ */
+function describeWell(well: Well, control: string): string {
+  const parts = [well.label, well.arm_id];
+  if (well.run_order > 0) parts.push(`run ${well.run_order}`);
+  if (control) parts.push(`${control} control`);
+  return parts.join(' · ');
 }
 
 export function PlateMap({

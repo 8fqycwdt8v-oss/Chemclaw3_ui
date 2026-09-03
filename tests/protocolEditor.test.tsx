@@ -255,6 +255,22 @@ describe('ProtocolEditor', () => {
     expect((screen.getByLabelText(/arm-1 temperature/) as HTMLInputElement).value).toBe('');
   });
 
+  it('leaves the text a chemist is typing alone, however they spell the number', async () => {
+    // The resynchronise above keyed on `value` changing, and `text` and `value` agree as *numbers*
+    // while somebody types and not as strings — so every keystroke that moved the parsed value
+    // rewrote the box with `String(value)`. Measured through this editor: `1e5` came back
+    // `100000`, `05` came back `5`, and inserting a `2` into `1.50` gave `12.5` with the trailing
+    // zero gone and the caret thrown to the end. Nothing was ever saved wrong; what was lost is
+    // what the chemist was typing.
+    serve();
+    open();
+    const box = screen.getByLabelText(/arm-1 temperature/) as HTMLInputElement;
+    for (const typed of ['1e5', '05', '12.50', '1.', '-', '1e']) {
+      fireEvent.change(box, { target: { value: typed } });
+      expect(box.value).toBe(typed);
+    }
+  });
+
   it('says somebody else edited it, offers the re-read, and does not re-post', async () => {
     // The 409 the `parent_revision` exists to produce. Re-posting these values against the new
     // parent would discard whatever landed in between while reporting success.

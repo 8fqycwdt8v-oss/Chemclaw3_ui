@@ -58,6 +58,23 @@ const clone = (design: ExperimentDesign): ExperimentDesign =>
  * Empty is a real value here and means *unset*, which is not zero: an unstated pressure is not one
  * bar and an unstated pH is not neutral.
  */
+/**
+ * Whether the box still says this value — the question `NumberField` resynchronises on.
+ *
+ * Not `String(value) === text`: `05`, `1.50` and `1e5` all *say* their value while differing from
+ * its canonical spelling, and rewriting them is what threw a chemist's caret to the end of the box
+ * mid-edit. Text that does not parse at all is somebody part-way through typing (`1e`, `-`, `1.`)
+ * and is never overwritten; it is only when the box parses to a **different** number, or sits empty
+ * against a value that is not null, that the display is stale.
+ */
+function textStillMeans(text: string, value: number | null): boolean {
+  const trimmed = text.trim();
+  if (trimmed === '') return value === null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed)) return true;
+  return parsed === value;
+}
+
 function NumberField({
   label,
   value,
@@ -73,12 +90,20 @@ function NumberField({
   // **The box is a draft of the field, not a second source of truth for it.** `text` was seeded
   // once and never resynchronised, and the arm `<li>` key is stable, so "Clear override" set the
   // arm's setpoints to null while the input went on showing the old number: the form displayed
-  // 60 °C for an arm that would be saved inheriting the base's 80 °C, and the Save posted the
-  // null. Mid-typing is not disturbed — `text` and `value` already agree while a chemist types,
-  // so this only fires when something *else* moved the field.
-  const [seen, setSeen] = useState(value);
-  if (seen !== value) {
-    setSeen(value);
+  // 60 °C for an arm that would be saved inheriting the base's 80 °C, and the Save posted the null.
+  //
+  // **The first version keyed that on `value` changing and did disturb mid-typing**, contrary to
+  // its own comment: `text` and `value` agree as *numbers* while a chemist types and not as
+  // strings, so every keystroke that moved the parsed value rewrote the box with `String(value)`.
+  // Measured through the real editor — `1` `e` `5` became `100000`, `0` `5` became `5`, and
+  // inserting a `2` into `1.50` gave back `12.5` with the trailing zero gone and the caret thrown
+  // to the end. Nothing was ever *saved* wrong; what was lost is the text the chemist was typing.
+  //
+  // So the question is not "did the value change" but "does this box still say the value" —
+  // `textStillMeans`. Mid-typing text that does not parse (`1e`, `-`, `1.`) is the chemist's and is
+  // left alone; a box that parses to something else, or is empty against a value that is not, is
+  // stale and is rewritten. That covers the case this was written for and no other.
+  if (!textStillMeans(text, value)) {
     setText(value === null ? '' : String(value));
   }
   return (

@@ -117,9 +117,25 @@ describe('PlateMap', () => {
     // a reader who cannot tell the tones apart.
     render(<PlateMap layout={layout()} arms={[arm('arm-ctl', 'positive'), arm('arm-1', '')]} />);
     expect(screen.getByText('positive')).toBeTruthy();
-    expect(screen.getByTitle(/arm-ctl · positive control/)).toBeTruthy();
+    expect(screen.getByTitle(/arm-ctl · run \d+ · positive control$/)).toBeTruthy();
     // And the arm beside it is not marked, which is what makes the marking mean something.
-    expect(screen.getByTitle('A1 · arm-1')).toBeTruthy();
+    expect(screen.getByTitle(/A1 · arm-1 · run \d+$/)).toBeTruthy();
+  });
+
+  it('gives a cell an accessible name carrying everything the cell shows, plus the well id', () => {
+    // `aria-label` on a `role=cell` **replaces** name-from-content, so anything left out of it is
+    // gone rather than merely un-emphasised. An earlier version named only the well and the arm,
+    // and bought the well id at the price of the run order and the control marking — leaving a
+    // screen-reader user unable to tell a control well from an ordinary one, because `●` is
+    // `aria-hidden` and the control's kind had left the name with it.
+    render(<PlateMap layout={layout()} arms={[arm('arm-ctl', 'negative')]} />);
+    const control = screen.getByRole('cell', { name: /arm-ctl/ });
+    for (const part of ['arm-ctl', 'run ', 'negative control']) {
+      expect(control.getAttribute('aria-label')).toContain(part);
+    }
+    const ordinary = screen.getByRole('cell', { name: /arm-1/ });
+    expect(ordinary.getAttribute('aria-label')).toContain('run ');
+    expect(ordinary.getAttribute('aria-label')).not.toContain('control');
   });
 
   it('leaves an unused well empty rather than putting a value in it', () => {

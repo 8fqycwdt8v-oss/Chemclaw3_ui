@@ -392,6 +392,18 @@ export interface ProtocolReceipt {
   title: string;
   mode: string;
   status: DesignStatus;
+  /**
+   * Whether the checks below were graded against a *procedure*.
+   *
+   * At the request stage the service reports every protocol-only check as a **passing** note
+   * reading "not checked yet — this design holds only the ask", precisely so a UI would not look
+   * like it had skipped them. So a reader that counts passes has to know which stage it is reading,
+   * and `status` is only a proxy for that: `advanced()` decides the status and `has_protocol`
+   * decides the stage, independently. A `draft` or `approved` design edited back down to the bare
+   * ask keeps its status, and the receipt card then showed a green "15 checks passed" over a design
+   * with no charge table, no procedure and no evidence.
+   */
+  has_protocol: boolean;
   summary: string;
   checks: ProtocolCheck[];
   /** The `check_id`s that stop this design being executed. A subset of the failed checks. */
@@ -434,3 +446,41 @@ export function setpointsFor(base: Setpoints, arm: ProtocolArm): Setpoints {
   );
   return { ...base, ...stated };
 }
+
+/**
+ * The conditions **every arm agrees on**, each arm resolved against the shared body first.
+ *
+ * A transcription of the service's `render.shared_setpoints`, and the same argument holds on this
+ * surface: `Conditions` rendered `design.base.setpoints` — what the body happens to hold, which is
+ * not what anybody runs the moment an arm overrides it — while the run sheet carries a column only
+ * where the arms *disagree*. So a field every arm overrode to the same value fell through both.
+ * Measured on the service with three arms all set to `N2` over a body reading `air`: the page said
+ * "Atmosphere: air", there was no atmosphere column, and the atmosphere the design is run under
+ * appeared nowhere on a document a chemist runs from.
+ *
+ * A field the arms disagree about comes back at its default, so the caller drops it and the run
+ * sheet shows it per row. That is what makes the two sections complements rather than two lists
+ * somebody keeps in step by hand.
+ */
+export function sharedSetpoints(design: ExperimentDesign): Setpoints {
+  if (design.arms.length === 0) return design.base.setpoints;
+  const resolved = design.arms.map((arm) => setpointsFor(design.base.setpoints, arm));
+  const [first, ...rest] = resolved as [Setpoints, ...Setpoints[]];
+  const agreed = Object.fromEntries(
+    Object.entries(first).filter(([field, value]) =>
+      rest.every((other) => other[field as keyof Setpoints] === value),
+    ),
+  );
+  return { ...EMPTY_SETPOINTS, ...agreed };
+}
+
+/** Every `Setpoints` field at the model's own default — what a disagreed-about field falls back to. */
+const EMPTY_SETPOINTS: Setpoints = {
+  temperature_c: null,
+  time_h: null,
+  pressure_bar: null,
+  atmosphere: '',
+  concentration_molar: null,
+  solvent: '',
+  ph: null,
+};

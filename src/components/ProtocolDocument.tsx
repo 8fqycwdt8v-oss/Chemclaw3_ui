@@ -43,10 +43,9 @@ import type {
   ExperimentDesign,
   ProtocolCheck,
   RequestField,
-  Setpoints,
 } from '../../shared/protocols.ts';
 import type { Json } from '../results/shape.ts';
-import { setpointsFor } from '../../shared/protocols.ts';
+import { setpointsFor, sharedSetpoints } from '../../shared/protocols.ts';
 import { Molecule } from './Molecule.tsx';
 import { PlateMap } from './PlateMap.tsx';
 import { RevisionDiff } from './RevisionDiff.tsx';
@@ -227,7 +226,18 @@ function ChecksStrip({
   );
 }
 
-function Conditions({ setpoints }: { setpoints: Setpoints }): React.JSX.Element {
+/**
+ * The conditions this design is run at — **what the arms agree on**, not what the body holds.
+ *
+ * This read `design.base.setpoints`, which is only what anybody runs while no arm overrides it. The
+ * run sheet is the other half and carries a column only where the arms *disagree*, so a field every
+ * arm overrode to the same value fell through both: three arms all set to `N2` over a body reading
+ * `air` gave a page stating "Atmosphere: air", no atmosphere column, and the atmosphere the design
+ * is actually run under stated nowhere. A field the arms disagree about comes back at its default
+ * and shows as `—` here, because the run sheet is where it belongs.
+ */
+function Conditions({ design }: { design: ExperimentDesign }): React.JSX.Element {
+  const setpoints = sharedSetpoints(design);
   const entries: [string, string][] = [
     ['Temperature', setpoints.temperature_c === null ? '—' : `${setpoints.temperature_c} °C`],
     ['Time', setpoints.time_h === null ? '—' : `${setpoints.time_h} h`],
@@ -255,6 +265,16 @@ function Conditions({ setpoints }: { setpoints: Setpoints }): React.JSX.Element 
   );
 }
 
+/**
+ * The run-sheet columns that appear only when the arms disagree about them.
+ *
+ * The names, the membership and the order are the service's `render._RUN_SHEET_WHEN_VARYING`, and
+ * this list existing at all is the point: all four used to ship on every sheet, which buries the
+ * one column that varies among three constant ones on a 96-row plate. A column dropped here is not
+ * a value lost — `Conditions` states what every arm shares.
+ */
+const WHEN_VARYING = ['c /M', 'Atmosphere', 'p /bar', 'pH'] as const;
+
 /** One run-sheet row per arm, resolved against the base — what a bench actually works from. */
 function runSheetRecords(design: ExperimentDesign): Json[] {
   const wells = new Map(design.layout?.wells.map((well) => [well.arm_id, well]) ?? []);
@@ -275,28 +295,42 @@ function runSheetRecords(design: ExperimentDesign): Json[] {
       Well: well?.label ?? '',
       Run: well?.run_order ?? '',
       ...levels,
+      // Temperature, time and solvent whether or not they vary — a chemist setting up a run reads
+      // those three off the row in front of them. Then the four in `WHEN_VARYING`, in the service's
+      // own order, dropped below if the arms agree about them.
       'T /°C': setpoints.temperature_c ?? '',
       't /h': setpoints.time_h ?? '',
       Solvent: setpoints.solvent,
+      'c /M': setpoints.concentration_molar ?? '',
       Atmosphere: setpoints.atmosphere,
       'p /bar': setpoints.pressure_bar ?? '',
-      'c /M': setpoints.concentration_molar ?? '',
       pH: setpoints.ph ?? '',
       Control: arm.control,
       'Replicate of': arm.replicate_of,
       Note: arm.note,
     };
   });
+  // **The four that appear only when the arms disagree about them**, which is the service's rule
+  // and was not this one's: all four shipped on every sheet, so a 96-row plate buried the one
+  // column that varies among three constant ones. What a constant column would have said is on the
+  // page already — `Conditions` states what every arm shares — so the two are complements here as
+  // they are there, and dropping one loses nothing.
+  const constant = new Set<string>(
+    WHEN_VARYING.filter((key) => new Set(records.map((row) => String(row[key]))).size <= 1),
+  );
+  const trimmed = records.map((row) =>
+    Object.fromEntries(Object.entries(row).filter(([key]) => !constant.has(key))),
+  );
   // A randomised design's whole point is that it is *run* in an order the plate does not show, so
   // the sheet is sorted by that order — as the service's own `run_sheet_rows` does, and as this
   // table's heading and aria-label both already claimed.
   return wells.size > 0
-    ? [...records].sort((a, b) => {
+    ? [...trimmed].sort((a, b) => {
         const left = typeof a.Run === 'number' ? a.Run : Number.POSITIVE_INFINITY;
         const right = typeof b.Run === 'number' ? b.Run : Number.POSITIVE_INFINITY;
         return left - right;
       })
-    : records;
+    : trimmed;
 }
 
 function Evidence({ evidence }: { evidence: EvidenceRef[] }): React.JSX.Element {
@@ -662,7 +696,16 @@ export function ProtocolDocument(): React.JSX.Element {
         </Section>
 
         <Section title="Conditions">
-          <Conditions setpoints={design.base.setpoints} />
+          <Conditions design={design} />
+          {design.arms.some(
+            (arm) =>
+              JSON.stringify(setpointsFor(design.base.setpoints, arm)) !==
+              JSON.stringify(sharedSetpoints(design)),
+          ) && (
+            <p className="mt-2 text-2xs text-ink-subtle">
+              The conditions every arm shares; the run sheet carries what varies.
+            </p>
+          )}
         </Section>
 
         {design.base.charge.length > 0 && (

@@ -627,7 +627,19 @@ function protocolVerdict(data: Json): {
   // opposite claim into a green "N checks passed" badge on a design with no charge table, no
   // procedure and no evidence. The document view guards this; this card is the surface a chemist
   // meets first, and it did not.
-  if (str(data.status) === 'requested') {
+  //
+  // **`status === 'requested'` was the first guard and it is a proxy, not the predicate.** The
+  // service picks the check stage from `has_protocol` and decides the status separately in
+  // `advanced()`, so the two come apart exactly where it matters: a `draft` or `approved` design
+  // edited back down to the bare ask keeps its status while every check returns a passing note, and
+  // the badge went green again on the same document the guard was written for. The receipt carries
+  // `has_protocol` now — the value the stage was actually chosen by — and this reads that. The
+  // `!== false` is for a receipt from a service too old to send it: an unknown stage falls back to
+  // the status proxy rather than claiming either answer.
+  if (
+    data.has_protocol === false ||
+    (data.has_protocol === undefined && str(data.status) === 'requested')
+  ) {
     return { text: 'the ask only — the procedure has not been checked', tone: 'neutral' };
   }
   return { text: `${checks.length} checks passed`, tone: 'ok' };

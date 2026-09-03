@@ -220,4 +220,40 @@ describe('the run sheet', () => {
     // And the base solvent is still its own column, not replaced by the level.
     expect(cells).toContain('2-MeTHF');
   });
+
+  it('carries a column only when the arms disagree about it, as the service does', async () => {
+    // Both arms resolve to `N2` and 0.2 M, and neither states a pressure or a pH. All four shipped
+    // on every sheet, so on a 96-row plate the one column that varies sat among three constant
+    // ones — which is the reason the service states for the rule, in the module this transcribes.
+    const table = await runSheet();
+    const headers = within(table)
+      .getAllByRole('columnheader')
+      .map((cell) => cell.textContent);
+    for (const constant of ['Atmosphere', 'c /M', 'p /bar', 'pH']) {
+      expect(headers).not.toContain(constant);
+    }
+    // The three a bench sheet always carries stay, varying or not.
+    for (const always of ['T /°C', 't /h', 'Solvent']) {
+      expect(headers).toContain(always);
+    }
+  });
+
+  it('shows the atmosphere every arm shares rather than the body it overrode', async () => {
+    // The other half of the same rule. A field dropped from the run sheet is *stated* in
+    // Conditions, so nothing is lost — and the value stated is what the arms run at.
+    render(
+      <MemoryRouter initialEntries={[`/protocols/${DESIGN}`]}>
+        <Routes>
+          <Route path="/protocols/:designId" element={<ProtocolDocument />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const heading = await screen.findByRole('heading', { name: 'Conditions' });
+    const section = heading.closest('section');
+    expect(section).toBeTruthy();
+    expect(within(section!).getByText('N2')).toBeTruthy();
+    // The arms disagree about the temperature (80 against 60), so it is the run sheet's.
+    expect(within(section!).queryByText('80 °C')).toBeNull();
+    expect(within(section!).getByText(/the run sheet carries what varies/i)).toBeTruthy();
+  });
 });

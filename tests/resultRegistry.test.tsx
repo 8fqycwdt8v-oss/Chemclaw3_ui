@@ -179,6 +179,47 @@ describe('dispatch', () => {
     });
   });
 
+  it('will not call a design with no procedure checked, whatever its status says', () => {
+    // At the request stage the service reports every protocol-only check as a **passing** note
+    // reading "not checked yet — this design holds only the ask", so counting passes turns the
+    // opposite claim into a green badge. The first guard read `status === 'requested'`, which is a
+    // *proxy*: the service picks the stage from `has_protocol` and decides the status separately in
+    // `advanced()`, and a `draft` or `approved` design edited back down to the bare ask keeps its
+    // status. Measured against the shipped renderer, that design got "15 checks passed", tone `ok`.
+    const notes = [
+      { check_id: 'a', severity: 'note', passed: true, detail: 'not checked yet' },
+      { check_id: 'b', severity: 'note', passed: true, detail: 'not checked yet' },
+    ];
+    for (const status of ['requested', 'draft', 'approved', 'executed']) {
+      const ask = pick('structure_experiment_request', {
+        design_id: 'design-0123456789ab',
+        summary: 's',
+        status,
+        has_protocol: false,
+        checks: notes,
+        blocking: [],
+      });
+      expect(ask.renderer.summary?.(ask.data)).toEqual({
+        text: 'the ask only — the procedure has not been checked',
+        tone: 'neutral',
+      });
+    }
+    // And a drafted design is still reported as checked, which is what makes the badge mean
+    // something at all.
+    const drafted = pick('draft_experiment_protocol', {
+      design_id: 'design-0123456789ab',
+      summary: 's',
+      status: 'draft',
+      has_protocol: true,
+      checks: notes,
+      blocking: [],
+    });
+    expect(drafted.renderer.summary?.(drafted.data)).toEqual({
+      text: '2 checks passed',
+      tone: 'ok',
+    });
+  });
+
   it('finds a value strip only when there is no record list to tabulate', () => {
     expect(pick('predict_pka', { pka: 4.76, sd: 1.6 }).id).toBe('values');
     // A payload with both is a table with a header, not a strip.

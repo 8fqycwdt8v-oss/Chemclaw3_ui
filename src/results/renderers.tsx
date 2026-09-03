@@ -621,6 +621,15 @@ function protocolVerdict(data: Json): {
     return { text: `${failed.length} of ${checks.length} failed`, tone: 'warn' };
   }
   if (checks.length === 0) return { text: 'no checks recorded', tone: 'neutral' };
+  // **Most of these did not run.** At the request stage the service reports every protocol-only
+  // check as a *passing* `note` reading "not checked yet — this design holds only the ask",
+  // precisely so a UI would not look like it had skipped them. Counting those as passes turned the
+  // opposite claim into a green "N checks passed" badge on a design with no charge table, no
+  // procedure and no evidence. The document view guards this; this card is the surface a chemist
+  // meets first, and it did not.
+  if (str(data.status) === 'requested') {
+    return { text: 'the ask only — the procedure has not been checked', tone: 'neutral' };
+  }
   return { text: `${checks.length} checks passed`, tone: 'ok' };
 }
 

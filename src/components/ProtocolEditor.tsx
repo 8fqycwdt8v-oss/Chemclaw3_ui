@@ -70,6 +70,17 @@ function NumberField({
   onChange: (value: number | null) => void;
 }): React.JSX.Element {
   const [text, setText] = useState(value === null ? '' : String(value));
+  // **The box is a draft of the field, not a second source of truth for it.** `text` was seeded
+  // once and never resynchronised, and the arm `<li>` key is stable, so "Clear override" set the
+  // arm's setpoints to null while the input went on showing the old number: the form displayed
+  // 60 °C for an arm that would be saved inheriting the base's 80 °C, and the Save posted the
+  // null. Mid-typing is not disturbed — `text` and `value` already agree while a chemist types,
+  // so this only fires when something *else* moved the field.
+  const [seen, setSeen] = useState(value);
+  if (seen !== value) {
+    setSeen(value);
+    setText(value === null ? '' : String(value));
+  }
   return (
     <label className="flex flex-col gap-1 text-xs">
       <span className="text-ink-muted">

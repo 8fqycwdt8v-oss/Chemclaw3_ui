@@ -110,11 +110,23 @@ export function RevisionDiff({ diff }: { diff: DesignDiff }): React.JSX.Element 
                         <span className="font-mono text-2xs break-all">{change.path}</span>
                       </span>
                     </td>
+                    {/* **The placeholder is a claim about the field, so it has to agree with the
+                        kind badge beside it.** `flatten` keeps `''` leaves, so an empty value is an
+                        ordinary output on any kind: a charge line added with an empty note rendered
+                        an `added` badge next to the word "removed", and a solvent set for the first
+                        time rendered "not present" for a field that existed and was empty. Only a
+                        genuine `added` has no before, and only a genuine `removed` has no after. */}
                     <td className="px-2.5 py-1.5 align-top">
-                      <Value text={change.before} absent="not present" />
+                      <Value
+                        text={change.before}
+                        absent={change.kind === 'added' ? 'not present' : 'empty'}
+                      />
                     </td>
                     <td className="px-2.5 py-1.5 align-top">
-                      <Value text={change.after} absent="removed" />
+                      <Value
+                        text={change.after}
+                        absent={change.kind === 'removed' ? 'removed' : 'empty'}
+                      />
                     </td>
                   </tr>
                 ))}

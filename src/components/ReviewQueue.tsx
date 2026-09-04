@@ -40,6 +40,7 @@ import {
   type ProposalDetail,
   type ProposalSummary,
 } from '../api/client.ts';
+import { useNewestRead } from '../hooks/useNewestRead.ts';
 import { relativeTime } from '../lib/format.ts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -85,18 +86,25 @@ function ProposalSheet({
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [loadedFor, setLoadedFor] = useState<number | null>(null);
+  const claim = useNewestRead();
 
   if (open && loadedFor !== id) {
     setLoadedFor(id);
     setDetail(null);
     setError(null);
     setReason('');
+    // Claimed before the request, so a read this one supersedes cannot land afterwards. What this
+    // sheet renders is the bytes an Approve would commit, and Approve posts `id` — a proposal's
+    // content under another proposal's identity is a sign-off on something nobody read. See
+    // `useNewestRead`.
+    const isNewest = claim();
     api
       .getProposal(id, auth)
-      .then(setDetail)
-      .catch((err: unknown) =>
-        setError(err instanceof Error ? err.message : 'Could not read that proposal.'),
-      );
+      .then((next) => isNewest() && setDetail(next))
+      .catch((err: unknown) => {
+        if (!isNewest()) return;
+        setError(err instanceof Error ? err.message : 'Could not read that proposal.');
+      });
   }
 
   const decide = (approved: boolean) => async (): Promise<void> => {

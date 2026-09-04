@@ -15,7 +15,6 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderHook } from '@testing-library/react';
-import { useChatStore } from '../src/state/chatStore.ts';
 import type { AuthProvider } from '../src/auth/types.ts';
 
 const SID = 'a'.repeat(32);
@@ -23,6 +22,9 @@ const SID = 'a'.repeat(32);
 let restore: (() => void) | null = null;
 let statuses: number[] = [];
 let requests: (RequestInit | undefined)[] = [];
+
+/** Torn down in `afterEach`, so no test's hook is alive while the next one counts requests. */
+let mounted: (() => void) | null = null;
 
 /** The auth context the hook reads. Replaced per test so recovery can be dictated. */
 let currentAuth: AuthProvider & { asked: number };
@@ -61,9 +63,23 @@ function stub(): void {
   };
 }
 
-/** Drive the hook for one conversation with one message, which is what makes it watch a session. */
+/**
+ * Drive the hook for one conversation with one message, which is what makes it watch a session.
+ *
+ * **The store is imported here, beside the hook, rather than at the top of the file.**
+ * `afterEach` calls `vi.resetModules()`, so every test after the first gets a fresh module graph —
+ * a fresh `useJobStreams` *and* a fresh `chatStore`. Seeding the file-level import therefore wrote
+ * into a store the hook under test could not see, and its `watchKey` was empty: the requests the
+ * second and third tests counted were fired by the **first test's hook, still mounted**, whose
+ * effect re-ran because `currentAuth` had been swapped under it. Both tests passed while
+ * exercising nothing, and the tell was that narrowing the hook's subscription — which cannot
+ * affect a 401 — turned one of them red.
+ *
+ * So: same graph as the hook, and `unmount` below so a test's hook cannot outlive it.
+ */
 async function watch(): Promise<void> {
   const { useJobStreams } = await import('../src/hooks/useJobStreams.ts');
+  const { useChatStore } = await import('../src/state/chatStore.ts');
   useChatStore.setState({
     conversations: {
       c1: {
@@ -77,7 +93,7 @@ async function watch(): Promise<void> {
     activeId: 'c1',
     jobStreamsThrottled: false,
   });
-  renderHook(() => useJobStreams());
+  mounted = renderHook(() => useJobStreams()).unmount;
   // One macrotask is enough for the stream's first request and its synchronous follow-up; a
   // backoff would not have elapsed, which is the point of counting requests rather than waiting.
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -91,6 +107,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  mounted?.();
+  mounted = null;
   restore?.();
   restore = null;
   vi.resetModules();

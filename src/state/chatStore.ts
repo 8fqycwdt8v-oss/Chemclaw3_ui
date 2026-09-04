@@ -741,11 +741,21 @@ export const useChatStore = create<ChatState>()(
 
       deleteConversation(id) {
         // A turn belonging to the conversation being deleted has to be stopped here, not left to
-        // finish into a conversation that no longer exists. Aborting also releases the backend's
-        // per-session turn lock, which is the whole reason Stop propagates a disconnect.
+        // finish into a conversation that no longer exists.
+        //
+        // **Through `stop()`, not `abort()`.** This used to abort the fetch and say that "aborting
+        // also releases the backend's per-session turn lock" — which stopped being true at
+        // `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`, and the slot's own docstring three
+        // hundred lines up already says so: the service could not tell Stop from a Wi-Fi handoff,
+        // so a dropped connection now *detaches* and the turn runs to completion on its own pump
+        // task. Aborting alone therefore left it generating for up to its 600 s deadline, spending
+        // the turn budget and holding the admission permit a queued turn is waiting on — for a
+        // chemist whose action was "cancel this and move on". `stop()` is `POST
+        // /sessions/{id}/turn/stop` and then the abort, in that order; the send path builds it
+        // precisely so this call site does not have to know that.
         const streaming = get().streaming;
         const wasStreamingThis = streaming?.conversationId === id;
-        if (wasStreamingThis) streaming?.abort.abort();
+        if (wasStreamingThis) streaming?.stop();
 
         // The subject index goes with the conversation. It is keyed by conversation id and read
         // by nobody else, so leaving it behind would be a rail for a transcript that no longer
@@ -773,8 +783,10 @@ export const useChatStore = create<ChatState>()(
       clearAll() {
         // "Reset app" is the escape hatch from a poisoned state, so it has to leave nothing
         // behind — including an in-flight turn that would otherwise write into a conversation
-        // this just deleted.
-        get().streaming?.abort.abort();
+        // this just deleted. Through `stop()` for the reason `deleteConversation` gives above, and
+        // with more force here: this is the control a chemist reaches for when a turn is wedged,
+        // which is exactly when leaving it running on the server is worst.
+        get().streaming?.stop();
         // Same reason as `deleteConversation`: every conversation these indexes describe is about
         // to stop existing.
         useEntityStore.getState().clear();

@@ -29,6 +29,7 @@ const base: BffConfig = {
   appVersion: 'test',
   sseHeartbeatMs: 15_000,
   upstreamConnectTimeoutMs: 10_000,
+  upstreamHeadersTimeoutMs: 120_000,
   requestTimeoutMs: 130_000,
   maxUpstreamSockets: 512,
   maxBodyBytes: 2 * 1024 * 1024,

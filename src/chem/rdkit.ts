@@ -53,10 +53,49 @@
 
 import type { JSMol, RDKitLoader, RDKitModule } from '@rdkit/rdkit';
 
+/**
+ * The longest SMILES this module will hand to `get_mol`, and the reason there has to be one.
+ *
+ * **RDKit's WASM traps on a long enough chain, and a trap is not recoverable.** Measured against
+ * the shipped binary (`@rdkit/rdkit` 2025.3.4-1.0.0), a chain of ~1040 carbons or more raises
+ * `RuntimeError: memory access out of bounds` inside `get_mol` — Emscripten aborts the runtime,
+ * and *every* later call into the same module throws too. `withMol` catches, so what the chemist
+ * then sees is "Could not render this structure" and "RDKit could not read this as a molecule"
+ * about `CCO`, for the rest of the tab's life, with `rdkitAvailable()` still answering `true`
+ * because the module did load. Nothing short of a reload recovers it.
+ *
+ * It is reachable with no user action: `Markdown` renders an inline code span through
+ * `InlineSmiles`, which parses on mount, and `looksLikeSmiles` accepts `'CC'.repeat(600)` — a
+ * polymer or a PEG linker written out longhand. `<Molecule>` takes the backend's own
+ * `molecule_smiles` and consults no recogniser at all.
+ *
+ * 600 is chosen from both ends. Above: it is ~40% below the trap, so no input can reach it. Below:
+ * it admits every structure anyone would draw here — paclitaxel is ~110 characters, vancomycin
+ * ~200, and the 60-mer peptide `tests/chem.test.tsx` deliberately blesses is 421.
+ *
+ * **What it does not fix**, stated because the numbers say so rather than left to be discovered: a
+ * legal 600-character chain still costs ~0.3 s to parse and ~1.7 s to draw on the main thread, and
+ * emits ~300 kB of SVG. Bounding that properly means a worker, which is a change of shape rather
+ * than a constant. This bounds the unrecoverable failure, not the slow one.
+ */
+const MAX_PARSED_SMILES_CHARS = 600;
+
+/**
+ * Set when a call has left the WASM runtime dead, so `loadRDKit` stops handing it out.
+ *
+ * The distinction this exists to keep is the one the trap destroys: `null` from a helper means
+ * "not a molecule", which is a claim about the *string*. A dead runtime makes every helper say
+ * that about every string, which is a false chemical claim rather than a missing one. Once this is
+ * set, `rdkitAvailable()` answers `false` and the surfaces that consult it say the toolkit is
+ * unavailable — which is true, and is what they already say when the chunk never arrived.
+ */
+let poisoned = false;
+
 /** Resolved once, then reused. Only a *success* is cached — see the catch below. */
 let modulePromise: Promise<RDKitModule | null> | null = null;
 
 export function loadRDKit(): Promise<RDKitModule | null> {
+  if (poisoned) return Promise.resolve(null);
   const pending = (modulePromise ??= (async () => {
     try {
       const [loader, { default: wasmUrl }] = await Promise.all([
@@ -114,10 +153,52 @@ function withMol<T>(rdkit: RDKitModule, smiles: string, fn: (mol: JSMol) => T): 
     if (!mol || !mol.is_valid()) return null;
     return fn(mol);
   } catch {
+    // Two very different things arrive here and they used to be answered identically. A C++
+    // exception out of the depiction code is ordinary — measured, a 1050-character chain throws
+    // one, `delete()` still works and the next molecule parses fine — and "not a molecule" is the
+    // right answer for it. A `RuntimeError` out of the WASM is the runtime aborting, after which
+    // that answer is a lie about every string. Rather than distinguish them by the shape of the
+    // throw, which is Emscripten's business and not a contract, ask the module whether it is still
+    // alive.
+    if (!stillAlive(rdkit)) poisoned = true;
     return null;
   } finally {
     mol?.delete();
   }
+}
+
+/**
+ * Can this module still read a molecule at all?
+ *
+ * `CCO` because it is the shortest thing that exercises the parser and the validity check without
+ * being a degenerate single atom. A throw here, or an invalid ethanol, means the heap is gone.
+ */
+function stillAlive(rdkit: RDKitModule): boolean {
+  let probe: JSMol | null = null;
+  try {
+    probe = rdkit.get_mol('CCO');
+    return probe !== null && probe.is_valid();
+  } catch {
+    return false;
+  } finally {
+    try {
+      probe?.delete();
+    } catch {
+      // A dead runtime can refuse the free as well. The verdict is already `false`.
+    }
+  }
+}
+
+/**
+ * `withMol`, for input that is a SMILES rather than a molblock.
+ *
+ * The bound is here rather than in `withMol` because a molblock is legitimately long — a
+ * thousand-atom `.mol` file is tens of kilobytes of text — and measured, the molfile parser
+ * degrades to "invalid" rather than trapping, so it does not need this and would be broken by it.
+ */
+function withSmilesMol<T>(rdkit: RDKitModule, smiles: string, fn: (mol: JSMol) => T): T | null {
+  if (smiles.length > MAX_PARSED_SMILES_CHARS) return null;
+  return withMol(rdkit, smiles, fn);
 }
 
 /**
@@ -130,7 +211,7 @@ function withMol<T>(rdkit: RDKitModule, smiles: string, fn: (mol: JSMol) => T): 
 export async function canonicalSmiles(smiles: string): Promise<string | null> {
   const rdkit = await loadRDKit();
   if (!rdkit) return null;
-  return withMol(rdkit, smiles, (mol) => mol.get_smiles() || null);
+  return withSmilesMol(rdkit, smiles, (mol) => mol.get_smiles() || null);
 }
 
 /** Whether RDKit can read `smiles` as a molecule. The gate a recogniser's guess must pass before
@@ -138,7 +219,7 @@ export async function canonicalSmiles(smiles: string): Promise<string | null> {
 export async function isMolecule(smiles: string): Promise<boolean> {
   const rdkit = await loadRDKit();
   if (!rdkit) return false;
-  return withMol(rdkit, smiles, () => true) ?? false;
+  return withSmilesMol(rdkit, smiles, () => true) ?? false;
 }
 
 /**
@@ -289,7 +370,7 @@ export async function moleculeSvg(smiles: string, opts: DrawOptions): Promise<st
   const rdkit = await loadRDKit();
   if (!rdkit) return null;
 
-  return withMol(rdkit, smiles, (mol) => {
+  return withSmilesMol(rdkit, smiles, (mol) => {
     mol.normalize_depiction(1);
     mol.straighten_depiction();
 

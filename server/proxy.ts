@@ -132,19 +132,40 @@ const isEventStream = (headers: IncomingHttpHeaders): boolean =>
  */
 function attachHeartbeat(upstreamRes: IncomingMessage, res: ServerResponse): void {
   let lastChunkAt = Date.now();
-  let atFrameBoundary = true;
+  /**
+   * The last two bytes forwarded, carried **across** chunks.
+   *
+   * This used to be a boolean read off one chunk in isolation, and that made the heartbeat latch
+   * itself off for the life of a stream. A chunk of a single byte can never satisfy a
+   * `tail.length === 2` test, so it set the flag to `false` — and the only thing that could clear
+   * it was another chunk, which by definition is not coming, because the stream has just gone
+   * quiet. That is precisely the state the heartbeat exists for.
+   *
+   * Measured through the real proxy with `SSE_HEARTBEAT_MS=300` and the same valid frame delivered
+   * two ways: `'data: one\n\n'` as one chunk produced 4 heartbeats; `'data: two\n'` then `'\n'`
+   * produced 0, and the stream then sat silent for ever with `x-accel-buffering: no` still set and
+   * nothing keeping it alive. Both deliveries are byte-identical on the wire and both are valid
+   * SSE — nothing constrains where the backend's `send()` calls or the network put a boundary, and
+   * a long `GET /sessions/{id}/events` carries thousands of frames, so hitting one is a matter of
+   * time rather than of bad luck. The visible symptom is the job feed dying at random, with the
+   * code that prevents it plainly present.
+   *
+   * Two bytes because that is the whole question — "did the stream end on `\n\n`" — and a rolling
+   * tail answers it whatever the chunking. It also removes the length special case: a stream that
+   * has forwarded fewer than two bytes is not at a frame boundary, which is the right answer.
+   */
+  let tail = '';
 
   // A 'data' listener coexists with .pipe(); both receive chunks in flowing mode.
   upstreamRes.on('data', (chunk: Buffer) => {
     lastChunkAt = Date.now();
-    const tail = chunk.subarray(-2);
-    atFrameBoundary = tail.length === 2 && tail[0] === 0x0a && tail[1] === 0x0a;
+    tail = (tail + chunk.subarray(-2).toString('latin1')).slice(-2);
   });
 
   const timer = setInterval(() => {
     if (res.writableEnded || res.destroyed) return;
     if (Date.now() - lastChunkAt < cfg.sseHeartbeatMs) return;
-    if (!atFrameBoundary) return;
+    if (tail !== '\n\n') return;
     res.write(': hb\n\n');
   }, cfg.sseHeartbeatMs);
 
@@ -263,8 +284,41 @@ export function proxy(
     },
   );
 
-  // No idle timeout: see the Agent comment above.
+  // No idle timeout: see the Agent comment above. That is right about the *body* — a job stream is
+  // legitimately silent for many minutes — and it left the response *headers* unbounded too, which
+  // is a different thing and was the one unrecoverable failure in this file.
   upstreamReq.setTimeout(0);
+
+  /**
+   * Give up on an upstream that has accepted the request and never begun answering.
+   *
+   * `requestTimeoutMs` bounds only how long a client may take to *send*; once a well-formed
+   * request had been read, nothing in this process ever gave up. Measured against an upstream that
+   * accepts and never answers, with `MAX_UPSTREAM_SOCKETS=4`: four requests claimed the whole
+   * agent pool, the next two queued, and after 10 s — five times the configured request timeout —
+   * not one of the six had received a single byte. At the shipped pool of 512 that is the entire
+   * `/api` surface, `GET /api/healthz` included, offline until the backend answers or every
+   * browser gives up. `/readyz` stays 200 throughout, because it probes on `agent: false`, so the
+   * pod is never rotated out either. Unlike the slowloris case `serverLimits.test.ts` closed,
+   * there was no timeout anywhere that recovered it.
+   *
+   * Bounding the *headers* rather than the response is what makes one timeout safe on every route,
+   * SSE included: a turn's header block arrives immediately and only its body is slow, so this
+   * cannot cut a 600 s turn or a quiet job stream. The socket-level `connect` timer above is a
+   * narrower thing again — it covers an upstream that never accepts, which is not this.
+   */
+  const headersTimer =
+    cfg.upstreamHeadersTimeoutMs > 0
+      ? setTimeout(() => {
+          upstreamReq.destroy(new Error('upstream headers timeout'));
+        }, cfg.upstreamHeadersTimeoutMs)
+      : null;
+  const clearHeadersTimer = (): void => {
+    if (headersTimer) clearTimeout(headersTimer);
+  };
+  upstreamReq.on('response', clearHeadersTimer);
+  upstreamReq.on('error', clearHeadersTimer);
+  upstreamReq.on('close', clearHeadersTimer);
 
   upstreamReq.on('socket', (socket) => {
     // Token frames are a few bytes each; Nagle would batch them into visible stutter.

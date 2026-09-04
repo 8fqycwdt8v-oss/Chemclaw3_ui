@@ -18,12 +18,13 @@
  *  - A legitimately silent stream must stay open. Only the connect phase is bounded.
  */
 
-import { useEffect, useMemo } from 'react';
+import { useEffect } from 'react';
 import { config } from '../env.ts';
 import { retryAfterSeconds } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from '../state/chatStore.ts';
+import type { ChatState } from '../state/chatStore.ts';
 import { logger } from '../lib/logger.ts';
 import { readEventStream } from '../lib/sse.ts';
 
@@ -64,31 +65,49 @@ const MAX_JOB_STREAMS = 3;
  */
 const FAILURES_BEFORE_REPORTING = 4;
 
+/**
+ * The sessions to watch, as one comma-joined string.
+ *
+ * A string rather than an array because it is both the effect's dependency and the store
+ * subscription: zustand compares a selector's result with `Object.is`, so a projection to a
+ * primitive re-renders only when the watched set actually changes. Exported so the property that
+ * matters — a token flush does not move it — can be pinned without opening a socket.
+ */
+export function watchedSessionKey(s: ChatState): string {
+  const budget = s.jobStreamsThrottled ? 1 : MAX_JOB_STREAMS;
+  const activeId = s.activeId;
+  const candidates = Object.values(s.conversations)
+    .filter((c) => c.sessionId)
+    // A conversation nobody has sent in has no job to report. This predicate is also what keeps
+    // `warmSession` from inflating the stream count: warming gives a session, not a turn.
+    .filter((c) => c.messages.length > 0 || c.id === activeId)
+    .sort((a, b) => {
+      if (a.id === activeId) return -1; // the active conversation is always watched
+      if (b.id === activeId) return 1;
+      return b.updatedAt - a.updatedAt;
+    })
+    .slice(0, budget)
+    .map((c) => c.sessionId as string);
+  return [...new Set(candidates)].join(',');
+}
+
 export function useJobStreams(): void {
   const { auth, ready } = useAuth();
-  const conversations = useChatStore((s) => s.conversations);
-  const activeId = useChatStore((s) => s.activeId);
-  const throttled = useChatStore((s) => s.jobStreamsThrottled);
 
-  // A stable, comparable key. The conversations map is a fresh object on every store write, so a
-  // raw array here would tear down and reopen every stream once per animation frame while a turn
-  // streams — zustand v5 has no implicit shallow compare to save us.
-  const watchKey = useMemo(() => {
-    const budget = throttled ? 1 : MAX_JOB_STREAMS;
-    const candidates = Object.values(conversations)
-      .filter((c) => c.sessionId)
-      // A conversation nobody has sent in has no job to report. This predicate is also what keeps
-      // `warmSession` from inflating the stream count: warming gives a session, not a turn.
-      .filter((c) => c.messages.length > 0 || c.id === activeId)
-      .sort((a, b) => {
-        if (a.id === activeId) return -1; // the active conversation is always watched
-        if (b.id === activeId) return 1;
-        return b.updatedAt - a.updatedAt;
-      })
-      .slice(0, budget)
-      .map((c) => c.sessionId as string);
-    return [...new Set(candidates)].join(',');
-  }, [conversations, activeId, throttled]);
+  // **The projection is the subscription.** The conversations map is a fresh object on every store
+  // write, so this used to be `useChatStore((s) => s.conversations)` folded into a `useMemo`. The
+  // memo did its job — streams were not torn down and reopened once per animation frame — but it
+  // could not touch the other half: subscribing to the map at all re-renders *this hook's
+  // component* at that rate, and its component is `AppShell`, so the top bar, the composer, the
+  // entity rail and the sidebar were all dragged onto the per-token render path. Measured with the
+  // hook stubbed out, 20 token flushes went from 20 renders each of those four to 0, and ~70% of
+  // all per-frame work went with them. `MessageList.tsx` documents this exact hazard and avoids
+  // it; the shell above it did not.
+  //
+  // Selecting the key itself means zustand compares with `Object.is` and re-renders only when the
+  // watched set actually changes. The projection still runs per write, over at most
+  // `MAX_CONVERSATIONS` entries, which is microseconds.
+  const watchKey = useChatStore(watchedSessionKey);
 
   useEffect(() => {
     if (!ready || !watchKey) return;

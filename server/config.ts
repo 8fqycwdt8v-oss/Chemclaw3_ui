@@ -152,6 +152,15 @@ export interface BffConfig {
   appVersion: string;
   sseHeartbeatMs: number;
   upstreamConnectTimeoutMs: number;
+  /**
+   * How long the upstream may take to begin ANSWERING before the request is abandoned.
+   *
+   * Distinct from `upstreamConnectTimeoutMs`, which covers an upstream that never accepts, and
+   * from `requestTimeoutMs`, which covers a client that never finishes sending. This is the one
+   * that was missing, and its absence was the only unrecoverable failure on this path — see the
+   * comment at its use in `server/proxy.ts`. `0` disables it and restores that.
+   */
+  upstreamHeadersTimeoutMs: number;
   /** How long a client may take to *send* a request before it is disconnected. */
   requestTimeoutMs: number;
   /** Upstream keep-alive sockets this process will hold at once. */
@@ -230,6 +239,12 @@ export const cfg: BffConfig = {
   maxMessageCharsIsValid,
   sseHeartbeatMs: num('SSE_HEARTBEAT_MS', 15_000),
   upstreamConnectTimeoutMs: num('UPSTREAM_CONNECT_TIMEOUT_MS', 10_000),
+  // Deliberately generous rather than tight. It bounds time-to-first-response-*header*, and the
+  // slowest legitimate case here is a route the backend answers after real work (a protocol
+  // generation, a durable launch) — not a turn, whose headers arrive at once and whose body is the
+  // slow part. What matters is that a hung backend now recycles the socket pool on its own instead
+  // of holding it until a human notices; a deployment that knows its backend can tighten this.
+  upstreamHeadersTimeoutMs: num('UPSTREAM_HEADERS_TIMEOUT_MS', 120_000),
   // Time to RECEIVE a request, not to answer one, so this bounds nothing about a 600 s turn or a
   // silent job stream — both of those are *responses*. It used to be 0 (disabled), and the cost
   // was measured: 129 unauthenticated one-byte POSTs each claimed one of the upstream agent's

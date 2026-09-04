@@ -14,6 +14,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLocation, useNavigate } from 'react-router';
 import {
   FileCheck2,
@@ -29,6 +30,8 @@ import { api } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore, newConversation } from '../state/chatStore.ts';
+import type { ChatState } from '../state/chatStore.ts';
+import type { Conversation } from '../state/types.ts';
 import { announceStatus } from '../state/announce.ts';
 import { relativeTime } from '../lib/format.ts';
 import { logger } from '../lib/logger.ts';
@@ -116,6 +119,55 @@ function useServerSessions(): 'idle' | 'degraded' {
   }, [auth, ready]);
 
   return health;
+}
+
+/**
+ * Everything in one conversation a search should reach, lowercased, cached on the conversation.
+ *
+ * Keyed on the conversation *object*, which the store replaces only when that conversation
+ * actually changes — so a streaming turn rebuilds one entry per animation frame and the other
+ * twenty-nine are read straight back. Without it the scan below allocated a lowercased copy of
+ * every message body in every conversation on every frame: measured at 30 conversations × 200
+ * messages, 2.1 ms per frame, i.e. ~128 ms of string work per second of streaming, for as long
+ * as the reader has anything typed in the box.
+ *
+ * A `WeakMap` rather than an LRU because the right eviction rule is exactly "the conversation is
+ * gone", and that is the one rule a `WeakMap` applies for free.
+ */
+const haystacks = new WeakMap<Conversation, string>();
+
+function haystack(c: Conversation): string {
+  const cached = haystacks.get(c);
+  if (cached !== undefined) return cached;
+  // Titles are derived from the first message, so searching them alone would miss anything said
+  // later — which is most of what a chemist wants to find again (a batch number, a ligand).
+  const built = [
+    c.title,
+    ...c.messages.map((m) => (m.role === 'user' ? m.text : m.finalText || m.streamedText)),
+  ]
+    .join('\n')
+    .toLowerCase();
+  haystacks.set(c, built);
+  return built;
+}
+
+/**
+ * The conversation ids this panel lists, newest first, narrowed by the search box.
+ *
+ * Exported and pure so the subscription above can be a shallow-compared array rather than the
+ * whole conversations map — see the comment at its one call site.
+ */
+export function visibleConversationIds(state: ChatState, needle: string): string[] {
+  // The store prepends on create but server-merged stubs were appended, so a conversation used
+  // ten minutes ago could sit below one from last month.
+  const sorted = [...state.order].sort(
+    (a, b) => (state.conversations[b]?.updatedAt ?? 0) - (state.conversations[a]?.updatedAt ?? 0),
+  );
+  if (!needle) return sorted;
+  return sorted.filter((id) => {
+    const c = state.conversations[id];
+    return c ? haystack(c).includes(needle) : false;
+  });
 }
 
 function ConversationRow({
@@ -232,35 +284,23 @@ function SidebarLink({
 
 export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.JSX.Element {
   const navigate = useNavigate();
-  const order = useChatStore((s) => s.order);
   const activeId = useChatStore((s) => s.activeId);
-  const conversations = useChatStore((s) => s.conversations);
   const degraded = useServerSessions();
   const throttled = useChatStore((s) => s.jobStreamsThrottled);
   const streamsFailing = useChatStore((s) => s.jobStreamsFailing.length > 0);
   const [query, setQuery] = useState('');
-
-  // The store prepends on create but server-merged stubs were appended, so a conversation used
-  // ten minutes ago could sit below one from last month.
-  const sorted = [...order].sort(
-    (a, b) => (conversations[b]?.updatedAt ?? 0) - (conversations[a]?.updatedAt ?? 0),
-  );
-
-  // Titles are derived from the first message, so searching them alone would miss anything said
-  // later — which is most of what a chemist wants to find again (a batch number, a ligand).
   const needle = query.trim().toLowerCase();
-  const matches = needle
-    ? sorted.filter((id) => {
-        const c = conversations[id];
-        if (!c) return false;
-        if (c.title.toLowerCase().includes(needle)) return true;
-        return c.messages.some((m) =>
-          (m.role === 'user' ? m.text : (m.finalText ?? m.streamedText))
-            .toLowerCase()
-            .includes(needle),
-        );
-      })
-    : sorted;
+
+  // **The list is subscribed to as ids, not as the conversation map.** `updateAssistant` replaces
+  // `state.conversations` on every animation-frame token flush, so `useChatStore((s) =>
+  // s.conversations)` changed identity ~60×/s and re-rendered this whole panel — every row, each
+  // with its own `DropdownMenu` — for the entire duration of every answer. Measured on the
+  // sidebar alone: 2.8 ms/flush at one conversation, 50.5 ms at thirty, linear in a number the
+  // chemist grows over time. The projection below still runs per write (that is what zustand
+  // compares) but it returns the same *shallow* array while the order and the match set hold, so
+  // React does nothing. `ConversationRow` already subscribes to its own conversation, so the one
+  // row that genuinely changed still re-renders — which is the whole of what should.
+  const visible = useChatStore(useShallow((s) => visibleConversationIds(s, needle)));
 
   return (
     <>
@@ -297,21 +337,25 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
       </div>
 
       <nav aria-label="Conversations" className="flex-1 overflow-y-auto px-2 pb-3">
-        {needle && matches.length === 0 && (
+        {needle && visible.length === 0 && (
           <p className="px-2.5 py-2 text-xs text-ink-muted">
             Nothing matches “{query.trim()}”. Only conversations stored in this browser are
             searched.
           </p>
         )}
         <ul className="space-y-1">
-          {matches.map((id) => (
+          {visible.map((id) => (
             <ConversationRow
               key={id}
               id={id}
               active={id === activeId}
               onSelect={() => {
-                const title = conversations[id]?.title ?? 'conversation';
-                const count = conversations[id]?.messages.length ?? 0;
+                // Read at click time rather than subscribed: the announcement wants the title and
+                // the length as they are when the reader acts, and subscribing to the map to get
+                // them is what put this panel on the per-token render path.
+                const opened = useChatStore.getState().conversations[id];
+                const title = opened?.title ?? 'conversation';
+                const count = opened?.messages.length ?? 0;
                 void navigate(`/c/${id}`);
                 onNavigate?.();
                 // Land the reader in the transcript rather than leaving focus on a list item

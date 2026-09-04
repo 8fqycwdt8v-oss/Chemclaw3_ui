@@ -19,6 +19,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Search, Server } from 'lucide-react';
 import { useAuth, useIsReviewer } from '../auth/AuthContext.tsx';
 import { api, type DurableJobStatus, type JobRecordSummary } from '../api/client.ts';
+import { useNewestRead } from '../hooks/useNewestRead.ts';
 import { relativeTime } from '../lib/format.ts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -84,19 +85,27 @@ function JobSheet({
   const [failed, setFailed] = useState(false);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
 
+  const claim = useNewestRead();
   const load = useCallback(
     (id: string) => {
+      // Claimed before the request, so a read this one supersedes cannot land afterwards. It is
+      // not only the displayed state that would be another job's: Cancel is offered on
+      // `status.status === 'running'` and posts to `jobId`, so a stale status decides whether a
+      // state-changing control appears for a job it does not describe. The same-id case is real
+      // here too — `cancel` re-reads the job it just asked to stop. See `useNewestRead`.
+      const isNewest = claim();
       setStatus(null);
       setFailed(false);
       api
         .getJob(id, auth)
-        .then(setStatus)
+        .then((next) => isNewest() && setStatus(next))
         .catch((err: unknown) => {
+          if (!isNewest()) return;
           setFailed(true);
           setNotice(err instanceof Error ? err.message : 'Could not read that job.');
         });
     },
-    [auth],
+    [auth, claim],
   );
 
   if (open && loadedFor !== jobId) {

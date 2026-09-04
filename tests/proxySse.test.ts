@@ -200,8 +200,6 @@ describe('the heartbeat', () => {
       // A frame cut mid-value, which is exactly what a TCP split looks like.
       res.write('event: token\ndata: {"type":"token","text":"hi');
       finish = () => {
-        // Two bytes or more, ending the frame: the boundary check reads the tail of a chunk, so a
-        // lone '\n' is conservatively treated as "still mid-frame".
         res.write('"}\n\n');
         setTimeout(() => res.end(), 260);
       };
@@ -225,6 +223,30 @@ describe('the heartbeat', () => {
     // never fires at all.
     expect(down.body, 'no heartbeat after the frame closed either').toContain(': hb\n\n');
     // The frame itself survived intact.
+    expect(down.body).toContain('event: token\ndata: {"type":"token","text":"hi"}\n\n');
+  });
+
+  it('keeps beating when the frame that closed arrived split across chunks', async () => {
+    // The boundary check used to read one chunk in isolation: `chunk.subarray(-2)` on a one-byte
+    // chunk has length 1, which failed the test and set "mid-frame" — and nothing could clear it,
+    // because clearing it needed another chunk and the stream had just gone quiet. So one
+    // unluckily-split frame silenced the heartbeat for the life of the stream, after which any
+    // fronting router drops the healthy-but-silent connection on its idle timeout. Measured at
+    // `SSE_HEARTBEAT_MS=60`: 4 heartbeats when the frame arrived whole, 0 when it arrived split.
+    //
+    // Both deliveries below are byte-identical on the wire and both are valid SSE. Nothing
+    // constrains where the upstream's `send()` calls or the network put a chunk boundary.
+    respond = (res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.write('event: token\ndata: {"type":"token","text":"hi"}\n');
+      // The frame's closing newline, alone. This is the chunk the old check could not read.
+      res.write('\n');
+      setTimeout(() => res.end(), 260);
+    };
+
+    const down = await read(port);
+
+    expect(down.body, 'the heartbeat latched off on a split frame').toContain(': hb\n\n');
     expect(down.body).toContain('event: token\ndata: {"type":"token","text":"hi"}\n\n');
   });
 

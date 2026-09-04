@@ -26,8 +26,47 @@ export function CrashScreen({ error }: { error: Error }): React.JSX.Element {
   // insecure origin, an old WebView) still has to be able to hand the text over, so it is shown
   // instead of copied rather than being reported as an error the reader cannot act on.
   const [state, setState] = useState<'idle' | 'copied' | 'manual'>('idle');
+  // Two clicks rather than a dialog. This is destructive and irreversible, so it needs a
+  // deliberate second act — and importing `ConfirmDialog` would put Radix, a portal and a focus
+  // trap inside the fallback for a throw, which is the one place nothing may be able to fail.
+  const [armed, setArmed] = useState(false);
   const [at] = useState(() => new Date());
   const reference = logger.correlationId();
+
+  /**
+   * Clear this browser's stored state and reload — the escape hatch this screen used to point at
+   * and could not reach.
+   *
+   * The text here said *"use 'Reset app' in the sidebar"*, and that control lives inside the tree
+   * this component has just replaced: the root boundary swaps the whole app, sidebar included, for
+   * this screen. So the one documented recovery from a poisoned persisted state was reachable only
+   * by reloading — which, when the poisoned state is what throws, renders this screen again. A
+   * boot loop with its own way out printed on it and no way to take it. `chatStorage.getItem`
+   * closes the *unparseable* half (a corrupt JSON read is a clean first run); what reaches here is
+   * state that parses into a shape a renderer chokes on, which a version rollback produces on its
+   * own.
+   *
+   * Written against `localStorage` directly rather than through `forgetLocalHistory`, deliberately
+   * and for this file's stated reason: it renders above the router, the auth gate and the tooltip
+   * provider, because anything it depends on could be the thing that threw. A reset that imports
+   * the store cannot clear a store that failed to load.
+   *
+   * `sessionStorage` is left alone: MSAL's tokens live there, and signing the chemist out is not
+   * what "my conversation list is broken" asks for.
+   */
+  const forget = (): void => {
+    try {
+      const keys: string[] = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i);
+        if (key?.startsWith('chemclaw3.')) keys.push(key);
+      }
+      for (const key of keys) localStorage.removeItem(key);
+    } catch {
+      // Storage denied. Nothing was persisted either, so the reload is still the right next step.
+    }
+    window.location.reload();
+  };
 
   const copy = (): void => {
     const text = diagnosticsText();
@@ -60,14 +99,23 @@ export function CrashScreen({ error }: { error: Error }): React.JSX.Element {
         </dl>
 
         <p className="text-ink-muted mt-3 text-xs">
-          Reloading usually clears this. If it does not, use “Reset app” in the sidebar — your
-          conversations are stored locally and a corrupt one can be cleared without losing the
-          server-side session.
+          Reloading usually clears this. If it does not, the stored conversations in this browser
+          are the likely cause — clearing them below does not touch the conversations on the server,
+          which can be reopened from the list afterwards.
         </p>
 
-        <Button variant="outline" size="sm" className="mt-3" onClick={copy}>
-          {state === 'copied' ? 'Diagnostics copied' : 'Copy diagnostics'}
-        </Button>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" onClick={copy}>
+            {state === 'copied' ? 'Diagnostics copied' : 'Copy diagnostics'}
+          </Button>
+          <Button
+            variant="outline-destructive"
+            size="sm"
+            onClick={armed ? forget : () => setArmed(true)}
+          >
+            {armed ? 'Clear them — this cannot be undone' : 'Clear stored conversations'}
+          </Button>
+        </div>
 
         {state === 'manual' && (
           <pre

@@ -13,7 +13,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
 import { ProtocolDocument } from '../src/components/ProtocolDocument.tsx';
 import { stubFetch } from './helpers.ts';
@@ -141,9 +141,23 @@ const HISTORY: RevisionSummary[] = [
 let restore: (() => void) | null = null;
 /** Which revision the service answers with — the head unless the URL asked for another. */
 let served = 4;
+/**
+ * What the service answers a `POST .../status` with, and whether the header row is served at all.
+ *
+ * Both are knobs because both are states the app has to behave differently in and neither is
+ * reachable from the read alone: a 409 is what a colleague deciding first looks like from here, and
+ * a null `summary` is a shape `DesignOut` permits — in which this screen cannot say what status it
+ * saw, so it must not offer a move made from a guess.
+ */
+let statusResponse: Response = new Response(null, { status: 204 });
+let serveSummary = true;
+
+/** Every request this render made, so a test can assert what was *sent*, not only what rendered. */
+let calls: { url: string; init?: RequestInit }[] = [];
 
 function serve(): void {
-  const stub = stubFetch((url) => {
+  const stub = stubFetch((url, init) => {
+    if (url.includes('/status') && init?.method === 'POST') return statusResponse;
     if (url.includes('/protocols?') || url.endsWith('/protocols')) {
       return new Response(JSON.stringify({ designs: [SUMMARY] }), {
         status: 200,
@@ -158,13 +172,14 @@ function serve(): void {
     return new Response(
       JSON.stringify({
         ...revision(asked ? Number(asked) : served),
-        summary: SUMMARY,
+        summary: serveSummary ? SUMMARY : null,
         history: HISTORY,
         status_history: SIGN_OFFS,
       }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     );
   });
+  calls = stub.calls;
   restore = stub.restore;
 }
 
@@ -181,7 +196,18 @@ function open(): void {
 beforeEach(() => {
   cleanup();
   served = 4;
+  serveSummary = true;
+  statusResponse = new Response(null, { status: 204 });
 });
+
+/** Type a reason, press `Mark {status}`, and confirm it — the whole click path a chemist takes. */
+async function mark(status: string, reason: string): Promise<void> {
+  const box = await screen.findByPlaceholderText('Why this design is moving state');
+  fireEvent.change(box, { target: { value: reason } });
+  fireEvent.click(await screen.findByRole('button', { name: `Mark ${status}` }));
+  const dialog = await screen.findByRole('alertdialog');
+  fireEvent.click(within(dialog).getByRole('button', { name: `Mark ${status}` }));
+}
 afterEach(() => {
   cleanup();
   restore?.();
@@ -265,5 +291,76 @@ describe('ProtocolDocument', () => {
     );
     expect(row.textContent).toContain('chemist@example.com');
     expect(row.textContent).toContain('The precedent runs at 80 °C.');
+  });
+
+  it('sends the status it is showing beside the revision it is showing', async () => {
+    // The half `expected_revision` cannot see. Without this the whole control rests on the client
+    // unit test — which proves `setProtocolStatus` puts the field in the body, and says nothing
+    // about whether anything calls it with the status a chemist was actually looking at.
+    serve();
+    open();
+    await mark('approved', 'the precedent holds');
+
+    await waitFor(() => expect(screen.getByRole('status').textContent).toContain('approved'));
+    const sent = calls.filter((c) => c.url.includes('/status') && c.init?.method === 'POST');
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(String(sent[0]!.init?.body))).toEqual({
+      status: 'approved',
+      expected_revision: 4,
+      expected_status: 'draft',
+      reason: 'the precedent holds',
+    });
+  });
+
+  it('reports a colleague’s decision as an alert with a way out, not as a neutral notice', async () => {
+    // `moveStatus` wrote every failure into the `role="status"` banner — the same neutral tone as
+    // "Status recorded as approved." two lines earlier — so a chemist whose decision was refused
+    // saw what one whose decision was recorded sees. A refusal is an alert, and it needs the one
+    // action that helps: reload and read what the other person did.
+    statusResponse = new Response(
+      JSON.stringify({
+        detail: {
+          code: 'status_conflict',
+          message: "this design is 'abandoned', not 'draft' as you saw it",
+        },
+      }),
+      { status: 409, headers: { 'content-type': 'application/json' } },
+    );
+    serve();
+    open();
+    await mark('approved', 'looks fine to me');
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Somebody else already decided this');
+    expect(within(alert).getByRole('button', { name: 'Reload the design' })).toBeTruthy();
+    // And not as a success: the neutral banner must be empty, or the two read the same.
+    expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('says the document moved when that is what moved, which is a different remedy', async () => {
+    statusResponse = new Response(
+      JSON.stringify({
+        detail: { code: 'revision_conflict', message: 'revision 4 is not the head (5)' },
+      }),
+      { status: 409, headers: { 'content-type': 'application/json' } },
+    );
+    serve();
+    open();
+    await mark('approved', 'looks fine to me');
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Somebody else edited this');
+  });
+
+  it('withholds the buttons entirely when the header did not load', async () => {
+    // `DesignOut.summary` is nullable, so this screen genuinely has a state in which it cannot say
+    // what status it saw. An optional `expected_status` would have made the compare-and-set always
+    // agree; withholding the move says the true thing instead.
+    serveSummary = false;
+    serve();
+    open();
+
+    expect(await screen.findByText(/its current status is unknown/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Mark approved' })).toBeNull();
   });
 });

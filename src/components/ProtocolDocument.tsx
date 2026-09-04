@@ -31,6 +31,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { FileDiff, FlaskConical, History, MessageSquarePlus, Pencil } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router';
 import { api, type ProtocolView } from '../api/client.ts';
+import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { prefill } from '../state/composerEvents.ts';
@@ -386,6 +387,16 @@ export function ProtocolDocument(): React.JSX.Element {
   const [diff, setDiff] = useState<DesignDiff | null>(null);
   const [statusReason, setStatusReason] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
+  /**
+   * A refused sign-off, held apart from `notice` because the two are not the same kind of thing.
+   *
+   * `notice` is a `role="status"` neutral banner — "Status recorded as approved." — and a conflict
+   * was being written into it, in the same tone, two lines after a success message. A chemist whose
+   * decision was *not* recorded got the same visual as one whose was. This renders as
+   * `ProtocolEditor`'s conflict block does: `role="alert"`, warn tone, and a reload action, because
+   * the only safe next step is to read what the other person did.
+   */
+  const [conflict, setConflict] = useState<'revision' | 'status' | null>(null);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -430,13 +441,35 @@ export function ProtocolDocument(): React.JSX.Element {
    * honest answer: a colleague's save between opening the page and pressing the button now gives a
    * 409 and a banner, instead of the chemist's name on a document they never read.
    */
-  const moveStatus = async (status: DesignStatus, atRevision: number): Promise<void> => {
+  const moveStatus = async (
+    status: DesignStatus,
+    atRevision: number,
+    fromStatus: DesignStatus,
+  ): Promise<void> => {
+    setConflict(null);
     try {
-      await api.setProtocolStatus(designId, status, atRevision, statusReason.trim(), auth);
+      await api.setProtocolStatus(
+        designId,
+        status,
+        atRevision,
+        fromStatus,
+        statusReason.trim(),
+        auth,
+      );
       setStatusReason('');
       setNotice(`Status recorded as ${status}.`);
       reload();
     } catch (err) {
+      if (err instanceof ApiError && err.kind === 'status_conflict') {
+        setNotice(null);
+        setConflict('status');
+        return;
+      }
+      if (err instanceof ApiError && err.kind === 'revision_conflict') {
+        setNotice(null);
+        setConflict('revision');
+        return;
+      }
       setNotice(err instanceof Error ? err.message : 'The status was not recorded.');
     }
   };
@@ -567,6 +600,37 @@ export function ProtocolDocument(): React.JSX.Element {
             </p>
           )}
 
+          {/* Two refusals, two sentences, because the remedy differs. A `revision` conflict means
+              the document moved and the diff is worth reading; a `status` conflict means somebody
+              already decided and the question is whether to override them. Both reload, because in
+              both cases what is on this screen is out of date. */}
+          {conflict && (
+            <div
+              role="alert"
+              className="flex flex-col gap-2 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
+            >
+              {conflict === 'status' ? (
+                <p>
+                  <strong>Somebody else already decided this.</strong> The design is no longer{' '}
+                  {summary ? summary.status : 'the status shown here'}, so your move was not
+                  recorded — recording it now would overwrite their decision without either of you
+                  seeing the other. Reload to read what they did and why.
+                </p>
+              ) : (
+                <p>
+                  <strong>Somebody else edited this.</strong> Revision {view.revision} is no longer
+                  the latest, so a sign-off made now would be attributed to a document that has
+                  since moved. Nothing was recorded — reload and read the current revision first.
+                </p>
+              )}
+              <div>
+                <Button size="sm" variant="outline" onClick={reload}>
+                  Reload the design
+                </Button>
+              </div>
+            </div>
+          )}
+
           <div className="flex flex-wrap gap-2">
             <Button size="sm" variant="outline" disabled={stale} onClick={() => setEditing(true)}>
               <Pencil aria-hidden className="size-3.5" />
@@ -601,27 +665,41 @@ export function ProtocolDocument(): React.JSX.Element {
                 className="resize-y rounded-lg border border-border-subtle bg-surface px-2.5 py-2 outline-none focus-ring"
               />
             </label>
-            <div className="flex flex-wrap gap-2">
-              {STATUSES.map((status) => (
-                <ConfirmDialog
-                  key={status}
-                  trigger={
-                    <Button
-                      size="xs"
-                      variant={status === 'abandoned' ? 'outline-destructive' : 'outline'}
-                      disabled={!statusReason.trim()}
-                    >
-                      Mark {status}
-                    </Button>
-                  }
-                  title={`Move this design to ${status}?`}
-                  description="The move is recorded against you with the reason you wrote. It does not change the document; earlier revisions stay readable."
-                  confirmLabel={`Mark ${status}`}
-                  variant={status === 'abandoned' ? 'destructive' : 'default'}
-                  onConfirm={() => void moveStatus(status, view.revision)}
-                />
-              ))}
-            </div>
+            {/* **The buttons are gated on the header, not given an optional status.** A move now
+                states the status it was made from, and the only honest source for that is the badge
+                this reader is looking at — `summary.status`. `DesignOut.summary` is nullable, so
+                there is a real state in which this screen cannot say what it saw, and sending a
+                guess would defeat the compare-and-set by making it always agree. Withholding the
+                buttons says the true thing: the decision cannot be made from what loaded. */}
+            {summary ? (
+              <div className="flex flex-wrap gap-2">
+                {STATUSES.map((status) => (
+                  <ConfirmDialog
+                    key={status}
+                    trigger={
+                      <Button
+                        size="xs"
+                        variant={status === 'abandoned' ? 'outline-destructive' : 'outline'}
+                        disabled={!statusReason.trim()}
+                      >
+                        Mark {status}
+                      </Button>
+                    }
+                    title={`Move this design to ${status}?`}
+                    description="The move is recorded against you with the reason you wrote. It does not change the document; earlier revisions stay readable."
+                    confirmLabel={`Mark ${status}`}
+                    variant={status === 'abandoned' ? 'destructive' : 'default'}
+                    onConfirm={() => void moveStatus(status, view.revision, summary.status)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <p className="text-2xs text-ink-subtle">
+                This design’s header did not load, so its current status is unknown — a sign-off
+                made from an unknown status could silently overwrite somebody else’s. Reload before
+                deciding.
+              </p>
+            )}
 
             {/* What the panel above promises. A move is recorded against the revision it was made
                 on, and the badge cannot show that: a revision landing on an approved design

@@ -263,22 +263,88 @@ describe('getProtocolDiff and setProtocolStatus', () => {
     expect(url.searchParams.get('from')).toBeNull();
   });
 
-  it('records a status move against the revision on screen, with its reason', async () => {
+  it('records a status move against the revision and the status on screen, with its reason', async () => {
     const stub = stubFetch(() => ok(null, 204));
     restore = stub.restore;
 
     await expect(
-      api.setProtocolStatus(DESIGN, 'abandoned', 3, 'superseded by the DoE', token),
+      api.setProtocolStatus(DESIGN, 'abandoned', 3, 'approved', 'superseded by the DoE', token),
     ).resolves.toBeUndefined();
 
     expect(stub.calls[0]!.url).toContain(`/protocols/${DESIGN}/status`);
     // `expected_revision` is `parent_revision`'s twin for a sign-off: the service refuses a move
     // that names anything but the head, so a colleague's save between reading and clicking is a
     // 409 rather than this chemist's name on a document they never saw.
+    //
+    // `expected_status` closes the half it cannot see. It is required by the service, so it being
+    // in this body is the whole reason the control exists at all rather than only in a docstring —
+    // which is why this assertion is `toEqual` on the exact body rather than a subset check.
     expect(JSON.parse(String(stub.calls[0]!.init?.body))).toEqual({
       status: 'abandoned',
       expected_revision: 3,
+      expected_status: 'approved',
       reason: 'superseded by the DoE',
+    });
+  });
+
+  it('gives a status conflict its own kind, distinct from a revision conflict', async () => {
+    // One route, two 409s, and only the service can say which: `revision_conflict` means the
+    // document moved and a diff is worth reading, `status_conflict` means a colleague already
+    // decided. Reporting the second as the first would send a chemist to a diff showing nothing —
+    // and before this route had a `status_conflict` at all, both moves were simply told 204.
+    const stub = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            detail: {
+              code: 'status_conflict',
+              message: "this design is 'abandoned', not 'draft' as you saw it",
+            },
+          }),
+          { status: 409, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    restore = stub.restore;
+
+    await expect(
+      api.setProtocolStatus(DESIGN, 'approved', 1, 'draft', 'looks fine', token),
+    ).rejects.toMatchObject({
+      kind: 'status_conflict',
+      status: 409,
+      message: "this design is 'abandoned', not 'draft' as you saw it",
+    });
+  });
+
+  it('reports the revision half of the same 409 as a revision conflict', async () => {
+    const stub = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            detail: { code: 'revision_conflict', message: 'revision 1 is not the head (2)' },
+          }),
+          { status: 409, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    restore = stub.restore;
+
+    await expect(
+      api.setProtocolStatus(DESIGN, 'approved', 1, 'draft', 'looks fine', token),
+    ).rejects.toMatchObject({ kind: 'revision_conflict', status: 409 });
+  });
+
+  it('reads a codeless 409 from an older service as a revision conflict', async () => {
+    // The only 409 a deployment predating `expected_status` can produce on this route, and it
+    // arrives as a bare string with nothing to branch on. `turn_in_flight` — the message route's
+    // default — would tell a chemist a turn is running, on a screen with no conversation on it.
+    const stub = stubFetch(() => jsonError(409, 'revision 1 is not the head (2)'));
+    restore = stub.restore;
+
+    await expect(
+      api.setProtocolStatus(DESIGN, 'approved', 1, 'draft', 'looks fine', token),
+    ).rejects.toMatchObject({
+      kind: 'revision_conflict',
+      status: 409,
+      message: 'revision 1 is not the head (2)',
     });
   });
 });

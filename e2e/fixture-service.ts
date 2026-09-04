@@ -577,6 +577,15 @@ const DESIGN_DIFF: DesignDiff = {
 
 /** The head, which the browser spec moves by saving a revision. */
 let head = 2;
+/**
+ * The design's current status, which the browser spec moves by marking it.
+ *
+ * Mutable for `expected_revision`'s reason one field along: the status route enforces **two**
+ * compare-and-sets, and a fixture that held the status constant could not tell a correct
+ * `expected_status` from a stale one — so the app could ship sending the badge it happened to
+ * render, or nothing at all, and pass.
+ */
+let designStatus: DesignSummary['status'] = 'draft';
 /** The base temperature, so a save is visible when the document is read back. */
 let temperature = 80;
 
@@ -690,7 +699,9 @@ createServer(async (req, res) => {
 
   // Experiment protocols.
   if (path === '/protocols' && req.method === 'GET') {
-    const designs: DesignSummary[] = [{ ...DESIGN_SUMMARY, head_revision: head }];
+    const designs: DesignSummary[] = [
+      { ...DESIGN_SUMMARY, head_revision: head, status: designStatus },
+    ];
     return json(res, 200, { designs });
   }
   if (path === `/protocols/${DESIGN_ID}` && req.method === 'GET') {
@@ -701,7 +712,7 @@ createServer(async (req, res) => {
     // response rather than a stubbed one" — was proving the app against an invention.
     const view: ProtocolView = {
       ...DESIGN_REVISION(asked, asked >= 3 ? temperature : 80),
-      summary: { ...DESIGN_SUMMARY, head_revision: head },
+      summary: { ...DESIGN_SUMMARY, head_revision: head, status: designStatus },
       status_history: [
         {
           status: 'approved' as const,
@@ -755,7 +766,11 @@ createServer(async (req, res) => {
     req.setEncoding('utf8');
     req.on('data', (chunk: string) => (body += chunk));
     req.on('end', () => {
-      const posted = JSON.parse(body) as { expected_revision?: number };
+      const posted = JSON.parse(body) as {
+        status?: DesignSummary['status'];
+        expected_revision?: number;
+        expected_status?: string;
+      };
       if (posted.expected_revision !== head) {
         json(res, 409, {
           detail: {
@@ -765,6 +780,19 @@ createServer(async (req, res) => {
         });
         return;
       }
+      // The second compare-and-set, and the reason it is here: the document did not move, so a
+      // fixture enforcing only the first would answer 204 to a sign-off made from a status a
+      // colleague had already changed — which is the defect the field exists to close.
+      if (posted.expected_status !== designStatus) {
+        json(res, 409, {
+          detail: {
+            code: 'status_conflict',
+            message: `this design is '${designStatus}', not '${String(posted.expected_status)}' as you saw it`,
+          },
+        });
+        return;
+      }
+      if (posted.status) designStatus = posted.status;
       res.writeHead(204);
       res.end();
     });

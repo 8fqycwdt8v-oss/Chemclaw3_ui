@@ -28,6 +28,15 @@ export type ApiErrorKind =
    *  `api.putProtocolRevision` for exactly the reason `plan_changed` is: the status alone cannot be
    *  told apart from `turn_in_flight`, and only the caller knows which route it asked. */
   | 'revision_conflict'
+  /** 409 on the protocol-status route only — somebody else *decided* while this chemist was
+   *  deciding. Distinct from `revision_conflict` because the document did not move, so the remedy
+   *  is not a diff: a colleague already approved, executed or abandoned this design, and the
+   *  question is whether to override them. The service is what tells the two apart —
+   *  `{"code": "status_conflict"}` against `{"code": "revision_conflict"}` on one route — because
+   *  the status number cannot: before this, `expected_revision` was a compare-and-set on the
+   *  *document* alone and two people at revision 1 could approve and abandon it with both told
+   *  204, so the case had no 409 to carry a code at all. */
+  | 'status_conflict'
   /** 422 — message over the backend's character cap. */
   | 'message_too_long'
   /** 429 without a `Retry-After` — the turn/token budget is spent, or too many concurrent event
@@ -175,6 +184,17 @@ export function errorFromStatus(
   /** The service's id for the request that failed — `correlationFrom`, or the error body's
    *  `correlation_id`. */
   correlationId?: string,
+  /**
+   * The service's own machine-readable discriminator, from an object `detail`'s `code`.
+   *
+   * Only 409 reads it, and only because that status genuinely means several things: a turn already
+   * running, an edit against a stale revision, and a sign-off against a status somebody else
+   * already moved. The comment above says the *number* must not be guessed from, and that stands —
+   * this is not the number, it is the service naming which of its own refusals this is. A response
+   * without one falls through to the message-route default exactly as before, which is what keeps
+   * an older deployment working.
+   */
+  code?: string,
 ): ApiError {
   const options = correlationId ? { correlationId } : undefined;
   switch (status) {
@@ -188,6 +208,9 @@ export function errorFromStatus(
     case 404:
       return new ApiError('session_not_found', detail || 'unknown session', 404, options);
     case 409:
+      if (code === 'status_conflict' || code === 'revision_conflict') {
+        return new ApiError(code, detail || 'Somebody else changed this design.', 409, options);
+      }
       return new ApiError(
         'turn_in_flight',
         detail || 'A turn is already running for this conversation.',
@@ -314,9 +337,19 @@ export function errorFromEvent(event: {
  * `{"code": "revision_conflict", "message": …}` — a `detail` that is neither a string nor an array
  * — so the message naming the head revision was dropped and `errorFromStatus`'s 409 default put
  * "A turn is already running for this conversation." on a banner about a concurrent *edit*. The
- * `code` is not rendered: `client.ts` already re-kinds that status, and a machine-readable code is
- * for the code that branches on it, not for the chemist.
+ * `code` is still not *rendered* — a machine-readable code is for the code that branches on it,
+ * not for the chemist — but `detailCode` above now hands it to `errorFromStatus`, because the
+ * status route answers with two of them (`revision_conflict` and `status_conflict`) and only the
+ * service can say which refusal this is.
  */
+function detailCode(detail: unknown): string | undefined {
+  if (detail && !Array.isArray(detail) && typeof detail === 'object') {
+    const code = (detail as { code?: unknown }).code;
+    return typeof code === 'string' && code ? code : undefined;
+  }
+  return undefined;
+}
+
 function detailText(detail: unknown): string | undefined {
   if (typeof detail === 'string') return detail;
   if (detail && !Array.isArray(detail) && typeof detail === 'object') {
@@ -342,12 +375,13 @@ function detailText(detail: unknown): string | undefined {
 
 export async function readFailure(
   res: Response,
-): Promise<{ detail?: string; correlationId: string }> {
+): Promise<{ detail?: string; code?: string; correlationId: string }> {
   const fromHeader = correlationFrom(res);
   try {
     const body = (await res.json()) as { detail?: unknown; correlation_id?: unknown };
     return {
       detail: detailText(body?.detail),
+      code: detailCode(body?.detail),
       correlationId:
         fromHeader || (typeof body?.correlation_id === 'string' ? body.correlation_id : ''),
     };

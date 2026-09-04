@@ -118,6 +118,7 @@ async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {
       failure.detail,
       res.headers.get('retry-after'),
       failure.correlationId,
+      failure.code,
     );
   }
   if (res.status === 204) return undefined as T;
@@ -791,7 +792,8 @@ export const api = {
   },
 
   /**
-   * Move a design's status, against the revision the chemist was reading, with the reason beside it.
+   * Move a design's status, against the revision *and the status* the chemist was reading, with the
+   * reason beside it.
    *
    * 204: the service records the move and returns nothing. `reason` is what makes an `abandoned`
    * design readable a year later — it is the only field that says why a design nobody ran exists.
@@ -801,17 +803,42 @@ export const api = {
    * the head had become, so a chemist who read revision 1, thought about it, and clicked Approve
    * after a colleague saved revision 2 had their name recorded against a document they never saw —
    * with no race required, just the seconds between reading and clicking.
+   *
+   * **`expectedStatus` is the badge on screen, and it closes the half `expectedRevision` cannot
+   * see.** That compare-and-set is on the *document*, so it says nothing about the decision: two
+   * people looking at revision 1 could approve and abandon it and both were told 204, measured 100
+   * of 100, and a design retired because the starting material decomposes came back into the draft
+   * listing without anybody being told. The service now refuses the second move with
+   * `{"code": "status_conflict"}`, which `errorFromStatus` turns into its own kind — the document
+   * did not move, so sending the chemist to a diff would show them nothing.
+   *
+   * The `catch` is the older-deployment case, and it is `putProtocolRevision`'s for the same
+   * reason: a service that answers 409 with a bare string carries no code, and on this route a
+   * service that predates `expected_status` can only have refused the revision.
    */
-  setProtocolStatus(
+  async setProtocolStatus(
     designId: string,
     status: DesignStatus,
     expectedRevision: number,
+    expectedStatus: DesignStatus,
     reason: string,
     getToken: TokenGetter,
   ): Promise<void> {
-    return request<void>(`/protocols/${encodeURIComponent(designId)}/status`, getToken, {
-      method: 'POST',
-      body: JSON.stringify({ status, expected_revision: expectedRevision, reason }),
-    });
+    try {
+      await request<void>(`/protocols/${encodeURIComponent(designId)}/status`, getToken, {
+        method: 'POST',
+        body: JSON.stringify({
+          status,
+          expected_revision: expectedRevision,
+          expected_status: expectedStatus,
+          reason,
+        }),
+      });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 409 && err.kind === 'turn_in_flight') {
+        throw new ApiError('revision_conflict', err.message, 409);
+      }
+      throw err;
+    }
   },
 };

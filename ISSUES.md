@@ -230,7 +230,7 @@ arrives as a `job_started` whose `kind` this UI does not recognise: an ask rende
 that runs for a week and then silently expires.
 
 **What closed it.** The backend claims the third kind and declares `AwaitingAnswerEvent`; this
-repository mirrors it in `shared/events.ts` — the interface *and* `normalizeEvent`, which rebuilds
+repository mirrors it in `shared/events.ts` — the interface _and_ `normalizeEvent`, which rebuilds
 every event field by field, so a field that does not reach it is deleted in transit rather than
 merely ignored. `useJobStreams` routes the frame to `chatStore.noteAwaiting` (its own slice, not the
 job feed — a question held open for days is not a run that finished), the sidebar badges `/review`

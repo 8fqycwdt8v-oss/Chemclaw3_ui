@@ -193,7 +193,7 @@ measured), and the `Intl` cost (50× predicted, 47× measured).
   with the open count, and re-reads `GET /pending` when that count moves. The backend's own contract
   tripwire fired inside the change and named this repository's normaliser in its failure message,
   which is the mechanical connection the two repositories previously had none of. `ISSUES.md` #9 is
-  closed with the reasoning. The inbox's *read* is still a poll, deliberately: the stream carries a
+  closed with the reasoning. The inbox's _read_ is still a poll, deliberately: the stream carries a
   notification, `GET /pending` carries the truth.
 - **The 600-character SMILES cap bounds the unrecoverable failure, not the slow one.** A legal
   600-character chain still costs ~0.3 s to parse and ~1.7 s to draw on the main thread. Bounding

@@ -28,6 +28,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { cfg } from './config.ts';
 import { log } from './log.ts';
 
 /** Much smaller than `maxBodyBytes`: twenty log entries do not need two megabytes. */
@@ -150,10 +151,16 @@ function readBody(req: IncomingMessage): Promise<string | null> {
  *
  * The number is chosen against the sink's own cadence rather than picked round: `src/lib/logger.ts`
  * flushes at most every `FLUSH_INTERVAL_MS` (5 s), so a chemist's browser costs ~12 batches a
- * minute and 600 is ~50 concurrent browsers per replica, with the ceiling scaling by replica
- * because each pod holds its own. The worst case it admits is 600 × 64 KiB ≈ 38 MB a minute, and a
- * fixed window means twice that across a window boundary — two orders below the 31 MB/s measured
- * above, which is the point.
+ * minute, with the ceiling scaling by replica because each pod holds its own.
+ *
+ * **It was 600, which is ~50 concurrent browsers, against a deployment target of 200.** At the
+ * target the arithmetic above is 2,400 batches a minute, so three of every four were refused —
+ * browser-side diagnostics thinning by 4x at exactly the moment something is wrong at scale, and
+ * 40 req/s of this pod spent writing the refusals. The default is now that arithmetic plus
+ * headroom (`server/config.ts`), and it is read from the config rather than fixed here: the knob
+ * `CLIENT_EVENTS_RATE_PER_MIN` existed all along and had no reader, so a deployment that raised it
+ * changed nothing. The worst case it admits is 3,000 × 64 KiB ≈ 3.2 MB/s, an order below the
+ * 31 MB/s measured above, which is the point.
  *
  * **There is no per-address bucket, and that is a measurement rather than an omission.** One was
  * written first, at 60/min keyed on `req.socket.remoteAddress`. In this deployment the UI pod sits
@@ -171,7 +178,7 @@ function readBody(req: IncomingMessage): Promise<string | null> {
  * `server/app.ts` books every response, so they are already
  * `chemclaw_ui_requests_total{route="/api/client-events",status="429"}`.
  */
-const PROCESS_BATCHES_PER_MINUTE = 600;
+const PROCESS_BATCHES_PER_MINUTE = cfg.clientEventsRatePerMin;
 const BUDGET_WINDOW_MS = 60_000;
 
 /**

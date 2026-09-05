@@ -18,7 +18,7 @@
  *  - A legitimately silent stream must stay open. Only the connect phase is bounded.
  */
 
-import { useEffect, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { config } from '../env.ts';
 import { retryAfterSeconds } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
@@ -26,6 +26,7 @@ import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from '../state/chatStore.ts';
 import { logger } from '../lib/logger.ts';
 import { readEventStream } from '../lib/sse.ts';
+import { MAX_BACKOFF_MS, backoff, sleep } from '../lib/backoff.ts';
 
 /**
  * How many sessions to watch at once.
@@ -64,17 +65,86 @@ const MAX_JOB_STREAMS = 3;
  */
 const FAILURES_BEFORE_REPORTING = 4;
 
+/**
+ * How many sessions a tab nobody is looking at watches.
+ *
+ * Every held stream costs a socket in the BFF's upstream pool, a slot in the service's per-pod
+ * stream cap, and — the one that is not free — a claim transaction against the service's Postgres
+ * pool every `session_event_poll_seconds` (2 s) for as long as it is open. At the 200-user target
+ * three streams each is 600 held connections and ~300 claim transactions a second, most of them
+ * produced by tabs sitting behind something else on a chemist's second monitor.
+ *
+ * **It is one rather than zero deliberately, and that is the whole argument.** The obvious move is
+ * to close the streams while `document.hidden`, the way `TopBar`'s health poll skips its probe —
+ * but a health poll's answer is worthless to a hidden tab and a job completion's is worth the most
+ * to one: this module exists because "a conformer search takes minutes to hours, so the completion
+ * almost always lands while they are somewhere else", and `notifyOnJobComplete` raises a desktop
+ * notification for exactly that. Gating on visibility would deliver that notification when the
+ * chemist next looks at the tab, which is the moment it stops being useful. So a hidden tab keeps
+ * watching — it keeps watching **one** session, the one it was last on, which is where a run was
+ * most likely just launched from.
+ *
+ * The mechanism is the budget the 429 path already uses (`jobStreamsThrottled`), not a second one.
+ */
+const HIDDEN_JOB_STREAMS = 1;
+
+/**
+ * How long a tab must stay hidden before it is treated as backgrounded.
+ *
+ * Without it every alt-tab tears down three streams and rebuilds them seconds later, which turns a
+ * saving into connection churn — and 200 chemists coming back to their tabs at 09:00 would reopen
+ * 600 streams at once. Half a minute is longer than any glance at another window and far shorter
+ * than the runs this stream reports on.
+ */
+const HIDDEN_GRACE_MS = 30_000;
+
+/**
+ * Whether this tab has been hidden long enough to count as backgrounded.
+ *
+ * A hook rather than a `document.hidden` read at render time: the watch set below is a `useMemo`,
+ * so the visibility change has to arrive as a state change or nothing recomputes.
+ */
+function useBackgrounded(): boolean {
+  const [backgrounded, setBackgrounded] = useState(false);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const clear = (): void => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
+    const onChange = (): void => {
+      clear();
+      // Coming back is immediate; going away waits out the grace period. Down slowly, up at once.
+      if (!document.hidden) setBackgrounded(false);
+      else timer = setTimeout(() => setBackgrounded(true), HIDDEN_GRACE_MS);
+    };
+    onChange();
+    document.addEventListener('visibilitychange', onChange);
+    return () => {
+      clear();
+      document.removeEventListener('visibilitychange', onChange);
+    };
+  }, []);
+
+  return backgrounded;
+}
+
 export function useJobStreams(): void {
   const { auth, ready } = useAuth();
   const conversations = useChatStore((s) => s.conversations);
   const activeId = useChatStore((s) => s.activeId);
   const throttled = useChatStore((s) => s.jobStreamsThrottled);
+  const backgrounded = useBackgrounded();
 
   // A stable, comparable key. The conversations map is a fresh object on every store write, so a
   // raw array here would tear down and reopen every stream once per animation frame while a turn
   // streams — zustand v5 has no implicit shallow compare to save us.
   const watchKey = useMemo(() => {
-    const budget = throttled ? 1 : MAX_JOB_STREAMS;
+    // Both narrowings are down-only and they compose by taking the smaller: a throttled tab that
+    // is also backgrounded watches one session, not one twice.
+    const budget = throttled || backgrounded ? HIDDEN_JOB_STREAMS : MAX_JOB_STREAMS;
     const candidates = Object.values(conversations)
       .filter((c) => c.sessionId)
       // A conversation nobody has sent in has no job to report. This predicate is also what keeps
@@ -88,7 +158,7 @@ export function useJobStreams(): void {
       .slice(0, budget)
       .map((c) => c.sessionId as string);
     return [...new Set(candidates)].join(',');
-  }, [conversations, activeId, throttled]);
+  }, [conversations, activeId, throttled, backgrounded]);
 
   useEffect(() => {
     if (!ready || !watchKey) return;
@@ -265,29 +335,4 @@ async function openStream(
       await backoff(attempt, controller.signal);
     }
   }
-}
-
-/** The longest this hook will ever wait before trying a stream again. */
-const MAX_BACKOFF_MS = 30_000;
-
-/** Exponential backoff with jitter, capped at `MAX_BACKOFF_MS`, abortable. */
-function backoff(attempt: number, signal: AbortSignal): Promise<void> {
-  const base = Math.min(MAX_BACKOFF_MS, 1_000 * 2 ** Math.min(attempt, 5));
-  return sleep(base * (0.5 + Math.random() * 0.5), signal);
-}
-
-/** Wait, resolving early if the stream is torn down — a timer nobody cancels outlives the tab's
- *  interest in the answer. */
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
 }

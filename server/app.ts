@@ -52,6 +52,22 @@ export function setSecurityHeaders(res: http.ServerResponse): void {
   if (!cfg.allowFraming) res.setHeader('x-frame-options', 'DENY');
 }
 
+/**
+ * Whether this asset's URL changes when its bytes do, and so may be cached for ever.
+ *
+ * Vite writes every build output as `assets/<name>-<hash>.<ext>`, and the hash is over the
+ * content — a changed file is a changed URL, which is the whole precondition for `immutable`.
+ * Anything copied verbatim out of `public/` keeps its name across deploys and is therefore
+ * explicitly NOT this: caching `favicon.svg` for a year would mean a year to change it.
+ *
+ * Matched on the shape rather than on a list of names, because the list is Vite's to write. The
+ * hash is base64url and at least eight characters, which no unhashed name in `public/` collides
+ * with, and the `/assets/` prefix is what Vite's `assetsDir` guarantees.
+ */
+function isContentHashed(pathname: string): boolean {
+  return /^\/assets\/.+-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/.test(pathname);
+}
+
 /** Static assets, or a handler that makes the "will 404" warning true rather than fatal. */
 function createAssetHandler(): (
   req: http.IncomingMessage,
@@ -77,8 +93,15 @@ function createAssetHandler(): (
     // SPA fallback, so /auth/callback and any client route resolve to index.html.
     single: true,
     etag: true,
-    // Serve Vite's precompressed output rather than compressing at request time. This is both
-    // faster and keeps any compression middleware — which would break SSE — out of the process.
+    // Serve the precompressed output rather than compressing at request time. This is both faster
+    // and keeps any compression middleware — which would break SSE — out of the process.
+    //
+    // These two options compress NOTHING. They serve a pre-built `.gz`/`.br` sibling when the
+    // request allows it and fall through silently when there is none, and for the life of this
+    // file there was none: the build emitted zero sidecars, so the main bundle went out at
+    // 634,903 B against 194,190 B gzipped with `Accept-Encoding: gzip, br` sent. The step that
+    // makes this true is `scripts/compress-assets.mjs`, wired into `npm run build:client`, and
+    // `tests/staticAssets.test.ts` drives a real request to keep the pair honest.
     gzip: true,
     brotli: true,
     setHeaders(res, pathname) {
@@ -95,7 +118,23 @@ function createAssetHandler(): (
         pathname === '/' || pathname === '/index.html' || !/\.[^/]+$/.test(pathname);
       if (servesHtmlShell) {
         res.setHeader('cache-control', 'no-cache');
+        return;
       }
+      // Everything else got NO `cache-control` at all, which is not "cache normally" — it is
+      // heuristic freshness, and the heuristic is a fraction of the file's age, so a
+      // just-deployed asset is stale on arrival and every returning chemist reissued a
+      // conditional GET for every asset on every load, into the single-threaded process that is
+      // also piping their SSE streams. The comment above has said "hashed assets are immutable"
+      // since this file was written; this is where that finally gets said to the browser.
+      res.setHeader(
+        'cache-control',
+        isContentHashed(pathname)
+          ? 'public, max-age=31536000, immutable'
+          : // Unhashed, so its URL is stable across deploys and its bytes are not: `favicon.svg`
+            // and `theme-boot.js` from `public/`. `no-cache` is a revalidation, not a refusal —
+            // the ETag turns it into a 304 — and it is what makes changing one of these take.
+            'no-cache',
+      );
     },
   });
 }

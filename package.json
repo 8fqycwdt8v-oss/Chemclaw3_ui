@@ -10,7 +10,7 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "npm run build:client && npm run build:server",
-    "build:client": "vite build",
+    "build:client": "vite build && node scripts/compress-assets.mjs",
     "build:server": "node scripts/build-server.mjs",
     "start": "node dist/server.js",
     "smoke": "node scripts/smoke.mjs",

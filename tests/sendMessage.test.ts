@@ -315,7 +315,10 @@ describe('sendMessage', () => {
 
         const cid = useChatStore.getState().createConversation();
         const turn = sendMessage({ conversationId: cid, text: 'pKa?', auth: devAuth });
-        await vi.advanceTimersByTimeAsync(630_000);
+        // Past the 630 s deadline by one full backoff. The poll used to run at a fixed 3 s, so its
+        // schedule landed exactly on the deadline; it is jittered now, so the last wait can begin
+        // just inside it and end outside — and a clock that stops mid-wait never resolves the turn.
+        await vi.advanceTimersByTimeAsync(690_000);
         await turn;
 
         const message = useChatStore.getState().conversations[cid]?.messages[1];

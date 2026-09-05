@@ -27,6 +27,15 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 let upstream: http.Server;
+/**
+ * The client-event budget this file drives the BFF with.
+ *
+ * A tenth of the shipped default, so the burst below is 100 requests rather than 3,020 — the
+ * shipped number is 200 chemists x 12 flushes a minute plus headroom (`server/config.ts`), and
+ * spending it here would make this the slowest test in the suite while proving the same thing.
+ */
+const CLIENT_EVENT_BUDGET = 80;
+
 let bff: http.Server;
 let port = 0;
 
@@ -75,6 +84,11 @@ beforeAll(async () => {
   process.env.CLIENT_DIR = '/nonexistent-client-dir';
   process.env.AUTH_MODE = 'dev';
   process.env.LOG_LEVEL = 'info';
+  // Small, and set here rather than left at the default, because what this file asserts about the
+  // budget is that the KNOB decides it. `CLIENT_EVENTS_RATE_PER_MIN` had no reader at all — the
+  // limit was a module constant of its own — so a deployment that raised it changed nothing, and
+  // a test that only drove the constant could not tell the difference.
+  process.env.CLIENT_EVENTS_RATE_PER_MIN = String(CLIENT_EVENT_BUDGET);
   const { createBffServer } = await import('../server/app.ts');
   bff = createBffServer();
   await new Promise<void>((resolve) => bff.listen(0, '127.0.0.1', resolve));
@@ -277,12 +291,14 @@ describe('/api/client-events', () => {
         body: batch,
       });
 
-    // The budget is 600 a minute; 620 in one burst crosses it and nothing else in this file does.
+    // Exactly the configured budget is accepted and the overflow is refused, which is the whole
+    // claim: the number comes from the configuration, not from this file and not from a constant
+    // beside the handler.
     const statuses: number[] = [];
-    for (let i = 0; i < 62; i += 1) {
+    for (let i = 0; i < (CLIENT_EVENT_BUDGET + 20) / 10; i += 1) {
       statuses.push(...(await Promise.all(Array.from({ length: 10 }, post))).map((r) => r.status));
     }
-    expect(statuses.filter((s) => s === 204)).toHaveLength(600);
+    expect(statuses.filter((s) => s === 204)).toHaveLength(CLIENT_EVENT_BUDGET);
     expect(statuses.filter((s) => s === 429)).toHaveLength(20);
 
     // A refusal the browser can act on rather than a reset socket: the sink reads `Retry-After`

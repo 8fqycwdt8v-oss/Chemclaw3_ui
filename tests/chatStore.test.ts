@@ -185,7 +185,13 @@ describe('removing conversations does not strand live state', () => {
     const abort = new AbortController();
     seed({
       composerLock: 'turn_in_flight',
-      streaming: { conversationId: 'a', messageId: 'm1', abort, stop: () => abort.abort() },
+      streaming: {
+        conversationId: 'a',
+        messageId: 'm1',
+        abort,
+        stop: () => abort.abort(),
+        abandon: () => {},
+      },
     });
 
     useChatStore.getState().deleteConversation('a');
@@ -201,7 +207,13 @@ describe('removing conversations does not strand live state', () => {
     const abort = new AbortController();
     seed({
       composerLock: 'turn_in_flight',
-      streaming: { conversationId: 'a', messageId: 'm1', abort, stop: () => abort.abort() },
+      streaming: {
+        conversationId: 'a',
+        messageId: 'm1',
+        abort,
+        stop: () => abort.abort(),
+        abandon: () => {},
+      },
     });
 
     useChatStore.getState().deleteConversation('b');
@@ -215,7 +227,13 @@ describe('removing conversations does not strand live state', () => {
     const abort = new AbortController();
     seed({
       composerLock: 'turn_in_flight',
-      streaming: { conversationId: 'a', messageId: 'm1', abort, stop: () => abort.abort() },
+      streaming: {
+        conversationId: 'a',
+        messageId: 'm1',
+        abort,
+        stop: () => abort.abort(),
+        abandon: () => {},
+      },
     });
 
     useChatStore.getState().clearAll();

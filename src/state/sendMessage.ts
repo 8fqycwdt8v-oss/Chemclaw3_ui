@@ -578,9 +578,11 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     }
 
     // A budget that is genuinely gone is terminal — it does not replenish because somebody
-    // pressed a button — so leave the composer locked and say so. A turn the service *shed*
-    // carries the same code and `retryable`, and falls through to the ordinary branch below,
-    // which already offers Retry.
+    // pressed a button — so leave the composer locked and say so. A turn the service *shed* is a
+    // different code now (`at_capacity`, kind `capacity`) and falls through to the ordinary
+    // branch below, which offers Retry; the `retryable` guard stays because an older deployment
+    // still sends a shed as a retryable `budget_exhausted`, and locking the composer on it would
+    // be the same defect one release earlier.
     if (apiError.kind === 'budget_exhausted' && !apiError.retryable) {
       releaseComposer('budget_exhausted');
       useChatStore.getState().setBanner({ kind: 'error', text });

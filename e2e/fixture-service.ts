@@ -384,8 +384,10 @@ const PROPOSAL_DETAIL: ProposalDetail = {
 };
 
 // One conversation blocked on a plan decision, so `/review` renders its inbox with a row rather
-// than one of its four empty states. `unread: 0` keeps the partial-scan notice out of the way of
-// the axe pass; the notice itself is covered by the component tests.
+// than one of its four empty states. `unread: 0` and `truncated: false` keep the partial-scan
+// notice out of the way of the axe pass; the notice itself is covered by the component tests.
+// Both are stated rather than left off: the service sends every field of this model on every
+// answer, and a fixture that omits one is describing a response nobody receives.
 const PENDING_PLANS: PendingPlans = {
   plans: [
     {
@@ -399,6 +401,7 @@ const PENDING_PLANS: PendingPlans = {
   considered: 1,
   gated: 1,
   unread: 0,
+  truncated: false,
 };
 
 const JOB: JobRecordSummary = {

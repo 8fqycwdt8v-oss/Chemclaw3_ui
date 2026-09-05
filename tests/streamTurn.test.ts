@@ -184,6 +184,23 @@ describe('streamTurn', () => {
       });
     });
 
+    it('reports a shed turn as capacity rather than as a failure nobody classified', async () => {
+      // `at_capacity` and `budget_exhausted` reach this client on the same path and mean opposite
+      // things: one is "we are busy, come back in a moment", the other is "the budget is gone".
+      // Until the code was mirrored here the first normalised to `internal` and arrived as a
+      // generic agent error — the offer a chemist needed ("try that again") was the one thing the
+      // event said and the UI did not.
+      const err = await failWith({
+        code: 'at_capacity',
+        message: 'server at capacity; retry shortly',
+        retryable: true,
+      });
+      expect(err.kind).toBe('capacity');
+      expect(err.retryable).toBe(true);
+      // Not the composer-locking kind, which is the whole point of the service having split them.
+      expect(err.kind).not.toBe('budget_exhausted');
+    });
+
     it('takes the service’s word on whether a retry is worth offering', async () => {
       const err = await failWith({ code: 'storage_unavailable', retryable: true });
       expect(err.kind).toBe('agent');

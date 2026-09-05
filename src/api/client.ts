@@ -420,11 +420,12 @@ export interface PendingPlan {
 /**
  * `GET /plans/pending` — undecided plans, with what the service's scan actually covered.
  *
- * The three counts are why this is an object rather than an array, and they are the whole
- * difference between this screen and the one it replaces. `plans: []` has three meanings:
- * `gated === 0` is "this deployment has no plan gate, so nothing can ever be here", `unread > 0`
- * is "the answer is partial", and neither of those is "nothing is waiting on you". The deleted
- * holds inbox rendered all three as the last one — see the note at the top of `ReviewQueue.tsx`.
+ * The counts are why this is an object rather than an array, and they are the whole difference
+ * between this screen and the one it replaces. `plans: []` has four meanings: `gated === 0` is
+ * "this deployment has no plan gate, so nothing can ever be here", `unread > 0` is "the answer is
+ * partial", `truncated` is "we stopped looking before the end", and none of those is "nothing is
+ * waiting on you". The deleted holds inbox rendered every one of them as the last — see the note
+ * at the top of `ReviewQueue.tsx`.
  */
 export interface PendingPlans {
   plans: PendingPlan[];
@@ -434,6 +435,22 @@ export interface PendingPlans {
   gated: number;
   /** Gated sessions whose plan was not read, so the list is short by an unknown amount. */
   unread: number;
+  /**
+   * Whether the service's walk through the caller's conversations stopped before the end.
+   *
+   * The fourth reading of an empty `plans`, and the one `unread` cannot carry: `unread` counts
+   * *gated* sessions whose plan went unread, and a walk that stopped early never learned whether
+   * the conversations beyond it were gated at all. So there is no number here — folding it into
+   * `unread` would invent plans that may not exist, which is what the service's own schema says
+   * about why it is a separate field.
+   *
+   * Optional because a service that predates the field sends nothing. Absent is read as "not
+   * reported" and changes no copy — the screen says exactly what it said before the field
+   * existed. It is deliberately NOT read as "the scan was complete": the version before this one
+   * walked the whole listing and had nothing to admit, but the version before *that* read only
+   * the first page and was silently short, which is the defect the field was added to end.
+   */
+  truncated?: boolean;
 }
 
 /**

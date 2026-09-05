@@ -68,7 +68,7 @@ describe('a panel route', () => {
     // on the panel's own copy rather than on a heading: with every request answered 404 the queue
     // renders one of its empty states, and which one is the panel's business, not this file's.
     await waitFor(() => expect(screen.queryByText('Opening the review queue…')).toBeNull());
-    expect(await screen.findByRole('heading', { name: 'Notes waiting for review' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Plans waiting on you' })).toBeTruthy();
     // The shell stayed put while the chunk arrived: Suspense is inside `AppShell`, not around it,
     // so the sidebar's two navs are still there beside the panel rather than replaced by it.
     expect(screen.getByRole('navigation', { name: 'Conversations' })).toBeTruthy();

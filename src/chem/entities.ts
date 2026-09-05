@@ -181,7 +181,8 @@ export interface JobEntity extends EntityBase {
 export interface NoteEntity extends EntityBase {
   kind: 'note';
   noteId: string;
-  /** The branch/PR reference, when the note came from a `note_proposed` rather than a citation. */
+  /** The commit the note was recorded in, when it came from a `note_proposed` event rather than
+   *  a citation. (That event name predates the write path: nothing proposes a note any more.) */
   reference?: string;
 }
 

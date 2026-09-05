@@ -1,14 +1,17 @@
 /**
  * A row somebody can be sent to.
  *
- * The routes stopped at the list level: `/review`, `/jobs`, `/protocols/:designId`. So a reviewer
- * could not be sent to a proposal, an operator could not be sent to a run, and a QA reviewer asked
- * to look at what changed in revision 3 had nowhere to be sent at all — `api.getProtocol` has taken
- * a `revision` since it was written, and the address bar never carried it.
+ * The routes stopped at the list level: `/review`, `/jobs`, `/protocols/:designId`. So an operator
+ * could not be sent to a run, and a QA reviewer asked to look at what changed in revision 3 had
+ * nowhere to be sent at all — `api.getProtocol` has taken a `revision` since it was written, and
+ * the address bar never carried it.
  *
  * The route file already makes this argument about the design id: it is in the URL "so a shared
- * link and a reload land on the same one". A proposal id, a job id and a revision number are the
- * same kind of thing, and all three appear in an answer.
+ * link and a reload land on the same one". A job id and a revision number are the same kind of
+ * thing, and both appear in an answer.
+ *
+ * A third case stood here — `/review/:proposalId` — and went with the PR-gate it addressed
+ * (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` in Chemclaw3).
  */
 
 import { useEffect } from 'react';
@@ -16,8 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { JobsPanel } from '../src/components/JobsPanel.tsx';
-import { ReviewQueue } from '../src/components/ReviewQueue.tsx';
-import type { DurableJobStatus, JobRecordSummary, ProposalDetail } from '../src/api/client.ts';
+import type { DurableJobStatus, JobRecordSummary } from '../src/api/client.ts';
 
 vi.mock('../src/auth/AuthContext.tsx', () => {
   const value = { auth: { getAccessToken: async () => null, mode: 'dev' }, ready: true };
@@ -42,24 +44,6 @@ const STATUS: DurableJobStatus = {
   rationale: RECORD.rationale,
 };
 
-const DETAIL: ProposalDetail = {
-  id: 7,
-  note_id: 'note-suzuki-42',
-  note_type: 'reaction',
-  actor: 'agent',
-  state: 'pending',
-  content: 'the bytes that would be committed',
-  dependencies: [],
-  submitted_at: '2026-09-01T00:00:00Z',
-  decided_at: '',
-  decided_by: '',
-  reason: '',
-  session_id: '',
-  correlation_id: '',
-  branch: '',
-  reference: '',
-};
-
 let restore: (() => void) | null = null;
 
 function serve(): void {
@@ -73,8 +57,6 @@ function serve(): void {
       });
     if (url.includes('/jobs/')) return Promise.resolve(json(STATUS));
     if (url.includes('/jobs')) return Promise.resolve(json([RECORD]));
-    if (url.includes('/proposals/7')) return Promise.resolve(json(DETAIL));
-    if (url.includes('/proposals')) return Promise.resolve(json([]));
     if (url.includes('/plans/pending')) {
       return Promise.resolve(json({ plans: [], gated: false, unread: 0 }));
     }
@@ -198,36 +180,5 @@ describe('a link to one run', () => {
 
     await screen.findByText('compare_solvents');
     expect(screen.queryByText('running')).toBeNull();
-  });
-});
-
-describe('a link to one proposal', () => {
-  it('opens the bytes it would commit', async () => {
-    render(
-      <MemoryRouter initialEntries={['/review/7']}>
-        <Routes>
-          <Route path="/review" element={<ReviewQueue />} />
-          <Route path="/review/:proposalId" element={<ReviewQueue />} />
-        </Routes>
-      </MemoryRouter>,
-    );
-
-    expect(await screen.findByText('the bytes that would be committed')).toBeTruthy();
-  });
-
-  it('ignores a path segment that is not a proposal id', async () => {
-    // The route pattern is `:proposalId`, so anything can arrive here. Every proposal route
-    // downstream takes a number, and asking for `/proposals/NaN` is a request this app should not
-    // be able to make.
-    render(
-      <MemoryRouter initialEntries={['/review/not-a-number']}>
-        <Routes>
-          <Route path="/review/:proposalId" element={<ReviewQueue />} />
-        </Routes>
-      </MemoryRouter>,
-    );
-
-    await screen.findByText('No notes are waiting for review');
-    expect(screen.queryByText('the bytes that would be committed')).toBeNull();
   });
 });

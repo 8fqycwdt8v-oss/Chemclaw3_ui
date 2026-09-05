@@ -103,13 +103,17 @@ for (const theme of ['light', 'dark'] as const) {
       await scan(page);
     });
 
-    test('the review queue, with a proposal open', async ({ page }) => {
-      // A modal panel over a list, holding a labelled textarea and two destructive-ish controls —
-      // and the panel is where a decision that cannot be undone is taken. Reached by URL rather
-      // than through the sidebar, because the drawer is already covered below.
+    test('the review queue, with a plan waiting', async ({ page }) => {
+      // A list of decisions somebody has to take, each linking back into the conversation that
+      // raised it. Reached by URL rather than through the sidebar, because the drawer is already
+      // covered below. This used to open a proposal sheet — a modal over the list with a labelled
+      // textarea and two destructive controls — which went with the PR gate; the page's remaining
+      // sections are plainer, and this pass is what says so rather than assuming it.
       await page.goto('/review');
-      await page.getByRole('button', { name: /note-suzuki-42/ }).click();
-      await expect(page.getByText(/confidence: 0\.8/)).toBeVisible();
+      await expect(
+        page.getByRole('heading', { name: 'Plans waiting on you', level: 2 }),
+      ).toBeVisible();
+      await expect(page.getByText('Which solvent for the Suzuki step?')).toBeVisible();
       await scan(page);
     });
 

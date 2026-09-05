@@ -31,8 +31,6 @@ import type {
   JobRecordSummary,
   NoteView,
   PendingPlans,
-  ProposalDetail,
-  ProposalSummary,
   ProtocolView,
   RevisionWritten,
   SessionSummary,
@@ -363,33 +361,11 @@ const SHARED_TRANSCRIPT: TranscriptMessage[] = [
   },
 ];
 
-const PROPOSAL: ProposalSummary = {
-  id: 7,
-  note_id: 'note-suzuki-42',
-  note_type: 'reaction',
-  state: 'pending',
-  branch: 'agent/note-suzuki-42',
-  reference: 'refs/heads/agent/note-suzuki-42',
-  actor: 'chemist@example.com',
-  submitted_at: '2026-08-09T10:00:00Z',
-  decided_at: null,
-  decided_by: '',
-  reason: '',
-};
-
-const PROPOSAL_DETAIL: ProposalDetail = {
-  ...PROPOSAL,
-  content: '---\ntype: reaction\nconfidence: 0.8\n---\nRan in 2-MeTHF at 70 °C.',
-  dependencies: [],
-  session_id: SID,
-  correlation_id: 'turn-e2e-2',
-};
-
 // One conversation blocked on a plan decision, so `/review` renders its inbox with a row rather
-// than one of its four empty states. `unread: 0` and `truncated: false` keep the partial-scan
-// notice out of the way of the axe pass; the notice itself is covered by the component tests.
-// Both are stated rather than left off: the service sends every field of this model on every
-// answer, and a fixture that omits one is describing a response nobody receives.
+// than one of its empty states. `unread: 0` and `truncated: false` keep the partial-scan notice
+// out of the way of the axe pass; the notice itself is covered by the component tests. Both are
+// stated rather than left off: the service sends every field of this model on every answer, and a
+// fixture that omits one is describing a response nobody receives.
 const PENDING_PLANS: PendingPlans = {
   plans: [
     {
@@ -673,7 +649,7 @@ createServer(async (req, res) => {
     return;
   }
 
-  // The cross-session plan inbox, on the same screen as the PR gate.
+  // The cross-session plan inbox — what `/review` is for now that the PR gate is gone.
   if (path === '/plans/pending' && req.method === 'GET') return json(res, 200, PENDING_PLANS);
 
   // Questions held open for a person. Empty rather than absent: the shell reads this once per page
@@ -682,15 +658,6 @@ createServer(async (req, res) => {
   // going unexercised, reported as noise.
   if (path === '/pending' && req.method === 'GET')
     return json(res, 200, { requests: [], count: 0 });
-
-  // The PR-gate review queue.
-  if (path === '/proposals' && req.method === 'GET') return json(res, 200, [PROPOSAL]);
-  if (path === '/proposals/7' && req.method === 'GET') return json(res, 200, PROPOSAL_DETAIL);
-  if (path === '/proposals/7/decision' && req.method === 'POST') {
-    req.resume();
-    res.writeHead(204);
-    return res.end();
-  }
 
   // The durable-run registry.
   if (path === '/jobs' && req.method === 'GET') {

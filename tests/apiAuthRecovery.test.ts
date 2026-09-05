@@ -89,7 +89,7 @@ describe('a 401 on a plain route', () => {
     restore = stub.restore;
     const auth = provider(false);
 
-    await expect(api.getProposal(7, auth)).rejects.toMatchObject({ kind: 'unauthorized' });
+    await expect(api.getNote('note-x', auth)).rejects.toMatchObject({ kind: 'unauthorized' });
     expect(auth.asked).toBe(1);
     expect(stub.calls).toHaveLength(1);
   });
@@ -194,10 +194,10 @@ describe('the routes that swallow a 404', () => {
     restore = stub.restore;
     const auth = provider(true);
 
-    // `listProposals` maps a 404 to `[]` so an older service leaves an empty queue rather than a
-    // banner. A 401 must not take that path — it would render "nothing to review" to someone who
-    // is simply signed out.
-    expect(await api.listProposals(auth)).toEqual([]);
+    // `listJobs` maps a 404 to `[]` so an older service leaves an empty list rather than a
+    // banner. A 401 must not take that path — it would render "nothing here" to someone who is
+    // simply signed out. (This used to drive `listProposals`, which went with the PR gate.)
+    expect(await api.listJobs(auth)).toEqual([]);
     expect(auth.asked).toBe(1);
     expect(stub.calls).toHaveLength(2);
   });

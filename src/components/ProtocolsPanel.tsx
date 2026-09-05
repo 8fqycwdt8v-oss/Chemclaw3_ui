@@ -19,6 +19,7 @@ import { api } from '../api/client.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { relativeTime } from '../lib/format.ts';
 import type { DesignStatus, DesignSummary } from '../../shared/protocols.ts';
+import { DESIGN_STATUSES } from '../../shared/protocols.ts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { EmptyState, Loading } from '@/components/chem/Feedback';
@@ -39,8 +40,6 @@ export const STATUS_TONE: Record<DesignStatus, 'neutral' | 'brand' | 'ok' | 'dan
   executed: 'brand',
   abandoned: 'danger',
 };
-
-const STATUSES: DesignStatus[] = ['requested', 'draft', 'approved', 'executed', 'abandoned'];
 
 /** Turn a service timestamp into "3 hours ago", or nothing when there is none to turn. */
 function when(value: string): string {
@@ -125,7 +124,7 @@ export function ProtocolsPanel(): React.JSX.Element {
               >
                 All
               </Button>
-              {STATUSES.map((option) => (
+              {DESIGN_STATUSES.map((option) => (
                 <Button
                   key={option}
                   size="xs"

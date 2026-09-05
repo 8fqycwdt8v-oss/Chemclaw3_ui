@@ -35,6 +35,16 @@ export type DesignMode = 'single' | 'screen' | 'campaign';
 /** Where a design sits between being asked for and being run. */
 export type DesignStatus = 'requested' | 'draft' | 'approved' | 'executed' | 'abandoned';
 
+/**
+ * What a revision holds: the structured ask alone, or a procedure.
+ *
+ * Not decoration on a badge. The service derives this column from `has_protocol` at the instant the
+ * revision is written, and `require_movable` reads it to decide whether a design has a procedure to
+ * approve — so it is half of the answer to "which sign-off buttons can succeed". See
+ * `legalStatusMoves` at the foot of this file.
+ */
+export type RevisionKind = 'request' | 'protocol';
+
 /** `blocker` stops execution; `warning` and `note` qualify it. */
 export type CheckSeverity = 'blocker' | 'warning' | 'note';
 
@@ -266,7 +276,7 @@ export interface ExperimentDesign {
 /** A revision as the history lists it — everything but the document itself. */
 export interface RevisionSummary {
   revision: number;
-  kind: 'request' | 'protocol';
+  kind: RevisionKind;
   author_kind: 'agent' | 'human';
   author: string;
   change_note: string;
@@ -312,7 +322,7 @@ export interface DesignOut {
   /** The header row — status, counts, timestamps. `null` for a design with no header yet. */
   summary: DesignSummary | null;
   revision: number;
-  kind: 'request' | 'protocol';
+  kind: RevisionKind;
   author_kind: 'agent' | 'human';
   author: string;
   change_note: string;
@@ -484,3 +494,88 @@ const EMPTY_SETPOINTS: Setpoints = {
   solvent: '',
   ph: null,
 };
+
+/**
+ * Every `DesignStatus`, in lifecycle order.
+ *
+ * The order is the lifecycle's, not the alphabet's, because it is what the sign-off panel renders
+ * in: a chemist reading three buttons left to right is reading the design's remaining path.
+ */
+export const DESIGN_STATUSES: readonly DesignStatus[] = [
+  'requested',
+  'draft',
+  'approved',
+  'executed',
+  'abandoned',
+];
+
+/**
+ * Which lifecycle move each status permits — a **transcription of `_LEGAL_MOVES`** in the service's
+ * `src/chemclaw/protocols/store.py`, read by `require_movable` and enforced nowhere else.
+ *
+ * This is the second definition of something another repository owns, and it is here for the same
+ * reason `setpointsFor` is: the surface a chemist acts on cannot ask the service what it would
+ * accept before drawing a button. Before it existed, `ProtocolDocument` rendered a *Mark X* button
+ * for all five statuses whatever the design was, so a draft protocol offered *Mark requested* and
+ * *Mark executed* — two clicks that can only ever be refused, on the one screen where a refusal
+ * reads as "your sign-off did not happen".
+ *
+ * The drift this creates is real and is why `tests/protocolStatusTransitions.test.ts` exists: it
+ * reads the service's own module out of a sibling checkout and fails on any difference, and says
+ * out loud when there is no checkout to read rather than passing on a check it did not perform.
+ *
+ * Two edges are worth knowing without opening the service: `draft -> executed` is **absent**
+ * because it is running an experiment nobody signed off, and `abandoned -> draft` is **present**
+ * because reviving a design somebody retired is a thing a person does.
+ */
+export const LEGAL_STATUS_MOVES: Record<DesignStatus, readonly DesignStatus[]> = {
+  requested: ['draft', 'abandoned'],
+  draft: ['approved', 'abandoned'],
+  approved: ['executed', 'draft', 'abandoned'],
+  executed: ['abandoned'],
+  abandoned: ['draft'],
+};
+
+/**
+ * The statuses that assert something about a *procedure* — the service's `_NEEDS_A_PROTOCOL`.
+ *
+ * A design holding only the structured ask has no procedure, so neither word can be true of it and
+ * the service refuses both with a 422 whatever the table above says.
+ */
+export const STATUSES_NEEDING_A_PROTOCOL: readonly DesignStatus[] = ['approved', 'executed'];
+
+/**
+ * The moves this design can actually be given, from where it is and from what its head holds.
+ *
+ * A transcription of the service's `require_movable`, read as a filter rather than as a refusal:
+ * the three rules it enforces are the transition table, `_NEEDS_A_PROTOCOL` (a status about a
+ * procedure needs a procedure), and its mirror image (`requested` means the ask *alone*, so a
+ * protocol head contradicts it).
+ *
+ * **`headKind` is the head revision's, not the one on screen.** They are the same whenever a move
+ * can succeed at all — a sign-off names the revision it was made on and the service refuses
+ * anything but the head — so a reader looking at an older revision is offered the head's moves and
+ * gets a `revision_conflict` if they take one, which is the honest refusal for what they did.
+ *
+ * **Every `X -> X` repeat is deliberately absent**, and that is this repository's decision rather
+ * than the service's: `require_movable` exempts a self-transition from the table so that pressing
+ * a button twice is a 204 rather than a 422. A button reading *Mark draft* on a design that is
+ * already draft is not a move a chemist is choosing between, though, so the panel does not carry
+ * one. What is left is a page that has not caught up — where the client sends the status it was
+ * showing, and `require_unmoved` refuses it as a `status_conflict` rather than taking it as a
+ * repeat — and `ProtocolDocument` answers that by re-reading the design, so the chemist sees the
+ * move that already landed instead of being offered the chance to make it twice.
+ */
+export function legalStatusMoves(
+  current: DesignStatus,
+  headKind: RevisionKind,
+): readonly DesignStatus[] {
+  // `?? []` for the reason `STATUS_TONE` carries one: `DesignStatus` is closed here and open on
+  // the wire, and a status this build has never heard of must cost a chemist an empty button row
+  // rather than the document page they were reading.
+  return (LEGAL_STATUS_MOVES[current] ?? []).filter((target) => {
+    if (STATUSES_NEEDING_A_PROTOCOL.includes(target)) return headKind === 'protocol';
+    if (target === 'requested') return headKind !== 'protocol';
+    return true;
+  });
+}

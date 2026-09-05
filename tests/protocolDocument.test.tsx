@@ -19,7 +19,9 @@ import { ProtocolDocument } from '../src/components/ProtocolDocument.tsx';
 import { stubFetch } from './helpers.ts';
 import type {
   DesignRevision,
+  DesignStatus,
   DesignSummary,
+  RevisionKind,
   RevisionSummary,
   StatusEvent,
 } from '../shared/protocols.ts';
@@ -49,7 +51,7 @@ const SUMMARY: DesignSummary = {
 const revision = (at: number): DesignRevision => ({
   design_id: DESIGN,
   revision: at,
-  kind: 'protocol',
+  kind: servedKind,
   author_kind: 'agent',
   author: 'chemclaw',
   change_note: 'Drafted from the structured request.',
@@ -151,6 +153,16 @@ let served = 4;
  */
 let statusResponse: Response = new Response(null, { status: 204 });
 let serveSummary = true;
+/**
+ * Where the design is, and what its head holds — the two inputs to which buttons the panel draws.
+ *
+ * Knobs rather than a second fixture because the sign-off panel is now a function of exactly these
+ * two: `legalStatusMoves(summary.status, view.kind)`. A fixture pinned to one pair could only ever
+ * prove the panel for that pair, which is how five buttons survived on a screen where at most three
+ * can ever work.
+ */
+let servedStatus: DesignStatus = 'draft';
+let servedKind: RevisionKind = 'protocol';
 
 /** Every request this render made, so a test can assert what was *sent*, not only what rendered. */
 let calls: { url: string; init?: RequestInit }[] = [];
@@ -172,7 +184,7 @@ function serve(): void {
     return new Response(
       JSON.stringify({
         ...revision(asked ? Number(asked) : served),
-        summary: serveSummary ? SUMMARY : null,
+        summary: serveSummary ? { ...SUMMARY, status: servedStatus } : null,
         history: HISTORY,
         status_history: SIGN_OFFS,
       }),
@@ -197,6 +209,8 @@ beforeEach(() => {
   cleanup();
   served = 4;
   serveSummary = true;
+  servedStatus = 'draft';
+  servedKind = 'protocol';
   statusResponse = new Response(null, { status: 204 });
 });
 
@@ -312,11 +326,17 @@ describe('ProtocolDocument', () => {
     });
   });
 
-  it('reports a colleague’s decision as an alert with a way out, not as a neutral notice', async () => {
+  it('reports a decision that already happened as an alert, and does not blame a colleague', async () => {
     // `moveStatus` wrote every failure into the `role="status"` banner — the same neutral tone as
     // "Status recorded as approved." two lines earlier — so a chemist whose decision was refused
     // saw what one whose decision was recorded sees. A refusal is an alert, and it needs the one
-    // action that helps: reload and read what the other person did.
+    // action that helps: re-read the design and see who moved it.
+    //
+    // **And it must not say who that was.** This 409 is `require_unmoved` refusing a move made from
+    // a status the design no longer holds, and the commonest way there is the chemist's own click
+    // landing while its answer was lost — measured on both service backends. "Somebody else already
+    // decided this" is then false in three clauses at once, on the one screen whose whole subject is
+    // attribution.
     statusResponse = new Response(
       JSON.stringify({
         detail: {
@@ -331,10 +351,39 @@ describe('ProtocolDocument', () => {
     await mark('approved', 'looks fine to me');
 
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('Somebody else already decided this');
+    expect(alert.textContent).toContain('This design has already moved');
+    // The status the PAGE was showing, which is the only thing this banner can truthfully name
+    // once the re-read below has replaced `summary.status` with what the design now holds.
+    expect(alert.textContent).toContain('It was draft when you pressed the button');
+    expect(alert.textContent).not.toMatch(/somebody else/i);
     expect(within(alert).getByRole('button', { name: 'Reload the design' })).toBeTruthy();
     // And not as a success: the neutral banner must be empty, or the two read the same.
     expect(screen.queryByRole('status')).toBeNull();
+  });
+
+  it('re-reads the design after a conflict, so the next click is not refused for the same reason', async () => {
+    // The root cause of the false accusation above. `reload()` ran on success only, so every
+    // failure left the panel showing the pre-move status — and `moveStatus` sends that as
+    // `expected_status`. A lost response therefore GUARANTEED the retry was refused, with the
+    // chemist's own move reported back to them as somebody else's decision.
+    statusResponse = new Response(
+      JSON.stringify({ detail: { code: 'status_conflict', message: 'moved' } }),
+      { status: 409, headers: { 'content-type': 'application/json' } },
+    );
+    serve();
+    open();
+    // Counted after the first read has landed, not after `open()`: the effect has not run at that
+    // point, so `before` would be 0 and the initial GET alone would satisfy the assertion — which
+    // is a test that passes with the reload deleted.
+    await screen.findByPlaceholderText('Why this design is moving state');
+    const before = calls.filter((c) => c.init?.method !== 'POST').length;
+    expect(before).toBeGreaterThan(0);
+    await mark('approved', 'looks fine to me');
+    await screen.findByRole('alert');
+
+    await waitFor(() =>
+      expect(calls.filter((c) => c.init?.method !== 'POST').length).toBeGreaterThan(before),
+    );
   });
 
   it('says the document moved when that is what moved, which is a different remedy', async () => {
@@ -349,7 +398,85 @@ describe('ProtocolDocument', () => {
     await mark('approved', 'looks fine to me');
 
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('Somebody else edited this');
+    expect(alert.textContent).toContain('The document moved under this sign-off');
+    // The revision the sign-off NAMED. The re-read moves the page onto the head, so interpolating
+    // what is on screen would print the number that is now correct.
+    expect(alert.textContent).toContain('Revision 4 was no longer the latest');
+  });
+
+  it('offers a draft only the two moves the service will take', async () => {
+    // The defect this replaced: all five `DesignStatus` values got a button whatever the design
+    // was, so a chemist looking at a draft could press *Mark requested* or *Mark executed* — both
+    // 422s — on the screen where a refusal reads as "your sign-off did not happen".
+    serve();
+    open();
+
+    expect(await screen.findByRole('button', { name: 'Mark approved' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Mark abandoned' })).toBeTruthy();
+    for (const refused of ['Mark requested', 'Mark executed', 'Mark draft']) {
+      expect(screen.queryByRole('button', { name: refused })).toBeNull();
+    }
+  });
+
+  it('offers an executed design the one move it has left', async () => {
+    // `executed -> {requested, draft, approved}` are all refused. Three of the five buttons on this
+    // screen could only ever fail, and the fourth was a repeat of the status it already holds.
+    servedStatus = 'executed';
+    serve();
+    open();
+
+    expect(await screen.findByRole('button', { name: 'Mark abandoned' })).toBeTruthy();
+    for (const refused of ['Mark approved', 'Mark draft', 'Mark requested', 'Mark executed']) {
+      expect(screen.queryByRole('button', { name: refused })).toBeNull();
+    }
+  });
+
+  it('withholds a sign-off from a design that holds no procedure', async () => {
+    // The service's rule that outranks the table: `approved` and `executed` assert something about
+    // a procedure, and a `request` head has none — so the button that offers to approve one is
+    // offering a 422 with a specific and rather alarming message about there being nothing to
+    // approve.
+    servedStatus = 'requested';
+    servedKind = 'request';
+    serve();
+    open();
+
+    expect(await screen.findByRole('button', { name: 'Mark draft' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Mark abandoned' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Mark approved' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Mark executed' })).toBeNull();
+  });
+
+  it('puts a 422 in the alert with the service’s reason, never in the neutral banner', async () => {
+    // Unreachable from a click now that the buttons are the legal moves — which is exactly why it
+    // has to be loud if it ever arrives: it means this repository's copy of the transition table
+    // has drifted from the service's. It used to fall through both conflict branches into
+    // `role="status"`, kinded `message_too_long`, so a refusal rendered in the same neutral banner
+    // as "Status recorded as approved." and wearing a sentence about a message length limit.
+    statusResponse = new Response(
+      JSON.stringify({
+        detail:
+          "a design that is 'draft' cannot be moved to 'executed': from 'draft' the moves are " +
+          "['abandoned', 'approved', 'draft']",
+      }),
+      {
+        status: 422,
+        headers: { 'content-type': 'application/json', 'x-chemclaw-correlation-id': 'corr-422' },
+      },
+    );
+    serve();
+    open();
+    await mark('approved', 'looks fine to me');
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('The service refused this move');
+    expect(alert.textContent).toContain("cannot be moved to 'executed'");
+    // Not the message-route default, which is what a 422 used to be rendered as here.
+    expect(alert.textContent).not.toMatch(/length limit/i);
+    // The reference `errorFromStatus` read off the response, which is what joins this refusal to a
+    // line of the service's log.
+    expect(alert.textContent).toContain('corr-422');
+    expect(screen.queryByRole('status')).toBeNull();
   });
 
   it('withholds the buttons entirely when the header did not load', async () => {

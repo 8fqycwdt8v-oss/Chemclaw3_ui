@@ -447,7 +447,7 @@ function SidebarLink({
       {count > 0 && (
         // The number is in the accessible name rather than beside it as a bare digit: a screen
         // reader announcing "Review queue 2" says nothing about what the 2 counts, and this link
-        // also leads to note proposals, which this badge is not about.
+        // also leads to recorded notes, which this badge is not about.
         <Badge tone="warn" className="ml-auto" aria-label={`${count} waiting on you`}>
           {count}
         </Badge>

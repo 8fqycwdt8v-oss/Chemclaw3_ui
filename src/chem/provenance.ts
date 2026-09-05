@@ -521,7 +521,7 @@ const TOOL_METHOD: Partial<Record<KnownTool, ToolMethod>> = {
     method: SURROGATE,
     caveat:
       'A durable multi-round campaign: it proposes, evaluates against a registered objective, and ' +
-      'opens its recommendation as a PR-gated note for human review.',
+      'records its recommendation as an agent-authored note, readable at once.',
   },
 
   // core, in-process. Retrieval rather than computation — no manifest, so no caveat.

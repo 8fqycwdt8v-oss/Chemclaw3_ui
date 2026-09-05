@@ -59,7 +59,7 @@ const CAMPAIGN_JOB = 'start_optimization_campaign';
  */
 const CAMPAIGN_DESCRIPTION =
   'A multi-round optimisation campaign: it proposes candidates, evaluates them through the named ' +
-  'objective, and opens its recommendation as a PR-gated note for human review. It runs for as ' +
+  'objective, and records its recommendation as an agent-authored note. It runs for as ' +
   'many rounds as its spec asked for, so expect hours rather than the minutes a single calculation ' +
   'takes.';
 

@@ -1,11 +1,15 @@
 /**
  * What is waiting on a human — across every conversation, not inside one.
  *
- * Two gates, two sections, and the difference between them is what the page is for.
- *
- * A **proposal** is machine-written knowledge waiting to enter the graph. Deciding it commits or
- * refuses bytes in a repository, and the service calls this gate "the line that makes
- * machine-written knowledge safe".
+ * **There used to be a third section and it is gone.** A "proposal" was machine-written knowledge
+ * waiting to enter the graph, and this page called deciding one "the line that makes
+ * machine-written knowledge safe". Chemclaw3 deleted that gate and its `/proposals` routes
+ * (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): a note is written straight into the
+ * graph carrying `created_by: agent`, and what makes it safe is now its citations and the fact
+ * that it can be contradicted. This is the **second** time this page has had to delete an inbox
+ * for a decision that cannot occur, and both times the failure mode was identical and quiet — the
+ * client swallows a 404 on a list route into `[]`, so the section rendered a confident, permanently
+ * empty queue that reads as "you are up to date". A dead section here is worse than a broken one.
  *
  * A **plan** is work the agent cannot start. Under `harness_autonomy="plan_only"` every
  * state-changing step is refused until a human approves the exact plan they were shown, and until
@@ -15,7 +19,7 @@
  * nothing anywhere able to say which conversation it was in. `GET /plans/pending` is the route
  * that answers it, and this is the only screen that asks.
  *
- * **The section it replaces is why the counts are rendered.** This page used to carry an inbox for
+ * **Those deletions are why the counts are rendered.** This page also used to carry an inbox for
  * durable interaction "holds". The service deleted that whole mechanism
  * (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`) because nothing could ever open one, and
  * the list call swallowed the resulting 404 into `[]` — so the page showed a confident,
@@ -30,258 +34,30 @@
  * — the same argument the deleted holds section made for linking back rather than answering here.
  */
 
-import { useCallback, useEffect, useState } from 'react';
-import { FileCheck2, Inbox, ListChecks } from 'lucide-react';
-import { Link, useNavigate, useParams } from 'react-router';
-import { useAuth, useIsReviewer } from '../auth/AuthContext.tsx';
+import { useEffect, useState } from 'react';
+import { Inbox, ListChecks } from 'lucide-react';
+import { Link } from 'react-router';
+import { useAuth } from '../auth/AuthContext.tsx';
 import {
   api,
   type PendingRequest,
   type PendingRequests as PendingRequestsView,
   type PendingPlans as PendingPlansView,
-  type ProposalDetail,
-  type ProposalSummary,
 } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
-import { useNewestRead } from '../hooks/useNewestRead.ts';
 import { relativeTime } from '../lib/format.ts';
 import { useChatStore } from '../state/chatStore.ts';
 import { CitationChip } from './CitationChip.tsx';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { ConfirmDialog } from '@/components/chem/ConfirmDialog';
 import { EmptyState, Loading } from '@/components/chem/Feedback';
-
-/**
- * The service's own listing cap, mirrored so a full page can be recognised as one.
- *
- * `proposal_list_limit` on the service side. A copy rather than something discovered, for the same
- * reason `maxMessageChars` is told to this app rather than fetched: the service publishes no route
- * carrying it. Being wrong here is cheap in exactly one direction — too low and a "Load older"
- * control appears with nothing behind it, which the first empty page then removes.
- */
-const PAGE_IS_FULL = 50;
-
-const STATE_TONE: Record<string, 'ok' | 'danger' | 'warn'> = {
-  approved: 'ok',
-  rejected: 'danger',
-  pending: 'warn',
-};
 
 /** Turn a service timestamp into "3 hours ago", or nothing when there is none to turn. */
 function when(value: string | null): string {
   if (!value) return '';
   const at = new Date(value).getTime();
   return Number.isNaN(at) ? '' : relativeTime(at);
-}
-
-/**
- * One proposal, with the bytes it would commit.
- *
- * The content is shown as the file it is, not as rendered markdown. A sign-off is on what lands in
- * the tree; rendering it would hide exactly the things a reviewer is checking for — the front
- * matter, the wikilinks, the confidence field.
- */
-function ProposalSheet({
-  id,
-  open,
-  onOpenChange,
-  onDecided,
-}: {
-  id: number;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onDecided: () => void;
-}): React.JSX.Element {
-  const { auth } = useAuth();
-  const isReviewer = useIsReviewer();
-  const [detail, setDetail] = useState<ProposalDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [reason, setReason] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [loadedFor, setLoadedFor] = useState<number | null>(null);
-  const claim = useNewestRead();
-
-  if (open && loadedFor !== id) {
-    setLoadedFor(id);
-    setDetail(null);
-    setError(null);
-    setReason('');
-    // Claimed before the request, so a read this one supersedes cannot land afterwards. What this
-    // sheet renders is the bytes an Approve would commit, and Approve posts `id` — a proposal's
-    // content under another proposal's identity is a sign-off on something nobody read. See
-    // `useNewestRead`.
-    const isNewest = claim();
-    api
-      .getProposal(id, auth)
-      .then((next) => isNewest() && setDetail(next))
-      .catch((err: unknown) => {
-        if (!isNewest()) return;
-        setError(err instanceof Error ? err.message : 'Could not read that proposal.');
-      });
-  }
-
-  const decide = (approved: boolean) => async (): Promise<void> => {
-    setBusy(true);
-    try {
-      await api.decideProposal(id, approved, reason, auth);
-      onOpenChange(false);
-      onDecided();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'The decision was not recorded.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const pending = detail?.state === 'pending';
-
-  return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" title="Proposed note" className="w-[min(48rem,95vw)]">
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-5">
-          {!detail && !error && <Loading>Reading the proposal…</Loading>}
-          {error && (
-            <p role="alert" className="text-sm text-danger-ink">
-              {error}
-            </p>
-          )}
-
-          {detail && (
-            <>
-              <div>
-                <p className="font-mono text-xs break-all">{detail.note_id}</p>
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  <Badge tone={STATE_TONE[detail.state] ?? 'neutral'}>{detail.state}</Badge>
-                  <Badge tone="neutral">{detail.note_type}</Badge>
-                  <span className="text-2xs text-ink-subtle">
-                    proposed by {detail.actor} {when(detail.submitted_at)}
-                  </span>
-                </div>
-              </div>
-
-              {detail.state !== 'pending' && (
-                <p className="rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-xs">
-                  {detail.state} by {detail.decided_by || 'someone'} {when(detail.decided_at)}
-                  {detail.reason && <> — {detail.reason}</>}
-                </p>
-              )}
-
-              <div>
-                <h3 className="mb-1.5 text-2xs font-medium tracking-wide text-ink-subtle uppercase">
-                  What would be committed
-                </h3>
-                {/* Focusable: it scrolls, and a scroll region nothing can focus is unreachable
-                    from a keyboard. */}
-                <pre
-                  tabIndex={0}
-                  role="region"
-                  aria-label="The note as it would be committed"
-                  className="max-h-96 overflow-auto rounded-lg border border-border-subtle bg-surface-sunken p-3 font-mono text-2xs leading-relaxed whitespace-pre-wrap focus-ring"
-                >
-                  {detail.content}
-                </pre>
-              </div>
-
-              {detail.dependencies.length > 0 && (
-                <div>
-                  <h3 className="mb-1.5 text-2xs font-medium tracking-wide text-ink-subtle uppercase">
-                    And {detail.dependencies.length} file
-                    {detail.dependencies.length === 1 ? '' : 's'} alongside it
-                  </h3>
-                  {/* Minted compound notes, usually. They land in the same commit, so they are
-                      part of what is being signed off — not context. */}
-                  <ul className="flex flex-col gap-2">
-                    {detail.dependencies.map((file) => (
-                      <li key={file.path}>
-                        <details className="group rounded-lg border border-border-subtle">
-                          <summary className="tap-target cursor-pointer list-none px-3 py-2 font-mono text-2xs focus-ring">
-                            {file.path}
-                          </summary>
-                          <pre
-                            tabIndex={0}
-                            role="region"
-                            aria-label={file.path}
-                            className="max-h-64 overflow-auto border-t border-border-subtle p-3 font-mono text-2xs whitespace-pre-wrap focus-ring"
-                          >
-                            {file.content}
-                          </pre>
-                        </details>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              <p className="text-2xs text-ink-subtle">
-                branch <span className="font-mono">{detail.branch}</span> · correlation{' '}
-                <span className="font-mono">{detail.correlation_id || 'not recorded'}</span>
-              </p>
-
-              {pending && !isReviewer && (
-                <p className="rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-xs text-ink-muted">
-                  Deciding a proposal needs a reviewer role. You can read it and see what it would
-                  commit; someone holding the role signs it in.
-                </p>
-              )}
-
-              {pending && isReviewer && (
-                <div className="flex flex-col gap-3 border-t border-border-subtle pt-4">
-                  <label className="flex flex-col gap-1.5 text-xs">
-                    <span className="font-medium">
-                      Reason{' '}
-                      <span className="font-normal text-ink-subtle">(required to reject)</span>
-                    </span>
-                    {/* Required on a rejection by the service, which 422s a blank one — and
-                        rightly: a note refused without a stated reason tells the next reviewer,
-                        and the agent, nothing. */}
-                    <textarea
-                      value={reason}
-                      onChange={(e) => setReason(e.target.value)}
-                      rows={2}
-                      className="resize-y rounded-lg border border-border-subtle bg-surface px-2.5 py-2 outline-none focus-ring"
-                      placeholder="Why this does or does not belong in the record"
-                    />
-                  </label>
-
-                  <div className="flex flex-wrap gap-2">
-                    <ConfirmDialog
-                      trigger={
-                        <Button variant="success" size="sm" disabled={busy}>
-                          Approve
-                        </Button>
-                      }
-                      title="Sign this note into the record?"
-                      description="It will be merged into the knowledge graph and cited by future answers. The decision is attributable to you and cannot be undone here."
-                      confirmLabel="Approve"
-                      onConfirm={() => void decide(true)()}
-                    />
-                    <ConfirmDialog
-                      trigger={
-                        <Button
-                          variant="outline-destructive"
-                          size="sm"
-                          disabled={busy || !reason.trim()}
-                        >
-                          Reject
-                        </Button>
-                      }
-                      title="Refuse this note?"
-                      description="The proposal is closed and the note does not enter the graph. Your reason is recorded with the decision."
-                      confirmLabel="Reject"
-                      variant="destructive"
-                      onConfirm={() => void decide(false)()}
-                    />
-                  </div>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </SheetContent>
-    </Sheet>
-  );
 }
 
 /**
@@ -678,144 +454,11 @@ function PendingInbox(): React.JSX.Element {
   );
 }
 
-function Proposals(): React.JSX.Element {
-  const { auth, ready } = useAuth();
-  // `/review/:proposalId` opens this queue with that proposal's sheet already up, so a reviewer can
-  // be *sent* to one rather than told to find it. Coerced here because a path segment is a string
-  // and every proposal route downstream takes a number.
-  const { proposalId } = useParams();
-  const navigate = useNavigate();
-  const deepLinked = proposalId && /^[0-9]{1,19}$/.test(proposalId) ? Number(proposalId) : null;
-  const [proposals, setProposals] = useState<ProposalSummary[] | null>(null);
-  const [openId, setOpenId] = useState<number | null>(deepLinked);
-  const [nonce, setNonce] = useState(0);
-  const [loadingOlder, setLoadingOlder] = useState(false);
-  /** Set once a page came back short or empty: there is nothing older to offer. */
-  const [exhausted, setExhausted] = useState(false);
-
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
-
-  useEffect(() => {
-    if (!ready) return;
-    let cancelled = false;
-    void api
-      .listProposals(auth, { state: 'pending' })
-      .then((list) => !cancelled && setProposals(list))
-      .catch(() => !cancelled && setProposals([]));
-    return () => {
-      cancelled = true;
-    };
-  }, [auth, ready, nonce]);
-
-  /**
-   * Fetch the page before the oldest one on screen.
-   *
-   * `listProposals` has accepted `beforeId` since it was written and **no caller ever passed it**,
-   * while the service caps a listing at `proposal_list_limit` (50). A PR gate is precisely the
-   * surface that accumulates, so proposal 51 was not below a fold — it was never fetched, and
-   * nothing said the list was short. A full page is the only evidence there might be more, which
-   * is the same rule the service uses for its own session cursor.
-   */
-  const older = useCallback(() => {
-    const oldest = proposals?.[proposals.length - 1]?.id;
-    if (!oldest || loadingOlder) return;
-    setLoadingOlder(true);
-    void api
-      .listProposals(auth, { state: 'pending', beforeId: oldest })
-      .then((page) => {
-        setProposals((current) => [...(current ?? []), ...page]);
-        setExhausted(page.length === 0);
-      })
-      .catch(() => setExhausted(true))
-      .finally(() => setLoadingOlder(false));
-  }, [auth, loadingOlder, proposals]);
-
-  // **The sheet is rendered whatever the list says.** It used to sit inside the "we have rows"
-  // branch, which is fine while the only way to open one is to click a row — and wrong the moment a
-  // URL can open one: `/review/7` for a proposal that is not on the pending page (already decided,
-  // or older than this page) landed on the empty state with nothing open and no explanation.
-  const sheet =
-    openId !== null ? (
-      <ProposalSheet
-        id={openId}
-        open
-        onOpenChange={(next) => {
-          if (next) return;
-          setOpenId(null);
-          // Closing a sheet the URL opened has to move the URL too, or Back is the only way out
-          // of a route that keeps reopening it.
-          if (deepLinked !== null) void navigate('/review', { replace: true });
-        }}
-        onDecided={reload}
-      />
-    ) : null;
-
-  if (!proposals) {
-    return (
-      <>
-        <Loading>Reading the review queue…</Loading>
-        {sheet}
-      </>
-    );
-  }
-  if (proposals.length === 0) {
-    return (
-      <>
-        <EmptyState
-          icon={<FileCheck2 className="size-5" />}
-          title="No notes are waiting for review"
-        >
-          Everything the agent has proposed has been decided. A new proposal appears here the moment
-          a turn opens one.
-        </EmptyState>
-        {sheet}
-      </>
-    );
-  }
-
-  return (
-    <>
-      <ul className="flex flex-col gap-2">
-        {proposals.map((proposal) => (
-          <li key={proposal.id}>
-            <button
-              type="button"
-              onClick={() => setOpenId(proposal.id)}
-              className="w-full rounded-lg border border-border-subtle bg-surface-raised p-3 text-left transition-colors hover:bg-surface-sunken focus-ring"
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-xs break-all">{proposal.note_id}</span>
-                <Badge tone="neutral">{proposal.note_type}</Badge>
-                <Badge tone={STATE_TONE[proposal.state] ?? 'neutral'}>{proposal.state}</Badge>
-              </div>
-              <p className="mt-1 text-2xs text-ink-subtle">
-                proposed by {proposal.actor} {when(proposal.submitted_at)}
-              </p>
-            </button>
-          </li>
-        ))}
-      </ul>
-      {/* Only while a full page came back — the service caps the listing, and a short page is the
-          evidence there is nothing older. Asking for one row beyond the ceiling to know for sure
-          would cost every listing an extra row to answer a question the next request answers for
-          free by coming back empty, which is the argument the service makes for its own cursor. */}
-      {!exhausted && proposals.length >= PAGE_IS_FULL && (
-        <div className="mt-2">
-          <Button variant="ghost" size="sm" disabled={loadingOlder} onClick={older}>
-            {loadingOlder ? 'Loading…' : 'Load older proposals'}
-          </Button>
-        </div>
-      )}
-      {sheet}
-    </>
-  );
-}
-
 export function ReviewQueue(): React.JSX.Element {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-8">
-        {/* First, because it is the section that blocks work: a proposal waits, a plan stops. */}
+        {/* First, because it is the section that blocks work: a question waits, a plan stops. */}
         <section aria-labelledby="plans-heading">
           <h2 id="plans-heading" className="mb-1 text-lg font-semibold tracking-tight">
             Plans waiting on you
@@ -839,16 +482,6 @@ export function ReviewQueue(): React.JSX.Element {
             that ran for seven days and then expired.
           </p>
           <PendingInbox />
-        </section>
-
-        <section aria-labelledby="proposals-heading">
-          <h2 id="proposals-heading" className="mb-1 text-lg font-semibold tracking-tight">
-            Notes waiting for review
-          </h2>
-          <p className="mb-3 text-sm text-ink-muted">
-            Knowledge the agent wrote, held at the gate until a human signs it into the graph.
-          </p>
-          <Proposals />
         </section>
       </div>
     </div>

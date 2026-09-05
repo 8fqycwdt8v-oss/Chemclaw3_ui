@@ -4,8 +4,14 @@
  * Endpoints verified against 8fqycwdt8v-oss/Chemclaw3 (`src/chemclaw/api/routes/`).
  *
  * Two policies live here and are worth telling apart, because the difference is not stylistic.
- * The *list* routes — sessions, transcripts, proposals — swallow a 404 into an empty result, so
- * this UI runs against an older service with a smaller sidebar rather than a banner. The *fetch*
+ * The *list* routes — sessions, transcripts, jobs — swallow a 404 into an empty result, so
+ * this UI runs against an older service with a smaller sidebar rather than a banner. **That policy
+ * has a cost this client has now paid twice**, so it is stated beside the policy rather than
+ * discovered again: a route the service *deleted* is indistinguishable from a route it never had,
+ * so the screen renders an empty list where the honest answer is "this is gone". Both times
+ * (durable interaction holds, then the PR gate's `/proposals`) the fix was to delete the caller,
+ * and the signal that it was needed came from reading the service's changelog rather than from
+ * anything here going red. The *fetch*
  * routes — one tool result, one note — do not, because nothing calls them speculatively: the
  * affordance only exists when the turn said the thing exists, so a 404 there is a real fault and
  * hiding it would leave a control that does nothing when clicked.
@@ -247,50 +253,6 @@ export interface AttachmentSummary {
    *  rather than omitting it, so treat 0 as "not a table", not as "an empty table". */
   rows: number;
   excerpt: string;
-}
-
-/**
- * One knowledge note waiting to enter the graph, as the PR gate records it.
- *
- * The service calls the gate "the line that makes machine-written knowledge safe"; these are the
- * things standing on it. Deciding one commits or refuses bytes in a repository, which is why the
- * decision route is role-gated upstream and why the reviewer is shown the file rather than a
- * summary of it.
- */
-export interface ProposalSummary {
-  id: number;
-  note_id: string;
-  note_type: string;
-  /** `pending` until decided; then `approved` or `rejected`. */
-  state: string;
-  branch: string;
-  reference: string;
-  /** The principal whose turn produced it. */
-  actor: string;
-  submitted_at: string | null;
-  decided_at: string | null;
-  decided_by: string;
-  reason: string;
-}
-
-/** A file the proposal would land alongside the note — a minted compound note, typically. */
-export interface ProposalFile {
-  path: string;
-  content: string;
-}
-
-/**
- * A proposal with the bytes it would commit.
- *
- * `content` and `dependencies` are the point of the detail route: a GxP sign-off is on what would
- * actually enter the tree, not on a summary of it. `correlation_id` joins the decision to the
- * audit trail of the turn that proposed it.
- */
-export interface ProposalDetail extends ProposalSummary {
-  content: string;
-  dependencies: ProposalFile[];
-  session_id: string;
-  correlation_id: string;
 }
 
 /**
@@ -689,26 +651,6 @@ export const api = {
   },
 
   /**
-   * The PR-gate review queue.
-   *
-   * `state` filters (`pending` is what a reviewer wants) and `before_id` is keyset pagination —
-   * an id, not an offset, so a decision landing mid-scroll cannot shift the page under the reader.
-   *
-   * Degrades to `[]` on a 404 like the other list routes, and for the same reason: a service
-   * without the queue should leave an empty screen, not a banner.
-   */
-  async listProposals(
-    getToken: TokenGetter,
-    options: { state?: string; beforeId?: number } = {},
-  ): Promise<ProposalSummary[]> {
-    const query = new URLSearchParams();
-    if (options.state) query.set('state', options.state);
-    if (options.beforeId) query.set('before_id', String(options.beforeId));
-    const suffix = query.toString() ? `?${query.toString()}` : '';
-    return orEmpty('/proposals', () => request<ProposalSummary[]>(`/proposals${suffix}`, getToken));
-  },
-
-  /**
    * Delete one conversation on the service, not only in this browser.
    *
    * "Delete conversation" was a local map delete: the server session, its transcript, its
@@ -805,30 +747,6 @@ export const api = {
     return request<void>(`/pending/${encodeURIComponent(requestId)}/answer`, getToken, {
       method: 'POST',
       body: JSON.stringify({ payload }),
-    });
-  },
-
-  /** One proposal with the exact bytes it would commit. Not swallowed: it is opened by a click. */
-  getProposal(id: number, getToken: TokenGetter): Promise<ProposalDetail> {
-    return request<ProposalDetail>(`/proposals/${id}`, getToken);
-  },
-
-  /**
-   * Sign a proposal into the record, or refuse it.
-   *
-   * `reason` is required on a rejection — the service 422s a blank one, and rightly: a note
-   * rejected without a stated reason tells the next reviewer, and the agent, nothing. It is
-   * optional on an approval, where the bytes are the record.
-   */
-  decideProposal(
-    id: number,
-    approved: boolean,
-    reason: string,
-    getToken: TokenGetter,
-  ): Promise<void> {
-    return request<void>(`/proposals/${id}/decision`, getToken, {
-      method: 'POST',
-      body: JSON.stringify({ approved, reason }),
     });
   },
 

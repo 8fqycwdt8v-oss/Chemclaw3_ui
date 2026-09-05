@@ -31,7 +31,7 @@ export interface RuntimeConfig {
    */
   warmSessions: boolean;
   /**
-   * App roles whose holders may decide a knowledge proposal or cancel a durable job.
+   * App roles whose holders may cancel a durable job or take another privileged action.
    *
    * Configured rather than hardcoded because the names are a deployment's own — they mirror the
    * service's `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`. Used to hide affordances, never to enforce

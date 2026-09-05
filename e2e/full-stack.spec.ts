@@ -163,35 +163,34 @@ test('6 · a durable job is launched and tracked (Temporal)', async () => {
   await expect(page.getByText('Reading the registry…')).toHaveCount(0);
 });
 
-test('7 · the review queue is reachable and renders (the PR-gate surface)', async () => {
+test('7 · the review queue is reachable and renders (what is waiting on a human)', async () => {
   await page.getByRole('button', { name: /Review queue/ }).click();
 
-  // Asserting the queue *renders* rather than that it holds a specific proposal: whether a given
-  // turn proposes a note is a model decision, and pinning this test to that would make it measure
-  // the model. That the human-validation surface exists and loads against the real service is the
+  // Asserting the page *renders* rather than that it holds a specific row: whether a given turn
+  // raises a plan or a question is a model decision, and pinning this test to that would make it
+  // measure the model. That the surface exists and loads against the real service is the
   // integration claim.
   //
   // But it has to be an assertion about the *panel*. `getByText(/Review queue/).first()` resolved
   // to the sidebar button this test had just clicked — first in DOM order, visible before and
   // after the click — so the scenario passed with the service down. Both headings below belong to
-  // the panel and to nothing else.
+  // the panel and to nothing else. (A third, 'Notes waiting for review', stood here until
+  // Chemclaw3 deleted the PR gate and its `/proposals` routes.)
+  await expect(page.getByRole('heading', { name: 'Plans waiting on you', level: 2 })).toBeVisible();
   await expect(
-    page.getByRole('heading', { name: 'Notes waiting for review', level: 2 }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole('heading', { name: 'Holds waiting on a decision', level: 2 }),
+    page.getByRole('heading', { name: 'Questions waiting on you', level: 2 }),
   ).toBeVisible();
 
-  // And both lists resolved rather than sitting on their loading copy, which is the difference
-  // between "the gate surface loads" and "the gate surface is still asking".
+  // And the lists resolved rather than sitting on their loading copy, which is the difference
+  // between "the surface loads" and "the surface is still asking".
   //
-  // Note what this still cannot claim: both components fall back to an empty list on a failed
+  // Note what this still cannot claim: these components fall back to an empty list on a failed
   // fetch, so the empty state and a healthy empty queue are indistinguishable from here. Closing
   // that needs the components to render the failure, which is a `src/components` change and a
   // product decision — recorded rather than papered over with an assertion that reads stronger
   // than it is.
-  await expect(page.getByText('Reading the review queue…')).toHaveCount(0);
-  await expect(page.getByText('Looking for holds…')).toHaveCount(0);
+  await expect(page.getByText('Reading the plan gate…')).toHaveCount(0);
+  await expect(page.getByText('Reading what is waiting…')).toHaveCount(0);
 });
 
 test('8 · /readyz reports every connector healthy', async ({ request }) => {

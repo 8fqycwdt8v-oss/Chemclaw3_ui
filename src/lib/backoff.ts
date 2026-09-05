@@ -34,6 +34,15 @@ export function backoffMs(attempt: number): number {
  * A timer nobody cancels outlives the tab's interest in the answer — and worse, it resolves into
  * a `while` loop whose exit condition has already been met, so an aborted stream would keep
  * reconnecting for the life of the page.
+ *
+ * **Both halves are cleaned up by whichever of them wins, and that is the fix rather than a
+ * tidy-up.** `{ once: true }` removes a listener only when the event FIRES, and on the ordinary
+ * path it never does: the timer wins, the promise resolves, and the listener stays attached to a
+ * signal that lives for the whole stream. Measured in the copy this was extracted from, on a
+ * stream held at the 15–30 s cap for 12 simulated hours: **1,931 `abort` listeners added, 0
+ * removed**, each retaining its closure and timer id — from one stream, of the three a tab holds.
+ * The extraction reintroduced exactly that, in the module whose docstring says it took the version
+ * that got it right.
  */
 export function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -41,15 +50,15 @@ export function sleep(ms: number, signal: AbortSignal): Promise<void> {
       resolve();
       return;
     }
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    // Declared after `done` and read only from inside it, which is after `setTimeout` has
+    // returned — the two refer to each other, and this is the order that keeps both `const`.
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done);
   });
 }
 

@@ -43,10 +43,12 @@ import { useEffect, useRef, useState } from 'react';
 import { Dialog } from 'radix-ui';
 import { ChevronLeft, ChevronRight, FileUp, PenLine, Sparkles, X } from 'lucide-react';
 import {
+  MAX_PARSED_SMILES_CHARS,
   canonicalSmiles,
   canonicalSmilesFromMolblock,
   moleculesFromMolfile,
   rdkitAvailable,
+  tooLongToParse,
   type MolfileRecords,
 } from '../chem/rdkit.ts';
 import { looksLikeCompoundName, looksLikeMolblock } from '../chem/recognise.ts';
@@ -70,7 +72,7 @@ import { Molecule } from './Molecule.tsx';
  */
 interface Verdict {
   of: string;
-  status: 'ok' | 'name' | 'invalid' | 'unavailable';
+  status: 'ok' | 'name' | 'invalid' | 'unavailable' | 'too-large';
   canonical?: string;
 }
 
@@ -82,7 +84,11 @@ type Check =
   | { status: 'name' }
   | { status: 'invalid' }
   /** RDKit never loaded. Not a refusal: nothing here read the string at all. */
-  | { status: 'unavailable' };
+  | { status: 'unavailable' }
+  /** Past `MAX_PARSED_SMILES_CHARS`. Also not a refusal about the chemistry — `src/chem/rdkit.ts`
+   *  declines to hand the parser a string long enough to trap the WASM, and the range it declines
+   *  starts well below the one that actually traps. */
+  | { status: 'too-large' };
 
 function checkOf(raw: string, verdict: Verdict | null): Check {
   const text = raw.trim();
@@ -255,7 +261,13 @@ export function StructureInput({
         }
         // "Not a molecule" is a claim about the string, and it is only ours to make if the toolkit
         // that would have read it is here at all. It was not, once, and this panel told a chemist
-        // that `CCO` is not a molecule.
+        // that `CCO` is not a molecule. The same applies to a string we declined to parse: the
+        // length cap starts at 600 and the WASM trap it avoids is at ~1,100, so this panel used to
+        // call a perfectly readable 700-character polymer not a molecule.
+        if (tooLongToParse(text)) {
+          setVerdict({ of: text, status: 'too-large' });
+          return;
+        }
         const available = await rdkitAvailable();
         if (cancelled) return;
         if (!available) setVerdict({ of: text, status: 'unavailable' });
@@ -534,6 +546,13 @@ export function StructureInput({
           <span className="text-warn-ink">
             That looks like a compound name, and a name is not a structure. This panel has no name
             lookup — the agent does.
+          </span>
+        )}
+        {check.status === 'too-large' && (
+          <span className="text-warn-ink">
+            That is longer than this panel will parse — {raw.trim().length} characters, against a
+            limit of {MAX_PARSED_SMILES_CHARS}. Nothing is wrong with it as chemistry; the toolkit
+            is unstable on strings that long, so it is not read here.
           </span>
         )}
       </p>

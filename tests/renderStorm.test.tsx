@@ -21,12 +21,14 @@
  * A future selector that widens back to the whole map fails here.
  */
 
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import { useShallow } from 'zustand/react/shallow';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { visibleConversationIds } from '../src/components/Sidebar.tsx';
 import { watchedSessionKey } from '../src/hooks/useJobStreams.ts';
+import { jobFeedTitles } from '../src/components/JobFeed.tsx';
 
 const reset = (): void => {
   useChatStore.setState({
@@ -108,17 +110,11 @@ describe('a token flush', () => {
 
   it('does not change the titles the job feed reads', () => {
     const { cid, mid } = seed();
-    const titles = (): Record<string, string> =>
-      Object.fromEntries(
-        Object.entries(useChatStore.getState().conversations).map(([id, c]) => [id, c.title]),
-      );
-    const { result, rerender } = renderHook(() =>
-      useChatStore(
-        useShallow((s) =>
-          Object.fromEntries(Object.entries(s.conversations).map(([id, c]) => [id, c.title])),
-        ),
-      ),
-    );
+    // `jobFeedTitles` is imported rather than retyped here, and that is load-bearing: this arm
+    // used to inline its own copy of the projection, so a `JobFeed` widened back to
+    // `s.conversations` would have gone on passing against a selector the panel no longer uses.
+    // The other two arms in this file import the real thing; this one was the exception.
+    const { result, rerender } = renderHook(() => useChatStore(useShallow(jobFeedTitles)));
     const before = result.current;
 
     useChatStore.getState().appendTokens(cid, mid, 'tokens that are not a title');
@@ -127,6 +123,19 @@ describe('a token flush', () => {
     // Identity, not equality: `useShallow` must have handed back the *same* object, which is what
     // stops React re-rendering the feed and every card in it.
     expect(result.current).toBe(before);
-    expect(titles()).toEqual(before);
+    expect(jobFeedTitles(useChatStore.getState())).toEqual(before);
+  });
+
+  it('and the job feed reads nothing wider than that', () => {
+    // The half an extracted projection cannot prove by itself. Importing `jobFeedTitles` pins what
+    // the function returns; it says nothing about whether `JobFeed` still calls it, so a panel
+    // that grew a second `useChatStore((s) => s.conversations)` beside it would be back on the
+    // per-token path with every assertion above still green. `s.conversations` may appear in this
+    // module exactly once — inside the projection itself.
+    const source = readFileSync('src/components/JobFeed.tsx', 'utf8');
+    // Comments stripped first — the prose above `jobFeedTitles` names the thing it is warning
+    // about, and counting that would make the assertion depend on how the warning is worded.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*/g, '');
+    expect(code.match(/s\.conversations/g) ?? []).toHaveLength(1);
   });
 });

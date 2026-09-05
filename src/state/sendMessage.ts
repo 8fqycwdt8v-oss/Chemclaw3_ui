@@ -274,7 +274,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   };
 
   const warnStopUnconfirmed = (): void => {
-    useChatStore.getState().setBanner({ kind: 'warn', text: STOP_UNCONFIRMED });
+    showBanner({ kind: 'warn', text: STOP_UNCONFIRMED });
     announceStatus('Stopped here; the server did not confirm the turn was cancelled.');
   };
 
@@ -334,6 +334,24 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   const releaseComposer = (lock: ComposerLock): void => {
     if (!stillOurs()) return;
     useChatStore.getState().setComposerLock(lock);
+  };
+
+  /**
+   * Write the banner, but only while this turn still owns it — the same rule as the lock.
+   *
+   * **The guard was put on the lock and on `releaseTurn`, and every other banner write in this
+   * function went straight through.** `releaseTurn` below documents the scenario in full; running
+   * it one statement further is the defect: its guarded `setBanner(null)` is immediately followed
+   * by `await announceStop()`, which paints "Stopped here, but the server did not confirm it" with
+   * no ownership check at all. Measured on turn A abandoned → conversation deleted → turn B sent →
+   * A's poll wakes: B's composer stayed correctly locked and B's screen got A's warning.
+   *
+   * So the banner goes through one guarded door rather than six unguarded ones, because the next
+   * failure exit somebody adds here will otherwise be the seventh.
+   */
+  const showBanner = (banner: Banner | null): void => {
+    if (!stillOurs()) return;
+    useChatStore.getState().setBanner(banner);
   };
 
   /**
@@ -533,7 +551,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     if (mayStillBeRunning) {
       const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
       if (sessionId) {
-        useChatStore.getState().setBanner({
+        showBanner({
           kind: 'info',
           text: 'Connection lost — the turn is still running on the server; recovering the answer…',
         });
@@ -553,6 +571,10 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
             unsupported_claims: [],
             review_required: false,
             verified_by: null,
+            // A recovered answer was never reviewed by a second pass — this is the transcript
+            // being rebuilt, not a fresh turn — so the pair is the service's "nothing happened".
+            challenged: false,
+            review_hold_id: null,
           });
           useChatStore.getState().finishTurn(conversationId, messageId, 'done');
           releaseTurn();
@@ -619,7 +641,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         seconds > 0
           ? { kind: 'warn', text: `${text} Try again in ${seconds} s.`, retryAfterSeconds: seconds }
           : { kind: 'warn', text: `${text} Try again shortly.` };
-      useChatStore.getState().setBanner(banner);
+      showBanner(banner);
       return;
     }
 
@@ -631,12 +653,12 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // be the same defect one release earlier.
     if (apiError.kind === 'budget_exhausted' && !apiError.retryable) {
       releaseComposer('budget_exhausted');
-      useChatStore.getState().setBanner({ kind: 'error', text });
+      showBanner({ kind: 'error', text });
       return;
     }
 
     releaseComposer(false);
-    useChatStore.getState().setBanner({
+    showBanner({
       kind: 'error',
       text,
       action:
@@ -815,7 +837,16 @@ export function resumeInterruptedTurn(
       abort.signal,
       auth,
     );
-    if (recovered === null || abort.signal.aborted) return;
+    if (abort.signal.aborted) return;
+    if (recovered === null) {
+      // **Recovery ran its whole budget and found nothing, so stop asking.** `finishTurn` clears
+      // the flag on every turn that settles, but this exit settles nothing — and leaving the flag
+      // set is what made an unrecoverable turn re-run the full 630 s / 210-request poll on every
+      // single page load, for ever, behind a message the reader already sees as aborted. The
+      // ownership check below applies here too: a newer turn must not be marked.
+      useChatStore.getState().giveUpOnInterruptedTurn(conversationId, messageId);
+      return;
+    }
     const store = useChatStore.getState();
     // Still the same interrupted message? A turn started in the meantime owns this conversation,
     // and writing an old answer under it is the shape of defect `releaseTurn` above exists for.
@@ -828,6 +859,10 @@ export function resumeInterruptedTurn(
       unsupported_claims: [],
       review_required: false,
       verified_by: null,
+      // A recovered answer was never reviewed by a second pass — this is the transcript being
+      // rebuilt, not a fresh turn — so the pair is the service's own "nothing happened" values.
+      challenged: false,
+      review_hold_id: null,
     });
     store.finishTurn(conversationId, messageId, 'done');
     announceStatus(describeAnswer(recovered));

@@ -310,6 +310,8 @@ const TURN: readonly Frame[] = [
       review_required: false,
       unsupported_claims: [],
       verified_by: 'citation-gate',
+      challenged: false,
+      review_hold_id: null,
     },
     0,
   ],
@@ -673,6 +675,13 @@ createServer(async (req, res) => {
 
   // The cross-session plan inbox, on the same screen as the PR gate.
   if (path === '/plans/pending' && req.method === 'GET') return json(res, 200, PENDING_PLANS);
+
+  // Questions held open for a person. Empty rather than absent: the shell reads this once per page
+  // for the sidebar badge (`useAwaitingBadge`), so leaving it unimplemented put a
+  // `pending.read_failed` warning in the log of every single browser test — a real request path
+  // going unexercised, reported as noise.
+  if (path === '/pending' && req.method === 'GET')
+    return json(res, 200, { requests: [], count: 0 });
 
   // The PR-gate review queue.
   if (path === '/proposals' && req.method === 'GET') return json(res, 200, [PROPOSAL]);

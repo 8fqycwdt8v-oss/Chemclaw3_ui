@@ -11,9 +11,10 @@
  * same kind of thing, and all three appear in an answer.
  */
 
+import { useEffect } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { JobsPanel } from '../src/components/JobsPanel.tsx';
 import { ReviewQueue } from '../src/components/ReviewQueue.tsx';
 import type { DurableJobStatus, JobRecordSummary, ProposalDetail } from '../src/api/client.ts';
@@ -85,6 +86,26 @@ function serve(): void {
   };
 }
 
+/**
+ * Hands the test the router's own `navigate`.
+ *
+ * A module-level binding rather than a prop this writes into, because an open sheet is a modal:
+ * Radix marks everything outside it `aria-hidden`, so a link beside the routes is not reachable
+ * and a location change has to be driven directly.
+ */
+let navigateTo: ((path: string) => void) | null = null;
+
+function Navigator(): null {
+  const navigate = useNavigate();
+  useEffect(() => {
+    navigateTo = (path) => void navigate(path);
+    return () => {
+      navigateTo = null;
+    };
+  }, [navigate]);
+  return null;
+}
+
 /** Reports the path so a test can assert the URL moved with the sheet. */
 function Where({ into }: { into: string[] }): null {
   const location = useLocation();
@@ -134,6 +155,36 @@ describe('a link to one run', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
 
     await waitFor(() => expect(seen[seen.length - 1]).toBe('/jobs'));
+  });
+
+  it('follows a SECOND link without a remount', async () => {
+    // The half a deep link is only half of. React Router keeps `JobsPanel` mounted across
+    // `/jobs/a` → `/jobs/b`, so a panel that seeded `useState` from the parameter read it exactly
+    // once: every arm above passed while a second link — from another tab, from Back or Forward,
+    // or from anywhere in the app — moved the address bar and left the first run's sheet on
+    // screen. The URL is now the only thing that says what is open, and this is what says so.
+    render(
+      <MemoryRouter initialEntries={['/jobs/calc-9f2c']}>
+        <Navigator />
+        <Routes>
+          <Route path="/jobs" element={<JobsPanel />} />
+          <Route path="/jobs/:jobId" element={<JobsPanel />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText('calc-9f2c')).toBeTruthy();
+
+    // Driven through the router rather than by clicking a link on the page: the open sheet is a
+    // modal, so Radix marks everything outside it `aria-hidden` and a link beside it is not
+    // reachable. What is under test is the panel's reaction to the location changing, and this is
+    // that, with no assumption about which affordance changed it.
+    act(() => navigateTo?.('/jobs/calc-0001'));
+
+    // Scoped to the sheet: `calc-9f2c` is also the id printed on the one list row behind it, so an
+    // unscoped `queryByText` would be asserting about the list rather than about what is open.
+    const sheet = await screen.findByRole('dialog');
+    expect(await within(sheet).findByText('calc-0001')).toBeTruthy();
+    expect(within(sheet).queryByText('calc-9f2c')).toBeNull();
   });
 
   it('leaves the plain list closed', async () => {

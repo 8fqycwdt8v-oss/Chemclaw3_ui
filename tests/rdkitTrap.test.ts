@@ -80,6 +80,27 @@ describe('a SMILES longer than the toolkit survives', () => {
     expect(await canonicalSmiles('C'.repeat(421))).toBe('C'.repeat(421));
     expect(await canonicalSmiles('CCO')).toBe('CCO');
   });
+
+  it('is a refusal by this module, and says so rather than answering about the chemistry', async () => {
+    const { isMolecule, tooLongToParse, MAX_PARSED_SMILES_CHARS } =
+      await import('../src/chem/rdkit.ts');
+
+    // The gap the cap opens, and the reason a surface may not read `false` here as a verdict.
+    // Measured against the shipped binary on 2026-09-05: 600 characters parse and draw, 800 do,
+    // 1,000 do (2.4 s, 504 kB of SVG), 1,040 parses and the draw throws with the runtime alive,
+    // and 1,100 traps and kills it. So everything from 601 to ~1,099 is a molecule RDKit can read
+    // and this module declines to — and `<Molecule>` used to render "Could not render this
+    // structure" over it, which is a chemical claim about a chain that is perfectly fine.
+    const polymer = 'C'.repeat(700);
+    expect(polymer.length).toBeGreaterThan(MAX_PARSED_SMILES_CHARS);
+    expect(await isMolecule(polymer)).toBe(false);
+    expect(tooLongToParse(polymer)).toBe(true);
+    expect(wasm.parses).toBe(0);
+
+    // And it does not fire on anything inside the cap, where `false` really is about the string.
+    expect(tooLongToParse('C'.repeat(MAX_PARSED_SMILES_CHARS))).toBe(false);
+    expect(tooLongToParse('CCO')).toBe(false);
+  });
 });
 
 describe('a trap that happens anyway', () => {

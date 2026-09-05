@@ -32,6 +32,8 @@ export function answerEvent(over: Partial<AnswerEvent> = {}): AnswerEvent {
     unsupported_claims: [],
     review_required: false,
     verified_by: null,
+    challenged: false,
+    review_hold_id: null,
     ...over,
   };
 }

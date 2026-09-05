@@ -664,7 +664,16 @@ export const api = {
   async pageSessions(getToken: TokenGetter, after?: string): Promise<SessionPage> {
     const query = after ? `?after=${encodeURIComponent(after)}` : '';
     try {
-      const res = await send(`/sessions${query}`, getToken, {});
+      let res = await send(`/sessions${query}`, getToken, {});
+      // **The one route that skipped 401 recovery**, because it calls `send` directly to reach the
+      // `X-Next-Cursor` header rather than going through `request`. Under MSAL `recoverFrom` is
+      // what *fires the sign-in redirect* — it always resolves `false`, and the retry is a side
+      // effect rather than the point — so the first authenticated call on boot (`Sidebar`'s
+      // listing) 401'd, logged `sessions.list_failed`, showed "showing local conversations only",
+      // and never asked the user to sign in, while every other route on the page did.
+      if (res.status === 401 && (await recoverFrom(getToken))) {
+        res = await send(`/sessions${query}`, getToken, {});
+      }
       if (!res.ok) {
         const failure = await readFailure(res);
         throw errorFromStatus(

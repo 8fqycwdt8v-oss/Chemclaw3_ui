@@ -147,14 +147,12 @@ describe('a question the agent is holding work open for', () => {
     // service no longer reports, so this asserts the removal rather than the addition.
     const { useChatStore } = await import('../src/state/chatStore.ts');
     useChatStore.setState({
-      awaiting: [{ request_id: 'gone', subject: 's', kind: 'approval', due_at: '' }],
+      awaiting: ['gone'],
     });
     mount();
 
     await screen.findByText('Isolated yield for arm B3');
-    await waitFor(() =>
-      expect(useChatStore.getState().awaiting.map((a) => a.request_id)).toEqual(['req-yield-7']),
-    );
+    await waitFor(() => expect(useChatStore.getState().awaiting).toEqual(['req-yield-7']));
   });
 
   it('lists nothing for a request that has already been decided', async () => {

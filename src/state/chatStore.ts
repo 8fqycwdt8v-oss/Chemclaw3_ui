@@ -544,6 +544,15 @@ export interface ChatState {
      * its whole remaining duration.
      */
     stop: () => void;
+    /**
+     * The same cancellation, sent while this document is being discarded.
+     *
+     * Separate from `stop` because the unload path can do exactly one thing — get a `keepalive`
+     * request onto the wire with a token it already has — and none of the things `stop` does
+     * after that (abort the stream, await the outcome, tell the reader) survive the navigation
+     * anyway. See its docstring in `src/state/sendMessage.ts`.
+     */
+    abandon: () => void;
   } | null;
 
   createConversation: () => string;
@@ -989,6 +998,35 @@ export function flushChatPersistence(): void {
 if (typeof window !== 'undefined') {
   window.addEventListener('pagehide', flushChatPersistence);
   window.addEventListener('beforeunload', flushChatPersistence);
+  window.addEventListener('pagehide', abandonTurnOnUnload);
+}
+
+/**
+ * Cancel a turn the reader is walking away from.
+ *
+ * The two handlers above save local state and neither cancels anything, so closing the tab,
+ * reloading, or navigating away left the turn running on the service — a disconnect only
+ * *detaches* (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`), so it ran to completion holding
+ * one of eight admission permits for up to 600 s, for an answer nobody was going to read.
+ *
+ * **`event.persisted` is the whole decision, and it is the honest version of "gone for good".**
+ * A `pagehide` with `persisted: true` is the page going into the back/forward cache: the document,
+ * this store and the in-flight `fetch` are all frozen and may be resumed intact, so cancelling
+ * there would destroy a turn the reader is about to come back to. With `persisted: false` the
+ * document is being discarded, and nothing in this app resumes a turn across that — a reloaded tab
+ * rehydrates a `streaming` message as failed (there is no resume endpoint) and picks the answer up
+ * only from a later transcript read. The browser cannot tell a reload from a close at unload time,
+ * and `PerformanceNavigationTiming` only says so on the *next* load, so a reload is cancelled too.
+ * That is the deliberate half of the trade: the answer would still have landed in the transcript,
+ * against which a chemist who reloads because the turn felt stuck is exactly the case that
+ * otherwise comes back to a 409 from the turn they were trying to escape.
+ *
+ * An in-app route change is not a `pagehide` at all, so navigating to `/jobs` mid-turn is
+ * untouched.
+ */
+function abandonTurnOnUnload(event: PageTransitionEvent): void {
+  if (event.persisted) return;
+  useChatStore.getState().streaming?.abandon();
 }
 
 const chatStorage: PersistStorage<PersistedState> = {

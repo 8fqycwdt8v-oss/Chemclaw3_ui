@@ -75,6 +75,11 @@ afterEach(() => {
   // running after vitest has failed it, so its own `finally` restores the spy *during the next
   // test*. That turned one real failure into two confusing ones while this file was being written.
   vi.restoreAllMocks();
+  // The clock, for the same reason and with a worse blast radius: a hung fake-timer test never
+  // reaches its `finally`, so the fake clock stays installed and every later test that waits on a
+  // real `setTimeout` hangs too. One root failure was reported as four, and none of the three
+  // cascaded ones named a cause. Restoring here bounds a timer test's damage to itself.
+  vi.useRealTimers();
 });
 
 describe('sendMessage', () => {
@@ -315,7 +320,10 @@ describe('sendMessage', () => {
 
         const cid = useChatStore.getState().createConversation();
         const turn = sendMessage({ conversationId: cid, text: 'pKa?', auth: devAuth });
-        await vi.advanceTimersByTimeAsync(630_000);
+        // Past the 630 s deadline by one full backoff. The poll used to run at a fixed 3 s, so its
+        // schedule landed exactly on the deadline; it is jittered now, so the last wait can begin
+        // just inside it and end outside — and a clock that stops mid-wait never resolves the turn.
+        await vi.advanceTimersByTimeAsync(690_000);
         await turn;
 
         const message = useChatStore.getState().conversations[cid]?.messages[1];
@@ -532,7 +540,15 @@ describe('sendMessage', () => {
       vi.useFakeTimers();
       try {
         const turn = sendMessage({ conversationId: cid, text: 'dup?', auth: devAuth });
-        await vi.advanceTimersByTimeAsync(12_000);
+        // Past the third poll's worst case, not its typical one. The mock above serves the second
+        // exchange from the third `GET /messages` on, and the waits before those three polls are
+        // `backoffMs(1..3)` — 2 s, 4 s and 8 s, each jittered to 50–100% — so the third poll lands
+        // anywhere between 7 s and 14 s after the drop. This advanced 12 s, which is *inside* that
+        // range: measured over the jitter, 14.6% of runs never reached the third poll, the turn
+        // never settled, and the test timed out — taking the three tests after it down with it,
+        // because a fake-timer test that hangs never reaches its own `finally`. Same rule as the
+        // 690_000 above: when the schedule is jittered, advance past the ceiling.
+        await vi.advanceTimersByTimeAsync(30_000);
         await turn;
       } finally {
         vi.useRealTimers();

@@ -16,6 +16,7 @@ import { useChatStore } from './chatStore.ts';
 import { useEntityStore } from '../chem/entities.ts';
 import { announceStatus, describeAnswer } from './announce.ts';
 import { logger } from '../lib/logger.ts';
+import { backoff } from '../lib/backoff.ts';
 
 /**
  * What the reader is told when Stop was pressed and the server never confirmed it.
@@ -161,6 +162,15 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
 
   const abort = new AbortController();
 
+  /**
+   * The bearer this turn's request actually carried.
+   *
+   * Kept so `abandon()` below can send the stop without awaiting a token acquisition that may need
+   * the network — see its docstring. Refreshed on every attempt, so a replay after a 401 leaves
+   * the newer token here rather than the one that was rejected.
+   */
+  let lastToken: string | null = null;
+
   /** When Send was pressed. The client half of a turn's timing, which the service cannot see. */
   const startedAt = Date.now();
   let firstTokenAt: number | null = null;
@@ -228,6 +238,39 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // stop rendering, release the composer — is right either way, and waiting on a request that
     // may be the thing that is broken would freeze the one control the user reached for.
     abort.abort();
+  };
+
+  /**
+   * Stop the turn on the way out of the document — Stop's unload-time half.
+   *
+   * A closed tab, a reload and a navigation away all *detach* rather than cancel
+   * (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`), so the turn kept running to completion:
+   * one of the front door's `service_max_concurrent_turns` (8 per process), a database connection
+   * and an LLM bill, for up to the 600 s wall clock, on work nobody will read. Two abandoned turns
+   * per pod is a quarter of its admission capacity. It also compounds — the chemist who reloaded
+   * because it felt stuck comes back, re-asks, gets a 409 from the turn that is still running, and
+   * reaches for `resetSession`, which mints a second session while the first turn keeps burning.
+   *
+   * Three things make this different from `stop()` above rather than a call to it:
+   *
+   *  - **`keepalive`**, because an ordinary `fetch` started from `pagehide` dies with the page.
+   *    Same trick, and the same reason, as the log sink's final batch (`src/lib/logger.ts`).
+   *  - **A token already in hand.** `auth.getAccessToken()` may need a silent MSAL refresh, and a
+   *    refresh is an iframe to `login.microsoftonline.com` — impossible during unload. `lastToken`
+   *    is the bearer this turn's own POST went out with, which is by construction at most one turn
+   *    old, and passing it as a bare getter also declines the 401 retry: there is nobody left to
+   *    recover for.
+   *  - **Nothing local.** No abort, no banner, no announcement, no awaiting the outcome. This
+   *    document is going away; the only thing worth doing is getting the request onto the wire.
+   */
+  const abandon = (): void => {
+    const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
+    if (!sessionId) return;
+    void api
+      .stopTurn(sessionId, () => Promise.resolve(lastToken), { keepalive: true })
+      .catch(() => {
+        // Nothing to report to and nobody to report it: the page is unloading.
+      });
   };
 
   const warnStopUnconfirmed = (): void => {
@@ -339,7 +382,10 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       message: text,
       dryRun,
       signal: abort.signal,
-      getToken: () => auth.getAccessToken(),
+      getToken: async () => {
+        lastToken = await auth.getAccessToken();
+        return lastToken;
+      },
       onAccepted() {
         turnAccepted = true;
       },
@@ -425,7 +471,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     logger.setContext({ correlationId: '', sessionId: '' });
     store.appendUserMessage(conversationId, text);
     messageId = store.startAssistantMessage(conversationId);
-    store.setStreaming({ conversationId, messageId, abort, stop });
+    store.setStreaming({ conversationId, messageId, abort, stop, abandon });
     store.setComposerLock('turn_in_flight');
     store.setBanner(null);
     batcher = createTokenBatcher(conversationId, messageId);
@@ -671,6 +717,22 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
  * copy instead of an older, already-answered one. Until the backend commits this turn's copy,
  * that many occurrences is all there is, so the search correctly keeps polling rather than
  * returning a stale answer.
+ *
+ * **The cadence is backed off with jitter, and the reason is the trigger.** This loop starts on
+ * any dropped turn stream, and the thing that drops every turn stream at once is a backend rolling
+ * restart — so at the 200-user target every client with a turn in flight entered it in the same
+ * second and, at the fixed 3 s interval this used to run at, produced 210 unpaginated
+ * `GET /sessions/{id}/messages` each: ~16.7 requests a second of transcript reads, every one of
+ * them `resolve_session`-gated and therefore a full session *rehydrate* on the pod that had just
+ * restarted, for ten and a half minutes. The condition that starts this loop is backend distress
+ * and what it did was add load to a distressed backend. `src/lib/backoff.ts` is the same helper
+ * the job-stream client already used, and the same jitter is what desynchronises the herd; the
+ * failure path uses it too, which is the other half — a poll that failed used to `continue`
+ * straight into the next one at full speed.
+ *
+ * The wall clock stays the only bound: ~30 attempts fit inside it now instead of 210, and the
+ * first is still within a few seconds, which is where the median detached answer lands. An attempt
+ * cap on top would be a second number saying the same thing.
  */
 export async function recoverDetachedAnswer(
   sessionId: string,
@@ -680,8 +742,14 @@ export async function recoverDetachedAnswer(
   auth: AuthProvider,
 ): Promise<string | null> {
   const deadline = Date.now() + 630_000;
+  let attempt = 0;
   while (Date.now() < deadline && !signal.aborted) {
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    attempt += 1;
+    await backoff(attempt, signal);
+    // Re-checked AFTER the wait, not only before it. At a fixed 3 s interval the two were the same
+    // question; a wait that can be 30 s long can start inside the deadline and end well outside it,
+    // and a poll issued then is asking about a turn the service's own 600 s wall clock has ended.
+    if (signal.aborted || Date.now() >= deadline) return null;
     let transcript;
     try {
       transcript = await api.getMessages(sessionId, () => auth.getAccessToken());

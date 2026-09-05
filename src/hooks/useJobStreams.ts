@@ -18,7 +18,7 @@
  *  - A legitimately silent stream must stay open. Only the connect phase is bounded.
  */
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { config } from '../env.ts';
 import { retryAfterSeconds } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
@@ -27,6 +27,10 @@ import { useChatStore } from '../state/chatStore.ts';
 import type { ChatState } from '../state/chatStore.ts';
 import { logger } from '../lib/logger.ts';
 import { readEventStream } from '../lib/sse.ts';
+// The one copy. `src/lib/backoff.ts` says it was extracted from this file, and until now this file
+// still held its own — two definitions of one behaviour, with the module's own prose claiming
+// otherwise, and the extracted `sleep` had dropped this one's abort-listener cleanup on the way.
+import { MAX_BACKOFF_MS, backoff, sleep } from '../lib/backoff.ts';
 
 /**
  * How many sessions to watch at once.
@@ -73,8 +77,56 @@ const FAILURES_BEFORE_REPORTING = 4;
  * primitive re-renders only when the watched set actually changes. Exported so the property that
  * matters — a token flush does not move it — can be pinned without opening a socket.
  */
-export function watchedSessionKey(s: ChatState): string {
-  const budget = s.jobStreamsThrottled ? 1 : MAX_JOB_STREAMS;
+/**
+ * How long a tab must stay hidden before it is treated as backgrounded.
+ *
+ * Without it every alt-tab tears down streams and rebuilds them seconds later, which turns a
+ * saving into connection churn — and 200 chemists coming back to their tabs at 09:00 would reopen
+ * 600 streams at once. Half a minute is longer than any glance at another window and far shorter
+ * than the runs this stream reports on.
+ */
+const HIDDEN_GRACE_MS = 30_000;
+
+/**
+ * Whether this tab has been hidden long enough to count as backgrounded.
+ *
+ * A hook rather than a `document.hidden` read at render time: the watch set is a store projection,
+ * so the visibility change has to arrive as a state change or nothing recomputes.
+ */
+function useBackgrounded(): boolean {
+  const [backgrounded, setBackgrounded] = useState(false);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const clear = (): void => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
+    const onChange = (): void => {
+      clear();
+      // Coming back is immediate; going away waits out the grace period. Down slowly, up at once.
+      if (!document.hidden) setBackgrounded(false);
+      else timer = setTimeout(() => setBackgrounded(true), HIDDEN_GRACE_MS);
+    };
+    onChange();
+    document.addEventListener('visibilitychange', onChange);
+    return () => {
+      clear();
+      document.removeEventListener('visibilitychange', onChange);
+    };
+  }, []);
+
+  return backgrounded;
+}
+
+export function watchedSessionKey(s: ChatState, backgrounded = false): string {
+  // **Two reasons to hold one stream, and only one of them is `jobStreamsThrottled`.** That flag
+  // means "this tab holds more than its share of the stream cap" and is deliberately irreversible,
+  // so a hidden tab must not set it: a chemist who comes back would never get their streams again.
+  // `backgrounded` is the reversible half, and it defaults to false so a caller that does not care
+  // about visibility — every test of the projection itself — reads exactly as it did before.
+  const budget = s.jobStreamsThrottled || backgrounded ? 1 : MAX_JOB_STREAMS;
   const activeId = s.activeId;
   const candidates = Object.values(s.conversations)
     .filter((c) => c.sessionId)
@@ -107,7 +159,11 @@ export function useJobStreams(): void {
   // Selecting the key itself means zustand compares with `Object.is` and re-renders only when the
   // watched set actually changes. The projection still runs per write, over at most
   // `MAX_CONVERSATIONS` entries, which is microseconds.
-  const watchKey = useChatStore(watchedSessionKey);
+  const backgrounded = useBackgrounded();
+  // The selector closes over `backgrounded`, so a visibility change re-projects and the effect
+  // below tears the surplus streams down — and rebuilds them when the tab comes back, which is the
+  // half `jobStreamsThrottled` cannot express.
+  const watchKey = useChatStore((s) => watchedSessionKey(s, backgrounded));
 
   useEffect(() => {
     if (!ready || !watchKey) return;
@@ -395,38 +451,4 @@ async function openStream(
       await backoff(attempt, controller.signal);
     }
   }
-}
-
-/** The longest this hook will ever wait before trying a stream again. */
-const MAX_BACKOFF_MS = 30_000;
-
-/** Exponential backoff with jitter, capped at `MAX_BACKOFF_MS`, abortable. */
-function backoff(attempt: number, signal: AbortSignal): Promise<void> {
-  const base = Math.min(MAX_BACKOFF_MS, 1_000 * 2 ** Math.min(attempt, 5));
-  return sleep(base * (0.5 + Math.random() * 0.5), signal);
-}
-
-/**
- * Wait, resolving early if the stream is torn down — a timer nobody cancels outlives the tab's
- * interest in the answer.
- *
- * Both halves are cleaned up by whichever of them wins, and that is the fix rather than a
- * tidy-up. `{ once: true }` removes a listener only when the event FIRES, and on the ordinary
- * path it never does: the timer wins, the promise resolves, and the listener stays attached to a
- * signal that lives for the whole stream. Measured on a stream held at the 15-30 s backoff cap
- * for 12 simulated hours: **1,931 `abort` listeners added, 0 removed**, each retaining this
- * closure and its timer id — from one stream, of the three a tab holds.
- */
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const done = (): void => {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', done);
-      resolve();
-    };
-    // Declared after `done` and read only from inside it, which is after `setTimeout` has
-    // returned — the two refer to each other, and this is the order that keeps both `const`.
-    const timer = setTimeout(done, ms);
-    signal.addEventListener('abort', done);
-  });
 }

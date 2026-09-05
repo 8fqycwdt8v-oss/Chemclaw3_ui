@@ -174,24 +174,20 @@ export interface BffConfig {
   maxConnections: number;
   /** How long `/readyz` fails before the listening socket is closed on SIGTERM. */
   shutdownDrainMs: number;
-  /** Upstream keep-alive sockets this process will hold at once. */
+  /** Upstream keep-alive sockets this process will hold at once for ORDINARY (non-SSE) calls. */
   maxUpstreamSockets: number;
+  /** Upstream sockets reserved for the long-lived SSE routes, in a pool of their own. */
+  maxUpstreamStreamSockets: number;
+  /** How long a request may wait for a free socket in its pool before it is refused with a 503. */
+  upstreamQueueTimeoutMs: number;
   /** Largest request body forwarded on an ordinary route. */
   maxBodyBytes: number;
   /** Largest request body forwarded on the attachment upload route. */
   maxUploadBytes: number;
-  /**
-   * Batches **this process** accepts on `/api/client-events` per minute before it 429s.
-   *
-   * Per process, not per IP: `clientEvents.ts` argues at length that there is no honest per-client
-   * key to bucket on behind a load balancer, and deliberately did not build one — while this
-   * docstring went on describing the per-IP limiter it rejected. The route is unauthenticated by
-   * design (it reports pre-sign-in failures), so this is its only bound on rate.
-   *
-   * It was also a knob with no reader: `clientEvents.ts` hard-coded 600 and nothing consulted this
-   * value, so lowering it under log-ingest pressure changed nothing and the shipped limit was ten
-   * times the documented default. The default is now the number that was actually in force.
-   */
+  /** Batches this PROCESS accepts on `/api/client-events` per minute before it 429s. The route is
+   *  unauthenticated by design (it reports pre-sign-in failures), so this is its only bound on
+   *  rate — and there is no per-address bucket, for the reason `server/clientEvents.ts` measured.
+   *  The docstring here used to say "one IP", which was never what the code counted. */
   clientEventsRatePerMin: number;
   warmSessions: boolean;
   reviewerRoles: string[];
@@ -319,7 +315,37 @@ export const cfg: BffConfig = {
   // The other half of that measurement: the pool was 128 and the outage threshold was 129. Raised
   // and made configurable so a legitimate burst of concurrent turns is not sharing a ceiling with
   // whatever is holding sockets open.
+  //
+  // This is now the ORDINARY pool only. Every call it carries is short — a health probe, a panel
+  // fetch, a turn stop — so 512 is a burst ceiling rather than a residency one: 200 chemists
+  // arriving at 09:00 fire one `/healthz` and a handful of panel loads each, and none of them
+  // holds a socket for more than a round trip.
   maxUpstreamSockets: num('MAX_UPSTREAM_SOCKETS', 512),
+  // The SSE pool, and the number that decides how many chemists a UI pod can hold.
+  //
+  // Measured on the shipped build against a stub upstream that holds streams open: one shared
+  // pool of 512 filled at exactly 512 live streams, and with it full an ordinary
+  // `GET /api/healthz` never answered at all (curl exit 28, 0 bytes) — the queue below has no
+  // timeout of its own, so `POST /sessions/{id}/messages` queued behind the streams for ever.
+  // Splitting the pools is what makes that impossible; this number is what decides when the
+  // STREAMS themselves start queueing.
+  //
+  // 1024 = 200 chemists x (3 job streams + 1 turn stream) + 22% headroom, which is the
+  // deployment target this repository is sized against. A pod expecting more raises it; the
+  // cost is one file descriptor and one upstream TCP connection per socket, and the backend
+  // must be willing to accept them (`service_max_event_streams_total` is its own, lower bound —
+  // over it the service 429s, which the SPA's job-stream client already backs off from).
+  maxUpstreamStreamSockets: num('MAX_UPSTREAM_STREAM_SOCKETS', 1_024),
+  // How long a request may sit in `http.Agent`'s queue waiting for a socket.
+  //
+  // Node's agent queue is unbounded and untimed: `agent.timeout` and `request.setTimeout` both
+  // bound a socket this request HAS, and a request that never gets one is bounded by neither. So
+  // a saturated pool did not degrade, it stopped — every subsequent call hung until a stream
+  // somewhere ended, which for a job stream means until the tab closes. A refusal is strictly
+  // better than that: the SPA's stream client backs off with jitter on a non-2xx, an ordinary
+  // call surfaces a banner the chemist can act on, and `upstream_saturated` in the log plus the
+  // upstream-error counter make the pod's real limit visible from a scrape.
+  upstreamQueueTimeoutMs: num('UPSTREAM_QUEUE_TIMEOUT_MS', 10_000),
   // The backend caps a message at 100k characters — but that is a Pydantic validator, which runs
   // after FastAPI has read and buffered the whole body. The BFF is the only thing in front of it,
   // so it is the only place a body can be refused before it is paid for. 2 MB leaves room for the
@@ -327,7 +353,17 @@ export const cfg: BffConfig = {
   maxBodyBytes: num('MAX_BODY_BYTES', 2 * 1024 * 1024),
   // Attachments stream through the same pipe and are legitimately much larger.
   maxUploadBytes: num('MAX_UPLOAD_BYTES', 32 * 1024 * 1024),
-  clientEventsRatePerMin: Math.max(1, Math.floor(num('CLIENT_EVENTS_RATE_PER_MIN', 600))),
+  // 200 chemists x 12 flushes a minute (`src/lib/logger.ts`'s 5 s cadence) is 2,400, so the old
+  // ceiling refused three of every four batches at the deployment target — thinning the browser's
+  // record by 4x at exactly the moment something is wrong, and spending 40 req/s of this pod on
+  // writing the refusals. 3,000 is that arithmetic plus 25% headroom. The worst case it admits is
+  // 3,000 x 64 KiB ≈ 3.2 MB/s, still an order below the 31 MB/s this process was measured
+  // sustaining.
+  //
+  // It also had NO READER until now: the limit `handleClientEvents` enforced was a module
+  // constant of its own, so this knob configured nothing and a deployment that raised it changed
+  // no behaviour at all.
+  clientEventsRatePerMin: Math.max(1, Math.floor(num('CLIENT_EVENTS_RATE_PER_MIN', 3_000))),
   csp: buildCsp(authMode, allowFraming),
   logLevel: str('LOG_LEVEL', 'info'),
   // Defaults to `info` rather than to this process's own level: the two are independent knobs and

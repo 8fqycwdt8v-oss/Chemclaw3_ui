@@ -183,9 +183,11 @@ describe('removing conversations does not strand live state', () => {
   const turnSlot = (conversationId: string) => {
     const abort = new AbortController();
     let asked = false;
+    let abandoned = false;
     return {
       abort,
       stopped: () => asked,
+      abandoned: () => abandoned,
       slot: {
         conversationId,
         messageId: 'm1',
@@ -193,6 +195,13 @@ describe('removing conversations does not strand live state', () => {
         stop: () => {
           asked = true;
           abort.abort();
+        },
+        // Distinct from `stop`, and tracked separately for the same reason `stopped` exists: a
+        // detach and a stop are different requests since
+        // `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`, and a fixture that collapsed them
+        // would pass whichever the store called.
+        abandon: () => {
+          abandoned = true;
         },
       },
     };

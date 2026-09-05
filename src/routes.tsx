@@ -302,27 +302,22 @@ export function AppRoutes(): React.JSX.Element {
       {/* None of these is a conversation, so they render inside the shell with no conversation:
           the sidebar, the top bar and the banner stay where they are, and Back returns to the
           thread the reader came from. */}
-      {/* `/review/:proposalId` and `/jobs/:jobId` open the same panel with one row already open.
-          Both were reachable only by clicking, so a reviewer could not be *sent* to a proposal and
-          an operator could not be sent to a run — the same argument the protocol document's own
-          comment below makes about a design id, and both of these ids appear in an answer too. The
-          panel reads the parameter itself rather than being handed a prop, so the URL stays the one
-          thing that says what is open. */}
+      {/* `/jobs/:jobId` opens the jobs panel with one row already open. It was reachable only by
+          clicking, so an operator could not be *sent* to a run — the same argument the protocol
+          document's own comment below makes about a design id, and that id appears in an answer
+          too. The panel reads the parameter itself rather than being handed a prop, so the URL
+          stays the one thing that says what is open.
+
+          `/review/:proposalId` stood beside it and is gone. Chemclaw3 deleted the PR-gate and its
+          `/proposals` routes (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so there
+          is no proposal to be sent to. `/review` itself stays: that page's other two sections —
+          plans and questions — are live, and it is still where a chemist finds what is waiting on
+          them. */}
       <Route
         path="/review"
         element={
           <AppShell>
             <Panel what="Opening the review queue…">
-              <ReviewQueue />
-            </Panel>
-          </AppShell>
-        }
-      />
-      <Route
-        path="/review/:proposalId"
-        element={
-          <AppShell>
-            <Panel what="Opening the proposal…">
               <ReviewQueue />
             </Panel>
           </AppShell>

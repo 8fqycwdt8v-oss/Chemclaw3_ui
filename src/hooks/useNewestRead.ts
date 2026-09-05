@@ -1,7 +1,7 @@
 /**
  * The guard a panel needs when the thing it is reading can change while the read is in flight.
  *
- * Three sheets in this app — the note panel, the job panel and the proposal panel — fetch during
+ * Two sheets in this app — the note panel and the job panel — fetch during
  * render behind a `loadedFor !== id` latch. The latch is right about what it is for: it resets the
  * panel to its loading state *synchronously*, so a re-target never paints the previous subject's
  * body under the new subject's heading for a frame. What it does not do is anything about the read
@@ -12,10 +12,10 @@
  * the heading and every action button stayed bound to the newest id. Measured on the note panel
  * (`tests/staleSheetResponse.test.tsx`): a panel headed `note-fast` rendering `note-slow`'s body,
  * source, author and validity window. That is not cosmetic on any of the three — a note panel is
- * the app's provenance surface, the job panel offers Cancel on `status.status === 'running'` while
- * posting to `jobId`, and the proposal panel shows the bytes an Approve would commit. Following a
- * neighbour note is the designed way to walk the graph, so the note case is reached by ordinary
- * use rather than by a mistake.
+ * the app's provenance surface, and the job panel offers Cancel on `status.status === 'running'`
+ * while posting to `jobId`. Following a neighbour note is the designed way to walk the graph, so
+ * the note case is reached by ordinary use rather than by a mistake. (A third sheet stood here —
+ * the proposal panel, showing the bytes an Approve would commit — and went with the PR gate.)
  *
  * A sequence number rather than a comparison against the current id, because the same id read
  * twice is a real case — `JobsPanel` re-reads the job it has just asked to cancel — and an

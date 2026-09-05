@@ -459,9 +459,9 @@ function Row({
             }
           />
           {/* The service's own sentence explains what the gate did; the remedy says what the
-              reader does about it. Both, because neither is the other: "propose_note changes
-              stored data and the plan has not been approved" does not tell a chemist to go and
-              approve it, and a remedy alone would hide which call was refused. */}
+              reader does about it. Both, because neither is the other: "record_knowledge_note
+              changes stored data and the plan has not been approved" does not tell a chemist to go
+              and approve it, and a remedy alone would hide which call was refused. */}
           {entry.toolFailure?.message && (
             <p className={cn('mt-0.5 text-2xs', refusal ? 'text-warn-ink' : 'text-danger-ink')}>
               {entry.toolFailure.message}
@@ -570,11 +570,16 @@ function Row({
         </Step>
       );
 
+    // The wire name is `note_proposed` and the event is not a proposal: nothing reviews a note
+    // since Chemclaw3's `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`. It is readable by
+    // everyone the moment it is written, so telling a chemist it is "for review" promises them a
+    // reviewer who does not exist. The literal stays because it is the SSE contract; the label a
+    // person reads is the half that was making the false claim.
     case 'note_proposed':
       return (
         <Step tone="idle">
           <Line
-            label="Proposed note for review"
+            label="Recorded note"
             mono={entry.note?.noteId}
             badge={
               entry.note?.reference ? (

@@ -60,6 +60,16 @@ export function useShortcuts(shortcuts: Shortcut[]): void {
       // letter and cannot be produced by ordinary prose keystrokes outside a text control — which
       // this still refuses to fire inside.
       if (inTextEntry(e.target)) return;
+      // **A window listener is not stopped by a focus trap**, so every one of these fired while a
+      // Radix Sheet or AlertDialog was open. Measured: with the protocol editor open and edits
+      // pending, Cmd+K created a conversation and navigated — unmounting the editor, taking the
+      // draft with it, and bypassing the unsaved-edit guard entirely, because an SPA navigation
+      // fires no `beforeunload` either.
+      //
+      // Radix sets `data-scroll-locked` on `<body>` for exactly the span a modal owns the screen,
+      // which is the cheapest reliable signal available here and the one that stays correct for a
+      // dialog this hook has never heard of.
+      if (document.body.hasAttribute('data-scroll-locked')) return;
       const mod = e.metaKey || e.ctrlKey;
       for (const shortcut of shortcuts) {
         if (e.key.toLowerCase() !== shortcut.key) continue;

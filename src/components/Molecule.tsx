@@ -49,7 +49,12 @@
 
 import { useEffect, useId, useState } from 'react';
 import { cn } from '../lib/cn.ts';
-import { moleculeSvg, rdkitAvailable } from '../chem/rdkit.ts';
+import {
+  MAX_PARSED_SMILES_CHARS,
+  moleculeSvg,
+  rdkitAvailable,
+  tooLongToParse,
+} from '../chem/rdkit.ts';
 import { mightBeStructure, readStructure, type ReadStructure } from '../chem/structure.ts';
 import { useThemeStore } from '../state/themeStore.ts';
 import { usePrefsStore } from '../state/prefsStore.ts';
@@ -121,9 +126,11 @@ function Reaction({ smiles, className, maxWidth }: Required<MoleculeProps>): Rea
 
 function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): React.JSX.Element {
   const [svg, setSvg] = useState<string | null>(null);
-  /** Why there is no drawing, when there is none. The two are different facts and only one of them
-   *  is about the structure. */
-  const [problem, setProblem] = useState<'unreadable' | 'unavailable' | null>(null);
+  /** Why there is no drawing, when there is none. The three are different facts and only one of
+   *  them is about the structure: `unavailable` is about the page, `too-large` is about this
+   *  module's own refusal to hand RDKit a string long enough to trap it, and only `unreadable` is
+   *  a claim about the chemistry. */
+  const [problem, setProblem] = useState<'unreadable' | 'unavailable' | 'too-large' | null>(null);
   // Subscribing to the app's resolved theme, so a structure re-draws when the user flips the
   // toggle — not only when the OS preference changes.
   const theme = useThemeStore((s) => s.resolved);
@@ -147,7 +154,15 @@ function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): R
         return;
       }
       // Nothing was drawn — but "this string is not a molecule" is a claim, and it is the wrong
-      // one to make about every structure on the page when the toolkit simply never loaded.
+      // one to make about every structure on the page when the toolkit simply never loaded. It is
+      // equally wrong about a string this module declined to parse: measured, RDKit reads a
+      // 1,000-character chain fine and `MAX_PARSED_SMILES_CHARS` stops at 600 to stay clear of the
+      // trap at ~1,100, so everything between is a real molecule we chose not to draw.
+      if (tooLongToParse(smiles)) {
+        setProblem('too-large');
+        setSvg(null);
+        return;
+      }
       const available = await rdkitAvailable();
       if (cancelled) return;
       setProblem(available ? 'unreadable' : 'unavailable');
@@ -170,7 +185,9 @@ function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): R
         <p className="mt-1.5 text-xs text-ink-muted">
           {problem === 'unavailable'
             ? 'The structure toolkit could not be loaded, so nothing on this page can be drawn. The SMILES string is shown as written.'
-            : 'Could not render this structure. The SMILES string is shown as written.'}
+            : problem === 'too-large'
+              ? `This structure is too large to draw here — ${smiles.length} characters of SMILES, against a limit of ${MAX_PARSED_SMILES_CHARS}. It is a molecule; it is the drawing that is refused. The SMILES string is shown as written.`
+              : 'Could not render this structure. The SMILES string is shown as written.'}
         </p>
       </div>
     );

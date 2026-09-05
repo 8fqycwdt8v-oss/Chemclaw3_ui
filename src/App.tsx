@@ -6,7 +6,7 @@
  * appear inside the normal chrome instead of replacing it.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { configProblems } from './env.ts';
 import { useAuth } from './auth/AuthContext.tsx';
@@ -175,22 +175,83 @@ function useResumeInterruptedTurn(conversationId: string | undefined): void {
  * would be a claim per poll against a mailbox that is usually empty, and the one thing worse than
  * not seeing a digest is claiming one into a page that is closing.
  */
+/**
+ * Whether this page has already claimed its digests — module scope, not a ref.
+ *
+ * **A ref made "once per page" false.** `AppShell` is remounted whenever the route *shape* changes:
+ * `/c/:id` renders it through `ConversationRoute` while `/review`, `/jobs` and `/protocols` render
+ * it directly, so React reconciles a different component at that position and the ref goes with it.
+ * Measured over four navigations: `GET /digests` was claimed 4 times, and that route is a
+ * *destructive* claim whose rows are never re-delivered. Rows still landed (the `.then` writes
+ * through `getState()`), so this was not loss — it was N unbounded windows in which a claim can be
+ * in flight when the tab closes, where the docstring above argues for exactly one.
+ *
+ * `routes.tsx` already uses this shape for its prefetch latch.
+ */
+let digestsClaimed = false;
+
 function useDigests(): void {
   const { auth, ready } = useAuth();
-  const claimed = useRef(false);
 
   useEffect(() => {
-    if (!ready || claimed.current) return;
+    if (!ready || digestsClaimed) return;
     // Latched *before* the request, not after: StrictMode invokes this effect twice in
     // development, and a second claim would consume rows the first one is still carrying.
-    claimed.current = true;
+    digestsClaimed = true;
     void api
       .listDigests(auth)
       .then((digests) => useChatStore.getState().addDigests(digests))
       .catch(() => {
-        // Silent, and the latch stays closed. A failed claim consumed nothing, but retrying on
-        // the next render is how a flapping network turns one mailbox read into many.
-        logger.debug('digests.claim_failed', {});
+        // The latch stays closed: retrying on the next render is how a flapping network turns one
+        // mailbox read into many. But **not silent** — `logger.debug` is below the shipped
+        // `CLIENT_LOG_LEVEL` of `info`, and "a failed claim consumed nothing" is only true of a
+        // request that never reached the service. A claim that committed server-side and then lost
+        // its response has consumed rows that are now delivered to nobody, with no record anywhere.
+        logger.warn('digests.claim_failed', {});
+      });
+  }, [auth, ready]);
+}
+
+/** Whether this page has already read `GET /pending` for the badge. Module scope for the reason
+ *  `digestsClaimed` is — a ref does not survive the shell being reconciled at a new route shape. */
+let awaitingRead = false;
+
+/**
+ * Fill the review badge from the service, once per page.
+ *
+ * **The badge was 0 after every reload, and stayed 0 until somebody opened `/review`.** `awaiting`
+ * is a notification cache fed by `awaiting_answer` frames, and deliberately not persisted — a
+ * persisted copy would outlive the answer. But the claim behind those frames is destructive and
+ * at-most-once, so a reload does not replay them: the questions are still open, `GET /pending`
+ * still lists them, and the one surface that says so is the screen a chemist only opens because
+ * the badge told them to. That is the failure this whole path exists to end, arriving by the one
+ * route the design left open.
+ *
+ * So the read that reconciles the cache happens here as well as in `ReviewQueue`, and `/pending` is
+ * an ordinary GET rather than a claim — reading it twice costs a request and destroys nothing,
+ * which is exactly why `useDigests` above cannot be written this way.
+ *
+ * The latch is released on failure, unlike the digest one: a retry here is free, and a badge that
+ * reads 0 for the life of the page because one request lost its connection is the defect again.
+ */
+function useAwaitingBadge(): void {
+  const { auth, ready } = useAuth();
+
+  useEffect(() => {
+    if (!ready || awaitingRead) return;
+    awaitingRead = true;
+    void api
+      .listPendingRequests(auth)
+      .then((next) => {
+        useChatStore
+          .getState()
+          .syncAwaiting(
+            next.requests.filter((r) => r.state === 'waiting').map((r) => r.request_id),
+          );
+      })
+      .catch(() => {
+        awaitingRead = false;
+        logger.warn('pending.read_failed', {});
       });
   }, [auth, ready]);
 }
@@ -223,7 +284,17 @@ export function AppShell({
         key: '/',
         mod: true,
         label: 'Search conversations',
-        run: () => document.getElementById('conversation-search')?.focus(),
+        // **`getElementById` returns the first match, and there are two.** `SidebarBody` renders
+        // in both the always-mounted `lg:flex` column and the mobile drawer, so below `lg` the
+        // first match is inside a `display:none` subtree where `.focus()` is a no-op — the
+        // shortcut did nothing on exactly the bench tablets it was for. Query every copy and take
+        // the one that can actually take focus (`offsetParent` is null for a hidden element).
+        run: () => {
+          const boxes = Array.from(
+            document.querySelectorAll<HTMLInputElement>('[data-conversation-search]'),
+          );
+          (boxes.find((box) => box.offsetParent !== null) ?? boxes[0])?.focus();
+        },
       },
       {
         key: 'j',
@@ -246,6 +317,7 @@ export function AppShell({
   useRemoteTranscript(conversationId, rehydrateNonce);
   useResumeInterruptedTurn(conversationId);
   useDigests();
+  useAwaitingBadge();
   // Watches several conversations, not just this one: a job launched in one and completing while
   // the chemist reads another is the case the feature exists for.
   useJobStreams();

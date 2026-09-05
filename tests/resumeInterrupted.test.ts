@@ -128,6 +128,10 @@ describe('a turn a reload interrupted', () => {
       unsupported_claims: [],
       review_required: false,
       verified_by: null,
+      // A recovered answer was never reviewed by a second pass — this is the transcript being
+      // rebuilt, not a fresh turn — so the pair is the service's own "nothing happened" values.
+      challenged: false,
+      review_hold_id: null,
     });
     useChatStore.getState().finishTurn(cid, first, 'done');
     const { mid } = (() => {

@@ -159,6 +159,10 @@ const full: Array<[string, Record<string, unknown>]> = [
       confidence: 0.75,
       unsupported_claims: ['c'],
       review_required: true,
+      // Both permanently at their defaults upstream today, and mirrored anyway: reviving them is a
+      // coordinated three-repo cut, and this fixture is what makes the mirror notice it.
+      challenged: true,
+      review_hold_id: 'hold-42',
       verified_by: 'judge',
     },
   ],

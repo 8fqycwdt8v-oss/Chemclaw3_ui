@@ -33,10 +33,19 @@ const SID = '([0-9a-f]{32})';
  * Widening here is safe in a way it would not be for `SID`: this segment is forwarded
  * still-encoded and the service uses the decoded value purely as a lookup key, never as a
  * filesystem or URL path, so an encoded `/` cannot traverse anything. A *raw* `/` still fails to
- * match, because that would change the route's shape rather than its parameter. The length cap
- * and the closed character set still hold.
+ * match, because that would change the route's shape rather than its parameter. The closed
+ * character set still holds.
+ *
+ * **The length cap is measured against the ENCODED segment, which is why 128 was too small.** The
+ * paragraph above argues for a wide character class precisely so a model-written slug never 404s
+ * here — and then capped it at a length a non-ASCII slug reaches three times faster, because
+ * `encodeURIComponent` spends three characters per byte. Measured: `note-Löslichkeit-…` encodes to
+ * 89 and passes, `note-ミトコンドリア酸化的リン酸化阻害剤` encodes to 158 and did not. Seventeen CJK
+ * characters was enough, and `api.getNote` deliberately does not swallow a 404, so the citation
+ * chip hard-errors. 512 keeps the cap doing its real job — bounding the URL — without contradicting
+ * the character set beside it.
  */
-const NOTE = "([A-Za-z0-9._:~!*'()%-]{1,128})";
+const NOTE = "([A-Za-z0-9._:~!*'()%-]{1,512})";
 
 /**
  * Durable job ids.
@@ -47,7 +56,7 @@ const NOTE = "([A-Za-z0-9._:~!*'()%-]{1,128})";
  * with a bracket in it. Same closed set, same length cap, same argument: the segment is
  * forwarded still-encoded and the service uses it as a lookup key, never as a path.
  */
-const JOB = "([A-Za-z0-9._:~!*'()%-]{1,128})";
+const JOB = "([A-Za-z0-9._:~!*'()%-]{1,512})";
 
 /**
  * A held-open question's id.
@@ -57,9 +66,11 @@ const JOB = "([A-Za-z0-9._:~!*'()%-]{1,128})";
  * `<parent workflow id>:await:<round>` so that round 4 is a different wait from round 3 — so the
  * set is as wide as a Temporal workflow id. Pinning it to either shape is how a route spends a
  * release 404-ing the other one. Same closed set, same length cap, same argument: the segment is
- * forwarded still-encoded and the service uses it as a lookup key, never as a path.
+ * forwarded still-encoded and the service uses it as a lookup key, never as a path. The cap is
+ * `NOTE`'s 512 for `NOTE`'s reason — `<workflow id>:await:<round>` costs three characters per
+ * colon once encoded.
  */
-const PENDING = "([A-Za-z0-9._:~!*'()%-]{1,128})";
+const PENDING = "([A-Za-z0-9._:~!*'()%-]{1,512})";
 
 /**
  * A stored tool result's ref.

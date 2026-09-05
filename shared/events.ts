@@ -255,6 +255,23 @@ export interface AnswerEvent {
    *  "needs expert review" affordance. */
   review_required: boolean;
   /**
+   * Whether a second pass challenged this answer, and the durable hold that pass opened.
+   *
+   * **Both are on the wire and both were being deleted in transit.** `runner_answer.py` passes
+   * `challenged=review.challenged, review_hold_id=review.hold_id` on *every* answer, and this
+   * mirror carried neither — so `normalizeEvent`, which rebuilds each event field by field, dropped
+   * them. That is drift #11 in the list this file keeps.
+   *
+   * They are both permanently at their defaults today (`agent/verifier.py` has assigned neither
+   * since D-2026-08-15), so nothing renders differently for mirroring them. That is exactly why it
+   * had to be done now rather than later: the backend's own comment says reviving them is a
+   * coordinated three-repo cut, and the cut is precisely the change a hand-written mirror cannot
+   * notice.
+   */
+  challenged: boolean;
+  /** The hold id when `challenged`, `null` otherwise. See `challenged`. */
+  review_hold_id: string | null;
+  /**
    * Which verifier produced `confidence`, or `null` when none ran.
    *
    * Worth carrying rather than collapsing, because the same number means different things:
@@ -279,6 +296,18 @@ export type ErrorCode =
   | 'llm_timeout'
   | 'turn_timeout'
   | 'budget_exhausted'
+  /**
+   * Admission control shed this turn: the service had no permit free within its admission
+   * timeout, so nothing ran at all.
+   *
+   * Its own member rather than `budget_exhausted`, because the two are opposite instructions —
+   * this one is "we are busy, retry in a moment" (`retryable: true`) and that one is "the budget
+   * is spent, stop retrying" (`retryable: false`). They shared a code until the service split
+   * them, and this app is the surface that paid for it: `errorFromEvent` had to read `retryable`
+   * to work out which of the two had arrived, on a taxonomy whose whole contract is that the code
+   * says what to do next.
+   */
+  | 'at_capacity'
   | 'loop_cap_reached'
   | 'spend_cap_reached'
   | 'bad_tool_arguments'
@@ -290,6 +319,7 @@ const ERROR_CODES = new Set<string>([
   'llm_timeout',
   'turn_timeout',
   'budget_exhausted',
+  'at_capacity',
   'loop_cap_reached',
   'spend_cap_reached',
   'bad_tool_arguments',
@@ -768,6 +798,8 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         confidence: typeof o.confidence === 'number' ? o.confidence : null,
         unsupported_claims: asStringArray(o.unsupported_claims),
         review_required: o.review_required === true,
+        challenged: o.challenged === true,
+        review_hold_id: typeof o.review_hold_id === 'string' ? o.review_hold_id : null,
         verified_by:
           o.verified_by === 'judge' || o.verified_by === 'citation-gate' ? o.verified_by : null,
       };
@@ -776,7 +808,9 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         type: 'error',
         message: asString(o.message, 'The turn failed.'),
         // An unrecognised code degrades to `internal` rather than dropping the event: a service
-        // that grew a ninth code should still be able to end a turn here.
+        // that grew a code this build has not been taught should still be able to end a turn
+        // here. Not "a ninth code", which is what this said while nine were declared: a count in
+        // a comment is a claim about a commit, and `at_capacity` made that one wrong.
         code: ERROR_CODES.has(asString(o.code)) ? (o.code as ErrorCode) : 'internal',
         retryable: o.retryable === true,
         correlation_id: asString(o.correlation_id),

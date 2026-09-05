@@ -19,6 +19,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { ReviewQueue } from '../src/components/ReviewQueue.tsx';
 import { stubFetch } from './helpers.ts';
+import { resetPendingPlansCache } from '../src/api/client.ts';
 import type { PendingPlans } from '../src/api/client.ts';
 
 const mode = { current: 'dev' as 'dev' | 'msal', roles: [] as string[] };
@@ -66,10 +67,16 @@ let restore: (() => void) | null = null;
 /** What the plan inbox route answers this test — replaced per test, never per assertion. */
 let pending: PendingPlans | 'fails' = PENDING;
 
-/** The screen under a router, which `Link` needs and the app always provides. */
-function renderQueue(): void {
+/**
+ * The screen under a router, which `Link` needs and the app always provides.
+ *
+ * A bare `MemoryRouter` is enough again: this harness carried both `/review` and
+ * `/review/:proposalId` because what proposal was open was the URL and only the URL, and that
+ * route went with the PR gate.
+ */
+function renderQueue(at = '/review'): void {
   render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[at]}>
       <ReviewQueue />
     </MemoryRouter>,
   );
@@ -111,6 +118,12 @@ beforeEach(() => {
   pending = PENDING;
   mode.current = 'dev';
   mode.roles = [];
+  // `GET /plans/pending` is the most expensive read one navigation here can trigger — up to 25
+  // checkpointer reads, serialized against every concurrent turn on the pod — so the client holds
+  // it for a short minimum interval and does not rescan when a reader bounces back into /review.
+  // That interval is module-wide, and each test below mounts the inbox against a fixture of its
+  // own, so without this one test answers the next one's question.
+  resetPendingPlansCache();
 });
 afterEach(() => {
   cleanup();
@@ -183,8 +196,50 @@ describe('the plan inbox', () => {
 
     cleanup();
     pending = { plans: [], considered: 30, gated: 30, unread: 5 };
+    // The second mount is immediate, and a remount inside the client's minimum interval is exactly
+    // what that interval refuses to rescan for. This test is about the two *renderings* of a
+    // bounded scan, so it asks for a fresh answer rather than pretending the second one is one.
+    resetPendingPlansCache();
     renderQueue();
     expect(await screen.findByText(/5 older conversations were not checked/)).toBeTruthy();
+  });
+
+  it('admits when the scan stopped before the end of the listing', async () => {
+    // The fourth reading of an empty list, and the one `unread` cannot carry: the walk through the
+    // caller's conversations stopped early, so the service never learned whether what lies beyond
+    // it is even gated — there is no count, only the admission. Rendered against an empty queue,
+    // because that is where a silent shortfall does its damage: "No plan is waiting on you" is
+    // otherwise a claim about conversations nobody looked at.
+    pending = { plans: [], considered: 30, gated: 30, unread: 0, truncated: true };
+    serve();
+    renderQueue();
+
+    expect(
+      await screen.findByText(/scan stopped before the end of your conversations/),
+    ).toBeTruthy();
+
+    // Both shortfalls at once: one sentence, both facts, and the count still belongs to `unread`.
+    cleanup();
+    pending = { ...PENDING, unread: 2, truncated: true };
+    // The inbox holds a pending-plans answer for 10 s so that opening `/review` twice in a minute
+    // does not re-run a scan the service just ran. A remount inside that window is exactly what
+    // the cache is for, so this test has to leave it deliberately rather than assert through it.
+    resetPendingPlansCache();
+    renderQueue();
+    const notice = await screen.findByText(/2 older conversations were not checked/);
+    expect(notice.textContent).toContain('the scan stopped before the end of your conversations');
+  });
+
+  it('says nothing extra when the service does not report the walk at all', async () => {
+    // `truncated` is additive on the wire, so a service that predates it sends nothing. Absent is
+    // "not reported" and must not turn into either claim — the screen says exactly what it said
+    // before the field existed.
+    pending = { plans: [], considered: 3, gated: 3, unread: 0 };
+    serve();
+    renderQueue();
+
+    expect(await screen.findByText(/No plan is waiting on you/)).toBeTruthy();
+    expect(screen.queryByText(/scan stopped/)).toBeNull();
   });
 
   it('says the question could not be asked, instead of answering it with an empty list', async () => {

@@ -253,7 +253,21 @@ export function summarizeTurn(trace: readonly TraceEntry[]): TurnSummary {
       else problems += 1;
     }
     if (entry.kind === 'job_failed') problems += 1;
-    if (entry.kind === 'evidence_source' && entry.evidenceSource?.failed) sourcesDown += 1;
+    if (entry.kind === 'evidence_source') {
+      // **The whole sweep, not its first source.** `gather_evidence` asks every source at once and
+      // `foldIntoSweep` merges the run into ONE entry whose `evidenceSource` stays the source it
+      // started with — so counting off that field asked "did the first source fail?" and answered
+      // it for the sweep. Measured on `graph(ok) → lexical(failed) → eln(failed)` driven through
+      // `applyEvent`: the row rendered "lexical failed · eln failed" while this summary — the
+      // thing `sourcesDown`'s own docstring says "lets a reader decide whether to open it at
+      // all" — reported **0 sources down**. Any sweep whose first source succeeded hid every
+      // failure behind it.
+      //
+      // The `evidenceSource` fallback stays for transcripts persisted before `evidenceSweep`
+      // existed, which carry the one field and no sweep.
+      const sweep = entry.evidenceSweep ?? (entry.evidenceSource ? [entry.evidenceSource] : []);
+      sourcesDown += sweep.filter((s) => s.failed).length;
+    }
   });
   return { steps, toolCalls, jobs, problems, sourcesDown, held };
 }

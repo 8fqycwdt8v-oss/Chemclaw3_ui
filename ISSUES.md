@@ -241,6 +241,21 @@ Two properties worth keeping, both asserted in `tests/awaitingAnswer.test.tsx`: 
 answer any more; and the slice is **not persisted**, because the service is the authority on what is
 open and a badge that survived a reload would outlive the answer.
 
+That sentence claimed both were asserted and only the first was — a `partialize` that grew an
+`awaiting` line would have shipped green — so the second is asserted now, against `partialize`
+itself. Writing it also surfaced what non-persistence costs: the claim behind `awaiting_answer` is
+destructive and at-most-once, so a reload replays nothing and the badge read **0** until somebody
+opened `/review`, which is the screen the badge exists to send them to. `useAwaitingBadge` in
+`App.tsx` reads `GET /pending` once per page for exactly that, beside the inbox's own read — an
+ordinary GET, so reading it twice costs a request and destroys nothing, which is why the digest
+claim next to it cannot be written the same way.
+
+The slice itself is **request ids**. It carried `subject`, `kind` and `due_at` beside each id,
+written by both producers and read by nobody: the badge reads `.length` and the inbox renders from
+its own `/pending` response. That also removed a defect the brief had grown — `syncAwaiting`
+compared ids only, so a `/pending` read correcting a `due_at` the stream never carried was
+discarded as "unchanged", which is the one thing that function is for.
+
 The half that stays a poll is deliberate and is not this issue: `GET /pending` is still read on
 `/review` rather than pushed, since the stream carries a notification and not a projection.
 

@@ -497,13 +497,17 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
       </div>
 
       <div className="px-3 pb-2">
-        <label htmlFor="conversation-search" className="sr-only-live">
-          Search conversations
-        </label>
         <div className="flex items-center gap-2 rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 focus-within:border-brand focus-within:ring-2 focus-within:ring-ring/25">
           <Search aria-hidden className="size-3.5 shrink-0 text-ink-subtle" />
           <input
-            id="conversation-search"
+            // Not an `id`: this component renders twice (the persistent column and the mobile
+            // drawer), and a duplicated id makes both `htmlFor` associations point at one input
+            // and `getElementById` resolve to the hidden copy. A data attribute is honest about
+            // there being more than one.
+            data-conversation-search=""
+            // The accessible name moves onto the input with the id: a `<label htmlFor>` cannot
+            // address one of two identical ids, and this component is rendered twice.
+            aria-label="Search conversations"
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}

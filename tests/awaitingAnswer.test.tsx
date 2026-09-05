@@ -143,14 +143,7 @@ describe('the push-back stream delivers a question waiting on a person', () => {
     serveFrames([OPENED]);
     const store = await watch();
 
-    expect(store.getState().awaiting).toEqual([
-      {
-        request_id: 'await-9f2c',
-        subject: '',
-        kind: 'measurement',
-        due_at: '2026-09-06T00:00:00Z',
-      },
-    ]);
+    expect(store.getState().awaiting).toEqual(['await-9f2c']);
   });
 
   it('does not file it as a durable run that finished', async () => {
@@ -209,10 +202,7 @@ describe('the sidebar says how many are waiting', () => {
     view.unmount();
 
     useChatStore.setState({
-      awaiting: [
-        { request_id: 'r1', subject: 's', kind: 'measurement', due_at: '' },
-        { request_id: 'r2', subject: 's', kind: 'approval', due_at: '' },
-      ],
+      awaiting: ['r1', 'r2'],
     });
     render(
       <MemoryRouter>
@@ -222,5 +212,33 @@ describe('the sidebar says how many are waiting', () => {
     // Named rather than rendered as a bare digit: this link also leads to note proposals, and a
     // screen reader announcing "Review queue 2" says nothing about what the 2 counts.
     expect(screen.getByLabelText('2 waiting on you').textContent).toBe('2');
+  });
+});
+
+describe('what survives a reload, and what has to be read again', () => {
+  it('does not persist the badge, and fills it from the service instead', async () => {
+    // **Both halves, because ISSUES.md claimed both were asserted here and neither was.** The
+    // non-persistence is deliberate — the list is a notification cache and a persisted copy would
+    // outlive the answer — but nothing pinned it, so a `partialize` that grew an `awaiting` line
+    // would have shipped green.
+    const { useChatStore } = await import('../src/state/chatStore.ts');
+    useChatStore.setState({
+      awaiting: ['r1'],
+    });
+    const persisted = useChatStore.persist.getOptions().partialize?.(useChatStore.getState());
+    expect(persisted).not.toHaveProperty('awaiting');
+    expect(persisted).not.toHaveProperty('awaitingRevision');
+
+    // And the consequence the design left open. The claim behind `awaiting_answer` is destructive
+    // and at-most-once, so a reload replays nothing: the questions are still open and the badge
+    // read 0 until somebody opened `/review` — which is the screen the badge exists to send them
+    // to. `syncAwaiting` off `GET /pending` is what closes that, and `useAwaitingBadge` in
+    // `App.tsx` is what calls it without waiting for the inbox to be opened.
+    useChatStore.setState({ awaiting: [], awaitingRevision: 0 });
+    useChatStore.getState().syncAwaiting(['r1', 'r2']);
+    expect(useChatStore.getState().awaiting).toHaveLength(2);
+    // Never bumped by a read — see `awaitingRevision`, which exists so the inbox's own
+    // reconciliation cannot re-trigger the effect that performed it.
+    expect(useChatStore.getState().awaitingRevision).toBe(0);
   });
 });

@@ -147,7 +147,7 @@ measured, not argued. Anything that turns out to be wrong is corrected in place 
 ## Review
 
 All eight batches are in. `npm run lint`, `npm run typecheck` and `npm test` are green —
-**971 tests across 107 files**, up from 848, and `npm run build` emits.
+**The suite and the build are green**; the counts that used to open this line said 971 across 107 files while the run reported 109 files, which is a claim about a commit rather than about the tree — `npm run test` is where a current number comes from.
 
 ### Five findings the work proved wrong
 

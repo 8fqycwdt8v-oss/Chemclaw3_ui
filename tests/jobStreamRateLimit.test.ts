@@ -143,12 +143,40 @@ describe('a 429 that carries no Retry-After', () => {
     stubRateLimited({});
     const { unmount } = watchOneSession();
 
-    // One connect is all this window buys: the cap's backoff is 15–30 s, so the second refusal —
-    // the one that sets the flag — is deliberately out of reach here. What is checked is that the
-    // client did not treat a header-less 429 as a one-second pause.
+    // One connect is all this window buys: the cap's backoff is 15–30 s from its first refusal,
+    // so the second one — which sets the flag — is deliberately out of reach here. What is checked
+    // is that the client did not treat a header-less 429 as a one-second pause.
     await new Promise((resolve) => setTimeout(resolve, 1_400));
     unmount();
 
     expect(connects).toBe(1);
+  });
+});
+
+describe('a 429 whose Retry-After cannot be read', () => {
+  it('is the limiter anyway, and never the irreversible stream cap', async () => {
+    // An HTTP-date from a gateway, a `0`, a stray character. `retryAfterSeconds` refuses all three
+    // and answers `null` — which this file used to read as "no header", dropping the refusal into
+    // the cap branch. Two of those set `jobStreamsThrottled`, which never clears: this tab watches
+    // one conversation instead of three for the life of the page, over a request budget that
+    // refilled in seconds. `errorFromStatus` splits the two 429s on the header's *presence* and
+    // parses only for the number; this is the same split, in the file whose docstring already
+    // claimed to be doing it.
+    stubRateLimited({ 'retry-after': 'Wed, 09 Sep 2026 00:00:00 GMT' });
+    const { unmount } = watchOneSession();
+    vi.useFakeTimers();
+    try {
+      // Long enough for several rounds at the backoff's own pace — the wait comes from there when
+      // the header carries no readable number, rather than from a `sleep(0)` spin.
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(useChatStore.getState().jobStreamsThrottled).toBe(false);
+      expect(useChatStore.getState().jobStreamsFailing).toEqual([SID]);
+      expect(connects).toBeGreaterThan(1);
+      expect(connects).toBeLessThanOrEqual(10);
+    } finally {
+      vi.useRealTimers();
+      unmount();
+    }
   });
 });

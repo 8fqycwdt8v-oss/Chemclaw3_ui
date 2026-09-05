@@ -308,6 +308,8 @@ const TURN: readonly Frame[] = [
       review_required: false,
       unsupported_claims: [],
       verified_by: 'citation-gate',
+      challenged: false,
+      review_hold_id: null,
     },
     0,
   ],
@@ -360,8 +362,10 @@ const SHARED_TRANSCRIPT: TranscriptMessage[] = [
 ];
 
 // One conversation blocked on a plan decision, so `/review` renders its inbox with a row rather
-// than one of its empty states. `unread: 0` keeps the partial-scan notice out of the way of
-// the axe pass; the notice itself is covered by the component tests.
+// than one of its empty states. `unread: 0` and `truncated: false` keep the partial-scan notice
+// out of the way of the axe pass; the notice itself is covered by the component tests. Both are
+// stated rather than left off: the service sends every field of this model on every answer, and a
+// fixture that omits one is describing a response nobody receives.
 const PENDING_PLANS: PendingPlans = {
   plans: [
     {
@@ -375,6 +379,7 @@ const PENDING_PLANS: PendingPlans = {
   considered: 1,
   gated: 1,
   unread: 0,
+  truncated: false,
 };
 
 const JOB: JobRecordSummary = {
@@ -646,6 +651,13 @@ createServer(async (req, res) => {
 
   // The cross-session plan inbox — what `/review` is for now that the PR gate is gone.
   if (path === '/plans/pending' && req.method === 'GET') return json(res, 200, PENDING_PLANS);
+
+  // Questions held open for a person. Empty rather than absent: the shell reads this once per page
+  // for the sidebar badge (`useAwaitingBadge`), so leaving it unimplemented put a
+  // `pending.read_failed` warning in the log of every single browser test — a real request path
+  // going unexercised, reported as noise.
+  if (path === '/pending' && req.method === 'GET')
+    return json(res, 200, { requests: [], count: 0 });
 
   // The durable-run registry.
   if (path === '/jobs' && req.method === 'GET') {

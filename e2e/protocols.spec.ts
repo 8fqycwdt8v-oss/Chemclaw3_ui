@@ -94,7 +94,7 @@ test('a comparison of two revisions is grouped by what it touches', async ({ pag
 test('a protocol result renders as a protocol under the answer', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('textbox', { name: /Message/ }).fill('Design the amination screen');
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
 
   const block = page.locator('[data-result-block="protocol"]');
   await expect(block).toBeVisible({ timeout: 15_000 });

@@ -76,7 +76,7 @@ for (const theme of ['light', 'dark'] as const) {
     test('a finished turn, with its trace expanded', async ({ page }) => {
       await page.goto('/');
       await page.getByPlaceholder(/Ask about a reaction/).fill('What is the pKa of acetic acid?');
-      await page.getByRole('button', { name: 'Send' }).click();
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
 
       const answer = page.getByRole('article', { name: 'Assistant answer' }).last();
       await expect(answer).toContainText('4.76', { timeout: 15_000 });
@@ -94,7 +94,7 @@ for (const theme of ['light', 'dark'] as const) {
       // the block had no keyboard access the first time a realistic one was put through it.
       await page.goto('/');
       await page.getByPlaceholder(/Ask about a reaction/).fill('Screen this azide.');
-      await page.getByRole('button', { name: 'Send' }).click();
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
 
       // Opened from the block in the answer, which is the path a chemist actually takes now —
       // the same sheet, reached without opening the trace and hunting for the row.

@@ -29,6 +29,28 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist/client',
+    /**
+     * Never inline a font into the stylesheet.
+     *
+     * Vite inlines any asset under 4 kB as a `data:` URI, and exactly one font face is under it:
+     * `jetbrains-mono-cyrillic-ext` is 2,028 bytes, so it was emitted as a 2,727-character base64
+     * blob **inside `index-*.css`** — the render-blocking stylesheet every visitor downloads
+     * before the first paint. The point of `@fontsource-variable`'s per-unicode-range faces is
+     * that a subset is fetched only when a glyph in it is used, and inlining is the one thing that
+     * defeats it: nothing in this application renders Cyrillic Extended, and everybody was
+     * downloading it anyway, uncacheable separately and unshrinkable by the 33% base64 tax.
+     *
+     * Scoped to fonts by returning `undefined` for everything else, which leaves Vite's default
+     * limit in charge of the small SVGs and images where inlining is a saved request rather than a
+     * defeated `unicode-range`.
+     *
+     * Measured on 2026-09-05: `index-*.css` went 59,836 → 57,171 bytes, and 13.52 → 11.01 kB
+     * gzipped. The gzip saving is the larger share of the two because base64 is already
+     * incompressible while the CSS around it is not — 2.5 kB off the render-blocking wire cost of
+     * every first load, for a subset nothing here renders.
+     */
+    assetsInlineLimit: (filePath: string): boolean | undefined =>
+      /\.(woff2?|ttf|otf|eot)$/i.test(filePath) ? false : undefined,
     // No maps at all. `'hidden'` suppresses the `//# sourceMappingURL=` comment and still writes
     // the `.map` files next to the chunks — into the very directory the Dockerfile copies whole
     // and `sirv` serves, so appending `.map` to any chunk URL returned the TypeScript of the

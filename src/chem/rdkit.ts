@@ -26,10 +26,20 @@
  *
  * Measured across the swap alone, which is the number that tests the claim: the entry chunk went
  * 485.86 kB → 485.78 kB, with RDKit emitted as a 74 kB loader and a 6.9 MB `.wasm` beside it, both
- * fetched the first time a structure appears. (The entry ends this branch at 509 kB. That
- * difference is the application code added on top — the method/caveat table, the entity store and
- * rail, the structure input — and none of it is RDKit or Ketcher: the only mention of either in
- * the entry chunk is the dynamic-import reference to their chunks.)
+ * fetched the first time a structure appears.
+ *
+ * **That delta is the claim; the absolute figure beside it was not, and this paragraph used to
+ * publish one anyway.** It said the entry "ends this branch at 509 kB" while the same sentence in
+ * `Molecule.tsx` said 485 kB — two numbers for one chunk, both stale.
+ *
+ * **No replacement number is written here, deliberately.** Measured twice within one afternoon on
+ * 2026-09-05 the entry chunk read 505.90 kB and then 510.24 kB, moved by branches touching modules
+ * it imports and by nothing in this file; splitting `routes.tsx` had moved it further still. A
+ * byte count in prose is a claim about one commit, this file has now been wrong about it twice,
+ * and the third attempt would go stale on the next merge. What is actually load-bearing is
+ * structural — the only mention of this module or of Ketcher in the entry is the dynamic-import
+ * reference to their chunks — so that is what `tests/entryChunk.test.ts` asserts, and `npm run
+ * build:client` is where a current size comes from.
  *
  * What that trade buys back is one toolkit deciding what a molecule is. Keeping smiles-drawer for
  * depiction beside RDKit for identity was the other option on the table, and it was rejected for
@@ -52,6 +62,7 @@
  */
 
 import type { JSMol, RDKitLoader, RDKitModule } from '@rdkit/rdkit';
+import { withLoadTimeout } from './toolkitLoad.ts';
 
 /**
  * The longest SMILES this module will hand to `get_mol`, and the reason there has to be one.
@@ -94,27 +105,57 @@ let poisoned = false;
 /** Resolved once, then reused. Only a *success* is cached — see the catch below. */
 let modulePromise: Promise<RDKitModule | null> | null = null;
 
+/**
+ * The most recent completed attempt ended in a failure, and no new one has started.
+ *
+ * Not a memoised verdict — `loadRDKit` still starts a fresh attempt for anybody who asks it for a
+ * module, which is what keeps a bad first fetch from being permanent. This exists for the *other*
+ * question. `rdkitAvailable()` is asked immediately after a helper returned a negative, by a
+ * surface deciding which sentence to show, and the surfaces are the two files that make chemical
+ * claims. Sending that question through a second full load meant a blackholed `.wasm` cost
+ * `TOOLKIT_LOAD_TIMEOUT_MS` to give up drawing and another one to work out *why* — two minutes of
+ * empty box before the honest copy appeared. Reading the attempt we just made costs nothing and
+ * says the same thing.
+ */
+let lastAttemptFailed = false;
+
 export function loadRDKit(): Promise<RDKitModule | null> {
   if (poisoned) return Promise.resolve(null);
   const pending = (modulePromise ??= (async () => {
+    // A new attempt is under way, so the last one's failure is no longer what `rdkitAvailable`
+    // should answer from. Set synchronously, before the first await, so no caller can observe the
+    // gap.
+    lastAttemptFailed = false;
     try {
-      const [loader, { default: wasmUrl }] = await Promise.all([
-        // The package's own typings declare types only — the loader is advertised as a global
-        // (`Window.initRDKitModule`) while the shipped file is CommonJS with a default export. So
-        // the runtime shape has to be asserted; `RDKitLoader` is the package's own type for it.
-        import('@rdkit/rdkit') as unknown as Promise<{ default: RDKitLoader }>,
-        // `?url` keeps the 6.9 MB binary out of the JS bundle and hands us the hashed asset path
-        // Vite emitted for it, which is what `locateFile` has to answer with.
-        import('@rdkit/rdkit/dist/RDKit_minimal.wasm?url'),
-      ]);
-      return await loader.default({ locateFile: () => wasmUrl });
+      // Bounded, because none of these steps has a deadline of its own: an accepted-and-unanswered
+      // request for the 6.9 MB binary leaves this promise pending, and every caller waits on it
+      // for the life of the page. `toolkitLoad.ts` carries the reasoning and the number, which the
+      // sketcher seam shares.
+      return await withLoadTimeout(
+        (async () => {
+          const [loader, { default: wasmUrl }] = await Promise.all([
+            // The package's own typings declare types only — the loader is advertised as a global
+            // (`Window.initRDKitModule`) while the shipped file is CommonJS with a default export.
+            // So the runtime shape has to be asserted; `RDKitLoader` is the package's own type.
+            import('@rdkit/rdkit') as unknown as Promise<{ default: RDKitLoader }>,
+            // `?url` keeps the 6.9 MB binary out of the JS bundle and hands us the hashed asset
+            // path Vite emitted for it, which is what `locateFile` has to answer with.
+            import('@rdkit/rdkit/dist/RDKit_minimal.wasm?url'),
+          ]);
+          return await loader.default({ locateFile: () => wasmUrl });
+        })(),
+        'The structure toolkit did not finish loading.',
+      );
     } catch {
-      // The failure is deliberately **not** memoised. A missing `wasm-unsafe-eval`, a chunk that
-      // did not arrive, a network blip — none of them is a property of the input, and caching the
-      // `null` meant one bad first fetch left the page unable to read a structure for its whole
-      // lifetime with no retry and nothing on screen to say so. Clearing it here makes the next
-      // thing a chemist does try again.
+      // The failure is deliberately **not** memoised, and the timeout is inside that rule rather
+      // than an exception to it. A missing `wasm-unsafe-eval`, a chunk that did not arrive, a
+      // network blip, a request nobody answered — none of them is a property of the input, and
+      // caching the `null` meant one bad first fetch left the page unable to read a structure for
+      // its whole lifetime with no retry and nothing on screen to say so. Clearing it here makes
+      // the next thing a chemist does try again; a load that times out and lands afterwards is
+      // in the browser's cache for that retry.
       modulePromise = null;
+      lastAttemptFailed = true;
       return null;
     }
   })());
@@ -134,8 +175,13 @@ export function loadRDKit(): Promise<RDKitModule | null> {
  * negative answer asks this first.** Not the helpers themselves — threading a third value through
  * every one of them puts the question at every call site instead of at the three that make a
  * claim, and `entities.ts` would have to handle a case it can do nothing about.
+ *
+ * It reports on the attempt that has already been made rather than commissioning another one, and
+ * that is what makes it cheap enough to ask from a render path. A caller that wants a *retry*
+ * wants a module, and asks `loadRDKit` for one.
  */
 export async function rdkitAvailable(): Promise<boolean> {
+  if (lastAttemptFailed && modulePromise === null) return false;
   return (await loadRDKit()) !== null;
 }
 
@@ -293,7 +339,12 @@ const YIELD_EVERY = 25;
 export async function moleculesFromMolfile(text: string): Promise<MolfileRecords> {
   // Asked once, up front. Without it every record comes back unreadable and the count becomes a
   // claim about the file rather than about the page.
-  if (!(await rdkitAvailable())) {
+  //
+  // The loader rather than `rdkitAvailable`, because this is a gate and not a post-mortem: a
+  // chemist dropping a file after an earlier load failed is exactly the retry the catch above
+  // exists to allow, and `rdkitAvailable` deliberately answers from the last attempt instead of
+  // making one.
+  if ((await loadRDKit()) === null) {
     return { smiles: [], unreadable: 0, skipped: 0, unavailable: true };
   }
 
@@ -360,6 +411,54 @@ export interface DrawOptions {
 }
 
 /**
+ * Drawings already made, newest use last.
+ *
+ * A depiction is a pure function of its four inputs, and nothing here memoised it, so every
+ * *mount* re-parsed and redrew. Measured against the shipped binary over ten drug-like structures
+ * (caffeine → atorvastatin): a mean of 5.40 ms and 12.5 kB of SVG each, from 2.81 ms/5.5 kB for
+ * 4-bromoanisole to 9.71 ms/24 kB for atorvastatin. That is main-thread WASM time in a `useEffect`
+ * with nothing between the calls, and this application redraws for reasons that have nothing to do
+ * with chemistry: flipping the theme redraws everything visible, switching conversations remounts
+ * the entity rail, and one molecule shown in three places is drawn three times. Measured on 20
+ * structures — the rail plus a result grid — a theme toggle costs **111.6 ms** of blocked main
+ * thread and, flipped back, another 108.7 ms; served from here the same 20 cost **0.02 ms**.
+ *
+ * **Bounded by characters, not by entries**, because the entries are not the same size: an SVG
+ * here ranges from 2.0 kB for ethanol to 304 kB for the 600-character chain `MAX_PARSED_SMILES_CHARS`
+ * still admits, so a count of 200 would admit anywhere between 0.4 MB and 60 MB. At the measured
+ * 12.5 kB mean this budget holds ~160 drawings — both themes for ~80 distinct structures, which
+ * covers the 50-hit structure grid and the rail together with room over — and 2 MB is small beside
+ * the 6.9 MB heap this module is already holding open.
+ */
+const SVG_CACHE_BUDGET_CHARS = 2_000_000;
+
+const svgCache = new Map<string, string>();
+let svgCacheChars = 0;
+
+/** All four inputs the drawing depends on. The size is in the key because the same structure is
+ *  drawn at one canvas size here and the caller scales it; a future second size must not collide. */
+const svgKey = (smiles: string, opts: DrawOptions): string =>
+  `${opts.width}x${opts.height}|${opts.dark ? 'dark' : 'light'}|${smiles}`;
+
+/** Keep `svg`, evicting least-recently-used drawings until the budget is met again. */
+function remember(key: string, svg: string): void {
+  svgCache.set(key, svg);
+  svgCacheChars += svg.length;
+  // A `Map` iterates in insertion order and a hit re-inserts (see below), so the first key is the
+  // least recently *used* rather than merely the oldest drawn. Deleting during iteration is
+  // defined behaviour here — the iterator skips what has gone.
+  for (const [oldest, drawn] of svgCache) {
+    if (svgCacheChars <= SVG_CACHE_BUDGET_CHARS) return;
+    // One drawing larger than the whole budget is kept anyway rather than evicted the instant it
+    // arrives: the cache is then a cache of one, which is still the right answer for a page
+    // showing that one structure.
+    if (oldest === key) return;
+    svgCache.delete(oldest);
+    svgCacheChars -= drawn.length;
+  }
+}
+
+/**
  * `smiles` drawn as an SVG, or `null` if it is not a molecule.
  *
  * Coordinates come from RDKit's own depiction, normalized and straightened — without those two
@@ -367,10 +466,22 @@ export interface DrawOptions {
  * arbitrary rotation, and the same compound drawn in two cards can look like two compounds.
  */
 export async function moleculeSvg(smiles: string, opts: DrawOptions): Promise<string | null> {
+  const key = svgKey(smiles, opts);
+  const hit = svgCache.get(key);
+  if (hit !== undefined) {
+    // Re-inserted, which is what makes the eviction order above least-recently-used. Answered
+    // before the loader is consulted on purpose: a drawing already made is a correct drawing of
+    // that molecule whatever has happened to the runtime since, and withholding it because the
+    // heap has died would replace a picture with a fallback for no gain.
+    svgCache.delete(key);
+    svgCache.set(key, hit);
+    return hit;
+  }
+
   const rdkit = await loadRDKit();
   if (!rdkit) return null;
 
-  return withSmilesMol(rdkit, smiles, (mol) => {
+  const drawn = withSmilesMol(rdkit, smiles, (mol) => {
     mol.normalize_depiction(1);
     mol.straighten_depiction();
 
@@ -385,4 +496,11 @@ export async function moleculeSvg(smiles: string, opts: DrawOptions): Promise<st
 
     return mol.get_svg_with_highlights(JSON.stringify(details)) || null;
   });
+
+  // Only a drawing is kept. A `null` here is one of three different things — not a molecule, past
+  // the length cap, or a runtime that has just died under `withSmilesMol` — and only the first is
+  // a property of the input. Caching the other two would be the memoised-failure defect the loader
+  // above refuses, one layer up.
+  if (drawn !== null) remember(key, drawn);
+  return drawn;
 }

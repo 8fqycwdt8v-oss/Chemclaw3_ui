@@ -119,6 +119,14 @@ function serve(): void {
         headers: { 'content-type': 'application/json' },
       });
     }
+    // The third gate on this page, and it must be tested AFTER `/plans/pending` — which also ends
+    // in `/pending`, and swallowing it here made every test on this page fail at once.
+    if (/\/pending$/.test(url) || url.includes('/pending/')) {
+      return new Response(JSON.stringify({ requests: [], count: 0 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     if (url.includes('/proposals/7/decision')) {
       decisions.push(JSON.parse(String(init?.body)));
       return new Response(null, { status: 204 });

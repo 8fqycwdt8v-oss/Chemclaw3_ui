@@ -31,11 +31,46 @@ const SCIENTIFIC_BELOW = 1e-4;
 const SIGNIFICANT_DIGITS = 4;
 
 /**
+ * The two formatters the magnitude-aware path uses, built once.
+ *
+ * `Number.prototype.toLocaleString` constructs an `Intl.NumberFormat` on every call, and V8 caches
+ * exactly one of them: the *default* one for a locale. Hand it an options object and the cache is
+ * missed, every time. Measured in bare node 22 over 1,000 sub-1 values, with a throwaway harness
+ * kept out of the tree: **35.3 µs/call with options against 0.75 µs/call through a hoisted
+ * formatter — 47×**. That is not a micro-optimization on a cold path: sub-1 magnitudes are what a
+ * chemistry payload is made of — similarity scores, mole fractions, catalyst loadings, Boltzmann
+ * populations, rate constants — so the options branch is the branch this app takes, and `AutoTable`
+ * calls it once per numeric cell. End to end, the same 2,000-row ten-column result — three of those
+ * columns below 1, so 6,000 such cells — rendered ~1,747 ms before this change and ~1,133 ms after
+ * (vitest + happy-dom, one paired run). A table whose columns were *all* sub-1 would have been
+ * spending 847 ms of a 24,000-cell render inside this one function.
+ *
+ * **The no-options path below is deliberately left on `toLocaleString`.** The obvious symmetry —
+ * hoist all three — was measured and is not an improvement: the default formatter *is* the one V8
+ * caches, and a hoisted instance came out at 0.75 µs against 0.63 µs for the method call. Caching
+ * something already cached buys nothing and costs a reader the question of why it is there.
+ *
+ * The output is byte-identical by construction: `toLocaleString(locale, options)` is specified as
+ * `new Intl.NumberFormat(locale, options).format(value)`, and `tests/formatterCache.test.ts` proves
+ * it against the pre-hoist expression over 900-odd values rather than trusting the spec.
+ */
+const SCIENTIFIC_FORMAT = new Intl.NumberFormat(SCIENTIFIC_LOCALE, {
+  notation: 'scientific',
+  maximumSignificantDigits: SIGNIFICANT_DIGITS,
+});
+const SIGNIFICANT_FORMAT = new Intl.NumberFormat(SCIENTIFIC_LOCALE, {
+  maximumSignificantDigits: SIGNIFICANT_DIGITS,
+});
+
+/**
  * Render a number a chemist might write down.
  *
  * `options` is passed through for the rare call that knows its own precision — an energy in
  * kcal/mol is meaningless past a tenth — and it wins outright, because a call site that states its
- * precision has said more than this function can infer.
+ * precision has said more than this function can infer. It is also the one path that still pays the
+ * uncached ~35 µs, and that is left alone rather than fixed: a caller's options object has no
+ * identity to cache on, and the only caller in `src/` is `formatEnergy` — once per finished job
+ * card, not once per cell.
  *
  * The default is magnitude-aware, and it did not used to be. `Intl`'s own default is
  * `maximumFractionDigits: 3`, which is a *fixed-decimal* clamp and not a precision: every value
@@ -55,12 +90,9 @@ export function formatScientificNumber(value: number, options?: Intl.NumberForma
   if (!Number.isFinite(value) || value === 0 || magnitude >= 1) {
     return value.toLocaleString(SCIENTIFIC_LOCALE);
   }
-  return value.toLocaleString(
-    SCIENTIFIC_LOCALE,
-    magnitude < SCIENTIFIC_BELOW
-      ? { notation: 'scientific', maximumSignificantDigits: SIGNIFICANT_DIGITS }
-      : { maximumSignificantDigits: SIGNIFICANT_DIGITS },
-  );
+  // Through the hoisted formatters — see their docstring for the 47× and for why the two branches
+  // above are not treated the same way.
+  return (magnitude < SCIENTIFIC_BELOW ? SCIENTIFIC_FORMAT : SIGNIFICANT_FORMAT).format(value);
 }
 
 /** Hartree to kcal/mol. The backend reports QM energies in hartree; chemists mostly think in

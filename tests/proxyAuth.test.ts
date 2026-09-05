@@ -45,7 +45,16 @@ beforeAll(async () => {
   process.env.CHEMCLAW_API_URL = `http://127.0.0.1:${upstreamPort}`;
   const { proxy } = await import('../server/proxy.ts');
 
-  proxyServer = http.createServer((req, res) => proxy(req, res, '/sessions', false));
+  const { mintCorrelationId } = await import('../server/correlation.ts');
+  proxyServer = http.createServer((req, res) =>
+    // The trace is `server/app.ts`'s job in the real process; here it is the minimum the proxy
+    // needs — a route label for a refusal line, and the correlation id it stamps upstream.
+    proxy(req, res, '/sessions', false, {
+      route: '/api/sessions',
+      upstreamMs: null,
+      correlationId: mintCorrelationId(),
+    }),
+  );
   await new Promise<void>((resolve) => proxyServer.listen(0, '127.0.0.1', resolve));
   proxyPort = (proxyServer.address() as AddressInfo).port;
 });

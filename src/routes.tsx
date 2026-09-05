@@ -21,17 +21,99 @@
  * while a redirect fragment is still on the address bar.
  */
 
-import { useEffect, useRef } from 'react';
+import { lazy, Suspense, useEffect, useRef } from 'react';
 import { Navigate, Route, Routes, useNavigate, useParams } from 'react-router';
 import { useChatStore, newConversation } from './state/chatStore.ts';
 import { useAuth } from './auth/AuthContext.tsx';
 import { AppShell } from './App.tsx';
-import { ReviewQueue } from './components/ReviewQueue.tsx';
-import { JobsPanel } from './components/JobsPanel.tsx';
-import { ProtocolsPanel } from './components/ProtocolsPanel.tsx';
-import { ProtocolDocument } from './components/ProtocolDocument.tsx';
 import { Loading } from '@/components/chem/Feedback';
 import { Button } from '@/components/ui/button';
+
+/**
+ * The four panels that are not the conversation, each behind its own chunk.
+ *
+ * They were static imports, so every chemist paid for the review queue, the jobs list, the
+ * protocol list and the protocol document in the entry bundle — on the first paint of a fresh
+ * conversation, before anything is on screen — and most chemists open none of them. The pattern is
+ * `LazyMarkdown.tsx`'s, for the same reason and with the same two halves: a named `loader` so the
+ * chunk can be warmed deliberately, and a Suspense fallback honest enough that the wait reads as a
+ * wait rather than as a broken page.
+ *
+ * **Measured on 2026-09-05 with `npm run build:client`, on one tree with only this file's imports
+ * changed** — the two builds are minutes apart, so nothing else moved between them. Read the pair,
+ * not the absolutes: the same figures moved by ~5 kB later the same afternoon on other people's
+ * merges, which is why `chem/rdkit.ts` no longer publishes one at all.
+ *
+ *  - What a browser fetches to run the app (the entry module plus every chunk `index.html` tells
+ *    it to preload) went **653.72 kB → 596.79 kB** raw, **199.40 kB → 189.42 kB** gzip.
+ *  - The four panels left as **60.52 kB** of route chunks — ReviewQueue 10.48, JobsPanel 6.40,
+ *    ProtocolsPanel 4.44, ProtocolDocument 39.20 — fetched when they are wanted.
+ *
+ * The entry chunk alone reads 643.70 kB → 505.90 kB, and quoting *that* would overstate the win by
+ * more than double: 80.9 kB of it is shared code Rolldown moved into new chunks (`chatStore`,
+ * `Feedback`, `clsx`, `tslib`) that `index.html` still preloads. The set is the number; the entry
+ * chunk is one member of it.
+ *
+ * The saving is also smaller than the 60.52 kB the panels weigh, and the reason is worth writing
+ * down rather than rounding away: everything they *share* with the chat — the api client, the
+ * stores, the shadcn primitives, the chem components — stays on the critical path because the
+ * conversation route needs it too. Splitting moves what is exclusive to a route, not what a route
+ * merely uses.
+ */
+const loadReviewQueue = () =>
+  import('./components/ReviewQueue.tsx').then((m) => ({ default: m.ReviewQueue }));
+const loadJobsPanel = () =>
+  import('./components/JobsPanel.tsx').then((m) => ({ default: m.JobsPanel }));
+const loadProtocolsPanel = () =>
+  import('./components/ProtocolsPanel.tsx').then((m) => ({ default: m.ProtocolsPanel }));
+const loadProtocolDocument = () =>
+  import('./components/ProtocolDocument.tsx').then((m) => ({ default: m.ProtocolDocument }));
+
+const ReviewQueue = lazy(loadReviewQueue);
+const JobsPanel = lazy(loadJobsPanel);
+const ProtocolsPanel = lazy(loadProtocolsPanel);
+const ProtocolDocument = lazy(loadProtocolDocument);
+
+let prefetched = false;
+
+/**
+ * Warm all four chunks. Safe to call repeatedly; only the first call fetches.
+ *
+ * Called from an idle callback once the app is up, which is the honest version of what a static
+ * import was doing: the bytes still arrive on a normal session, they simply stop being on the
+ * critical path to the first paint. A nav link cannot warm them on hover — the sidebar and the top
+ * bar own those controls and this module has no business reaching into them — so idle is where the
+ * warming goes, and it is what keeps the Suspense fallbacks below almost always unrendered.
+ */
+export function prefetchPanels(): void {
+  if (prefetched) return;
+  prefetched = true;
+  void Promise.all([
+    loadReviewQueue(),
+    loadJobsPanel(),
+    loadProtocolsPanel(),
+    loadProtocolDocument(),
+  ]).catch(() => {
+    // A warm-up that failed is not an error anybody can act on: the route itself will import
+    // again when it is actually navigated to, and *that* failure has a place to be shown.
+    prefetched = false;
+  });
+}
+
+/**
+ * A lazily-loaded panel, with a fallback that says which one.
+ *
+ * Inside `AppShell` rather than around it, so the sidebar, the top bar and the banner stay exactly
+ * where they are while a route chunk arrives — the reader sees the same page with one region
+ * loading, which is what navigating between panels already looks like.
+ */
+function Panel({ what, children }: { what: string; children: React.ReactNode }): React.JSX.Element {
+  return (
+    <Suspense fallback={<Loading className="justify-center p-8">{what}</Loading>}>
+      {children}
+    </Suspense>
+  );
+}
 
 /** Pick a conversation to land on, creating one if the store is empty. */
 function Bootstrap(): React.JSX.Element {
@@ -198,6 +280,20 @@ function ConversationRoute(): React.JSX.Element {
 }
 
 export function AppRoutes(): React.JSX.Element {
+  // After the first paint, never before it: `requestIdleCallback` runs when the browser has
+  // nothing better to do, which is precisely the budget these four chunks are allowed to spend.
+  // The `setTimeout` is for Safari, which still ships no idle callback; two seconds is well past
+  // any first paint and nothing is waiting on it.
+  useEffect(() => {
+    const idle = window.requestIdleCallback;
+    if (idle) {
+      const handle = idle.call(window, prefetchPanels);
+      return () => window.cancelIdleCallback(handle);
+    }
+    const timer = setTimeout(prefetchPanels, 2_000);
+    return () => clearTimeout(timer);
+  }, []);
+
   return (
     <Routes>
       <Route path="/" element={<Bootstrap />} />
@@ -206,11 +302,29 @@ export function AppRoutes(): React.JSX.Element {
       {/* None of these is a conversation, so they render inside the shell with no conversation:
           the sidebar, the top bar and the banner stay where they are, and Back returns to the
           thread the reader came from. */}
+      {/* `/review/:proposalId` and `/jobs/:jobId` open the same panel with one row already open.
+          Both were reachable only by clicking, so a reviewer could not be *sent* to a proposal and
+          an operator could not be sent to a run — the same argument the protocol document's own
+          comment below makes about a design id, and both of these ids appear in an answer too. The
+          panel reads the parameter itself rather than being handed a prop, so the URL stays the one
+          thing that says what is open. */}
       <Route
         path="/review"
         element={
           <AppShell>
-            <ReviewQueue />
+            <Panel what="Opening the review queue…">
+              <ReviewQueue />
+            </Panel>
+          </AppShell>
+        }
+      />
+      <Route
+        path="/review/:proposalId"
+        element={
+          <AppShell>
+            <Panel what="Opening the proposal…">
+              <ReviewQueue />
+            </Panel>
           </AppShell>
         }
       />
@@ -218,7 +332,19 @@ export function AppRoutes(): React.JSX.Element {
         path="/jobs"
         element={
           <AppShell>
-            <JobsPanel />
+            <Panel what="Opening the jobs list…">
+              <JobsPanel />
+            </Panel>
+          </AppShell>
+        }
+      />
+      <Route
+        path="/jobs/:jobId"
+        element={
+          <AppShell>
+            <Panel what="Opening the run…">
+              <JobsPanel />
+            </Panel>
           </AppShell>
         }
       />
@@ -231,7 +357,9 @@ export function AppRoutes(): React.JSX.Element {
         path="/protocols"
         element={
           <AppShell>
-            <ProtocolsPanel />
+            <Panel what="Opening the protocols…">
+              <ProtocolsPanel />
+            </Panel>
           </AppShell>
         }
       />
@@ -239,7 +367,9 @@ export function AppRoutes(): React.JSX.Element {
         path="/protocols/:designId"
         element={
           <AppShell>
-            <ProtocolDocument />
+            <Panel what="Opening the protocol…">
+              <ProtocolDocument />
+            </Panel>
           </AppShell>
         }
       />

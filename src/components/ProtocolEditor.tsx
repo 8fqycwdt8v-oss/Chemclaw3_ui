@@ -26,7 +26,7 @@
  * assignment would put the map and the arms out of step with nothing to notice).
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
@@ -180,6 +180,17 @@ type State =
   | { status: 'conflict' }
   | { status: 'failed'; message: string };
 
+/**
+ * Has anything actually been typed?
+ *
+ * Compared as JSON against the revision this form was seeded from, rather than tracked with a flag
+ * per field: a chemist who changes 60 °C to 70 and back has not edited the protocol, and a dirty
+ * flag would still stop them closing. One `JSON.stringify` of a document this size is microseconds
+ * and it runs on a close attempt, not on a keystroke.
+ */
+const isDirty = (draft: ExperimentDesign, original: ExperimentDesign, note: string): boolean =>
+  note.trim() !== '' || JSON.stringify(draft) !== JSON.stringify(original);
+
 export function ProtocolEditor({
   designId,
   revision,
@@ -210,7 +221,50 @@ export function ProtocolEditor({
   const [draft, setDraft] = useState<ExperimentDesign>(() => clone(revision.design));
   const [note, setNote] = useState('');
   const [state, setState] = useState<State>({ status: 'editing' });
+  /** Set when a close was refused because there were edits to lose. Cleared by either answer. */
+  const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const { auth } = useAuth();
+
+  const dirty = (): boolean => isDirty(draft, revision.design, note);
+
+  /**
+   * Stand between an edited form and every way of closing it.
+   *
+   * **This is the one screen in the app where a human writes**, and it had no unsaved-work guard at
+   * all. `SheetContent` is a Radix dialog, so Escape and a click on the overlay both close it; the
+   * document page renders the editor as `{editing && <ProtocolEditor …>}`, so closing *unmounts*
+   * it; and `draft` is component state seeded once. Twenty corrected setpoints, one stray Escape,
+   * gone — no confirmation, no draft, nothing to undo. Every other irreversible act in this
+   * codebase is confirmed (`ConfirmDialog` on the plan decision, on a protocol status move, on
+   * Save here), and this was the only irreversible *loss* that was not.
+   *
+   * A refusal-then-confirm rather than a nested `AlertDialog`: a modal on top of a modal is a focus
+   * trap inside a focus trap, and the question — "you have edits, discard them?" — belongs in the
+   * panel that holds them.
+   */
+  const requestClose = (next: boolean): void => {
+    if (next) {
+      onOpenChange(true);
+      return;
+    }
+    if (dirty() && !confirmingDiscard) {
+      setConfirmingDiscard(true);
+      return;
+    }
+    onOpenChange(false);
+  };
+
+  // The browser's own version of the same guard, for the reload and the closed tab. The text is the
+  // browser's to choose — every engine ignores a custom string — so this only asks for the prompt.
+  useEffect(() => {
+    if (!open) return;
+    const warn = (e: BeforeUnloadEvent): void => {
+      if (!dirty()) return;
+      e.preventDefault();
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  });
 
   const setSetpoint = <K extends keyof Setpoints>(key: K, value: Setpoints[K]): void =>
     setDraft((d) => ({
@@ -321,13 +375,59 @@ export function ProtocolEditor({
       .join(', ');
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" title="Edit the protocol" className="w-[min(56rem,95vw)]">
+    <Sheet open={open} onOpenChange={requestClose}>
+      <SheetContent
+        side="right"
+        title="Edit the protocol"
+        className="w-[min(56rem,95vw)]"
+        // Radix closes on both of these before `onOpenChange` can decline, so the interception has
+        // to happen here as well as there.
+        onEscapeKeyDown={(e) => {
+          if (dirty() && !confirmingDiscard) {
+            e.preventDefault();
+            setConfirmingDiscard(true);
+          }
+        }}
+        onPointerDownOutside={(e) => {
+          if (dirty() && !confirmingDiscard) {
+            e.preventDefault();
+            setConfirmingDiscard(true);
+          }
+        }}
+      >
         <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-5">
           <p className="text-xs text-ink-muted">
             Editing revision {revision.revision} of <span className="font-mono">{designId}</span>.
             Saving writes a new revision attributed to you; nothing is overwritten.
           </p>
+
+          {confirmingDiscard && (
+            <div
+              role="alertdialog"
+              aria-label="Discard your edits?"
+              className="flex flex-col gap-2 rounded-lg border border-danger/40 bg-danger-soft px-3 py-2 text-xs text-danger-ink"
+            >
+              <p>
+                <strong>You have edits that have not been saved.</strong> Closing this panel throws
+                them away — there is no draft and nothing to undo.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="outline" onClick={() => setConfirmingDiscard(false)}>
+                  Keep editing
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline-destructive"
+                  onClick={() => {
+                    setConfirmingDiscard(false);
+                    onOpenChange(false);
+                  }}
+                >
+                  Discard my edits
+                </Button>
+              </div>
+            </div>
+          )}
 
           {state.status === 'conflict' && (
             <div
@@ -615,7 +715,7 @@ export function ProtocolEditor({
                 confirmLabel="Save revision"
                 onConfirm={() => void save()}
               />
-              <Button size="sm" variant="outline" onClick={() => onOpenChange(false)}>
+              <Button size="sm" variant="outline" onClick={() => requestClose(false)}>
                 Cancel
               </Button>
             </div>

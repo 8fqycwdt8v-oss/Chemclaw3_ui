@@ -93,6 +93,41 @@ describe('an upstream that accepts and never answers', () => {
     expect(answer.ms).toBeLessThan(UPSTREAM_HEADERS_TIMEOUT_MS * 6);
   });
 
+  it('names the request in both lines it writes about it', async () => {
+    // A 502 is the line somebody comes looking for, and it was guaranteed not to have a
+    // correlation id: the id was read off the upstream's response, and by definition there is not
+    // one. Both the warning and the access line now carry the id the front door minted and sent
+    // upstream, so the service's own record of the request it never answered joins to these.
+    const written: string[] = [];
+    const stdout = vi
+      .spyOn(console, 'log')
+      .mockImplementation((l: unknown) => void written.push(String(l)));
+    const stderr = vi
+      .spyOn(console, 'error')
+      .mockImplementation((l: unknown) => void written.push(String(l)));
+    try {
+      await get('/api/jobs');
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+    }
+
+    const records = written.flatMap((line) => {
+      try {
+        return [JSON.parse(line) as { message?: string; fields?: Record<string, unknown> }];
+      } catch {
+        return [];
+      }
+    });
+    const failure = records.find((r) => r.message === 'upstream error');
+    const access = records.find((r) => r.message === 'request');
+
+    expect(failure?.fields?.correlation_id).toMatch(/^[0-9a-f]{32}$/);
+    expect(access?.fields).toMatchObject({ status: 502 });
+    // The same id on both, or they are two incidents rather than one.
+    expect(access?.fields?.correlation_id).toBe(failure?.fields?.correlation_id);
+  });
+
   it('gives the socket pool back, so /api recovers without anyone intervening', async () => {
     // **What the bound buys is recovery, not immunity**, and the first draft of this test asked
     // for the wrong one: while the pool really is full every other request queues behind it, so a

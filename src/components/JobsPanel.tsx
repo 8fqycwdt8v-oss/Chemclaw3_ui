@@ -16,6 +16,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { useNavigate, useParams } from 'react-router';
 import { Search, Server } from 'lucide-react';
 import { useAuth, useIsReviewer } from '../auth/AuthContext.tsx';
 import { api, type DurableJobStatus, type JobRecordSummary } from '../api/client.ts';
@@ -220,13 +221,19 @@ function JobSheet({
 
 export function JobsPanel(): React.JSX.Element {
   const { auth, ready } = useAuth();
+  // `/jobs/:jobId` opens this panel with that run's sheet already up, so a run can be *sent* to
+  // somebody rather than only clicked to. The parameter is read here rather than passed in, for
+  // the reason `ProtocolDocument` gives about its own design id: the URL is the one thing that
+  // says what is open, so a shared link and a reload land in the same place.
+  const { jobId: deepLinked } = useParams();
+  const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [submitted, setSubmitted] = useState('');
   // The result carries the query it answers, so "loading" is derived rather than set: clearing
   // the list on the way into the effect is a second render and a lint error, and this way a
   // stale list is never shown under a new search either.
   const [loaded, setLoaded] = useState<{ query: string; list: JobRecordSummary[] } | null>(null);
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(deepLinked ?? null);
   const jobs = loaded?.query === submitted ? loaded.list : null;
 
   useEffect(() => {
@@ -325,7 +332,13 @@ export function JobsPanel(): React.JSX.Element {
             jobId={openId}
             jobName={jobs?.find((job) => job.job_id === openId)?.job ?? ''}
             open
-            onOpenChange={(next) => !next && setOpenId(null)}
+            onOpenChange={(next) => {
+              if (next) return;
+              setOpenId(null);
+              // Closing a sheet the URL opened has to move the URL too, or Back is the only way
+              // out of a route that keeps reopening it.
+              if (deepLinked) void navigate('/jobs', { replace: true });
+            }}
           />
         )}
       </div>

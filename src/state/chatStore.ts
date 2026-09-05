@@ -51,8 +51,35 @@ interface PersistedState {
   conversations: Record<string, Conversation>;
   order: string[];
   activeId: string | null;
+  /**
+   * The half-written question in each conversation's composer.
+   *
+   * Persisted because losing it is the one data loss in this app the chemist did not ask for and
+   * cannot undo: `drafts` was in the store and absent from `partialize`, so a reload threw away
+   * what they were typing. It compounds with a reload during a long turn, which loses the answer
+   * too. Cheap — a draft is bounded by the composer's own message cap and there is one per
+   * conversation.
+   */
+  drafts: Record<string, string>;
   jobFeed: JobFeedItem[];
+  /**
+   * Standing-query findings, claimed from the service's mailbox.
+   *
+   * Persisted because **the read is the consume**: `GET /digests` marks every row it returns as
+   * consumed and never re-delivers it, so a digest held only in component state is one a reload
+   * destroys. Claimed once per page rather than polled, for the same reason.
+   */
+  digests: DigestCard[];
   notifyOnJobComplete: boolean;
+}
+
+/** One claimed digest, plus what the wire shape does not carry. */
+export interface DigestCard {
+  query: string;
+  noteIds: string[];
+  /** When WE claimed it. The service sends no timestamp, so nothing here may imply one. */
+  receivedAt: number;
+  dismissed: boolean;
 }
 
 /**
@@ -121,22 +148,59 @@ function migrateV2toV3(state: Partial<PersistedState>): Partial<PersistedState> 
  * notices until an upgrade lands on a real machine.
  */
 export function migratePersisted(persisted: unknown, version: number): PersistedState {
+  // **A version from the future is not migrated — it is discarded.** zustand calls `migrate`
+  // whenever the stored version *differs* from the configured one, newer included, and with only
+  // `if (version < n)` steps both guards are then false: a v4 slice was returned unchanged, cast
+  // to `PersistedState`, and handed to the app. Measured against a v4 payload whose `jobFeed` was
+  // a string, `useJobNotifications` did `jobFeed.filter(...)` on it and threw during the render of
+  // `AppShell` — which the root boundary answers by replacing the whole app with the crash screen,
+  // on every reload, because the value is still on disk.
+  //
+  // The trigger is not a hostile actor, it is an ordinary release: a canary or a rollback puts a
+  // browser that has run the newer bundle back on the older one. There is nothing an older reader
+  // can safely do with a shape written by a schema it has never seen, so this returns the empty
+  // state — the same answer `chatStorage.getItem` already gives for unparseable JSON, and a clean
+  // first run rather than a boot loop.
+  if (version > CHAT_PERSIST_VERSION) return emptyPersistedState();
+
   const steps: ((s: Partial<PersistedState>) => Partial<PersistedState>)[] = [];
   if (version < 2) steps.push(migrateV1toV2);
   if (version < 3) steps.push(migrateV2toV3);
 
   const state = persisted as Partial<PersistedState> | undefined;
-  if (!state?.conversations || !state.order)
-    return {
-      conversations: {},
-      order: [],
-      activeId: null,
-      jobFeed: [],
-      notifyOnJobComplete: false,
-    };
+  if (!state?.conversations || !state.order) return emptyPersistedState();
 
-  return steps.reduce<Partial<PersistedState>>((acc, step) => step(acc), state) as PersistedState;
+  try {
+    const migrated = steps.reduce<Partial<PersistedState>>((acc, step) => step(acc), state);
+    // Fields added after v3 without a version bump, because they are additive and an absent one is
+    // indistinguishable from an empty one. A bump would be for a field whose *absence* means
+    // something different from its empty value; neither of these is that.
+    return {
+      ...migrated,
+      drafts: migrated.drafts ?? {},
+      digests: migrated.digests ?? [],
+    } as PersistedState;
+  } catch {
+    // A step that throws on a shape it did not expect — `migrateV1toV2` does exactly this on a
+    // non-array `order` or `messages` — used to surface as an unhandled rejection out of
+    // `persist.rehydrate()`, which no caller awaits. Same answer as above: a slice this reader
+    // cannot make sense of is a slice it does not have.
+    return emptyPersistedState();
+  }
 }
+
+/** The schema version this build writes, and the ceiling `migratePersisted` refuses above. */
+const CHAT_PERSIST_VERSION = 3;
+
+const emptyPersistedState = (): PersistedState => ({
+  conversations: {},
+  order: [],
+  activeId: null,
+  drafts: {},
+  jobFeed: [],
+  digests: [],
+  notifyOnJobComplete: false,
+});
 
 /** Keep persisted state bounded — see `partialize` below. */
 const MAX_CONVERSATIONS = 30;
@@ -417,6 +481,8 @@ export interface ChatState {
   /** Cross-turn job endings — successes and failures — from `GET /sessions/{id}/events`.
    *  Persisted since v3. */
   jobFeed: JobFeedItem[];
+  /** Standing-query findings claimed from the service's destructive mailbox — see `DigestCard`. */
+  digests: DigestCard[];
   /** True once the backend has told us twice that we are over its stream cap. */
   jobStreamsThrottled: boolean;
   /**
@@ -478,6 +544,24 @@ export interface ChatState {
   setSessionProfile: (conversationId: string, profile: string) => void;
   setStreaming: (s: ChatState['streaming']) => void;
   pushJobFinished: (event: JobTerminalEvent, sessionId: string) => void;
+  /**
+   * Record digests claimed from the service, dropping any this browser already holds.
+   *
+   * Idempotent on (query, note ids): the claim is destructive so a row cannot arrive twice from the
+   * service, but a second tab claiming concurrently, or a StrictMode double-effect, can both reach
+   * this — and a duplicated finding reads as two findings.
+   */
+  addDigests: (digests: { query: string; note_ids: string[] }[]) => void;
+  dismissDigest: (index: number) => void;
+  /**
+   * Make a local conversation for a session the service forked from `parentId`.
+   *
+   * The parent's messages are carried over so the branch reads as a branch rather than as an empty
+   * thread that happens to share a history on the server — the service copied them, and a local
+   * conversation that showed none of them would be describing a different fork. Returns the new
+   * conversation's id, or `null` when the parent is gone.
+   */
+  adoptFork: (parentId: string, sessionId: string) => string | null;
   dismissJobItem: (jobId: string) => void;
   restoreJobItem: (jobId: string) => void;
   markJobsSeen: () => void;
@@ -512,25 +596,86 @@ const updateAssistant = (
 };
 
 /**
- * Drop the oldest half of the persisted conversations, so a payload that was refused can be
- * retried as a smaller one. Returns `null` when there is nothing left to drop.
+ * The fewest messages one conversation is worth keeping on disk.
+ *
+ * The floor of the second shedding stage below. Under this the conversation is a title and a
+ * fragment, which is worse than useless to come back to — at that point dropping the write and
+ * saying so is the honest answer.
+ */
+const MIN_PERSISTED_MESSAGES = 10;
+
+/**
+ * Write a settled answer once, not twice.
+ *
+ * `applyEvent`'s answer branch sets `finalText` and deliberately leaves `streamedText` alone
+ * ("Replace, never append"), and every reader picks one of the two — `finalText || streamedText`
+ * in `MessageList` and `Sidebar`, `finalText ?? streamedText` in `sendMessage`. `partialize` then
+ * wrote the message object whole, so a settled answer went to disk **twice, byte for byte**.
+ * Measured on one 10,800-character answer: 22,544 characters persisted, **2.09x**. That is half the
+ * effective history budget, and the single largest contributor to reaching the quota cliff the
+ * shedding above exists to handle.
+ *
+ * Only when `finalText` is a non-empty string, which is exactly the condition under which no reader
+ * consults `streamedText`. An aborted turn, a loop- or spend-capped turn, and an `answer` event
+ * carrying `text: ''` all leave `finalText` null or empty — those keep their streamed text, because
+ * there it is the only copy of the answer there is. `turnActivity` also reads `streamedText`, and
+ * it is documented as meaningful only while `status === 'streaming'`, which a persisted message
+ * never is: the branch above rewrites those to `aborted`.
+ */
+function withoutDuplicateAnswer(m: ChatMessage): ChatMessage {
+  if (m.role !== 'assistant' || !m.finalText) return m;
+  return m.streamedText ? { ...m, streamedText: '' } : m;
+}
+
+/**
+ * Make a refused payload smaller, in two stages, and never to nothing.
+ *
+ * **Stage one: halve the conversations, but never below one.** The old form was
+ * `slice(0, Math.floor(order.length / 2))`, and at one conversation `Math.floor(1 / 2)` is `0` — so
+ * it returned a state with `order: []` and `conversations: {}`, which is not `null`, so
+ * `writeChatStorageNow` wrote it and **returned successfully**. Measured with a single
+ * over-quota conversation: two refusals, one write, `persisted conversations 0`, and
+ * `storageWritable` still `true`, so the "history could not be saved" warning never fired. Every
+ * other conversation — including ones that would have fit — was gone from disk after the next
+ * reload, silently, reported as a success.
+ *
+ * **Stage two: halve the last conversation's messages.** One conversation can exceed the quota on
+ * its own (a long turn with large tool results), and stage one has nothing left to drop. Keeping
+ * the newest half is the right end to keep: what a chemist comes back for is the end of the
+ * conversation.
+ *
+ * `null` means it cannot be made to fit and the caller should latch off — which is what the
+ * existing `storageWritable` flag and its warning were always for, and what the empty-state bug
+ * was silently routing around.
  */
 function shedOldest(state: PersistedState): PersistedState | null {
-  if (state.order.length === 0) return null;
-  const order = state.order.slice(0, Math.floor(state.order.length / 2));
-  const conversations: Record<string, Conversation> = {};
-  for (const id of order) {
-    const conversation = state.conversations[id];
-    if (conversation) conversations[id] = conversation;
+  if (state.order.length > 1) {
+    const order = state.order.slice(0, Math.max(1, Math.floor(state.order.length / 2)));
+    const conversations: Record<string, Conversation> = {};
+    for (const id of order) {
+      const conversation = state.conversations[id];
+      if (conversation) conversations[id] = conversation;
+    }
+    return {
+      ...state,
+      order,
+      conversations,
+      activeId:
+        state.activeId && conversations[state.activeId] ? state.activeId : (order[0] ?? null),
+      jobFeed: state.jobFeed.filter(
+        (j) => j.conversationId === null || conversations[j.conversationId],
+      ),
+    };
   }
+
+  const id = state.order[0];
+  const only = id ? state.conversations[id] : undefined;
+  if (!id || !only || only.messages.length <= MIN_PERSISTED_MESSAGES) return null;
+
+  const keep = Math.max(MIN_PERSISTED_MESSAGES, Math.floor(only.messages.length / 2));
   return {
     ...state,
-    order,
-    conversations,
-    activeId: state.activeId && conversations[state.activeId] ? state.activeId : (order[0] ?? null),
-    jobFeed: state.jobFeed.filter(
-      (j) => j.conversationId === null || conversations[j.conversationId],
-    ),
+    conversations: { [id]: { ...only, messages: only.messages.slice(-keep) } },
   };
 }
 
@@ -561,14 +706,143 @@ let scheduledValue: StorageValue<PersistedState> | null = null;
 let throttleTimer: ReturnType<typeof setTimeout> | null = null;
 let lastWriteAt = 0;
 
+/**
+ * How many conversations this browser has been shown to accept, learned from a refusal.
+ *
+ * **The shed used to be forgotten the moment it succeeded**, and that is what made the over-quota
+ * state permanent rather than transient. `shedOldest` operates on the partialized *snapshot* and
+ * never touches memory, so the next flush 750 ms later re-partialized all thirty conversations,
+ * re-stringified the whole payload, was refused, shed, and stringified again. Measured at the
+ * caps' own ceiling (30 conversations x 100 messages x 2.5 kB, 5 MiB quota): **37.5 ms of blocking
+ * main-thread work and 12.3 MiB stringified per flush, ten refusals, for every 750 ms of the tab's
+ * life** — two dropped frames per throttle window, taken *while an answer is streaming*, which is
+ * exactly the jank `PERSIST_THROTTLE_MS` was introduced to avoid.
+ *
+ * Remembering the number that fit turns that into one shed cycle instead of one per write. It only
+ * ever tightens within a page's life and is deliberately not persisted: a quota is a property of
+ * the browser at a moment, and re-learning it costs one cycle per load rather than pinning a
+ * pessimistic bound for ever. `MAX_CONVERSATIONS` remains the ceiling; this is a floor under it.
+ */
+let learnedConversationCap = MAX_CONVERSATIONS;
+
+/** Apply what we have learned, cheaply, before stringifying anything. */
+function withinLearnedCap(state: PersistedState): PersistedState {
+  if (state.order.length <= learnedConversationCap) return state;
+  const order = state.order.slice(0, learnedConversationCap);
+  const conversations: Record<string, Conversation> = {};
+  for (const id of order) {
+    const conversation = state.conversations[id];
+    if (conversation) conversations[id] = conversation;
+  }
+  return {
+    ...state,
+    order,
+    conversations,
+    activeId: state.activeId && conversations[state.activeId] ? state.activeId : (order[0] ?? null),
+    jobFeed: state.jobFeed.filter(
+      (j) => j.conversationId === null || conversations[j.conversationId],
+    ),
+  };
+}
+
+/**
+ * Conversations this tab deliberately removed, so the merge below cannot resurrect them.
+ *
+ * In memory and per tab, which is the right lifetime: it only has to outlive the write that would
+ * otherwise bring the conversation back from the copy another tab left on disk, and a reload has
+ * already read the post-deletion state.
+ */
+const tombstoned = new Set<string>();
+
+/** Record a deliberate removal, so a later merge does not undo it. See `mergeWithStored`. */
+export function forgetConversationOnDisk(...ids: string[]): void {
+  for (const id of ids) tombstoned.add(id);
+}
+
+/**
+ * Fold in any conversation another tab wrote that this one has never heard of.
+ *
+ * **Two tabs on one account resolve to the same key, read it once at boot, and then each write
+ * their entire map every 750 ms.** So the write was a *replace* by two writers with divergent
+ * views: a conversation started in tab B was erased from disk by tab A's next flush and was gone
+ * on the next reload. Nothing anywhere coordinated them — there is no `storage` listener and no
+ * `BroadcastChannel` in this app — and `hydrateChatForAccount`'s own comment makes exactly this
+ * argument about a second `rehydrate()` clobbering live state, one scope out.
+ *
+ * A merge rather than a lock, because the conflict is not a real one: two tabs almost never edit
+ * the *same* conversation, they hold different ones. Same-id collisions keep the newer
+ * `updatedAt`, which is the tab that actually did something. Ids this tab deleted are skipped, or
+ * "delete" would mean "delete until the other tab flushes".
+ *
+ * What this deliberately does not do is push the other tab's conversations onto *this* tab's
+ * screen while it is open. That is live cross-tab sync — a feature, with a real question about
+ * rehydrating over an in-flight turn — and the sidebar already learns about conversations from
+ * elsewhere through `GET /sessions`. This is the narrower promise: nothing you did in one tab is
+ * destroyed by the other.
+ */
+function mergeWithStored(name: string, next: PersistedState): PersistedState {
+  let stored: PersistedState | undefined;
+  try {
+    const raw = localStorage.getItem(name);
+    if (!raw) return next;
+    stored = (JSON.parse(raw) as StorageValue<PersistedState>).state;
+  } catch {
+    // Unreadable or not ours to parse. There is nothing to merge, and refusing to write would
+    // turn an unreadable neighbour into a total loss of our own history.
+    return next;
+  }
+  if (!stored?.conversations || !Array.isArray(stored.order)) return next;
+
+  const extra = stored.order.filter((id) => {
+    if (tombstoned.has(id)) return false;
+    const theirs = stored.conversations[id];
+    if (!theirs) return false;
+    const ours = next.conversations[id];
+    return !ours || theirs.updatedAt > ours.updatedAt;
+  });
+  if (extra.length === 0) return next;
+
+  const conversations = { ...next.conversations };
+  for (const id of extra) conversations[id] = stored.conversations[id] as Conversation;
+  return {
+    ...next,
+    conversations,
+    order: [...next.order, ...extra.filter((id) => !next.order.includes(id))],
+    drafts: {
+      ...Object.fromEntries(extra.map((id) => [id, stored.drafts?.[id] ?? ''])),
+      ...next.drafts,
+    },
+  };
+}
+
 function writeChatStorageNow(name: string, value: StorageValue<PersistedState>): void {
   if (!storageWritable) return;
-  let state: PersistedState | null = value.state;
+  let state: PersistedState | null = withinLearnedCap(mergeWithStored(name, value.state));
+  /**
+   * Whether this write had to shed to land — and the only condition under which anything is
+   * learned.
+   *
+   * Learning from every *success* is what the first version of this did, and it was wrong in the
+   * one way that matters: the store's own first write happens before any conversation exists, so
+   * `order.length` is `0`, and the cap latched to zero and persisted an empty slice from then on.
+   * Caught by `tests/persistQuota.test.ts`, which is exactly the shape of bug that test exists
+   * for — a fix for silent data loss that causes silent data loss.
+   *
+   * A refusal is the only evidence about this browser's quota. A success says nothing: it may
+   * simply be a small payload.
+   */
+  let shed = false;
   while (state) {
     try {
       localStorage.setItem(name, JSON.stringify({ ...value, state }));
+      // Only ever downward, and never to zero: a cap of nothing is the empty-state bug again by
+      // another route.
+      if (shed) {
+        learnedConversationCap = Math.max(1, Math.min(learnedConversationCap, state.order.length));
+      }
       return;
     } catch {
+      shed = true;
       state = shedOldest(state);
     }
   }
@@ -709,6 +983,7 @@ export const useChatStore = create<ChatState>()(
       composerLock: false,
       banner: null,
       drafts: {},
+      digests: [],
       sessionProfiles: {},
       jobFeed: [],
       jobStreamsThrottled: false,
@@ -761,6 +1036,9 @@ export const useChatStore = create<ChatState>()(
         // by nobody else, so leaving it behind would be a rail for a transcript that no longer
         // exists.
         useEntityStore.getState().forget(id);
+        // And a tombstone, so the cross-tab merge in `writeChatStorageNow` cannot bring it back
+        // from a copy another tab left on disk.
+        forgetConversationOnDisk(id);
 
         set((s) => {
           const { [id]: _removed, ...rest } = s.conversations;
@@ -790,6 +1068,7 @@ export const useChatStore = create<ChatState>()(
         // Same reason as `deleteConversation`: every conversation these indexes describe is about
         // to stop existing.
         useEntityStore.getState().clear();
+        forgetConversationOnDisk(...get().order);
         set(() => {
           const fresh = newConversation();
           return {
@@ -1207,6 +1486,56 @@ export const useChatStore = create<ChatState>()(
         return get().conversations[conversationId]?.sessionId ?? sessionId;
       },
 
+      adoptFork(parentId, sessionId) {
+        const parent = get().conversations[parentId];
+        if (!parent) return null;
+        const branch: Conversation = {
+          ...newConversation(),
+          sessionId,
+          title: `${parent.title} (branch)`,
+          // The parent's history, minus anything still in flight: a fork is taken from a settled
+          // thread (the service refuses one with a turn running), so a message marked `streaming`
+          // here would be a spinner nothing can ever end.
+          messages: parent.messages.filter(
+            (m) => !(m.role === 'assistant' && m.status === 'streaming'),
+          ),
+          // The service holds the authoritative copy, so the transcript rehydrate is what
+          // reconciles the two if they differ.
+          sessionOrigin: 'server',
+        };
+        set((s) => ({
+          conversations: { ...s.conversations, [branch.id]: branch },
+          order: [branch.id, ...s.order],
+          activeId: branch.id,
+        }));
+        return branch.id;
+      },
+
+      addDigests(claimed) {
+        if (claimed.length === 0) return;
+        set((s) => {
+          const key = (query: string, ids: string[]): string => `${query}\u0000${ids.join(',')}`;
+          const known = new Set(s.digests.map((d) => key(d.query, d.noteIds)));
+          const additions = claimed
+            .filter((d) => !known.has(key(d.query, d.note_ids)))
+            .map((d) => ({
+              query: d.query,
+              noteIds: d.note_ids,
+              receivedAt: Date.now(),
+              dismissed: false,
+            }));
+          return additions.length > 0 ? { digests: [...additions, ...s.digests] } : {};
+        });
+      },
+
+      dismissDigest(index) {
+        // A flag, not a delete, for the same reason the job feed uses one: the service's copy was
+        // consumed by the read that produced this, so this card is the only copy there is.
+        set((s) => ({
+          digests: s.digests.map((d, i) => (i === index ? { ...d, dismissed: true } : d)),
+        }));
+      },
+
       dismissJobItem(jobId) {
         // A flag, not a delete. The feed is durable now, so an unguarded click on a 24px control
         // would otherwise be a permanent deletion of the only copy — the backend's is consumed.
@@ -1231,7 +1560,7 @@ export const useChatStore = create<ChatState>()(
       // `skipHydration` below: nothing is read off disk until that call, so one chemist's transcript
       // is never rehydrated into the next chemist's session on a shared workstation.
       name: chatStorageKey(null),
-      version: 3,
+      version: CHAT_PERSIST_VERSION,
       storage: chatStorage,
 
       // Do NOT auto-load on store creation: which account's slot to read is not known until the
@@ -1251,18 +1580,25 @@ export const useChatStore = create<ChatState>()(
           if (!conversation) continue;
           conversations[id] = {
             ...conversation,
-            messages: conversation.messages.slice(-MAX_PERSISTED_MESSAGES).map((m) =>
-              m.role === 'assistant' && m.status === 'streaming'
-                ? {
-                    ...m,
-                    status: 'aborted' as const,
-                    error: {
-                      kind: 'stream' as ApiErrorKind,
-                      message: 'Interrupted by a page reload.',
-                    },
-                  }
-                : m,
-            ),
+            messages: conversation.messages
+              .slice(-MAX_PERSISTED_MESSAGES)
+              .map((m) =>
+                m.role === 'assistant' && m.status === 'streaming'
+                  ? {
+                      ...m,
+                      status: 'aborted' as const,
+                      // Not just a status: the answer this turn was writing may well exist on the
+                      // server, and this is what tells the next boot to go and look. See
+                      // `AssistantMessage.interruptedByReload`.
+                      interruptedByReload: true,
+                      error: {
+                        kind: 'stream' as ApiErrorKind,
+                        message: 'Interrupted by a page reload.',
+                      },
+                    }
+                  : m,
+              )
+              .map(withoutDuplicateAnswer),
           };
         }
 
@@ -1277,11 +1613,23 @@ export const useChatStore = create<ChatState>()(
 
         // sessionId IS persisted: it may well still be alive after a reload, and if it is not,
         // the 404 path recreates it transparently.
+        // Drafts, for the conversations that survived the trim — an orphan draft is a string
+        // keyed by an id nothing can open. See the field's own note on `PersistedState`.
+        const drafts: Record<string, string> = {};
+        for (const [id, text] of Object.entries(state.drafts)) {
+          if (text && conversations[id]) drafts[id] = text;
+        }
+
         return {
           conversations,
           order,
           activeId: state.activeId,
+          drafts,
           jobFeed,
+          // Aged out on the same clock as the job feed, and for the same reason: a finding from
+          // last month is history rather than news. Never dropped for being *unread* — the claim
+          // that produced it cannot be repeated.
+          digests: state.digests.filter((d) => d.receivedAt > cutoff),
           notifyOnJobComplete: state.notifyOnJobComplete,
         };
       },

@@ -31,6 +31,9 @@ const base: BffConfig = {
   upstreamConnectTimeoutMs: 10_000,
   upstreamHeadersTimeoutMs: 120_000,
   requestTimeoutMs: 130_000,
+  headersTimeoutMs: 30_000,
+  maxConnections: 1_024,
+  shutdownDrainMs: 10_000,
   maxUpstreamSockets: 512,
   maxBodyBytes: 2 * 1024 * 1024,
   maxUploadBytes: 32 * 1024 * 1024,
@@ -155,6 +158,67 @@ describe('the checks that were already there still work', () => {
   it('requires the Entra settings under msal', () => {
     const problems = validateConfig(config({ authMode: 'msal', rawAuthMode: 'msal' }));
     expect(problems).toHaveLength(3);
+  });
+});
+
+/**
+ * An upstream address with a path on it is an address this process cannot use.
+ *
+ * `server/proxy.ts` and `server/ready.ts` both take `protocol`/`hostname`/`port` off this URL and
+ * never touch `pathname`; the path they send is built from the route table and starts at the
+ * gateway root. So `https://gw.example/chemclaw` — the ordinary shape for a service behind a
+ * shared ingress — boots clean, logs the address it was given, reports ready, and then asks the
+ * gateway for `/jobs` when the service is at `/chemclaw/jobs`. Every `/api` route 404s, and the
+ * one line that would explain it looks correct.
+ *
+ * Refused rather than honoured, which is the posture this file already takes for `AUTH_MODE` and
+ * `MAX_MESSAGE_CHARS`: a prefix belongs in the ingress, and a half-honoured one is the same silent
+ * 404 with more places to look for it.
+ */
+describe('a path prefix on CHEMCLAW_API_URL', () => {
+  it('is refused, and the refusal names the path', () => {
+    const problems = validateConfig(config({ apiUrl: 'https://gw.example/chemclaw' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('/chemclaw');
+    // And it names the address that would work, because the operator's next move is to write one.
+    expect(problems[0]).toContain('https://gw.example');
+  });
+
+  it('is refused however deep it is, trailing slash included', () => {
+    for (const url of [
+      'http://svc:8080/api',
+      'http://svc:8080/a/b/',
+      'https://gw.example/chemclaw/',
+    ]) {
+      expect(validateConfig(config({ apiUrl: url }))).toHaveLength(1);
+    }
+  });
+
+  it('leaves a bare origin alone, with or without the root slash', () => {
+    for (const url of [
+      'http://127.0.0.1:8080',
+      'http://127.0.0.1:8080/',
+      'http://chemclaw:8080',
+      'https://chemclaw.example',
+    ]) {
+      expect(validateConfig(config({ apiUrl: url }))).toEqual([]);
+    }
+  });
+
+  it('does not add a second complaint to a scheme that was already wrong', () => {
+    // `ftp://example.com/x` is one misconfiguration, not two. The scheme is the thing to fix.
+    const problems = validateConfig(config({ apiUrl: 'ftp://example.com/x' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('must be http(s)');
+  });
+
+  it('is what the shipped default satisfies', async () => {
+    vi.stubEnv('CHEMCLAW_API_URL', '');
+    vi.resetModules();
+    const fresh = await import('../server/config.ts');
+    expect(fresh.validateConfig(fresh.cfg).filter((p) => p.includes('CHEMCLAW_API_URL'))).toEqual(
+      [],
+    );
   });
 });
 

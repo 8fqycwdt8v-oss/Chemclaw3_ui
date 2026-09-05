@@ -159,6 +159,14 @@ async function openStream(
 
   /** A frame arrived, so this stream is doing its job. */
   const delivering = (): void => {
+    // The one-shot re-auth below is spent per *rejection*, not per session, and this is where it
+    // is given back. `reauthed` was set once and never cleared, so a stream that refreshed its
+    // token, then delivered for an hour, then hit the ordinary next expiry took the `return`
+    // instead of the refresh — permanently, for the life of the page. Measured over
+    // `401 → 200 (one job_completed frame, then close) → 401`: requests 3, provider asked 1,
+    // jobFeed 1, and every completion after that lost. A connection that delivered is proof the
+    // credential it used was good, which is exactly what makes the next 401 a *new* fact.
+    reauthed = false;
     if (failures === 0) return;
     failures = 0;
     useChatStore.getState().setJobStreamFailing(sessionId, false);
@@ -191,14 +199,34 @@ async function openStream(
       // back in `Retry-After`; the stream cap sends no such header. Counting a limiter refusal as
       // evidence that this tab holds too many streams would drop it to one stream for the life of
       // the page over a budget that refills in seconds — so honour the number it sent, and leave
-      // the counter alone. It is the same signal `errorFromStatus` splits the two 429s on.
+      // `consecutive429`, the cap's own counter, alone. It is the same signal `errorFromStatus`
+      // splits the two 429s on. (The *failure* counter is a different fact and does now move; see
+      // the branch itself.)
       if (res.status === 429) {
         const wait = retryAfterSeconds(res.headers.get('retry-after'));
         if (wait !== null) {
-          // Bounded by the same ceiling the backoff has. The limiter's own number is seconds, so
-          // this never bites in practice; what it prevents is a header from somewhere else in the
-          // path silently switching job push-back off for an hour.
-          await sleep(Math.min(wait * 1_000, MAX_BACKOFF_MS), controller.signal);
+          // Honouring the number is right; honouring it *silently and for ever* was not. This was
+          // the one retry path that touched neither `failed()` nor `attempt` nor the log, so a
+          // limiter refusing steadily — plausibly *because* this tab keeps coming back at exactly
+          // the rate it asked for — was invisible. Measured over 120 s of one stream at
+          // `Retry-After: 1`: **121 requests, `jobStreamsFailing` empty**, nothing logged.
+          //
+          // So it counts like every other connect that delivered nothing, and past the reporting
+          // threshold the header stops being taken at face value: a limiter that has refused four
+          // times running is not describing a queue that clears in a second, and the backoff's
+          // 15-30 s ceiling is the honest pace for it. `jobStreamsThrottled` is deliberately NOT
+          // set — that flag means "this tab holds more streams than its share of the *stream*
+          // cap", which a request-rate refusal is no evidence of, and it is irreversible.
+          attempt += 1;
+          failed('rate_limited', 429);
+          if (failures >= FAILURES_BEFORE_REPORTING) {
+            await backoff(attempt, controller.signal);
+          } else {
+            // Bounded by the same ceiling the backoff has. The limiter's own number is seconds, so
+            // this never bites in practice; what it prevents is a header from somewhere else in
+            // the path silently switching job push-back off for an hour.
+            await sleep(Math.min(wait * 1_000, MAX_BACKOFF_MS), controller.signal);
+          }
           continue;
         }
         consecutive429 += 1;
@@ -223,6 +251,14 @@ async function openStream(
       if (res.status === 401) {
         if (reauthed || !(await auth.handleUnauthorized())) {
           logger.warn('jobstream.unauthorized', { sessionId });
+          // The indicator is raised here rather than through `failed()`, and immediately rather
+          // than after four attempts. `FAILURES_BEFORE_REPORTING` exists so a rollout blip does
+          // not raise a badge, and it works because a transient failure *repeats* — this one
+          // does not, because there is no next attempt to count. It was the only terminus in
+          // this loop that returned without telling anyone, so the one death mode that is
+          // permanent was the one that showed nothing: a conformer search finishing afterwards
+          // produced no card, no badge and no notification.
+          useChatStore.getState().setJobStreamFailing(sessionId, true);
           return;
         }
         reauthed = true;
@@ -295,18 +331,27 @@ function backoff(attempt: number, signal: AbortSignal): Promise<void> {
   return sleep(base * (0.5 + Math.random() * 0.5), signal);
 }
 
-/** Wait, resolving early if the stream is torn down — a timer nobody cancels outlives the tab's
- *  interest in the answer. */
+/**
+ * Wait, resolving early if the stream is torn down — a timer nobody cancels outlives the tab's
+ * interest in the answer.
+ *
+ * Both halves are cleaned up by whichever of them wins, and that is the fix rather than a
+ * tidy-up. `{ once: true }` removes a listener only when the event FIRES, and on the ordinary
+ * path it never does: the timer wins, the promise resolves, and the listener stays attached to a
+ * signal that lives for the whole stream. Measured on a stream held at the 15-30 s backoff cap
+ * for 12 simulated hours: **1,931 `abort` listeners added, 0 removed**, each retaining this
+ * closure and its timer id — from one stream, of the three a tab holds.
+ */
 function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    // Declared after `done` and read only from inside it, which is after `setTimeout` has
+    // returned — the two refer to each other, and this is the order that keeps both `const`.
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done);
   });
 }

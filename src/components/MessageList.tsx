@@ -21,7 +21,7 @@
  */
 
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ChevronUp, FlaskConical } from 'lucide-react';
+import { ChevronUp, ClipboardCopy, FlaskConical, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { AssistantMessage, ChatMessage, TraceEntry } from '../state/types.ts';
 import { Markdown } from './LazyMarkdown.tsx';
@@ -32,6 +32,7 @@ import { PlanStrip } from './PlanStrip.tsx';
 import { ActivityLine } from './ActivityLine.tsx';
 import { ResultBlock } from './ResultBlock.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
+import { prefill } from '../state/composerEvents.ts';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { entitiesOf, messagesFor, useEntityStore } from '../chem/entities.ts';
@@ -140,6 +141,53 @@ const ResultBlocks = memo(function ResultBlocks({
   );
 });
 
+/**
+ * Put the answer on the clipboard, and say whether it landed.
+ *
+ * The markdown the service sent rather than the rendered DOM: that is what a chemist pastes into an
+ * ELN, a ticket or a message, and it is the only form in which the citations survive as text.
+ * Before this, `navigator.clipboard` appeared exactly once in the whole app — on the crash screen —
+ * so getting an answer out meant selecting and dragging it, which takes the citation chips, the
+ * result tables and the figure marks with it.
+ *
+ * A refusal is shown rather than reported as an error, the same way `CrashScreen` handles it: a
+ * browser can decline the clipboard (no permission, an insecure origin, an old WebView) and the
+ * reader still has to be able to get the text out.
+ */
+function CopyAnswer({ text }: { text: string }): React.JSX.Element {
+  const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
+
+  const copy = (): void => {
+    const clipboard = navigator.clipboard;
+    if (!clipboard?.writeText) {
+      setState('failed');
+      return;
+    }
+    void clipboard.writeText(text).then(
+      () => {
+        setState('copied');
+        // Back to the affordance, so a second copy does not read as already done.
+        window.setTimeout(() => setState('idle'), 2_000);
+      },
+      () => setState('failed'),
+    );
+  };
+
+  return (
+    <div className="mt-1.5 flex items-center gap-2">
+      <Button variant="ghost" size="xs" onClick={copy} aria-label="Copy this answer">
+        <ClipboardCopy aria-hidden className="size-3.5" />
+        {state === 'copied' ? 'Copied' : 'Copy'}
+      </Button>
+      {state === 'failed' && (
+        <span role="status" className="text-2xs text-ink-muted">
+          This browser would not take it — select the text instead.
+        </span>
+      )}
+    </div>
+  );
+}
+
 const AssistantBubble = memo(function AssistantBubble({
   message,
   sessionId,
@@ -225,6 +273,9 @@ const AssistantBubble = memo(function AssistantBubble({
       <ResultBlocks trace={message.trace} sessionId={sessionId} />
 
       <div className="max-w-prose">
+        {/* Only once the turn has settled: copying half an answer is copying the wrong thing. */}
+        {body && !streaming && <CopyAnswer text={body} />}
+
         {message.status === 'aborted' && (
           <p className="mt-2 text-xs text-ink-muted">Stopped before the answer was complete.</p>
         )}
@@ -308,7 +359,7 @@ function BubbleBody({
 }): React.JSX.Element {
   if (message.role === 'user') {
     return (
-      <div className="flex justify-end">
+      <div className="flex flex-col items-end">
         <div className="max-w-[min(85%,42rem)] rounded-2xl rounded-br-md bg-brand px-4 py-2.5 text-brand-fg shadow-xs">
           {/* Plain text, with its structures drawable — see `StructureText`. Not markdown: a
               chemist typed this, and a parser would turn their asterisks into emphasis in the
@@ -317,6 +368,22 @@ function BubbleBody({
             <StructureText text={message.text} />
           </p>
         </div>
+        {/* **Put the question back in the composer, and stop.** The failure path was better served
+            than the success path: a turn that *failed* returns its text to the draft
+            (`sendMessage`), while a turn that succeeded and answered the wrong question left the
+            chemist retyping it — with a SMILES in it, which is where a transcription error enters.
+            Deliberately not a "regenerate": `sendMessage` records that "nothing in this app has ever
+            re-posted a turn on the user's behalf", and that line is worth keeping. This refills and
+            focuses; the human presses Send, having seen what they are sending. */}
+        <Button
+          variant="ghost"
+          size="xs"
+          className="mt-1 text-ink-subtle"
+          onClick={() => prefill(message.text)}
+        >
+          <Pencil aria-hidden className="size-3" />
+          Edit and resend
+        </Button>
       </div>
     );
   }

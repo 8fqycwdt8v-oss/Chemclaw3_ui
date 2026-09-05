@@ -75,8 +75,13 @@ async function startProxy(env: Record<string, string>, expectSse = true): Promis
   vi.resetModules();
   for (const [key, value] of Object.entries(env)) process.env[key] = value;
   const { proxy } = await import('../server/proxy.ts');
+  const { mintCorrelationId } = await import('../server/correlation.ts');
   const server = http.createServer((req, res) =>
-    proxy(req, res, req.url?.replace(/^\/api/, '') ?? '/', expectSse),
+    proxy(req, res, req.url?.replace(/^\/api/, '') ?? '/', expectSse, {
+      route: '/api/sessions/{id}/events',
+      upstreamMs: null,
+      correlationId: mintCorrelationId(),
+    }),
   );
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

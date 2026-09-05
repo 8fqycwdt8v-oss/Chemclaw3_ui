@@ -18,30 +18,36 @@ import https from 'node:https';
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 import { cfg } from './config.ts';
 import { log } from './log.ts';
+import { CORRELATION_HEADER, correlationFrom } from './correlation.ts';
 import { upstreamErrorRecorded } from './metrics.ts';
 
 /**
- * What one proxied request tells the access log about itself.
+ * What one request tells the access log about itself.
  *
- * Passed in and mutated rather than returned, because the two facts worth recording — how long the
- * upstream took and the correlation id it answered with — are known at different moments, and both
- * are known before `res` finishes, which is when the line is written.
+ * Passed in and mutated rather than returned, because the facts worth recording are known at
+ * different moments — the route as `server/app.ts` dispatches, the upstream duration and the
+ * correlation id as the answer comes back — and all of them are known before `res` finishes,
+ * which is when the line is written.
+ *
+ * It covers every request rather than only the proxied ones, which is why it is no longer called
+ * `ProxyTrace`: `server/app.ts` used to carry a second `{ route }` object beside it for exactly
+ * the same purpose, and the cost of the duplicate was that this file could not name the route it
+ * was refusing (see `refuseTooLarge`). It lives here rather than in `app.ts` because `app.ts`
+ * already imports this module and the reverse would be a cycle.
  */
-export interface ProxyTrace {
+export interface RequestTrace {
+  /**
+   * The route's TEMPLATE, never the path that matched it — see `ResolvedRoute.template`.
+   *
+   * Starts as the least specific label and is narrowed as dispatch proceeds, so a response that
+   * never reaches a route still books one.
+   */
+  route: string;
   /** Milliseconds from opening the upstream request to its response headers. Null if none came. */
   upstreamMs: number | null;
-  /** The service's own id for this request, read back from its response header. */
+  /** This request's correlation id: minted at the front door, replaced by the service's own. */
   correlationId: string;
 }
-
-/**
- * The response header the Chemclaw service stamps its per-request correlation id on.
- *
- * Read here and forwarded to the browser by the header copy below (it is neither hop-by-hop nor
- * BFF-owned, so it already crosses) — and written into this process's access log, which is what
- * lets one line here be joined to the service's own record of the same request.
- */
-const CORRELATION_HEADER = 'x-chemclaw-correlation-id';
 
 const upstream = new URL(cfg.apiUrl);
 const transport = upstream.protocol === 'https:' ? https : http;
@@ -175,8 +181,17 @@ function attachHeartbeat(upstreamRes: IncomingMessage, res: ServerResponse): voi
   upstreamRes.on('error', stop);
 }
 
-/** Copy request headers to the upstream, dropping anything hop-by-hop or actively harmful. */
-function buildUpstreamHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
+/**
+ * Copy request headers to the upstream, dropping anything hop-by-hop or actively harmful.
+ *
+ * `correlationId` is this process's own, and is stamped **after** the strip loop for a reason the
+ * loop states: an `x-chemclaw-*` header arriving from a browser is dropped, so the only such
+ * header the service ever sees on this hop is one the BFF wrote.
+ */
+function buildUpstreamHeaders(
+  req: IncomingMessage,
+  correlationId: string,
+): http.OutgoingHttpHeaders {
   const headers: http.OutgoingHttpHeaders = {};
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === undefined) continue;
@@ -204,15 +219,34 @@ function buildUpstreamHeaders(req: IncomingMessage): http.OutgoingHttpHeaders {
   // fills, so tokens would arrive in clumps or, on a short answer, not until the very end.
   headers['accept-encoding'] = 'identity';
   headers['host'] = upstream.host;
+  // The join key, sent rather than only read back. The service adopts a well-formed inbound id
+  // (`_request_correlation_id`, which takes `[A-Za-z0-9_-]{8,64}` and mints its own otherwise), so
+  // one id now names this request in this pod's access log, in the service's, and in its
+  // `audit_events` — instead of two ids a reader has to line up by timestamp.
+  headers[CORRELATION_HEADER] = correlationId;
   return headers;
 }
 
-/** Refuse a body this process will not carry, in the shape FastAPI's own errors have. */
-function refuseTooLarge(req: IncomingMessage, res: ServerResponse, maxBodyBytes: number): void {
+/**
+ * Refuse a body this process will not carry, in the shape FastAPI's own errors have.
+ *
+ * Logged with the route TEMPLATE and not `req.url`, for the reason `server/app.ts` gives about its
+ * own metric labels: the path carries a session, note or job id, and this line is written on the
+ * one path a caller controls entirely. A `/api:blocked` refusal never reaches here, but an
+ * oversized POST to a whitelisted route does, and `path: req.url` put an attacker-chosen string
+ * into a log record on an unauthenticated request. The template is a source constant.
+ */
+function refuseTooLarge(
+  trace: RequestTrace,
+  req: IncomingMessage,
+  res: ServerResponse,
+  maxBodyBytes: number,
+): void {
   log.warn('refused body over cap', {
     method: req.method,
-    path: req.url,
+    route: trace.route,
     max_bytes: maxBodyBytes,
+    correlation_id: trace.correlationId,
   });
   if (!res.headersSent) {
     res.writeHead(413, { 'content-type': 'application/json', connection: 'close' });
@@ -226,9 +260,9 @@ export function proxy(
   res: ServerResponse,
   upstreamPath: string,
   expectSse: boolean,
-  maxBodyBytes: number = cfg.maxBodyBytes,
   /** Filled in as the request runs; the access log reads it when the response finishes. */
-  trace?: ProxyTrace,
+  trace: RequestTrace,
+  maxBodyBytes: number = cfg.maxBodyBytes,
 ): void {
   const startedAt = Date.now();
   // The cheap check first: a declared length over the cap is refused without opening an upstream
@@ -236,7 +270,7 @@ export function proxy(
   // its own validator can reject it.
   const declared = Number(req.headers['content-length']);
   if (Number.isFinite(declared) && declared > maxBodyBytes) {
-    refuseTooLarge(req, res, maxBodyBytes);
+    refuseTooLarge(trace, req, res, maxBodyBytes);
     return;
   }
 
@@ -247,17 +281,19 @@ export function proxy(
       port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
       method: req.method,
       path: upstreamPath,
-      headers: buildUpstreamHeaders(req),
+      headers: buildUpstreamHeaders(req, trace.correlationId),
       agent,
     },
     (upstreamRes) => {
-      if (trace) {
-        trace.upstreamMs = Date.now() - startedAt;
-        const correlation = upstreamRes.headers[CORRELATION_HEADER];
-        trace.correlationId = Array.isArray(correlation)
-          ? (correlation[0] ?? '')
-          : (correlation ?? '');
-      }
+      trace.upstreamMs = Date.now() - startedAt;
+      // The service's own id wins where it sent one — normally the same string, because it adopts
+      // what it was sent. Where it sent none the minted id stands, which is the difference between
+      // a 502 that can be looked up and the empty `correlation_id` every failed request used to
+      // log. The response header follows the same rule for free: the copy below carries the
+      // upstream's value into `writeHead`, which overrides the minted one `server/app.ts` already
+      // put on the response with `setHeader`.
+      const fromUpstream = correlationFrom(upstreamRes.headers);
+      if (fromUpstream) trace.correlationId = fromUpstream;
       const out: http.OutgoingHttpHeaders = {};
       for (const [key, value] of Object.entries(upstreamRes.headers)) {
         if (value === undefined || HOP_BY_HOP.has(key) || bffOwnsResponseHeader(key)) continue;
@@ -370,6 +406,9 @@ export function proxy(
       path: upstreamPath,
       code: err.code ?? 'EPROXY',
       error: err.message,
+      // The id this request was sent upstream under. A 502 is the line somebody comes looking for,
+      // and until the front door minted one it was the line guaranteed not to have an id at all.
+      correlation_id: trace.correlationId,
     });
     res.writeHead(502, { 'content-type': 'application/json', connection: 'close' });
     res.end(JSON.stringify({ detail: 'upstream unavailable', code: err.code ?? 'EPROXY' }));
@@ -387,7 +426,7 @@ export function proxy(
     received += chunk.length;
     if (received <= maxBodyBytes) return;
     upstreamReq.destroy();
-    refuseTooLarge(req, res, maxBodyBytes);
+    refuseTooLarge(trace, req, res, maxBodyBytes);
   });
 
   req.pipe(upstreamReq);

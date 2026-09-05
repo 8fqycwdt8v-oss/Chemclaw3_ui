@@ -19,6 +19,7 @@
 import { useCallback, useState } from 'react';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { api, type NoteRef, type NoteView } from '../api/client.ts';
+import { useNewestRead } from '../hooks/useNewestRead.ts';
 import { Markdown } from './LazyMarkdown.tsx';
 import { Molecule } from './Molecule.tsx';
 import { UseStructure } from '@/components/chem/UseStructure';
@@ -86,20 +87,26 @@ export function NoteSheet({
   const { auth } = useAuth();
   const [state, setState] = useState<State>({ status: 'idle' });
 
+  const claim = useNewestRead();
   const load = useCallback(
     (id: string) => {
+      // Claimed before the request so a read this one supersedes cannot land afterwards: the
+      // heading, the provenance and the validity window all belong to `noteId`, and the panel
+      // showing another note's under it is worse than showing nothing. See `useNewestRead`.
+      const isNewest = claim();
       setState({ status: 'loading' });
       api
         .getNote(id, auth)
-        .then((view) => setState({ status: 'ready', view }))
-        .catch((err: unknown) =>
+        .then((view) => isNewest() && setState({ status: 'ready', view }))
+        .catch((err: unknown) => {
+          if (!isNewest()) return;
           setState({
             status: 'failed',
             message: err instanceof Error ? err.message : 'Could not read that note.',
-          }),
-        );
+          });
+        });
     },
-    [auth],
+    [auth, claim],
   );
 
   // Keyed on `noteId` as well as `open` so following a neighbour refetches: the panel stays

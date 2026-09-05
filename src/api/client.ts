@@ -161,6 +161,43 @@ async function orEmpty<T>(route: string, load: () => Promise<T[]>): Promise<T[]>
 export interface SessionSummary {
   session_id: string;
   created_at?: string;
+  /**
+   * The session's last activity — the newest stored message, not when it was started.
+   *
+   * The distinction is the sidebar's whole ordering problem, and the service's own schema says it
+   * in as many words: "the difference between 'what have I been working on' and 'what did I once
+   * open'". Optional because a service that predates the field sends nothing, and a restored
+   * conversation then falls back to `created_at` as it always did.
+   */
+  updated_at?: string;
+  /**
+   * A name derived server-side from the session's first user message.
+   *
+   * `Sidebar.tsx` carried a comment saying the server "has never sent one, so the guard was
+   * decoration in front of a constant" — true when it was written, and false since
+   * `routes/sessions.py` began constructing `SessionSummary(..., title=title)`. The guard was
+   * deleted one release before it became load-bearing, which is why every restored conversation
+   * still read "Earlier conversation" until somebody clicked into it.
+   *
+   * `null` is a session whose first turn predates the field, and is deliberately distinguishable
+   * from `""` — only one of those is worth reporting.
+   */
+  title?: string | null;
+}
+
+/** One page of `GET /sessions`, plus the cursor that continues it. */
+export interface SessionPage {
+  sessions: SessionSummary[];
+  /**
+   * `X-Next-Cursor`, or `''` when this is the last page.
+   *
+   * A header rather than an envelope because the service chose one — adding `{sessions, next}`
+   * would have broken every deployed client — and it survives the trip because the BFF copies
+   * response headers through and the SPA is same-origin with it. Absent is the service's word for
+   * "there is no next page", including on a deployment whose registry cannot resume a listing at
+   * all; following a cursor such a deployment did not advertise is a 422 by design.
+   */
+  next: string;
 }
 
 /** One tool call as the transcript records it. `arguments` and `result` are truncated server-side
@@ -169,6 +206,22 @@ export interface TranscriptToolCall {
   tool: string;
   arguments: string;
   result: string | null;
+  /**
+   * The content address of the full result, when the service still holds it.
+   *
+   * The fourth field of a shape this interface declared three of — and the service does a *second*
+   * read (`fetchable_refs`) purely to populate it, whose own docstring calls this "the one path on
+   * which the ref `D-2026-08-09-a-preview-is-not-a-result` added never reached a surface". It did
+   * not, because the client's type stopped at three fields and `traceFrom` mapped three.
+   *
+   * The cost of dropping it is exactly one release of `USER-STORIES.md` A3 being true: live, a
+   * chemist opens the hazard table, the charge table and the solvent ranking as data; after a
+   * reload the same turn shows the 400-character paraphrase and no affordance at all.
+   *
+   * Empty means there is nothing to fetch — swept, or never stored. The service deliberately does
+   * not distinguish those, because the only consumer that acts on this cannot.
+   */
+  result_ref?: string;
 }
 
 export interface TranscriptMessage {
@@ -255,6 +308,45 @@ export interface JobRecordSummary {
   summary: string;
   note_id: string;
   completed_at: string | null;
+}
+
+/**
+ * One standing query's finding — what a watch turned up since it last reported.
+ *
+ * Two fields, and no timestamp: the service does not send one, so nothing here may imply when the
+ * notes were merged. `note_ids` resolve through the ordinary citation chip.
+ */
+export interface Digest {
+  query: string;
+  note_ids: string[];
+}
+
+/** One question the agent is holding a workflow open for, as an inbox renders it. */
+export interface PendingRequest {
+  request_id: string;
+  /** What kind of answer is wanted — the service's own vocabulary, shown as given. */
+  kind: string;
+  subject: string;
+  rationale: string;
+  /** Who it was routed to: an object id, a upn, or an entitlement. Empty means "anyone". */
+  asked_of: string;
+  requested_by: string;
+  session_id: string;
+  /** `waiting` is the only state that can be answered; the rest are history. */
+  state: string;
+  due_at: string;
+  created_at: string;
+}
+
+export interface PendingRequests {
+  requests: PendingRequest[];
+  /**
+   * The length of `requests`, not a population.
+   *
+   * The service says so in as many words, and the distinction is load-bearing for the copy: "12"
+   * over five rows would be describing a page as a total.
+   */
+  count: number;
 }
 
 /** One job's live status and structured result. */
@@ -474,6 +566,42 @@ export const api = {
   },
 
   /**
+   * One page of sessions, with the cursor for the next.
+   *
+   * Separate from `listSessions` rather than replacing it: the service caps a page at
+   * `service_max_listed_sessions` (100), so conversation 101 was simply unreachable — not below a
+   * fold, not fetched. The plain form stays because it is what every caller that wants "the recent
+   * ones" should use, and because degrading a *paged* read to an empty array on a 404 would hide
+   * the difference between "no more pages" and "this service has no such route".
+   */
+  async pageSessions(getToken: TokenGetter, after?: string): Promise<SessionPage> {
+    const query = after ? `?after=${encodeURIComponent(after)}` : '';
+    try {
+      const res = await send(`/sessions${query}`, getToken, {});
+      if (!res.ok) {
+        const failure = await readFailure(res);
+        throw errorFromStatus(
+          res.status,
+          failure.detail,
+          res.headers.get('retry-after'),
+          failure.correlationId,
+          failure.code,
+        );
+      }
+      return {
+        sessions: (await res.json()) as SessionSummary[],
+        next: res.headers.get('x-next-cursor') ?? '',
+      };
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'session_not_found') {
+        logger.warn('api.list_route_missing', { route: '/sessions' });
+        return { sessions: [], next: '' };
+      }
+      throw err;
+    }
+  },
+
+  /**
    * Stop the session's running turn — the explicit act a closed stream no longer performs.
    *
    * The backend detaches on disconnect (its turn runs to completion unwatched), so Stop is a
@@ -578,6 +706,106 @@ export const api = {
     if (options.beforeId) query.set('before_id', String(options.beforeId));
     const suffix = query.toString() ? `?${query.toString()}` : '';
     return orEmpty('/proposals', () => request<ProposalSummary[]>(`/proposals${suffix}`, getToken));
+  },
+
+  /**
+   * Delete one conversation on the service, not only in this browser.
+   *
+   * "Delete conversation" was a local map delete: the server session, its transcript, its
+   * checkpoints, its attachments and its ownership row all survived. The chemist who deleted it
+   * *because* it held something they did not want kept had been told something untrue — and the
+   * service has a twelve-table transactional sweep for exactly this case, whose own docstring
+   * frames it as "I do not want this conversation any more".
+   *
+   * A 404 is success here, deliberately. The service answers 404 for both "no such session" and
+   * "not yours", refusing to be an id oracle — and a conversation this browser holds a stale id
+   * for is a conversation that is already gone. Every other failure is the caller's to report,
+   * because a delete that silently did not happen is the failure this method exists to end.
+   */
+  async deleteSession(sessionId: string, getToken: TokenGetter): Promise<void> {
+    try {
+      await request<void>(`/sessions/${encodeURIComponent(sessionId)}`, getToken, {
+        method: 'DELETE',
+      });
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'session_not_found') return;
+      throw err;
+    }
+  },
+
+  /**
+   * Branch this conversation onto a new session carrying its whole history.
+   *
+   * "Try a different direction from here without losing this thread" — and the nearest thing the
+   * service offers to editing a question and re-asking it while keeping both branches.
+   *
+   * Three refusals worth carrying, because each is a different fact: **409** a turn is in flight
+   * (a fork reads five of the parent's tables, and a turn committing partway through would land a
+   * child that resumes with holes), **501** this deployment has no durable session store so there
+   * is no thread to copy, and **404** which is the service refusing to say whether the id exists.
+   */
+  forkSession(sessionId: string, getToken: TokenGetter): Promise<{ session_id: string }> {
+    return request<{ session_id: string }>(
+      `/sessions/${encodeURIComponent(sessionId)}/fork`,
+      getToken,
+      { method: 'POST' },
+    );
+  },
+
+  /**
+   * Claim the standing-query digests waiting for this chemist.
+   *
+   * **The read is the consume.** The service's mailbox claim is destructive by design — a row this
+   * call returns is marked consumed and is never re-delivered — so the caller must persist what it
+   * gets before anything can drop it. That is why this is read once at boot into the store rather
+   * than polled from a component effect that can unmount mid-flight.
+   *
+   * The cost of losing one is bounded and worth stating, because it is what makes the destructive
+   * read acceptable: a digest is a *notification*. The notes it names are already merged knowledge
+   * and the query that found them is a saved watch, so losing the notification is not losing the
+   * knowledge.
+   *
+   * Swallowed to empty on a 404 like the other list routes: a service without standing queries is
+   * a smaller app, not an error.
+   */
+  listDigests(getToken: TokenGetter): Promise<Digest[]> {
+    return orEmpty('/digests', () => request<Digest[]>('/digests', getToken));
+  },
+
+  /**
+   * What is waiting on this chemist to answer — across every conversation.
+   *
+   * The inbox for `request_external_input`, for `BoCampaignWorkflow._measure` pausing at the bench
+   * for measured yields, and for the connector-job path. **Not the deleted `/approvals`**: that
+   * mechanism had three consumers and no producer, which is what made an empty list a lie. This one
+   * has three live producers, and the service filters the listing to what this caller may actually
+   * answer, so a row here is a row they can act on.
+   *
+   * Not swallowed into an empty list. "Nothing is waiting on you" and "we could not ask" are
+   * opposite things to tell somebody whose bench work is blocked — the same argument
+   * `listPendingPlans` makes, and the mistake the holds inbox made before it.
+   */
+  listPendingRequests(getToken: TokenGetter): Promise<PendingRequests> {
+    return request<PendingRequests>('/pending', getToken);
+  },
+
+  /**
+   * Answer one held-open question, releasing whatever is waiting on it.
+   *
+   * The service distinguishes four refusals and each is a different fact: 404 no such request, 403
+   * not routed to you, **409 already decided**, 503 the broker did not take it. The 409 is the one
+   * worth carrying to a surface — two chemists at one bench answering the same question is the
+   * ordinary case, and the second must be told rather than have their answer dropped.
+   */
+  answerPendingRequest(
+    requestId: string,
+    payload: Record<string, unknown>,
+    getToken: TokenGetter,
+  ): Promise<void> {
+    return request<void>(`/pending/${encodeURIComponent(requestId)}/answer`, getToken, {
+      method: 'POST',
+      body: JSON.stringify({ payload }),
+    });
   },
 
   /** One proposal with the exact bytes it would commit. Not swallowed: it is opened by a click. */

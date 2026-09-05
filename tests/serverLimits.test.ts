@@ -24,6 +24,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import net from 'node:net';
 import type { AddressInfo } from 'node:net';
+import { promisify } from 'node:util';
 
 /**
  * What the stand-in upstream actually received, tagged with the probe that sent it.
@@ -196,4 +197,135 @@ describe('a body larger than the BFF will carry', () => {
       expect(bytes).toBeLessThanOrEqual(MAX_BODY_BYTES + chunk.length);
     }
   });
+});
+
+/**
+ * The header phase, and the connection count: the two socket-level bounds the process now sets for
+ * itself.
+ *
+ * `headersTimeout` was pinned at 125 s "just above the LB idle timeout", which is only a reason if
+ * the timer starts when the SOCKET is accepted. It did, up to Node 14.11. It starts at the first
+ * byte of the request now, so the pin was buying nothing and costing the header phase a bound 250×
+ * looser than it needs — a request line and no more held a connection for two minutes, free.
+ *
+ * A separate server, because the one above sets `REQUEST_TIMEOUT_MS=500` and the whole question
+ * here is what the header bound does when it is much *tighter* than the request bound.
+ */
+describe('the header phase and the connection count', () => {
+  const HEADERS_TIMEOUT_MS = 500;
+  /** Forty times the header bound: a test that confuses the two would have to wait for it. */
+  const REQUEST_TIMEOUT_MS_LOOSE = 20_000;
+  const MAX_CONNECTIONS = 4;
+
+  let server: http.Server;
+  let serverPort = 0;
+
+  beforeAll(async () => {
+    vi.resetModules();
+    process.env.HEADERS_TIMEOUT_MS = String(HEADERS_TIMEOUT_MS);
+    process.env.REQUEST_TIMEOUT_MS = String(REQUEST_TIMEOUT_MS_LOOSE);
+    process.env.MAX_CONNECTIONS = String(MAX_CONNECTIONS);
+    const { createBffServer } = await import('../server/app.ts');
+    server = createBffServer();
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    serverPort = (server.address() as AddressInfo).port;
+  });
+
+  afterAll(async () => {
+    delete process.env.HEADERS_TIMEOUT_MS;
+    delete process.env.MAX_CONNECTIONS;
+    process.env.REQUEST_TIMEOUT_MS = String(REQUEST_TIMEOUT_MS);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  });
+
+  /** One raw connection, resolved with what came back and how long it took. */
+  const raw = (write: (socket: net.Socket) => void, waitMs: number) =>
+    new Promise<{ response: string; ms: number }>((resolve) => {
+      const startedAt = Date.now();
+      let response = '';
+      const socket = net.connect(serverPort, '127.0.0.1', () => write(socket));
+      socket.on('data', (chunk: Buffer) => {
+        response += chunk.toString();
+      });
+      socket.on('close', () => resolve({ response, ms: Date.now() - startedAt }));
+      socket.on('error', () => resolve({ response, ms: Date.now() - startedAt }));
+      setTimeout(() => {
+        socket.destroy();
+        resolve({ response, ms: Date.now() - startedAt });
+      }, waitMs).unref?.();
+    });
+
+  it('cuts a request whose headers never arrive, long before the request timeout', async () => {
+    // A request line and then silence — sixteen bytes, and under the old pin it held a connection
+    // for 125 s. Now it is bounded by the header timeout plus one sweep, and the sweep is derived
+    // from the *tighter* of the two bounds precisely so it does not become the bound itself.
+    const outcome = await raw((s) => s.write('GET /healthz HTTP/1.1\r\n'), 5_000);
+
+    expect(outcome.ms).toBeLessThan(REQUEST_TIMEOUT_MS_LOOSE / 4);
+    expect(outcome.response).toContain('408');
+  }, 20_000);
+
+  it('still serves a keep-alive connection idled far past the header timeout', async () => {
+    // This one passes before the change as well, and it is here for what it pins rather than for
+    // what it catches: the whole justification for lowering the bound is that the timer starts at
+    // the first byte of the REQUEST and not at the accept, which is a property of the runtime and
+    // not of this repository. A Node that went back to connection-based timing would serve the
+    // first request, then kill the second — and the comment in `config.ts` would be wrong again
+    // with nothing to say so.
+    const outcome = await raw(
+      (s) => {
+        const request =
+          'GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n';
+        s.write(request);
+        // Three times the header bound, and well inside the 120 s keep-alive.
+        setTimeout(() => {
+          if (!s.destroyed) s.write(request);
+        }, HEADERS_TIMEOUT_MS * 3);
+      },
+      HEADERS_TIMEOUT_MS * 3 + 1_500,
+    );
+
+    const served = outcome.response.split('HTTP/1.1 200 OK').length - 1;
+    expect(served).toBe(2);
+    expect(outcome.response).not.toContain('408');
+  }, 20_000);
+
+  it('sheds a connection over the ceiling instead of holding it', async () => {
+    // Nothing bounded concurrent client connections, so the pod's worst-case descriptor and buffer
+    // use was whatever a caller decided to open. What this does NOT buy is stated in `config.ts`:
+    // running out of descriptors at accept() is silent on this runtime rather than fatal, so the
+    // value here is a ceiling this process picked, not a crash avoided.
+    const connections = promisify(server.getConnections.bind(server));
+    const held: net.Socket[] = [];
+    try {
+      for (let i = 0; i < MAX_CONNECTIONS; i += 1) {
+        held.push(
+          await new Promise<net.Socket>((resolve) => {
+            const socket = net.connect(serverPort, '127.0.0.1', () => resolve(socket));
+            socket.resume();
+            socket.on('error', () => resolve(socket));
+          }),
+        );
+      }
+      await new Promise((r) => setTimeout(r, 100));
+      expect(await connections()).toBe(MAX_CONNECTIONS);
+
+      // Before: served 200 like any other request, and the count kept climbing.
+      const over = await raw(
+        (s) => s.write('GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n'),
+        2_000,
+      );
+      expect(over.response).toBe('');
+    } finally {
+      for (const socket of held) socket.destroy();
+    }
+
+    // And it comes back on its own: shedding is not a latch.
+    await new Promise((r) => setTimeout(r, 300));
+    const after = await raw(
+      (s) => s.write('GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n'),
+      2_000,
+    );
+    expect(after.response).toContain('200 OK');
+  }, 20_000);
 });

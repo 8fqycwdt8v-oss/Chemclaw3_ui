@@ -80,27 +80,23 @@ were paths to "no sign-in required" that nobody chose, and each looked like a wo
 
 ---
 
-## Issue 4: `GET /sessions` cannot populate a conversation list on its own
+## Closed: `GET /sessions` now names and dates its sessions, and this UI reads them (was Issue 4)
 
-**Repo:** Chemclaw3 (backend)
+`SessionSummary` was `{session_id, created_at}` and this entry asked for `title` and `updated_at`.
+**The service added both**, exactly as proposed — `routes/sessions.py` constructs
+`SessionSummary(session_id, created_at, updated_at, title)` from `page_for_owner` — and it also
+added keyset pagination on an `X-Next-Cursor` header.
 
-`SessionSummary` is `{session_id, created_at}`. A sidebar needs a name and a recency, and neither
-is derivable from that:
+The client had outrun none of it and read none of it. Worse, `Sidebar.tsx` carried a comment saying
+the guard against a server-supplied title "was decoration in front of a constant" because "the
+server has never sent one" — deleted one release before it became load-bearing. So every restored
+conversation read "Earlier conversation" until somebody clicked into it, sorted by when it was
+_started_ rather than last touched, and conversation 101 was unreachable because nobody followed the
+cursor.
 
-- **No title.** A session is minted before anyone has spoken, so the server has no name for it at
-  creation, and nothing revisits the row afterwards.
-- **No last-activity.** `created_at` is when the session was _started_. Sorting by it puts a
-  session opened last Tuesday and abandoned above one used an hour ago.
-
-**Mitigated client-side, at a cost.** A restored conversation is renamed from the first user
-message in its transcript — but only once it is opened, because that is when
-`GET /sessions/{id}/messages` runs. So the sidebar still reads "Earlier conversation" for every
-session the chemist has not clicked into, and fixing that from here would mean fetching every
-transcript on boot to read one line out of each.
-
-**Fix:** add `title` and `updated_at` to `SessionSummary`. The title can be derived server-side
-from the session's first user message at write time — the same rule this UI applies locally — and
-`updated_at` is the newest `session_messages` row. Both come off tables the listing already reads.
+All three are now read (`api.pageSessions`, `adoptSessions`, the "Load earlier conversations"
+control), and `tests/contractDrift.test.tsx` pins each — including the fallback, so a service that
+predates the fields still gets the placeholder rather than a blank row.
 
 ---
 
@@ -150,27 +146,14 @@ worse than the contained degradation above. Filed rather than half-built.
 
 ---
 
-## Issue 7: warmed sessions are never cleaned up
+## Closed: warmed sessions no longer fill the listing (was Issue 7)
 
-`warmSession` creates the backend session on the first keystroke so the first message costs one
-round-trip instead of two. It also changes what a session means in aggregate: from "conversations
-someone sent a message in" to "conversations someone typed a character into".
+The fix this entry called "better" is the one the service took: `list_sessions`'s docstring now
+reads "Sessions that were created and never used are not listed at all". A warmed-and-abandoned
+session costs an ownership row and nothing on screen.
 
-**The capacity question is answered.** `service_max_live_sessions` is 1000 and bounds an LRU
-_cache_ of in-process handles; durable history survives eviction, and a session with no turns has
-no history to survive. A warmed-and-abandoned session costs one ownership row plus, briefly, one
-cache slot — cheaper than a used one, and evicted before it. `service_max_listed_sessions` (100)
-bounds the listing.
-
-**What is open is hygiene, not capacity.** Nothing deletes the ownership rows of sessions that were
-warmed and never used, so `GET /sessions` fills with empty conversations. The client cannot filter
-them: an unused session and a session whose transcript failed to load both come back as `[]`.
-
-**Mitigation in place:** `warmSessions` is a `/config.js` flag (`server/runtimeConfig.ts`,
-`src/env.ts`), default on, switchable without a client rebuild.
-
-**Fix:** have `GET /sessions` omit sessions with no messages, or expose a message count on
-`SessionSummary` so the client can. The former is better — it is the same query.
+What remains true and is _not_ a defect: `warmSessions` stays a `/config.js` flag, because it still
+changes what a session means in aggregate and a deployment may want it off.
 
 ---
 
@@ -224,6 +207,42 @@ technical:
 **What would change the answer:** a confirmed confidential-client registration in the target
 tenant, or the refresh failures above becoming common enough to be the bigger operational cost.
 Reopen PR #11 rather than rebuilding — the branch is retained.
+
+---
+
+## Issue 9 (closed): a question the agent is waiting on could not reach the browser by itself
+
+**Repos:** Chemclaw3 (backend) and here. Closed 2026-09-05 by
+`D-2026-09-05-a-push-nobody-claims-is-not-a-push` there and the mirror here.
+
+`GET /pending` and `POST /pending/{id}/answer` were surfaced first — the "Questions waiting on you"
+section of `/review`, added because the route has three live producers (the
+`request_external_input` agent tool, `BoCampaignWorkflow._measure` pausing a campaign at the bench
+for measured yields, and the connector-job path) and had no consumer at all.
+
+**The push half was the part this repository could not fix.** `AwaitAnswerWorkflow._push` wrote an
+`awaiting-answer` row into `session_events` (`durable/awaiting.py`) and
+`GET /sessions/{id}/events` read with `kinds=("job_completed", "job_failed")`
+(`routes/streams.py`), so the row was never delivered to any client — written, never claimed, aged
+out under retention, and the claim is destructive and at-most-once, so there was no second chance
+at it either. The only trace a chemist got was `record_job_started(handle.id, "awaiting")`, which
+arrives as a `job_started` whose `kind` this UI does not recognise: an ask rendered as a durable job
+that runs for a week and then silently expires.
+
+**What closed it.** The backend claims the third kind and declares `AwaitingAnswerEvent`; this
+repository mirrors it in `shared/events.ts` — the interface _and_ `normalizeEvent`, which rebuilds
+every event field by field, so a field that does not reach it is deleted in transit rather than
+merely ignored. `useJobStreams` routes the frame to `chatStore.noteAwaiting` (its own slice, not the
+job feed — a question held open for days is not a run that finished), the sidebar badges `/review`
+with the count, and the inbox re-reads `GET /pending` when the count moves.
+
+Two properties worth keeping, both asserted in `tests/awaitingAnswer.test.tsx`: the badge comes
+**down** on the expiry push, because a counter that only rose would advertise a question nobody can
+answer any more; and the slice is **not persisted**, because the service is the authority on what is
+open and a badge that survived a reload would outlive the answer.
+
+The half that stays a poll is deliberate and is not this issue: `GET /pending` is still read on
+`/review` rather than pushed, since the stream carries a notification and not a projection.
 
 ---
 

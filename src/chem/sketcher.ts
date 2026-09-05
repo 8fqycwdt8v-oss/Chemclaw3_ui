@@ -26,6 +26,13 @@
  * `null` rather than throwing — a browser that cannot load the editor should offer the paste and
  * drop paths, not a blank dialog.
  *
+ * **And a failure is not memoised, for the same reason it is not memoised there.** The two seams
+ * had opposite answers to one fact: `loadRDKit` clears its promise on failure because a chunk that
+ * did not arrive is not a property of the browser, while this one kept the `null` for the life of
+ * the page. On a **7.71 MB** chunk (measured, `npm run build:client`) one dropped connection is
+ * the likeliest failure there is, and it read as "this browser cannot run the editor" — with the
+ * Draw button still there, still opening a dialog that would never work again.
+ *
  * ## The CSP
  *
  * Ketcher's chemistry runs in a Web Worker that instantiates WASM, so `worker-src` and
@@ -61,18 +68,33 @@ export interface SketcherSession {
  */
 export type MountSketcher = (host: HTMLElement, initial?: string) => Promise<SketcherSession>;
 
-/** Resolved once, then reused. `null` once loading has failed, so a browser that cannot run the
- *  editor degrades to the paste and drop paths instead of retrying on every click. */
+/** Resolved once, then reused. Only a *success* is kept — see the catch below. */
 let mountPromise: Promise<MountSketcher | null> | null = null;
 
 export function loadSketcher(): Promise<MountSketcher | null> {
-  mountPromise ??= (async () => {
+  const pending = (mountPromise ??= (async () => {
     try {
       const module = await import('./sketcher.ketcher.tsx');
       return module.mountKetcher;
     } catch {
+      // Cleared, so the next Draw click asks again. There is **no retry counter**, and that is a
+      // decision rather than an omission: every retry here is a chemist pressing a button, so
+      // nothing can loop, and a bound is a budget the one chemist on a flaky connection burns
+      // through — after which the editor is gone for the life of the page, which is the exact
+      // defect this removes. The cost of an attempt that fails is a failed request; the cost of
+      // being wrong about "this browser cannot run the editor" is the whole feature.
+      //
+      // What this cannot recover, stated because it bounds the fix: per the HTML module-map
+      // semantics a dynamic `import()` whose *fetch* failed is recorded as errored against that
+      // URL, so a re-import of the same specifier can fail again without touching the network.
+      // Vite fails first on the modulepreload link for a chunk it cannot fetch, which is the
+      // common case and is recoverable; a failure thrown while the module *evaluates* is
+      // recoverable too. Re-fetching a poisoned URL would mean appending a cache-buster to the
+      // chunk path, which forfeits chunk identity and its caching for every user to serve the
+      // one who was unlucky twice.
+      mountPromise = null;
       return null;
     }
-  })();
-  return mountPromise;
+  })());
+  return pending;
 }

@@ -18,7 +18,7 @@ test('the shell paints and the empty state explains itself', async ({ page }) =>
 test('the answer arrives incrementally, not all at once', async ({ page }) => {
   await page.goto('/');
   await page.getByPlaceholder(/Ask about a reaction/).fill('What is the pKa of acetic acid?');
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
 
   const answer = page.getByRole('article', { name: 'Assistant answer' }).last();
 
@@ -39,7 +39,7 @@ test('the answer arrives incrementally, not all at once', async ({ page }) => {
 test('stop ends the turn and unlocks the composer', async ({ page }) => {
   await page.goto('/');
   await page.getByPlaceholder(/Ask about a reaction/).fill('What is the pKa of acetic acid?');
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
 
   await page.getByRole('button', { name: 'Stop' }).click();
 
@@ -53,13 +53,20 @@ test('stop ends the turn and unlocks the composer', async ({ page }) => {
       .getByRole('article', { name: 'Assistant answer' })
       .getByText('Stopped before the answer was complete.'),
   ).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
+  // **`exact` is load-bearing, and this is the assertion that proved it.** Playwright matches an
+  // accessible name by substring unless told otherwise, and a stopped message carries an "Edit and
+  // resend" button — which contains "Send". So this resolved to two elements and failed as a
+  // strict-mode violation, in the one test that reaches a state where both are on screen. Every
+  // `Send` locator in `e2e/` is exact for that reason: the composer's button is `aria-label="Send"`
+  // exactly, and the others pass today only because they click before an interrupted message
+  // exists.
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeVisible();
 });
 
 test('the trace panel reports its own expanded state', async ({ page }) => {
   await page.goto('/');
   await page.getByPlaceholder(/Ask about a reaction/).fill('What is the pKa of acetic acid?');
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
 
   const toggle = page.getByRole('button', { name: /The agent’s work/ });
   await expect(toggle).toBeVisible({ timeout: 15_000 });
@@ -77,7 +84,7 @@ test('the result reaches the answer as data, and the panel behind it agrees', as
   // it opens is the same registry at full size.
   await page.goto('/');
   await page.getByPlaceholder(/Ask about a reaction/).fill('Screen this azide before I order it.');
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
 
   const block = page.locator('[data-result-block="hazard"]');
   await expect(block).toBeVisible({ timeout: 15_000 });
@@ -106,7 +113,7 @@ test('the agent profile is chosen before the session exists, and not after', asy
   await picker.selectOption('property-lookup');
 
   await page.getByPlaceholder(/Ask about a reaction/).fill('What is the pKa of acetic acid?');
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByRole('article', { name: 'Assistant answer' }).last()).toContainText(
     '4.76',
     { timeout: 15_000 },

@@ -38,6 +38,12 @@ function traceFrom(calls: TranscriptToolCall[], key: string, at: number): TraceE
     toolCall: {
       tool: call.tool,
       arguments: call.arguments,
+      // The content address, when the service still holds the full result. Carried because it is
+      // what makes `ResultBlock` and `ResultSheet` reachable at all — the live turn gets it from
+      // `tool_result.result_ref`, and this is the same fact recovered from storage. Dropping it
+      // was the whole of why every full result — a hazard table, a charge table, a solvent
+      // ranking — became a 400-character paraphrase the moment the page was reloaded.
+      ...(call.result_ref ? { resultRef: call.result_ref } : {}),
       ...(call.result == null ? { unresolved: true } : { result: call.result }),
     },
   }));

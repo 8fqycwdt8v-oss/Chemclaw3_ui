@@ -31,21 +31,37 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { FileCheck2, ListChecks } from 'lucide-react';
-import { Link } from 'react-router';
+import { FileCheck2, Inbox, ListChecks } from 'lucide-react';
+import { Link, useNavigate, useParams } from 'react-router';
 import { useAuth, useIsReviewer } from '../auth/AuthContext.tsx';
 import {
   api,
+  type PendingRequest,
+  type PendingRequests as PendingRequestsView,
   type PendingPlans as PendingPlansView,
   type ProposalDetail,
   type ProposalSummary,
 } from '../api/client.ts';
+import { ApiError } from '../api/errors.ts';
+import { useNewestRead } from '../hooks/useNewestRead.ts';
 import { relativeTime } from '../lib/format.ts';
+import { useChatStore } from '../state/chatStore.ts';
+import { CitationChip } from './CitationChip.tsx';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { ConfirmDialog } from '@/components/chem/ConfirmDialog';
 import { EmptyState, Loading } from '@/components/chem/Feedback';
+
+/**
+ * The service's own listing cap, mirrored so a full page can be recognised as one.
+ *
+ * `proposal_list_limit` on the service side. A copy rather than something discovered, for the same
+ * reason `maxMessageChars` is told to this app rather than fetched: the service publishes no route
+ * carrying it. Being wrong here is cheap in exactly one direction — too low and a "Load older"
+ * control appears with nothing behind it, which the first empty page then removes.
+ */
+const PAGE_IS_FULL = 50;
 
 const STATE_TONE: Record<string, 'ok' | 'danger' | 'warn'> = {
   approved: 'ok',
@@ -85,18 +101,25 @@ function ProposalSheet({
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const [loadedFor, setLoadedFor] = useState<number | null>(null);
+  const claim = useNewestRead();
 
   if (open && loadedFor !== id) {
     setLoadedFor(id);
     setDetail(null);
     setError(null);
     setReason('');
+    // Claimed before the request, so a read this one supersedes cannot land afterwards. What this
+    // sheet renders is the bytes an Approve would commit, and Approve posts `id` — a proposal's
+    // content under another proposal's identity is a sign-off on something nobody read. See
+    // `useNewestRead`.
+    const isNewest = claim();
     api
       .getProposal(id, auth)
-      .then(setDetail)
-      .catch((err: unknown) =>
-        setError(err instanceof Error ? err.message : 'Could not read that proposal.'),
-      );
+      .then((next) => isNewest() && setDetail(next))
+      .catch((err: unknown) => {
+        if (!isNewest()) return;
+        setError(err instanceof Error ? err.message : 'Could not read that proposal.');
+      });
   }
 
   const decide = (approved: boolean) => async (): Promise<void> => {
@@ -390,11 +413,285 @@ function PlanInbox(): React.JSX.Element {
   );
 }
 
+/**
+ * What the standing queries turned up, claimed once and kept.
+ *
+ * `GET /digests` was built, registered and never called from here — `USER-STORIES.md` H4 still
+ * records the whole story as blocked on the backend, and only its *creation* half is.
+ *
+ * **The read is the consume, and that decides the shape of this component.** The service's mailbox
+ * claim is destructive: a row returned here is marked consumed and never re-delivered. So the
+ * claim happens once, at the top of the app, straight into the persisted store — not from an
+ * effect on this screen, which would destroy a digest for anyone who opened `/review` and
+ * navigated away before the response landed. This renders what was already claimed.
+ *
+ * Dismissal is a flag rather than a delete, because this card is now the only copy there is.
+ */
+function Digests(): React.JSX.Element | null {
+  const digests = useChatStore((s) => s.digests);
+  const dismiss = useChatStore((s) => s.dismissDigest);
+  const visible = digests
+    .map((digest, index) => ({ digest, index }))
+    .filter(({ digest }) => !digest.dismissed);
+
+  if (visible.length === 0) return null;
+
+  return (
+    <section aria-labelledby="digests-heading">
+      <h2 id="digests-heading" className="mb-1 text-lg font-semibold tracking-tight">
+        New knowledge from your standing queries
+      </h2>
+      <p className="mb-3 text-sm text-ink-muted">
+        Notes that have entered the graph since a watch of yours last reported. Read once — the
+        service does not keep a second copy, so these stay here until you dismiss them.
+      </p>
+      <ul className="flex flex-col gap-2">
+        {visible.map(({ digest, index }) => (
+          <li
+            key={`${digest.receivedAt}-${index}`}
+            className="rounded-lg border border-border-subtle bg-surface-raised p-3"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-sm">
+                  <span className="text-ink-muted">watching </span>
+                  <span className="font-medium">{digest.query || 'a saved query'}</span>
+                </p>
+                {/* "Seen", not "found": the service sends no timestamp for the merge, and a card
+                    that implied one would be inventing it — the same rule `JobFeed` follows. */}
+                <p className="mt-0.5 text-2xs text-ink-subtle">
+                  seen {relativeTime(digest.receivedAt)} · {digest.noteIds.length}{' '}
+                  {digest.noteIds.length === 1 ? 'note' : 'notes'}
+                </p>
+              </div>
+              <Button size="xs" variant="ghost" onClick={() => dismiss(index)}>
+                Dismiss
+              </Button>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {digest.noteIds.map((noteId) => (
+                <CitationChip key={noteId} kind="note" id={noteId} />
+              ))}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * Questions the agent is holding a workflow open for.
+ *
+ * The third gate, and the one that had no surface at all. `GET /pending` has **three live
+ * producers** — the `request_external_input` agent tool, `BoCampaignWorkflow._measure` pausing a
+ * campaign at the bench for measured yields, and the connector-job path — and none of them could
+ * reach a chemist: the request became a durable job that ran for seven days and expired.
+ *
+ * **This is not the `/approvals` inbox that was deleted.** That one had three consumers and no
+ * producer, and swallowed its own 404 into `[]`, so it rendered a confident, permanently empty
+ * inbox describing a decision that could not occur. The difference is the producers, and the
+ * failure is surfaced rather than folded into an empty list, for the same reason `PlanInbox` does
+ * it: "nothing is waiting" and "we could not ask" are opposite things to tell somebody whose bench
+ * work is blocked.
+ *
+ * A campaign waiting on a yield is answered here as a number. Anything else is answered as text —
+ * the service takes an opaque payload, and inventing a form per `kind` from a vocabulary this
+ * client does not own would be guessing at a schema the workflow defines.
+ */
+function PendingInbox(): React.JSX.Element {
+  const { auth, ready } = useAuth();
+  const [view, setView] = useState<PendingRequestsView | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [answering, setAnswering] = useState<string | null>(null);
+  const [value, setValue] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
+  const [nonce, setNonce] = useState(0);
+  // The stream's own revision, not the list's length: `syncAwaiting` below must not be able to
+  // re-trigger the effect that calls it. See `awaitingRevision` in the store.
+  const pushes = useChatStore((s) => s.awaitingRevision);
+
+  useEffect(() => {
+    if (!ready) return;
+    let cancelled = false;
+    void api
+      .listPendingRequests(auth)
+      .then((next) => {
+        if (cancelled) return;
+        setView(next);
+        setFailed(false);
+        // The service is the authority on what is open; the `awaiting_answer` stream only says
+        // that something changed. Reconciling here is what keeps the sidebar badge honest after
+        // an answer given in another tab, and what fills in the fields neither push carries whole.
+        useChatStore.getState().syncAwaiting(
+          next.requests
+            .filter((r) => r.state === 'waiting')
+            .map((r) => ({
+              request_id: r.request_id,
+              subject: r.subject,
+              kind: r.kind,
+              due_at: r.due_at,
+            })),
+        );
+      })
+      .catch(() => !cancelled && setFailed(true));
+    return () => {
+      cancelled = true;
+    };
+    // `pushes` is a dependency and not a value this reads: a frame off the push-back stream moves
+    // it, which is the whole mechanism by which an inbox left open on screen notices a new question
+    // without polling for one.
+  }, [auth, ready, nonce, pushes]);
+
+  const submit = (request: PendingRequest) => async (): Promise<void> => {
+    setNotice(null);
+    try {
+      // A number when it parses as one, the raw text otherwise. A yield typed as "82" must not
+      // reach a workflow expecting a measurement as the string "82".
+      const parsed = Number(value.trim());
+      const payload =
+        value.trim() !== '' && Number.isFinite(parsed)
+          ? { value: parsed }
+          : { value: value.trim() };
+      await api.answerPendingRequest(request.request_id, payload, auth);
+      setAnswering(null);
+      setValue('');
+      setNotice('Answered. Whatever was waiting on it has been released.');
+      setNonce((n) => n + 1);
+    } catch (err: unknown) {
+      // The 409 is the one worth spelling out: two chemists at one bench answering the same
+      // question is ordinary, and the second must be told rather than have their answer dropped.
+      setNotice(
+        err instanceof ApiError && err.status === 409
+          ? 'Somebody has already answered this one.'
+          : err instanceof Error
+            ? err.message
+            : 'The answer was not delivered.',
+      );
+      setNonce((n) => n + 1);
+    }
+  };
+
+  if (failed) {
+    return (
+      <p role="alert" className="text-sm text-danger-ink">
+        The service could not be asked what is waiting on you. This is not the same as nothing
+        waiting — a campaign paused for a measurement stays paused.
+      </p>
+    );
+  }
+  if (!view) return <Loading>Reading what is waiting…</Loading>;
+
+  const waiting = view.requests.filter((r) => r.state === 'waiting');
+  if (waiting.length === 0) {
+    return (
+      <EmptyState icon={<Inbox className="size-5" />} title="Nothing is waiting on you">
+        A question appears here when the agent holds work open for an answer only a person can give
+        — a measured yield, a decision about a batch, a value off an instrument.
+      </EmptyState>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {notice && (
+        <p
+          role="status"
+          className="rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-xs"
+        >
+          {notice}
+        </p>
+      )}
+      <ul className="flex flex-col gap-2">
+        {waiting.map((request) => (
+          <li
+            key={request.request_id}
+            className="rounded-lg border border-warn/40 bg-surface-raised p-3"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium">{request.subject}</span>
+              <Badge tone="warn">{request.kind}</Badge>
+              {request.due_at && (
+                <span className="text-2xs text-ink-subtle">due {when(request.due_at)}</span>
+              )}
+            </div>
+            {request.rationale && (
+              <p className="mt-1.5 text-sm text-ink-muted">{request.rationale}</p>
+            )}
+
+            {answering === request.request_id ? (
+              <div className="mt-2 flex flex-wrap items-end gap-2">
+                <label className="flex flex-col gap-1 text-xs">
+                  <span className="text-ink-muted">Your answer</span>
+                  <input
+                    // Focused on open through a ref rather than `autoFocus`: the prop moves focus
+                    // on *mount*, which for a row rendered in a list is a jump a reader did not
+                    // ask for — and `jsx-a11y` refuses it for that reason. This form appears
+                    // because the reader clicked Answer, so moving focus into it is answering
+                    // their action rather than pre-empting it.
+                    ref={(el) => el?.focus()}
+                    value={value}
+                    onChange={(e) => setValue(e.target.value)}
+                    className="rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 outline-none focus-ring"
+                  />
+                </label>
+                <ConfirmDialog
+                  trigger={
+                    <Button size="sm" disabled={!value.trim()}>
+                      Send the answer
+                    </Button>
+                  }
+                  title="Send this answer?"
+                  description="The workflow waiting on this question resumes with what you have typed, attributed to you. It cannot be taken back."
+                  confirmLabel="Send it"
+                  onConfirm={() => void submit(request)()}
+                />
+                <Button size="sm" variant="ghost" onClick={() => setAnswering(null)}>
+                  Cancel
+                </Button>
+              </div>
+            ) : (
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setAnswering(request.request_id);
+                    setValue('');
+                  }}
+                >
+                  Answer
+                </Button>
+                {request.session_id && (
+                  <Button asChild size="sm" variant="ghost">
+                    {/* The conversation that raised it, for the context the subject line cannot
+                        carry — the same link the plan inbox offers, for the same reason. */}
+                    <Link to={`/s/${request.session_id}`}>Open the conversation</Link>
+                  </Button>
+                )}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function Proposals(): React.JSX.Element {
   const { auth, ready } = useAuth();
+  // `/review/:proposalId` opens this queue with that proposal's sheet already up, so a reviewer can
+  // be *sent* to one rather than told to find it. Coerced here because a path segment is a string
+  // and every proposal route downstream takes a number.
+  const { proposalId } = useParams();
+  const navigate = useNavigate();
+  const deepLinked = proposalId && /^[0-9]{1,19}$/.test(proposalId) ? Number(proposalId) : null;
   const [proposals, setProposals] = useState<ProposalSummary[] | null>(null);
-  const [openId, setOpenId] = useState<number | null>(null);
+  const [openId, setOpenId] = useState<number | null>(deepLinked);
   const [nonce, setNonce] = useState(0);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  /** Set once a page came back short or empty: there is nothing older to offer. */
+  const [exhausted, setExhausted] = useState(false);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -410,13 +707,69 @@ function Proposals(): React.JSX.Element {
     };
   }, [auth, ready, nonce]);
 
-  if (!proposals) return <Loading>Reading the review queue…</Loading>;
+  /**
+   * Fetch the page before the oldest one on screen.
+   *
+   * `listProposals` has accepted `beforeId` since it was written and **no caller ever passed it**,
+   * while the service caps a listing at `proposal_list_limit` (50). A PR gate is precisely the
+   * surface that accumulates, so proposal 51 was not below a fold — it was never fetched, and
+   * nothing said the list was short. A full page is the only evidence there might be more, which
+   * is the same rule the service uses for its own session cursor.
+   */
+  const older = useCallback(() => {
+    const oldest = proposals?.[proposals.length - 1]?.id;
+    if (!oldest || loadingOlder) return;
+    setLoadingOlder(true);
+    void api
+      .listProposals(auth, { state: 'pending', beforeId: oldest })
+      .then((page) => {
+        setProposals((current) => [...(current ?? []), ...page]);
+        setExhausted(page.length === 0);
+      })
+      .catch(() => setExhausted(true))
+      .finally(() => setLoadingOlder(false));
+  }, [auth, loadingOlder, proposals]);
+
+  // **The sheet is rendered whatever the list says.** It used to sit inside the "we have rows"
+  // branch, which is fine while the only way to open one is to click a row — and wrong the moment a
+  // URL can open one: `/review/7` for a proposal that is not on the pending page (already decided,
+  // or older than this page) landed on the empty state with nothing open and no explanation.
+  const sheet =
+    openId !== null ? (
+      <ProposalSheet
+        id={openId}
+        open
+        onOpenChange={(next) => {
+          if (next) return;
+          setOpenId(null);
+          // Closing a sheet the URL opened has to move the URL too, or Back is the only way out
+          // of a route that keeps reopening it.
+          if (deepLinked !== null) void navigate('/review', { replace: true });
+        }}
+        onDecided={reload}
+      />
+    ) : null;
+
+  if (!proposals) {
+    return (
+      <>
+        <Loading>Reading the review queue…</Loading>
+        {sheet}
+      </>
+    );
+  }
   if (proposals.length === 0) {
     return (
-      <EmptyState icon={<FileCheck2 className="size-5" />} title="No notes are waiting for review">
-        Everything the agent has proposed has been decided. A new proposal appears here the moment a
-        turn opens one.
-      </EmptyState>
+      <>
+        <EmptyState
+          icon={<FileCheck2 className="size-5" />}
+          title="No notes are waiting for review"
+        >
+          Everything the agent has proposed has been decided. A new proposal appears here the moment
+          a turn opens one.
+        </EmptyState>
+        {sheet}
+      </>
     );
   }
 
@@ -442,14 +795,18 @@ function Proposals(): React.JSX.Element {
           </li>
         ))}
       </ul>
-      {openId !== null && (
-        <ProposalSheet
-          id={openId}
-          open
-          onOpenChange={(next) => !next && setOpenId(null)}
-          onDecided={reload}
-        />
+      {/* Only while a full page came back — the service caps the listing, and a short page is the
+          evidence there is nothing older. Asking for one row beyond the ceiling to know for sure
+          would cost every listing an extra row to answer a question the next request answers for
+          free by coming back empty, which is the argument the service makes for its own cursor. */}
+      {!exhausted && proposals.length >= PAGE_IS_FULL && (
+        <div className="mt-2">
+          <Button variant="ghost" size="sm" disabled={loadingOlder} onClick={older}>
+            {loadingOlder ? 'Loading…' : 'Load older proposals'}
+          </Button>
+        </div>
       )}
+      {sheet}
     </>
   );
 }
@@ -468,6 +825,20 @@ export function ReviewQueue(): React.JSX.Element {
             conversation, including the ones you have closed.
           </p>
           <PlanInbox />
+        </section>
+
+        <Digests />
+
+        <section aria-labelledby="pending-heading">
+          <h2 id="pending-heading" className="mb-1 text-lg font-semibold tracking-tight">
+            Questions waiting on you
+          </h2>
+          <p className="mb-3 text-sm text-ink-muted">
+            Work the agent has paused for an answer only a person can give — a measured yield, a
+            value off an instrument. Until this section existed, one of these became a durable job
+            that ran for seven days and then expired.
+          </p>
+          <PendingInbox />
         </section>
 
         <section aria-labelledby="proposals-heading">

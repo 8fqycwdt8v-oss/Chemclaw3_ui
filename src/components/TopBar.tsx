@@ -6,6 +6,10 @@
  * it now pauses while the tab is hidden — a backgrounded tab used to keep hitting the BFF every
  * 30s for as long as it was left open.
  *
+ * Beside it, and only when the browser says so, an offline marker. The probe alone cannot
+ * distinguish "the service is down" from "this tablet dropped off the AP", and on a shared bench
+ * device the second is the common one; `useOffline` is the half of that the browser can answer.
+ *
  * The banner renders the `retry` action. `sendMessage` has always set it for the retryable kinds
  * (503 capacity, and the BFF's own 502 mapped to `network`), and this component only handled
  * `reset` and `reauth` — so the two failures most likely to be transient produced a red bar with
@@ -17,6 +21,7 @@ import { Menu, RefreshCw, X } from 'lucide-react';
 import { config } from '../env.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { useChatStore } from '../state/chatStore.ts';
+import { useOffline } from '../hooks/useOffline.ts';
 import { resetSession } from '../state/sendMessage.ts';
 import { SidebarBody } from './Sidebar.tsx';
 import { EntityRailTrigger } from './EntityRail.tsx';
@@ -66,6 +71,7 @@ export function TopBar({
   const [drawer, setDrawer] = useState(false);
   const banner = useChatStore((s) => s.banner);
   const activeId = useChatStore((s) => s.activeId);
+  const offline = useOffline();
 
   useEffect(() => {
     let cancelled = false;
@@ -84,12 +90,17 @@ export function TopBar({
     };
     check();
     const timer = setInterval(check, HEALTH_POLL_MS);
-    // Catch up immediately on return rather than waiting out the rest of the interval.
+    // Catch up immediately on return rather than waiting out the rest of the interval. `online`
+    // is the same argument for the other way back: every probe taken during an outage failed, so
+    // the dot reads "unreachable" and would go on reading it for up to 30 s after the Wi-Fi
+    // returned — which is the moment a chemist is most likely to be looking at it.
     document.addEventListener('visibilitychange', check);
+    window.addEventListener('online', check);
     return () => {
       cancelled = true;
       clearInterval(timer);
       document.removeEventListener('visibilitychange', check);
+      window.removeEventListener('online', check);
     };
   }, []);
 
@@ -135,6 +146,36 @@ export function TopBar({
           </TooltipTrigger>
           <TooltipContent>Chemclaw service: {meta.label}</TooltipContent>
         </Tooltip>
+
+        {/* Beside the service indicator rather than replacing it, because they are two facts and
+            the dot above stays true: from here the service IS unreachable. What this adds is the
+            reason, which is the half the health probe cannot see — a failed probe looks identical
+            whether the backend is down or the bench tablet dropped off the AP.
+
+            Only the offline state is ever rendered. `navigator.onLine` is a link-layer signal:
+            false is trustworthy, true says only that an interface exists, so a second dot reading
+            "online" would be claiming reachability the browser has not checked. The tooltip says
+            so in as many words rather than leaving the reader to assume the stronger claim. */}
+        {offline && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex items-center">
+                <StatusDot status="down" label="offline" showLabel={false} />
+                <span
+                  aria-hidden
+                  className="sr-only-live sm:not-sr-only sm:ml-1.5 sm:text-xs sm:text-ink-muted"
+                >
+                  offline
+                </span>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              This device reports no network connection, so nothing here can reach the service. The
+              browser only knows about the link — a connected network with no route out still reads
+              as online.
+            </TooltipContent>
+          </Tooltip>
+        )}
 
         {auth.mode === 'dev' && (
           <Badge tone="warn" className="hidden sm:inline-flex">

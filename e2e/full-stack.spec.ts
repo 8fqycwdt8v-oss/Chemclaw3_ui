@@ -44,7 +44,7 @@ const composer = () => page.getByPlaceholder(/Ask about a reaction/);
  */
 async function ask(question: string): Promise<string> {
   await composer().fill(question);
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Stop' })).toBeHidden({ timeout: 220_000 });
   const answer = page.getByRole('article', { name: 'Assistant answer' }).last();
   await expect(answer).not.toBeEmpty();

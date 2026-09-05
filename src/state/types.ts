@@ -236,6 +236,22 @@ export interface AssistantMessage {
    */
   degradedConnectors: string[];
   /**
+   * This turn was cut off by a page reload rather than by anything that happened to it.
+   *
+   * Stamped by `partialize`, which rewrites a message still marked `streaming` to `aborted` —
+   * because there is no way to resume a *stream* across a reload. That much is unchanged. What was
+   * wrong is the conclusion drawn from it: the backend detaches rather than cancels
+   * (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`), so the turn ran to completion on its own
+   * pump and **wrote its answer to the session transcript**. `recoverDetachedAnswer` already knew
+   * how to fetch that, and only ever ran inside the tab that started the turn — so a reload during
+   * a ten-minute turn threw away an answer that existed, and the transcript rehydrate could not
+   * pick it up either, because it runs only for a conversation with no local messages at all.
+   *
+   * A flag rather than matching the aborted message's prose, so the recovery is not one copy-edit
+   * away from silently never firing again.
+   */
+  interruptedByReload?: boolean;
+  /**
    * The turn is parked waiting for a server admission permit, and has not started running.
    *
    * On the message rather than in `trace` for the same reason `degradedConnectors` is: it is a

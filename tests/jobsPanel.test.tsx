@@ -21,6 +21,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { JobsPanel } from '../src/components/JobsPanel.tsx';
 import { stubFetch } from './helpers.ts';
 import type { DurableJobStatus, JobRecordSummary } from '../src/api/client.ts';
@@ -129,7 +130,11 @@ afterEach(() => {
 describe('JobsPanel', () => {
   it('leads with why a run happened, not with its id', async () => {
     serve();
-    render(<JobsPanel />);
+    render(
+      <MemoryRouter>
+        <JobsPanel />
+      </MemoryRouter>,
+    );
 
     expect(
       await screen.findByText('Decide whether 2-MeTHF or CPME favours the coupling.'),
@@ -140,7 +145,11 @@ describe('JobsPanel', () => {
   it('searches the rationale, and says that is what it searched', async () => {
     // Otherwise a chemist searching for a result reads "no run matches that" as "we never ran it".
     serve();
-    render(<JobsPanel />);
+    render(
+      <MemoryRouter>
+        <JobsPanel />
+      </MemoryRouter>,
+    );
     await screen.findByText('compare_solvents');
 
     fireEvent.change(screen.getByLabelText('Search runs'), { target: { value: 'nitration' } });
@@ -153,7 +162,11 @@ describe('JobsPanel', () => {
 
   it('asks for cancellation without claiming the job stopped', async () => {
     serve();
-    render(<JobsPanel />);
+    render(
+      <MemoryRouter>
+        <JobsPanel />
+      </MemoryRouter>,
+    );
     fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
     await screen.findByText('running');
 
@@ -171,7 +184,11 @@ describe('JobsPanel', () => {
     mode.current = 'msal';
     mode.roles = [];
     serve();
-    render(<JobsPanel />);
+    render(
+      <MemoryRouter>
+        <JobsPanel />
+      </MemoryRouter>,
+    );
     fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
     await screen.findByText('running');
 
@@ -183,7 +200,11 @@ describe('JobsPanel', () => {
     // Otherwise "still loading" and "this failed and will never load" are the same screen.
     jobReadFails = true;
     serve();
-    render(<JobsPanel />);
+    render(
+      <MemoryRouter>
+        <JobsPanel />
+      </MemoryRouter>,
+    );
     fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
 
     await screen.findByRole('status');
@@ -210,7 +231,11 @@ describe('JobsPanel', () => {
       completed_at: null,
     };
     serve([campaign, RECORD]);
-    render(<JobsPanel />);
+    render(
+      <MemoryRouter>
+        <JobsPanel />
+      </MemoryRouter>,
+    );
 
     // The badge is in the list, where a reader is scanning rows.
     const row = await screen.findByRole('button', { name: /start_optimization_campaign/ });
@@ -228,7 +253,11 @@ describe('JobsPanel', () => {
 
   it('distinguishes an empty registry from an empty search', async () => {
     serve([]);
-    render(<JobsPanel />);
+    render(
+      <MemoryRouter>
+        <JobsPanel />
+      </MemoryRouter>,
+    );
     expect(await screen.findByText('No runs recorded yet')).toBeTruthy();
   });
 });

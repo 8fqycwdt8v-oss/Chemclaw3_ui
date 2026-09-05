@@ -20,6 +20,7 @@
  * consumed by the time the card arrives.
  */
 
+import { useShallow } from 'zustand/react/shallow';
 import { useEffect, useRef, useState } from 'react';
 import { Undo2, X } from 'lucide-react';
 import { useNavigate } from 'react-router';
@@ -33,7 +34,15 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 export function JobFeed(): React.JSX.Element | null {
   const jobFeed = useChatStore((s) => s.jobFeed);
   const activeId = useChatStore((s) => s.activeId);
-  const conversations = useChatStore((s) => s.conversations);
+  // Titles only, shallow-compared. Selecting `s.conversations` whole put this panel on the
+  // per-token render path — `updateAssistant` replaces that map on every animation-frame flush —
+  // to read one string per card. A record of titles changes when a conversation is named, which
+  // is once.
+  const titles = useChatStore(
+    useShallow((s) =>
+      Object.fromEntries(Object.entries(s.conversations).map(([id, c]) => [id, c.title])),
+    ),
+  );
   const dismiss = useChatStore((s) => s.dismissJobItem);
   const restore = useChatStore((s) => s.restoreJobItem);
   const [undoable, setUndoable] = useState<string | null>(null);
@@ -84,9 +93,7 @@ export function JobFeed(): React.JSX.Element | null {
           <ul className="flex flex-wrap gap-2">
             {visible.map((item) => {
               const elsewhere = item.conversationId && item.conversationId !== activeId;
-              const title = item.conversationId
-                ? conversations[item.conversationId]?.title
-                : undefined;
+              const title = item.conversationId ? titles[item.conversationId] : undefined;
               return (
                 <li
                   key={item.event.job_id}

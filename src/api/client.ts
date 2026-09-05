@@ -990,8 +990,17 @@ export const api = {
         },
       );
     } catch (err) {
+      // **The rebuild carries the correlation id, and it used to drop it.** `errorFromStatus` had
+      // just read the service's own reference off the failed response and attached it; a
+      // constructor call with no `options` silently returned it to `''`, so this route — and the
+      // status route below, which copied this shape — was the one place a banner could not say
+      // "(reference …)". `api/errors.ts` states the rule the rest of this file keeps: every banner
+      // carries a reference. `retryable` is deliberately not copied: it is derived from the kind,
+      // and the kind is what this line changes.
       if (err instanceof ApiError && err.status === 409) {
-        throw new ApiError('revision_conflict', err.message, 409);
+        throw new ApiError('revision_conflict', err.message, 409, {
+          correlationId: err.correlationId,
+        });
       }
       throw err;
     }
@@ -1063,8 +1072,13 @@ export const api = {
         }),
       });
     } catch (err) {
+      // The reference is carried across the re-kind for `putProtocolRevision`'s reason, and this
+      // is the site where losing it costs most: a refused sign-off is the failure a chemist is
+      // likeliest to have to ask somebody about.
       if (err instanceof ApiError && err.status === 409 && err.kind === 'turn_in_flight') {
-        throw new ApiError('revision_conflict', err.message, 409);
+        throw new ApiError('revision_conflict', err.message, 409, {
+          correlationId: err.correlationId,
+        });
       }
       throw err;
     }

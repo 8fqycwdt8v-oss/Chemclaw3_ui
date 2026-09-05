@@ -233,6 +233,26 @@ describe('putProtocolRevision', () => {
     );
   });
 
+  it('carries the correlation id across the re-kind', async () => {
+    // The rebuild is a fresh `ApiError`, and it used to be constructed with no `options` — so the
+    // reference `errorFromStatus` had just read off the response was thrown away by the one line
+    // whose only job was to change the kind. `api/errors.ts` states the rule: every banner carries
+    // a reference. Without it, the two conflict banners in `ProtocolDocument` are the only failures
+    // in this app a chemist cannot quote a single log line for.
+    const stub = stubFetch(
+      () =>
+        new Response(JSON.stringify({ detail: { code: 'revision_conflict', message: 'stale' } }), {
+          status: 409,
+          headers: { 'content-type': 'application/json', 'x-chemclaw-correlation-id': 'corr-put' },
+        }),
+    );
+    restore = stub.restore;
+
+    await expect(api.putProtocolRevision(DESIGN, DOCUMENT, 2, 'note', token)).rejects.toMatchObject(
+      { kind: 'revision_conflict', correlationId: 'corr-put' },
+    );
+  });
+
   it('leaves every other failure alone', async () => {
     // Only 409 means "somebody else moved it". A 422 is this client sending something wrong and
     // must not be presented as a conflict with a colleague.
@@ -330,6 +350,28 @@ describe('getProtocolDiff and setProtocolStatus', () => {
     await expect(
       api.setProtocolStatus(DESIGN, 'approved', 1, 'draft', 'looks fine', token),
     ).rejects.toMatchObject({ kind: 'revision_conflict', status: 409 });
+  });
+
+  it('carries the correlation id across the re-kind here too', async () => {
+    // The same defect, copied. This one is the site where losing the reference costs most: a
+    // refused sign-off is the failure a chemist is likeliest to have to ask somebody about, and
+    // the codeless branch is exactly the older deployment where the rest of the diagnosis is
+    // thinnest.
+    const stub = stubFetch(
+      () =>
+        new Response(JSON.stringify({ detail: 'revision 1 is not the head (2)' }), {
+          status: 409,
+          headers: {
+            'content-type': 'application/json',
+            'x-chemclaw-correlation-id': 'corr-status',
+          },
+        }),
+    );
+    restore = stub.restore;
+
+    await expect(
+      api.setProtocolStatus(DESIGN, 'approved', 1, 'draft', 'looks fine', token),
+    ).rejects.toMatchObject({ kind: 'revision_conflict', correlationId: 'corr-status' });
   });
 
   it('reads a codeless 409 from an older service as a revision conflict', async () => {

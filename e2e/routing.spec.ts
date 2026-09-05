@@ -63,20 +63,22 @@ async function openSidebar(page: Page, isMobile: boolean | undefined): Promise<v
   if (isMobile) await page.getByRole('button', { name: 'Conversations' }).click();
 }
 
-test('the review queue is reachable and shows what would be committed', async ({
+test('the review queue is reachable and shows what is waiting on a person', async ({
   page,
   isMobile,
 }) => {
-  // The largest capability the service had and the UI did not touch. Reaching it from the shell
-  // is half the point — a queue nobody can navigate to is a queue nobody reviews.
+  // Reaching it from the shell is half the point — a queue nobody can navigate to is a queue
+  // nobody works. This used to click through to a proposal and assert on the bytes it would
+  // commit; that section went with the PR gate
+  // (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` in Chemclaw3), so what it now
+  // asserts is the section that is still there and still blocks work.
   await page.goto('/');
   await openSidebar(page, isMobile);
   await page.getByRole('button', { name: 'Review queue' }).click();
 
   await expect(page).toHaveURL(/\/review$/);
-  await page.getByRole('button', { name: /note-suzuki-42/ }).click();
-  // The bytes, not a summary of them: a sign-off is on what lands in the tree.
-  await expect(page.getByText(/confidence: 0\.8/)).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Plans waiting on you' })).toBeVisible();
+  await expect(page.getByText('Which solvent for the Suzuki step?')).toBeVisible();
 });
 
 test('the durable-run registry leads with why a run happened', async ({ page, isMobile }) => {

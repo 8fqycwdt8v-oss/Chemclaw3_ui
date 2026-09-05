@@ -24,6 +24,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { MemoryRouter } from 'react-router';
 import { ReviewQueue } from '../src/components/ReviewQueue.tsx';
 import { stubFetch } from './helpers.ts';
+import { resetPendingPlansCache } from '../src/api/client.ts';
 import type { PendingPlans, ProposalDetail, ProposalSummary } from '../src/api/client.ts';
 
 const mode = { current: 'dev' as 'dev' | 'msal', roles: [] as string[] };
@@ -165,6 +166,12 @@ beforeEach(() => {
   pending = PENDING;
   mode.current = 'dev';
   mode.roles = [];
+  // `GET /plans/pending` is the most expensive read one navigation here can trigger — up to 25
+  // checkpointer reads, serialized against every concurrent turn on the pod — so the client holds
+  // it for a short minimum interval and does not rescan when a reader bounces back into /review.
+  // That interval is module-wide, and each test below mounts the inbox against a fixture of its
+  // own, so without this one test answers the next one's question.
+  resetPendingPlansCache();
 });
 afterEach(() => {
   cleanup();
@@ -311,6 +318,10 @@ describe('the plan inbox', () => {
 
     cleanup();
     pending = { plans: [], considered: 30, gated: 30, unread: 5 };
+    // The second mount is immediate, and a remount inside the client's minimum interval is exactly
+    // what that interval refuses to rescan for. This test is about the two *renderings* of a
+    // bounded scan, so it asks for a fresh answer rather than pretending the second one is one.
+    resetPendingPlansCache();
     renderQueue();
     expect(await screen.findByText(/5 older conversations were not checked/)).toBeTruthy();
   });
@@ -332,6 +343,10 @@ describe('the plan inbox', () => {
     // Both shortfalls at once: one sentence, both facts, and the count still belongs to `unread`.
     cleanup();
     pending = { ...PENDING, unread: 2, truncated: true };
+    // The inbox holds a pending-plans answer for 10 s so that opening `/review` twice in a minute
+    // does not re-run a scan the service just ran. A remount inside that window is exactly what
+    // the cache is for, so this test has to leave it deliberately rather than assert through it.
+    resetPendingPlansCache();
     renderQueue();
     const notice = await screen.findByText(/2 older conversations were not checked/);
     expect(notice.textContent).toContain('the scan stopped before the end of your conversations');

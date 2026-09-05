@@ -82,7 +82,11 @@ async function send(path: string, auth: TokenGetter, init: RequestInit): Promise
   try {
     return await fetch(`${config.apiBase}${path}`, {
       ...init,
-      cache: 'no-store',
+      // `no-store` unless the caller says otherwise, and almost nothing does: a session, a
+      // transcript, a job list and a review queue are all mutable and session-scoped, and a stale
+      // one is worse than a slow one. The exception is a content-addressed route, whose URL
+      // changes when its bytes do — see `contentAddressed` below.
+      cache: init.cache ?? 'no-store',
       headers: {
         accept: 'application/json',
         ...(init.body && !(init.body instanceof FormData)
@@ -123,6 +127,72 @@ async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+/**
+ * Reads of an immutable, content-addressed resource that are already on the wire.
+ *
+ * Keyed by path and deleted the moment the request settles, so this is an in-flight join rather
+ * than a cache: it holds nothing after the answer arrives, and it cannot grow.
+ *
+ * It exists because two components legitimately ask for the same bytes at the same instant — a
+ * result block under the answer and the trace panel behind it both cite one `result_ref`, and a
+ * citation chip and the note sheet it opens both cite one note id. Each component's own `requested`
+ * ref guards against a double fetch *within one instance* and can see nothing outside it, so what
+ * looked like one read was two round trips to the service's blob store.
+ */
+const inFlight = new Map<string, Promise<unknown>>();
+
+/**
+ * `request`, for a route whose URL changes whenever its bytes do.
+ *
+ * Two things follow from content-addressing and neither was being taken: concurrent readers can
+ * share one request, and the browser's HTTP cache may keep the answer — `send` sets `no-store` on
+ * everything by default, which does not merely skip the cache, it forbids writing to it, so a
+ * remount (a route change, a conversation switch and back, a block scrolling out of the window and
+ * in again) refetched the whole payload every time.
+ *
+ * **What this does not yet buy, said plainly**, because `ResultBlock`'s own docstring has claimed
+ * for longer that "the browser and any cache in front of it can hold it forever": the service sets
+ * no `Cache-Control` on either route, so `default` gets a revalidation at best rather than a hit.
+ * This is the half that lives here; the backend half is a header on `GET /sessions/{id}/tool-results/{ref}`.
+ */
+function contentAddressed<T>(path: string, auth: TokenGetter): Promise<T> {
+  const existing = inFlight.get(path);
+  if (existing) return existing as Promise<T>;
+  const pending = request<T>(path, auth, { cache: 'default' }).finally(() => {
+    inFlight.delete(path);
+  });
+  inFlight.set(path, pending);
+  return pending;
+}
+
+/**
+ * The shortest interval between two scans of the plan inbox.
+ *
+ * `GET /plans/pending` is the most expensive thing one navigation in this app can trigger: the
+ * service scans up to `service_max_plan_scans` (25) sessions, and its own route docstring says
+ * each read "is a statement on a checkpointer that serializes them against every concurrent turn
+ * on the pod". `ReviewQueue` mounts it on every visit to `/review`, uncached and undebounced, so a
+ * chemist bouncing between the inbox and a conversation paid for the whole scan each time.
+ *
+ * Ten seconds, which is short enough that nobody navigates through it deliberately and long enough
+ * to collapse a bounce. It is a *minimum interval*, not a cache with an expiry policy: the one
+ * action that can invalidate this answer is a plan decision, and `decidePlan` drops the entry.
+ */
+const PENDING_PLANS_MIN_INTERVAL_MS = 10_000;
+
+/** The last plan scan and when it was taken, or nothing. */
+let pendingPlansCache: { at: number; plans: PendingPlans } | null = null;
+
+/**
+ * Test seam: this cache is module-wide, so one test would otherwise answer the next one's question.
+ *
+ * The same shape, and the same reason, as `resetClientEventBudget` in `server/clientEvents.ts`.
+ * Nothing in the app calls it — a signed-out reader gets a fresh page and a fresh module.
+ */
+export function resetPendingPlansCache(): void {
+  pendingPlansCache = null;
 }
 
 /**
@@ -627,10 +697,24 @@ export const api = {
    * and an older backend without the route answers the same way, degrading Stop to the old
    * disconnect-only behaviour rather than surfacing a banner.
    */
-  async stopTurn(sessionId: string, getToken: TokenGetter): Promise<boolean> {
+  /**
+   * Cancel the running turn.
+   *
+   * `keepalive` is for the one caller that is being torn down as it asks: a `pagehide` handler has
+   * until the document is discarded, and an ordinary `fetch` started there is cancelled with the
+   * page. It is not the default because `keepalive` requests are capped at 64 KiB by the browser
+   * and share a small per-page budget with the log sink's own final batch, and because every other
+   * caller is alive to await the answer.
+   */
+  async stopTurn(
+    sessionId: string,
+    getToken: TokenGetter,
+    options: { keepalive?: boolean } = {},
+  ): Promise<boolean> {
     try {
       await request<{ stopped: boolean }>(`/sessions/${sessionId}/turn/stop`, getToken, {
         method: 'POST',
+        ...(options.keepalive ? { keepalive: true } : {}),
       });
       return true;
     } catch (err) {
@@ -684,7 +768,10 @@ export const api = {
    * caller should see.
    */
   getToolResult(sessionId: string, ref: string, getToken: TokenGetter): Promise<StoredToolResult> {
-    return request<StoredToolResult>(`/sessions/${sessionId}/tool-results/${ref}`, getToken);
+    return contentAddressed<StoredToolResult>(
+      `/sessions/${sessionId}/tool-results/${ref}`,
+      getToken,
+    );
   },
 
   /**
@@ -699,7 +786,7 @@ export const api = {
    * `encodeURIComponent` emits.
    */
   getNote(noteId: string, getToken: TokenGetter, hops = 1): Promise<NoteView> {
-    return request<NoteView>(
+    return contentAddressed<NoteView>(
       `/notes/${encodeURIComponent(noteId)}?hops=${encodeURIComponent(String(hops))}`,
       getToken,
     );
@@ -894,7 +981,14 @@ export const api = {
    * caller so the screen can say it could not ask.
    */
   listPendingPlans(getToken: TokenGetter): Promise<PendingPlans> {
-    return request<PendingPlans>('/plans/pending', getToken);
+    const cached = pendingPlansCache;
+    if (cached && Date.now() - cached.at < PENDING_PLANS_MIN_INTERVAL_MS) {
+      return Promise.resolve(cached.plans);
+    }
+    return request<PendingPlans>('/plans/pending', getToken).then((plans) => {
+      pendingPlansCache = { at: Date.now(), plans };
+      return plans;
+    });
   },
 
   /**
@@ -912,6 +1006,10 @@ export const api = {
     planHash: string,
     getToken: TokenGetter,
   ): Promise<void> {
+    // Whatever the outcome, this inbox's answer is now suspect: an approval removes a row, and a
+    // 409 means the plan moved under the reader. Dropping the entry is what keeps the interval
+    // below from being a staleness window on the one action that invalidates it.
+    pendingPlansCache = null;
     try {
       await request<void>(`/sessions/${sessionId}/plan/decision`, getToken, {
         method: 'POST',

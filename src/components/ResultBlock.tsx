@@ -19,8 +19,14 @@
  *  - it is **lazy**: the fetch starts when the block scrolls into view, so a long transcript the
  *    reader never scrolls back through costs nothing;
  *  - it is **capped** by the caller, at a small number of blocks per turn;
- *  - the URL is **content-addressed** and immutable, so the browser and any cache in front of it
- *    can hold it forever.
+ *  - the URL is **content-addressed** and immutable, so it is *cacheable* — concurrent readers of
+ *    one ref share a single request (`contentAddressed` in `src/api/client.ts`), and the fetch no
+ *    longer forbids the browser from keeping the answer. It said "the browser and any cache in
+ *    front of it can hold it forever" while `src/api/client.ts` set `cache: 'no-store'` on every
+ *    request the SPA made, which is not "do not use the cache" but "do not write to it", so every
+ *    remount refetched the whole payload. What is still missing is the service's end: neither
+ *    `GET /sessions/{id}/tool-results/{ref}` nor `GET /notes/{id}` sends a `Cache-Control`, so a
+ *    revalidation is the most the browser can do with it today.
  *
  * ## It renders only when there is something to render
  *

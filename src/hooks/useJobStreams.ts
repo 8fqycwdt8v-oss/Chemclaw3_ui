@@ -18,7 +18,7 @@
  *  - A legitimately silent stream must stay open. Only the connect phase is bounded.
  */
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { config } from '../env.ts';
 import { retryAfterSeconds } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
@@ -73,8 +73,56 @@ const FAILURES_BEFORE_REPORTING = 4;
  * primitive re-renders only when the watched set actually changes. Exported so the property that
  * matters — a token flush does not move it — can be pinned without opening a socket.
  */
-export function watchedSessionKey(s: ChatState): string {
-  const budget = s.jobStreamsThrottled ? 1 : MAX_JOB_STREAMS;
+/**
+ * How long a tab must stay hidden before it is treated as backgrounded.
+ *
+ * Without it every alt-tab tears down streams and rebuilds them seconds later, which turns a
+ * saving into connection churn — and 200 chemists coming back to their tabs at 09:00 would reopen
+ * 600 streams at once. Half a minute is longer than any glance at another window and far shorter
+ * than the runs this stream reports on.
+ */
+const HIDDEN_GRACE_MS = 30_000;
+
+/**
+ * Whether this tab has been hidden long enough to count as backgrounded.
+ *
+ * A hook rather than a `document.hidden` read at render time: the watch set is a store projection,
+ * so the visibility change has to arrive as a state change or nothing recomputes.
+ */
+function useBackgrounded(): boolean {
+  const [backgrounded, setBackgrounded] = useState(false);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const clear = (): void => {
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
+    const onChange = (): void => {
+      clear();
+      // Coming back is immediate; going away waits out the grace period. Down slowly, up at once.
+      if (!document.hidden) setBackgrounded(false);
+      else timer = setTimeout(() => setBackgrounded(true), HIDDEN_GRACE_MS);
+    };
+    onChange();
+    document.addEventListener('visibilitychange', onChange);
+    return () => {
+      clear();
+      document.removeEventListener('visibilitychange', onChange);
+    };
+  }, []);
+
+  return backgrounded;
+}
+
+export function watchedSessionKey(s: ChatState, backgrounded = false): string {
+  // **Two reasons to hold one stream, and only one of them is `jobStreamsThrottled`.** That flag
+  // means "this tab holds more than its share of the stream cap" and is deliberately irreversible,
+  // so a hidden tab must not set it: a chemist who comes back would never get their streams again.
+  // `backgrounded` is the reversible half, and it defaults to false so a caller that does not care
+  // about visibility — every test of the projection itself — reads exactly as it did before.
+  const budget = s.jobStreamsThrottled || backgrounded ? 1 : MAX_JOB_STREAMS;
   const activeId = s.activeId;
   const candidates = Object.values(s.conversations)
     .filter((c) => c.sessionId)
@@ -107,7 +155,11 @@ export function useJobStreams(): void {
   // Selecting the key itself means zustand compares with `Object.is` and re-renders only when the
   // watched set actually changes. The projection still runs per write, over at most
   // `MAX_CONVERSATIONS` entries, which is microseconds.
-  const watchKey = useChatStore(watchedSessionKey);
+  const backgrounded = useBackgrounded();
+  // The selector closes over `backgrounded`, so a visibility change re-projects and the effect
+  // below tears the surplus streams down — and rebuilds them when the tab comes back, which is the
+  // half `jobStreamsThrottled` cannot express.
+  const watchKey = useChatStore((s) => watchedSessionKey(s, backgrounded));
 
   useEffect(() => {
     if (!ready || !watchKey) return;

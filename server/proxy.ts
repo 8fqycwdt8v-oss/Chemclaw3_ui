@@ -60,11 +60,36 @@ const transport = upstream.protocol === 'https:' ? https : http;
  * moment its first body byte arrives, so anything that can open connections and dribble bytes can
  * hold the pool. `cfg.requestTimeoutMs` is what puts a bound on that; this is the ceiling it is
  * bounding, and it is configurable so the two can be tuned together.
+ *
+ * **There are two pools, and that is the load-bearing part.** One `Agent` served both the SSE
+ * routes and every ordinary call, which made a *residency* limit and a *burst* limit share one
+ * number — and the residents win, because they never leave. Measured on the shipped build with a
+ * stub upstream holding streams open: at exactly `maxSockets` live streams an ordinary
+ * `GET /api/healthz` never answered (curl exit 28, 0 bytes received), and `POST
+ * /sessions/{id}/messages` queued behind the same streams, so the pod was dead for every user for
+ * as long as the tabs stayed open. 200 chemists x 3 job streams is 600 against a pool of 512, so
+ * that was not a hypothetical: the wall was ~170 users per pod.
+ *
+ * Split, a saturated stream pool can no longer starve a turn submission, a health probe or a
+ * transcript load, whatever the SPA does with its streams.
  */
 const agent = new transport.Agent({
   keepAlive: true,
   keepAliveMsecs: 15_000,
   maxSockets: cfg.maxUpstreamSockets,
+  timeout: 0,
+});
+
+/**
+ * The pool for the two long-lived routes — the turn stream and the job push-back stream.
+ *
+ * Sized by residency rather than by burst: every socket here is held for the life of a turn or of
+ * a browser tab, so the number is "how many chemists this pod carries" and nothing else.
+ */
+const streamAgent = new transport.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 15_000,
+  maxSockets: cfg.maxUpstreamStreamSockets,
   timeout: 0,
 });
 
@@ -227,6 +252,40 @@ function buildUpstreamHeaders(
   return headers;
 }
 
+/** The code this process answers a saturated pool with. Not an `errno`; only the log reads it. */
+const POOL_TIMEOUT_CODE = 'EPOOLTIMEOUT';
+
+/**
+ * Bound the wait for a socket, which is the one phase nothing else here bounds.
+ *
+ * `agent.timeout`, `request.setTimeout` and `upstreamConnectTimeoutMs` all bound a socket this
+ * request already HAS; a request still sitting in `http.Agent`'s queue has none of them, and that
+ * queue is unbounded and untimed. So a full pool did not degrade — it stopped, permanently,
+ * because the sockets holding it are SSE streams that release only when the tab closes.
+ *
+ * The timer is armed at request time and cleared by the `socket` event, which the agent emits on
+ * dequeue rather than on construction — that ordering is what makes this measure the queue wait
+ * and not the connect.
+ *
+ * **`refuse` writes the answer itself, and that is not a style choice.** The obvious form is
+ * `upstreamReq.destroy(err)` and a branch in the `error` handler, which is how this was first
+ * written and it hangs: measured on Node 22, destroying a `ClientRequest` that never received a
+ * socket emits **no** `error` and **no** `close` — the request is silently dropped and the browser
+ * waits for ever, which is the exact defect this bound exists to remove. `destroy()` here is only
+ * what unqueues it; a request the agent later hands a socket to sees `destroyed` and releases it.
+ */
+function boundQueueWait(upstreamReq: http.ClientRequest, refuse: () => void): void {
+  if (cfg.upstreamQueueTimeoutMs <= 0) return;
+  const timer = setTimeout(() => {
+    upstreamReq.destroy();
+    refuse();
+  }, cfg.upstreamQueueTimeoutMs);
+  const clear = (): void => clearTimeout(timer);
+  upstreamReq.once('socket', clear);
+  upstreamReq.once('error', clear);
+  upstreamReq.once('close', clear);
+}
+
 /**
  * Refuse a body this process will not carry, in the shape FastAPI's own errors have.
  *
@@ -282,7 +341,10 @@ export function proxy(
       method: req.method,
       path: upstreamPath,
       headers: buildUpstreamHeaders(req, trace.correlationId),
-      agent,
+      // The ROUTE's declaration, not the response's content type: the socket is claimed before a
+      // single upstream byte is read, so this is the only fact available at the moment the pool is
+      // chosen. A stream route that answers 429 or 502 releases its socket immediately anyway.
+      agent: expectSse ? streamAgent : agent,
     },
     (upstreamRes) => {
       trace.upstreamMs = Date.now() - startedAt;
@@ -324,6 +386,39 @@ export function proxy(
   // legitimately silent for many minutes — and it left the response *headers* unbounded too, which
   // is a different thing and was the one unrecoverable failure in this file.
   upstreamReq.setTimeout(0);
+
+  /**
+   * Answer a request whose pool never had a socket for it.
+   *
+   * A pool with nothing free is this process being full, not the backend being down, and the two
+   * want opposite things from the caller: 502 says "that request failed", 503 with a `Retry-After`
+   * says "come back". The SPA's stream client already backs off with jitter on any non-2xx, so
+   * the retry this produces is paced.
+   */
+  const refuseSaturated = (): void => {
+    if (res.headersSent) return;
+    upstreamErrorRecorded();
+    log.warn('upstream pool saturated', {
+      method: req.method,
+      path: upstreamPath,
+      code: POOL_TIMEOUT_CODE,
+      pool: expectSse ? 'stream' : 'default',
+      waited_ms: cfg.upstreamQueueTimeoutMs,
+    });
+    res.writeHead(503, {
+      'content-type': 'application/json',
+      connection: 'close',
+      'retry-after': '5',
+    });
+    res.end(
+      JSON.stringify({ detail: 'no upstream connection available', code: POOL_TIMEOUT_CODE }),
+    );
+    // Same reason as the error path below: answering early and then waiting politely for the rest
+    // of a body nobody is sending is an unbounded hold.
+    if (!req.readableEnded) req.destroy();
+  };
+
+  boundQueueWait(upstreamReq, refuseSaturated);
 
   /**
    * Give up on an upstream that has accepted the request and never begun answering.

@@ -38,6 +38,7 @@ import { announceStatus } from '../state/announce.ts';
 import { relativeTime } from '../lib/format.ts';
 import { logger } from '../lib/logger.ts';
 import { cn } from '@/lib/utils';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -413,11 +414,15 @@ function SidebarLink({
   icon,
   children,
   onNavigate,
+  count = 0,
 }: {
   to: string;
   icon: React.ReactNode;
   children: React.ReactNode;
   onNavigate?: () => void;
+  /** How many things are waiting behind this link. `0` renders nothing at all — an empty badge
+   *  reads as a broken one, and "nothing is waiting" is the state this app is in almost always. */
+  count?: number;
 }): React.JSX.Element {
   const navigate = useNavigate();
   const location = useLocation();
@@ -439,6 +444,14 @@ function SidebarLink({
         {icon}
       </span>
       {children}
+      {count > 0 && (
+        // The number is in the accessible name rather than beside it as a bare digit: a screen
+        // reader announcing "Review queue 2" says nothing about what the 2 counts, and this link
+        // also leads to note proposals, which this badge is not about.
+        <Badge tone="warn" className="ml-auto" aria-label={`${count} waiting on you`}>
+          {count}
+        </Badge>
+      )}
     </Button>
   );
 }
@@ -449,6 +462,9 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
   const { health: degraded, more: loadMoreSessions, loadingMore } = useServerSessions();
   const throttled = useChatStore((s) => s.jobStreamsThrottled);
   const streamsFailing = useChatStore((s) => s.jobStreamsFailing.length > 0);
+  // A number, not the list: zustand compares with `Object.is`, so subscribing to the array itself
+  // would re-render this whole panel on every `syncAwaiting` that changed nothing.
+  const awaiting = useChatStore((s) => s.awaiting.length);
   const [query, setQuery] = useState('');
   const needle = query.trim().toLowerCase();
 
@@ -554,7 +570,12 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
             because they are where a chemist goes occasionally, and the list is where they go
             every time. */}
         <nav aria-label="Other views" className="flex flex-col gap-1">
-          <SidebarLink to="/review" icon={<FileCheck2 />} onNavigate={onNavigate}>
+          {/* The count is on this link and not on a toast, because a question held open for a
+              person has a deadline measured in days: it must be visible on every screen for as
+              long as it is open, and gone the moment it is not. Before the service delivered
+              `awaiting_answer` at all, the only trace of a paused campaign was a durable run that
+              appeared to execute for a week (backend D-2026-09-05). */}
+          <SidebarLink to="/review" icon={<FileCheck2 />} onNavigate={onNavigate} count={awaiting}>
             Review queue
           </SidebarLink>
           {/* A design outlives the conversation that drafted it — corrected by somebody who was

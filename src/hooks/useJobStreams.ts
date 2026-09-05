@@ -12,7 +12,7 @@
  *    now known — see `MAX_JOB_STREAMS` — but the failure mode is unchanged: the 429 path backs off
  *    and retries forever, so overshooting looks like "notifications quietly stopped". So there is
  *    an explicit client-side budget, and it only ever adjusts DOWNWARD.
- *  - Its claim is destructive and scoped to `job_completed` in SQL. We are one of two consumers
+ *  - Its claim is destructive and scoped to three kinds in SQL. We are one of two consumers
  *    racing for those rows, so a missed event is expected and must never be treated as an error.
  *    More streams do not multiply delivery; they multiply racers.
  *  - A legitimately silent stream must stay open. Only the connect phase is bounded.
@@ -285,14 +285,21 @@ async function openStream(
         if (!frame.event) continue;
         const event = frame.event;
         try {
-          // Both endings, not just the happy one. This stream is scoped server-side to exactly
-          // `job_completed` and `job_failed`, and a job that died after the turn ended is the
-          // case the whole push-back path exists for — dropping it left the launch row saying
-          // "runs asynchronously" indefinitely.
+          // Both endings, not just the happy one. This stream is scoped server-side to
+          // `job_completed`, `job_failed` and `awaiting-answer`, and a job that died after the
+          // turn ended is the case the whole push-back path exists for — dropping it left the
+          // launch row saying "runs asynchronously" indefinitely.
           if (event.type === 'job_completed' || event.type === 'job_failed') {
             // The event carries no session id — but we know which stream we opened, so the
             // association is attached here rather than by mutating the wire contract.
             useChatStore.getState().pushJobFinished(event, sessionId);
+          } else if (event.type === 'awaiting_answer') {
+            // The third kind this stream claims (backend D-2026-09-05). It is not a job ending —
+            // it is a durable request *starting* or expiring — so it goes to its own slice rather
+            // than into the job feed, where a "question waiting on you" would render as a run that
+            // finished. The expiry push matters as much as the open: `noteAwaiting` removes on it,
+            // which is what keeps the badge from counting a question nobody can answer any more.
+            useChatStore.getState().noteAwaiting(event);
           }
         } catch {
           // one bad frame is not worth dropping the stream

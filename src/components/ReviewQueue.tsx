@@ -507,6 +507,9 @@ function PendingInbox(): React.JSX.Element {
   const [value, setValue] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  // The stream's own revision, not the list's length: `syncAwaiting` below must not be able to
+  // re-trigger the effect that calls it. See `awaitingRevision` in the store.
+  const pushes = useChatStore((s) => s.awaitingRevision);
 
   useEffect(() => {
     if (!ready) return;
@@ -517,12 +520,28 @@ function PendingInbox(): React.JSX.Element {
         if (cancelled) return;
         setView(next);
         setFailed(false);
+        // The service is the authority on what is open; the `awaiting_answer` stream only says
+        // that something changed. Reconciling here is what keeps the sidebar badge honest after
+        // an answer given in another tab, and what fills in the fields neither push carries whole.
+        useChatStore.getState().syncAwaiting(
+          next.requests
+            .filter((r) => r.state === 'waiting')
+            .map((r) => ({
+              request_id: r.request_id,
+              subject: r.subject,
+              kind: r.kind,
+              due_at: r.due_at,
+            })),
+        );
       })
       .catch(() => !cancelled && setFailed(true));
     return () => {
       cancelled = true;
     };
-  }, [auth, ready, nonce]);
+    // `pushes` is a dependency and not a value this reads: a frame off the push-back stream moves
+    // it, which is the whole mechanism by which an inbox left open on screen notices a new question
+    // without polling for one.
+  }, [auth, ready, nonce, pushes]);
 
   const submit = (request: PendingRequest) => async (): Promise<void> => {
     setNotice(null);

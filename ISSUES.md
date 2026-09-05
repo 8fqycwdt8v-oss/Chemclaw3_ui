@@ -210,30 +210,39 @@ Reopen PR #11 rather than rebuilding — the branch is retained.
 
 ---
 
-## Issue 9: a question the agent is waiting on cannot reach the browser by itself
+## Issue 9 (closed): a question the agent is waiting on could not reach the browser by itself
 
-**Repo:** Chemclaw3 (backend)
+**Repos:** Chemclaw3 (backend) and here. Closed 2026-09-05 by
+`D-2026-09-05-a-push-nobody-claims-is-not-a-push` there and the mirror here.
 
-`GET /pending` and `POST /pending/{id}/answer` are now surfaced — the "Questions waiting on you"
+`GET /pending` and `POST /pending/{id}/answer` were surfaced first — the "Questions waiting on you"
 section of `/review`, added because the route has three live producers (the
 `request_external_input` agent tool, `BoCampaignWorkflow._measure` pausing a campaign at the bench
-for measured yields, and the connector-job path) and no consumer at all. That half is done.
+for measured yields, and the connector-job path) and had no consumer at all.
 
-**The push half is not, and it cannot be fixed from here.** `AwaitAnswerWorkflow._push` writes an
-`awaiting-answer` row into `session_events` (`durable/awaiting.py`), and
-`GET /sessions/{id}/events` reads with `kinds=("job_completed", "job_failed")`
-(`routes/streams.py`). So the row is never delivered to any client. The only trace a chemist gets
-is `record_job_started(handle.id, "awaiting")`, which arrives as a `job_started` whose `kind` this
-UI does not recognise — so an ask renders as a durable job that runs for seven days and then
-silently expires.
+**The push half was the part this repository could not fix.** `AwaitAnswerWorkflow._push` wrote an
+`awaiting-answer` row into `session_events` (`durable/awaiting.py`) and
+`GET /sessions/{id}/events` read with `kinds=("job_completed", "job_failed")`
+(`routes/streams.py`), so the row was never delivered to any client — written, never claimed, aged
+out under retention, and the claim is destructive and at-most-once, so there was no second chance
+at it either. The only trace a chemist got was `record_job_started(handle.id, "awaiting")`, which
+arrives as a `job_started` whose `kind` this UI does not recognise: an ask rendered as a durable job
+that runs for a week and then silently expires.
 
-**Consequence today:** the inbox is a poll. It is read when `/review` is opened, so a campaign that
-pauses while the chemist is elsewhere waits until they think to look.
+**What closed it.** The backend claims the third kind and declares `AwaitingAnswerEvent`; this
+repository mirrors it in `shared/events.ts` — the interface *and* `normalizeEvent`, which rebuilds
+every event field by field, so a field that does not reach it is deleted in transit rather than
+merely ignored. `useJobStreams` routes the frame to `chatStore.noteAwaiting` (its own slice, not the
+job feed — a question held open for days is not a run that finished), the sidebar badges `/review`
+with the count, and the inbox re-reads `GET /pending` when the count moves.
 
-**Fix:** widen that `kinds` tuple and give the event a type in the SSE contract, which is a change
-to a shape both repositories share — `shared/events.ts` here mirrors it. Deliberately not made
-unilaterally from this side: adding a member to the service's event union is that service's
-decision, and a client that invented one would be describing an event nothing sends.
+Two properties worth keeping, both asserted in `tests/awaitingAnswer.test.tsx`: the badge comes
+**down** on the expiry push, because a counter that only rose would advertise a question nobody can
+answer any more; and the slice is **not persisted**, because the service is the authority on what is
+open and a badge that survived a reload would outlive the answer.
+
+The half that stays a poll is deliberate and is not this issue: `GET /pending` is still read on
+`/review` rather than pushed, since the stream carries a notification and not a projection.
 
 ---
 

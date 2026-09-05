@@ -186,11 +186,15 @@ measured), and the `Intl` cost (50× predicted, 47× measured).
 
 ### What is left, and why
 
-- **The `awaiting-answer` push path** is the service's to widen — `GET /sessions/{id}/events` reads
-  `kinds=("job_completed", "job_failed")`, so the row a paused workflow writes never reaches a
-  browser. The inbox is therefore a poll. Filed as `ISSUES.md` #9 rather than fixed here: adding a
-  member to the service's event union is that service's decision, and a client that invented one
-  would be describing an event nothing sends.
+- **The `awaiting-answer` push path is now closed**, and it took a change in both repositories:
+  `D-2026-09-05-a-push-nobody-claims-is-not-a-push` widens the service's claim to a third kind and
+  declares `AwaitingAnswerEvent`; this side mirrors it, routes the frame to its own store slice
+  (not the job feed — a question held open for days is not a run that finished), badges `/review`
+  with the open count, and re-reads `GET /pending` when that count moves. The backend's own contract
+  tripwire fired inside the change and named this repository's normaliser in its failure message,
+  which is the mechanical connection the two repositories previously had none of. `ISSUES.md` #9 is
+  closed with the reasoning. The inbox's *read* is still a poll, deliberately: the stream carries a
+  notification, `GET /pending` carries the truth.
 - **The 600-character SMILES cap bounds the unrecoverable failure, not the slow one.** A legal
   600-character chain still costs ~0.3 s to parse and ~1.7 s to draw on the main thread. Bounding
   that means a worker, which is a change of shape rather than a constant.

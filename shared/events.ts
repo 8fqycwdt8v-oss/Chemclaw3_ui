@@ -5,7 +5,7 @@
  * and setting BOTH the SSE `event:` name and the JSON `type` field to the same discriminator.
  * We prefer the JSON field and fall back to the SSE name.
  *
- * Verified against 8fqycwdt8v-oss/Chemclaw3 (src/chemclaw/api/events.py). Seventeen members —
+ * Verified against 8fqycwdt8v-oss/Chemclaw3 (src/chemclaw/api/events.py). Eighteen members —
  * `question` and `note_proposed` are easy to miss, and `job_started` carries `kind`.
  *
  * It said ten for a while, and the two it was missing were the two that report trouble:
@@ -48,6 +48,14 @@
  * mirrored in the interface AND in `normalizeEvent` below — which is the half that matters, since
  * this normaliser rebuilds every event field by field and an unmirrored field is *deleted in
  * transit* rather than merely untyped.
+ *
+ * The eighteenth member arrived the way the rule above says one should: the backend's own contract
+ * tripwire fired inside the change that added it, and named this file and this normaliser in its
+ * failure message. `awaiting_answer` (backend D-2026-09-05) is the notification that a workflow has
+ * stopped and is waiting for a person. The row behind it had been written on every open, reminder
+ * and expiry since the workflow was built and claimed by nothing, so it aged out undelivered —
+ * which is the *sixth* form of the same failure this file keeps recording, one repository further
+ * upstream: a producer with no consumer instead of a member with no mirror.
  *
  * This file is imported by both the SPA (bundled by Vite) and the mock backend (bundled by
  * esbuild). Keep it dependency-free.
@@ -152,6 +160,50 @@ export interface JobFailedEvent {
  *  inside the turn, and on `GET /sessions/{id}/events` when it finishes after it. Anything that
  *  consumes one must consume the other, or a failure looks exactly like a job still running. */
 export type JobTerminalEvent = JobCompletedEvent | JobFailedEvent;
+
+/**
+ * A workflow has stopped and is waiting for an answer only a person can give.
+ *
+ * **Not a `question`.** `QuestionEvent` is the agent asking mid-turn, with the turn held open and
+ * the answer arriving as the next message. This one outlives its turn: the request is durable, it
+ * has a deadline, it is answered through `POST /pending/{id}/answer`, and the person who has to
+ * answer it may not be the person whose turn opened it. A surface that folds the two together
+ * would put a days-long request in a chat bubble that scrolls away.
+ *
+ * **`state` is what tells the two pushes apart**, because the backend deliberately sends one event
+ * type rather than two. The open — and every reminder — carries `kind`, `asked_of` and `due_at`
+ * with `state: 'waiting'`; the expiry carries `subject` and `reminders` with `state: 'expired'`
+ * and nothing else. Every field but `request_id` is therefore routinely empty, on one side or the
+ * other, and an empty one is "this push does not carry it" rather than "this request has none".
+ *
+ * The `job_started` of `kind: 'awaiting'` recorded beside the wait names the same `request_id`.
+ * That is the join: a surface that shows a wait as a running job can close it out on this event
+ * instead of leaving it running until the tab is reloaded.
+ */
+export interface AwaitingAnswerEvent {
+  type: 'awaiting_answer';
+  /** What `GET /pending` and `POST /pending/{id}/answer` are keyed by. The only field that is
+   *  always populated, and the only one worth branching on. */
+  request_id: string;
+  /** `'waiting'` on the open and on every reminder, `'expired'` when the deadline passed with no
+   *  answer. Open upstream — a string, not a union — because the backend types it as a bare `str`
+   *  defaulted to `'waiting'`, and narrowing it here would make a third state this build does not
+   *  know render as nothing at all. */
+  state: string;
+  /** What is being decided, in one line. Sent on the **expiry** push. */
+  subject: string;
+  /** The category of request ('measurement', 'approval', …). Sent on the **open** push. */
+  kind: string;
+  /** Who was asked — a person or a role. Sent on the open push. Never a reason to hide the event
+   *  from anyone else: the deadline is the whole point, and a request nobody can see is exactly
+   *  the one that expires. */
+  asked_of: string;
+  /** The deadline, ISO-8601. Sent on the open push. Empty means this push did not carry one, so a
+   *  surface must render "no deadline shown" rather than "no deadline". */
+  due_at: string;
+  /** How many reminders had been sent when this push was written. `0` on the open. */
+  reminders: number;
+}
 
 export interface QuestionEvent {
   type: 'question';
@@ -446,6 +498,7 @@ export type ChemclawEvent =
   | JobStartedEvent
   | JobCompletedEvent
   | JobFailedEvent
+  | AwaitingAnswerEvent
   | CapabilityDegradedEvent
   | ToolFailedEvent
   | ToolResultEvent
@@ -467,6 +520,7 @@ const EVENT_TYPES = new Set<string>([
   'job_started',
   'job_completed',
   'job_failed',
+  'awaiting_answer',
   'capability_degraded',
   'tool_failed',
   'tool_result',
@@ -633,6 +687,22 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
       // with nothing printable to say. Inventing a sentence here would put words in its mouth;
       // the surface decides what an empty reason reads as.
       return { type: 'job_failed', job_id: asString(o.job_id), reason: asString(o.reason) };
+    case 'awaiting_answer':
+      return {
+        type: 'awaiting_answer',
+        request_id: asString(o.request_id),
+        // The backend's own default, restated rather than left empty: an event that reached here
+        // at all describes a request that exists, and `''` would be a fourth state no surface has
+        // a rendering for. `'waiting'` is the honest reading of a push whose state did not arrive.
+        state: asString(o.state, 'waiting'),
+        subject: asString(o.subject),
+        kind: asString(o.kind),
+        asked_of: asString(o.asked_of),
+        due_at: asString(o.due_at),
+        // `asCount`, not a bare cast: a reminder count is rendered next to a deadline, and `NaN`
+        // there reads as a fault in the request rather than in the payload that carried it.
+        reminders: asCount(o.reminders),
+      };
     case 'capability_degraded':
       return { type: 'capability_degraded', connectors: asStringArray(o.connectors) };
     case 'tool_failed':

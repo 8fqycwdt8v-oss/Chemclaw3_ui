@@ -10,7 +10,7 @@
 
 import { create } from 'zustand';
 import { persist, type PersistStorage, type StorageValue } from 'zustand/middleware';
-import type { ChemclawEvent, JobTerminalEvent } from '../../shared/events.ts';
+import type { AwaitingAnswerEvent, ChemclawEvent, JobTerminalEvent } from '../../shared/events.ts';
 import { useEntityStore } from '../chem/entities.ts';
 import type { ApiErrorKind } from '../api/errors.ts';
 import type {
@@ -44,6 +44,23 @@ export interface JobFeedItem {
   receivedAt: number;
   seen: boolean;
   dismissed: boolean;
+}
+
+/**
+ * One open question, reduced to the four fields anything renders.
+ *
+ * The two `awaiting_answer` pushes carry disjoint fields — the open sends `kind`, `asked_of` and
+ * `due_at`; the expiry sends `subject` — so every one of these except the id is routinely empty on
+ * the frame it arrives in, and a surface must render the absence rather than infer a value. What
+ * fills them in properly is `syncAwaiting`, off `GET /pending`, which carries all of them at once.
+ */
+export interface AwaitingBrief {
+  request_id: string;
+  subject: string;
+  kind: string;
+  /** ISO-8601, or empty when this push did not carry one — which is "no deadline shown", never
+   *  "no deadline". */
+  due_at: string;
 }
 
 /** Exactly the slice `partialize` writes to localStorage, and what `migrate` must return. */
@@ -494,6 +511,33 @@ export interface ChatState {
    * right now, and a reload re-establishes every stream anyway.
    */
   jobStreamsFailing: string[];
+  /**
+   * Requests a person has to answer before something durable can continue.
+   *
+   * **Not persisted, and the reason is the whole design.** This list is a *notification* cache,
+   * not a projection: it is fed by `awaiting_answer` frames off the push-back stream so a badge can
+   * appear without polling, and it is replaced wholesale by `syncAwaiting` whenever
+   * `GET /pending` — the only authority on what is actually open — has been read. A persisted copy
+   * would survive a reload and outlive the answer, so the one failure this whole path exists to end
+   * (a question nobody is told about) would come back as its mirror image: a badge for a question
+   * somebody already answered.
+   *
+   * A brief rather than the event, because the fields the two pushes carry are disjoint and only
+   * these four are ever rendered. `state` is not among them: an entry is here *because* it is
+   * waiting, and an expiry removes it.
+   */
+  awaiting: AwaitingBrief[];
+  /**
+   * Bumped by `noteAwaiting` and **never by `syncAwaiting`** — the count of times the *stream* said
+   * something changed.
+   *
+   * This exists so the inbox can re-read `GET /pending` on a push without re-reading it on its own
+   * reconciliation. Depending on `awaiting.length` instead looks equivalent and is not: the first
+   * read of a non-empty inbox moves that number from 0, which re-runs the effect that just set it,
+   * so every mount with an open question costs a second round trip to learn nothing. A counter the
+   * read cannot move has no such edge.
+   */
+  awaitingRevision: number;
   /** Opt-in, and deliberately separate from `Notification.permission` — a browser-level
    *  revocation must read as "blocked", not as "off". */
   notifyOnJobComplete: boolean;
@@ -544,6 +588,25 @@ export interface ChatState {
   setSessionProfile: (conversationId: string, profile: string) => void;
   setStreaming: (s: ChatState['streaming']) => void;
   pushJobFinished: (event: JobTerminalEvent, sessionId: string) => void;
+  /**
+   * Record one `awaiting_answer` frame off the push-back stream.
+   *
+   * Adds on `state: 'waiting'` and **removes on anything else**, which is what makes an expiry a
+   * useful event rather than a second copy of the open: the workflow pushes again when the deadline
+   * passes, and a badge that only ever counted up would show a question that can no longer be
+   * answered. Idempotent on `request_id` because reminders re-push the same request and the stream
+   * is at-least-once on reconnect; the existing entry is kept rather than replaced, since a
+   * reminder's payload is identical and `syncAwaiting` is what corrects a stale one.
+   */
+  noteAwaiting: (event: AwaitingAnswerEvent) => void;
+  /**
+   * Replace the list with what `GET /pending` actually holds.
+   *
+   * The stream says *that* something changed; this says *what is true*. Anything that reads the
+   * inbox calls it, so answering a question in another tab, or a request opened while this tab was
+   * closed, both reconcile on the next read rather than waiting for a frame that will never come.
+   */
+  syncAwaiting: (briefs: AwaitingBrief[]) => void;
   /**
    * Record digests claimed from the service, dropping any this browser already holds.
    *
@@ -988,6 +1051,8 @@ export const useChatStore = create<ChatState>()(
       jobFeed: [],
       jobStreamsThrottled: false,
       jobStreamsFailing: [],
+      awaiting: [],
+      awaitingRevision: 0,
       notifyOnJobComplete: false,
       streaming: null,
 
@@ -1078,6 +1143,8 @@ export const useChatStore = create<ChatState>()(
             drafts: {},
             jobStreamsThrottled: false,
             jobStreamsFailing: [],
+            awaiting: [],
+            awaitingRevision: 0,
             composerLock: false,
             banner: null,
             jobFeed: [],
@@ -1437,6 +1504,44 @@ export const useChatStore = create<ChatState>()(
             dismissed: false,
           };
           return { jobFeed: [item, ...s.jobFeed].slice(0, MAX_JOB_FEED) };
+        });
+      },
+
+      noteAwaiting(event) {
+        set((s) => {
+          if (event.state !== 'waiting') {
+            const rest = s.awaiting.filter((a) => a.request_id !== event.request_id);
+            // Same identity when nothing was removed, so an expiry for a request this tab never
+            // saw open does not re-render every consumer of the list — nor re-read the inbox.
+            return rest.length === s.awaiting.length
+              ? {}
+              : { awaiting: rest, awaitingRevision: s.awaitingRevision + 1 };
+          }
+          if (s.awaiting.some((a) => a.request_id === event.request_id)) return {};
+          return {
+            awaitingRevision: s.awaitingRevision + 1,
+            awaiting: [
+              ...s.awaiting,
+              {
+                request_id: event.request_id,
+                subject: event.subject,
+                kind: event.kind,
+                due_at: event.due_at,
+              },
+            ],
+          };
+        });
+      },
+
+      syncAwaiting(briefs) {
+        set((s) => {
+          // Compared before writing because this runs on every read of the inbox, and the common
+          // outcome is "unchanged" — a fresh array each time would re-render the sidebar badge on
+          // a timer for the life of the page.
+          const same =
+            briefs.length === s.awaiting.length &&
+            briefs.every((b, i) => b.request_id === s.awaiting[i]?.request_id);
+          return same ? {} : { awaiting: briefs };
         });
       },
 

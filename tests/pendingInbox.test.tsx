@@ -140,6 +140,23 @@ describe('a question the agent is holding work open for', () => {
     expect(await screen.findByText(/already answered this one/)).toBeTruthy();
   });
 
+  it('reconciles the badge with what the service actually holds', async () => {
+    // The stream says *that* something changed; this read says *what is true*. Without it a badge
+    // raised by an `awaiting_answer` push would survive an answer given in another tab, which is
+    // the defect the push exists to end wearing the opposite sign. Seeded with a request the
+    // service no longer reports, so this asserts the removal rather than the addition.
+    const { useChatStore } = await import('../src/state/chatStore.ts');
+    useChatStore.setState({
+      awaiting: [{ request_id: 'gone', subject: 's', kind: 'approval', due_at: '' }],
+    });
+    mount();
+
+    await screen.findByText('Isolated yield for arm B3');
+    await waitFor(() =>
+      expect(useChatStore.getState().awaiting.map((a) => a.request_id)).toEqual(['req-yield-7']),
+    );
+  });
+
   it('lists nothing for a request that has already been decided', async () => {
     // `open_requests` can return history; only `waiting` can be answered, and an inbox showing a
     // settled row invites an action that will 409.

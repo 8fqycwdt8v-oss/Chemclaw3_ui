@@ -28,8 +28,8 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { FileDiff, FlaskConical, History, MessageSquarePlus, Pencil } from 'lucide-react';
-import { useNavigate, useParams } from 'react-router';
+import { FileDiff, FlaskConical, History, MessageSquarePlus, Pencil, Printer } from 'lucide-react';
+import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { api, type ProtocolView } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
@@ -46,7 +46,7 @@ import type {
   RequestField,
 } from '../../shared/protocols.ts';
 import type { Json } from '../results/shape.ts';
-import { setpointsFor, sharedSetpoints } from '../../shared/protocols.ts';
+import { legalStatusMoves, setpointsFor, sharedSetpoints } from '../../shared/protocols.ts';
 import { Molecule } from './Molecule.tsx';
 import { PlateMap } from './PlateMap.tsx';
 import { RevisionDiff } from './RevisionDiff.tsx';
@@ -57,8 +57,6 @@ import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/chem/ConfirmDialog';
 import { EmptyState, Loading } from '@/components/chem/Feedback';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-
-const STATUSES: DesignStatus[] = ['requested', 'draft', 'approved', 'executed', 'abandoned'];
 
 /** A service timestamp as "3 hours ago", or nothing when there is none to turn. */
 function when(value: string): string {
@@ -362,6 +360,26 @@ function Evidence({ evidence }: { evidence: EvidenceRef[] }): React.JSX.Element 
   );
 }
 
+/**
+ * Why a sign-off was not recorded, in the three shapes that answer differently.
+ *
+ * `status` and `revision` are the service's two 409 codes and each has its own sentence and its own
+ * remedy. `other` is everything else — chiefly the 422 `require_movable` answers an illegal move
+ * with, which the buttons above should now make unreachable from a click, and which is exactly why
+ * it must be loud if it ever arrives: it means this repository's copy of the transition table has
+ * drifted from the service's.
+ *
+ * `from` and `at` are what the *page* was showing when the button was pressed, carried here rather
+ * than read off `view` at render time, because both conflicts re-read the design: by the time the
+ * banner draws, `summary.status` is the new truth and `view.revision` is the new head, so a
+ * sentence interpolating either would name the thing it is telling the chemist has changed.
+ */
+type Refusal = { reference: string } & (
+  | { kind: 'status'; from: DesignStatus }
+  | { kind: 'revision'; at: number }
+  | { kind: 'other'; reason: string }
+);
+
 export function ProtocolDocument(): React.JSX.Element {
   const { designId = '' } = useParams();
   const { auth, ready } = useAuth();
@@ -381,7 +399,32 @@ export function ProtocolDocument(): React.JSX.Element {
     error: string | null;
   } | null>(null);
   /** The revision being read. `undefined` is the head, which is what a fresh open wants. */
-  const [at, setAt] = useState<number | undefined>(undefined);
+  /**
+   * Which revision is on screen — in the URL, not in component state.
+   *
+   * The route's own comment argues for the design id being in the URL "so a shared link and a
+   * reload land on the same one", and every word of it applies to the revision: a QA reviewer asked
+   * to look at what changed in revision 3 could not be sent there, because `?revision=` existed on
+   * `api.getProtocol` and nowhere in the address bar. `replace` rather than a push, so stepping
+   * through a history does not fill the Back button with one entry per revision.
+   */
+  const [params, setParams] = useSearchParams();
+  const requested = Number(params.get('revision') ?? '');
+  const at = Number.isInteger(requested) && requested > 0 ? requested : undefined;
+  const setAt = useCallback(
+    (revision: number | undefined): void => {
+      setParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          if (revision === undefined) next.delete('revision');
+          else next.set('revision', String(revision));
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setParams],
+  );
   const [nonce, setNonce] = useState(0);
   const [editing, setEditing] = useState(false);
   const [diff, setDiff] = useState<DesignDiff | null>(null);
@@ -395,8 +438,14 @@ export function ProtocolDocument(): React.JSX.Element {
    * decision was *not* recorded got the same visual as one whose was. This renders as
    * `ProtocolEditor`'s conflict block does: `role="alert"`, warn tone, and a reload action, because
    * the only safe next step is to read what the other person did.
+   *
+   * **`other` is the third member and it is the one that was missing.** The two conflicts were
+   * named branches and *everything else* fell through to `notice` — so a 422, which is what the
+   * service answers a lifecycle move it will not make, reached the chemist in the same neutral
+   * banner as a success, wearing the message of a kind (`message_too_long`) about a completely
+   * different route. That is the defect this block was added to fix, one status code along.
    */
-  const [conflict, setConflict] = useState<'revision' | 'status' | null>(null);
+  const [refusal, setRefusal] = useState<Refusal | null>(null);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
@@ -446,7 +495,7 @@ export function ProtocolDocument(): React.JSX.Element {
     atRevision: number,
     fromStatus: DesignStatus,
   ): Promise<void> => {
-    setConflict(null);
+    setRefusal(null);
     try {
       await api.setProtocolStatus(
         designId,
@@ -460,17 +509,42 @@ export function ProtocolDocument(): React.JSX.Element {
       setNotice(`Status recorded as ${status}.`);
       reload();
     } catch (err) {
+      // **Nothing that failed goes to `notice`.** That banner is `role="status"` and it says
+      // "Status recorded as approved." one branch up; a refusal written into it is a refusal
+      // rendered as the thing it is not. The two 409 codes get their own sentence because their
+      // remedies differ, and everything else — a 422, a 500, an unreachable service — keeps the
+      // service's own words in the alert, which is the only place the reason survives at all.
+      setNotice(null);
+      // The service's id for the request that failed. `api/errors.ts` states the rule — every
+      // banner carries a reference — and this is the one screen where a chemist is most likely to
+      // need it, because "my sign-off was refused" is otherwise unjoinable to a single log line.
+      const reference = err instanceof ApiError ? err.correlationId : '';
+      // **A conflict reloads, and that is the fix for the commonest way to reach one.** Both 409s
+      // mean this page is out of date, and it used to stay out of date: `reload()` ran on success
+      // only, so the panel kept showing the pre-move status and sent it again as `expected_status`
+      // on the next click. Measured on both service backends: a first click that lands while its
+      // response is lost *guarantees* the retry is refused, because the retry carries the stale
+      // status — the chemist's own move, reported to them as somebody else's. Reloading is what
+      // lets them see that it already worked: the badge and the sign-off list come back saying so,
+      // and the button that would repeat the move is not offered any more, because the design now
+      // holds the status it names. A 422 or an unreachable service is not reloaded: nothing landed,
+      // and a failed re-read would replace this alert with the page's own "could not read that
+      // design".
       if (err instanceof ApiError && err.kind === 'status_conflict') {
-        setNotice(null);
-        setConflict('status');
+        setRefusal({ kind: 'status', from: fromStatus, reference });
+        reload();
         return;
       }
       if (err instanceof ApiError && err.kind === 'revision_conflict') {
-        setNotice(null);
-        setConflict('revision');
+        setRefusal({ kind: 'revision', at: atRevision, reference });
+        reload();
         return;
       }
-      setNotice(err instanceof Error ? err.message : 'The status was not recorded.');
+      setRefusal({
+        kind: 'other',
+        reason: err instanceof Error && err.message ? err.message : 'The service did not say why.',
+        reference,
+      });
     }
   };
 
@@ -548,9 +622,25 @@ export function ProtocolDocument(): React.JSX.Element {
   const stale = view.revision !== head;
   const records = runSheetRecords(design);
   const headers = records.length > 0 ? Object.keys(records[0]!) : [];
+  /**
+   * The sign-off buttons, which are the design's legal moves and nothing else.
+   *
+   * This panel used to render one per `DesignStatus`, all five, whatever the design was — so a
+   * draft protocol offered *Mark requested* and *Mark executed*, and an executed one offered three
+   * moves of which every single one is a 422. A button a chemist cannot succeed at is worse here
+   * than almost anywhere else in this app: the refusal reads as "the sign-off you just made did
+   * not happen", on a screen where that sentence has a second, very different meaning.
+   *
+   * What it costs is that the panel no longer shows the whole state machine — a chemist cannot see
+   * from here that `executed` exists until a design is approved. That is the accepted trade: the
+   * lifecycle is documentation, and a button is an offer.
+   */
+  const moves = summary ? legalStatusMoves(summary.status, view.kind) : [];
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-4">
+    // `data-print="document"` is what the print stylesheet keys on: it takes everything that is not
+    // inside this element off the page. See `@media print` in `src/index.css`.
+    <div data-print="document" className="min-h-0 flex-1 overflow-y-auto p-4">
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-7">
         <header className="flex flex-col gap-3">
           <div>
@@ -600,38 +690,65 @@ export function ProtocolDocument(): React.JSX.Element {
             </p>
           )}
 
-          {/* Two refusals, two sentences, because the remedy differs. A `revision` conflict means
-              the document moved and the diff is worth reading; a `status` conflict means somebody
-              already decided and the question is whether to override them. Both reload, because in
-              both cases what is on this screen is out of date. */}
-          {conflict && (
+          {/* Three refusals, three sentences, because the remedy differs. A `revision` conflict
+              means the document moved and the diff is worth reading; a `status` conflict means the
+              decision moved; anything else is the service's own words, kept rather than flattened.
+              The two conflicts have already re-read the design when this draws — they are the two
+              that mean the page is out of date — and the Reload button is here for the third. */}
+          {refusal && (
             <div
               role="alert"
               className="flex flex-col gap-2 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
             >
-              {conflict === 'status' ? (
+              {refusal.kind === 'status' ? (
+                /* **It said "Somebody else already decided this", and for the commonest way of
+                   reaching this banner there is no somebody else.** It is raised by the service's
+                   `require_unmoved`, which compares the status this page was showing against the
+                   status the design now holds — and those come apart most often when the chemist's
+                   *own* first click landed and its response did not come back, so they press again
+                   from a page that never learned it worked. Measured on both service backends: that
+                   sequence is refused every time. Three of the old sentence's four clauses were
+                   false in that case — it was not somebody else, the move *was* recorded, and there
+                   is no decision of theirs to overwrite. This one is true either way and points at
+                   the list that settles which happened. */
                 <p>
-                  <strong>Somebody else already decided this.</strong> The design is no longer{' '}
-                  {summary ? summary.status : 'the status shown here'}, so your move was not
-                  recorded — recording it now would overwrite their decision without either of you
-                  seeing the other. Reload to read what they did and why.
+                  <strong>This design has already moved.</strong> It was {refusal.from} when you
+                  pressed the button and is not any more, so nothing was recorded now. The sign-off
+                  list below has been re-read: it says who moved it, when and why — and that may be
+                  an earlier attempt of your own that landed after its answer was lost.
+                </p>
+              ) : refusal.kind === 'revision' ? (
+                <p>
+                  <strong>The document moved under this sign-off.</strong> Revision {refusal.at} was
+                  no longer the latest, so recording it would have attributed your name to a
+                  document that has since changed. Nothing was recorded — the design has been
+                  re-read, so read the current revision before deciding again.
                 </p>
               ) : (
                 <p>
-                  <strong>Somebody else edited this.</strong> Revision {view.revision} is no longer
-                  the latest, so a sign-off made now would be attributed to a document that has
-                  since moved. Nothing was recorded — reload and read the current revision first.
+                  <strong>The service refused this move.</strong> {refusal.reason} Nothing was
+                  recorded.
                 </p>
               )}
-              <div>
+              <div className="flex flex-wrap items-center gap-2">
                 <Button size="sm" variant="outline" onClick={reload}>
                   Reload the design
                 </Button>
+                {refusal.reference && <span>Reference {refusal.reference}</span>}
               </div>
             </div>
           )}
 
-          <div className="flex flex-wrap gap-2">
+          <div data-print="hide" className="flex flex-wrap gap-2">
+            {/* The one artefact here that leaves the screen. This document is described in its own
+                header comment as the thing "a chemist has to be able to check line by line before
+                anything is charged into a vessel" — which happens at a bench, on paper, next to
+                the vessel. There was no print stylesheet anywhere in the app, so printing it took
+                the sidebar, the composer and the job feed along with it. */}
+            <Button size="sm" variant="outline" onClick={() => window.print()}>
+              <Printer aria-hidden className="size-3.5" />
+              Print
+            </Button>
             <Button size="sm" variant="outline" disabled={stale} onClick={() => setEditing(true)}>
               <Pencil aria-hidden className="size-3.5" />
               Edit this protocol
@@ -673,7 +790,7 @@ export function ProtocolDocument(): React.JSX.Element {
                 buttons says the true thing: the decision cannot be made from what loaded. */}
             {summary ? (
               <div className="flex flex-wrap gap-2">
-                {STATUSES.map((status) => (
+                {moves.map((status) => (
                   <ConfirmDialog
                     key={status}
                     trigger={
@@ -692,6 +809,11 @@ export function ProtocolDocument(): React.JSX.Element {
                     onConfirm={() => void moveStatus(status, view.revision, summary.status)}
                   />
                 ))}
+                {moves.length === 0 && (
+                  <p className="text-2xs text-ink-subtle">
+                    There is nothing this design can be moved to from {summary.status}.
+                  </p>
+                )}
               </div>
             ) : (
               <p className="text-2xs text-ink-subtle">

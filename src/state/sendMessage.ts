@@ -325,10 +325,34 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
    * unlock a composer that a newer one owns — `finishTurn` and `setStreaming` are already keyed
    * on `messageId` for exactly that reason, and this was the one write that was not.
    */
-  const releaseComposer = (lock: ComposerLock): void => {
+  /** Whether this turn still owns the single global composer/banner slot. */
+  const stillOurs = (): boolean => {
     const streaming = useChatStore.getState().streaming;
-    if (streaming && streaming.messageId !== messageId) return;
+    return !streaming || streaming.messageId === messageId;
+  };
+
+  const releaseComposer = (lock: ComposerLock): void => {
+    if (!stillOurs()) return;
     useChatStore.getState().setComposerLock(lock);
+  };
+
+  /**
+   * Hand back the composer *and* the banner, for a turn that has ended without one to show.
+   *
+   * The banner needs the same guard as the lock and did not have it. Both detach-recovery exits
+   * below wrote `setComposerLock(false)` and `setBanner(null)` straight through — on the
+   * longest-lived path in this file, since `recoverDetachedAnswer` polls for 630 s. Reachable
+   * without contrivance: turn A drops and its recovery starts; the chemist deletes A's
+   * conversation, which clears `streaming` and the lock; they send turn B; up to three seconds
+   * later A's poll wakes, sees the abort, and unlocks **B's** composer and clears **B's** banner
+   * while B is still streaming. The `finishTurn`/`applyEvent` calls beside them were always keyed
+   * on `messageId`; these two were the pair that was not, which is the same finding
+   * `releaseComposer`'s own docstring records about the lock alone.
+   */
+  const releaseTurn = (): void => {
+    if (!stillOurs()) return;
+    useChatStore.getState().setComposerLock(false);
+    useChatStore.getState().setBanner(null);
   };
 
   const runOnce = async (sessionId: string): Promise<void> => {
@@ -531,15 +555,13 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
             verified_by: null,
           });
           useChatStore.getState().finishTurn(conversationId, messageId, 'done');
-          useChatStore.getState().setComposerLock(false);
-          useChatStore.getState().setBanner(null);
+          releaseTurn();
           announceStatus(describeAnswer(recovered));
           return;
         }
         if (abort.signal.aborted) {
           useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
-          useChatStore.getState().setComposerLock(false);
-          useChatStore.getState().setBanner(null);
+          releaseTurn();
           await announceStop();
           return;
         }
@@ -602,9 +624,11 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     }
 
     // A budget that is genuinely gone is terminal — it does not replenish because somebody
-    // pressed a button — so leave the composer locked and say so. A turn the service *shed*
-    // carries the same code and `retryable`, and falls through to the ordinary branch below,
-    // which already offers Retry.
+    // pressed a button — so leave the composer locked and say so. A turn the service *shed* is a
+    // different code now (`at_capacity`, kind `capacity`) and falls through to the ordinary
+    // branch below, which offers Retry; the `retryable` guard stays because an older deployment
+    // still sends a shed as a retryable `budget_exhausted`, and locking the composer on it would
+    // be the same defect one release earlier.
     if (apiError.kind === 'budget_exhausted' && !apiError.retryable) {
       releaseComposer('budget_exhausted');
       useChatStore.getState().setBanner({ kind: 'error', text });
@@ -688,7 +712,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
  * first is still within a few seconds, which is where the median detached answer lands. An attempt
  * cap on top would be a second number saying the same thing.
  */
-async function recoverDetachedAnswer(
+export async function recoverDetachedAnswer(
   sessionId: string,
   question: string,
   priorOccurrences: number,
@@ -734,6 +758,82 @@ async function recoverDetachedAnswer(
     if (answer) return answer.text;
   }
   return null;
+}
+
+/**
+ * Go and find the answer a reload interrupted.
+ *
+ * **The turn was not cancelled — it was detached.** `partialize` rewrites a message still marked
+ * `streaming` to `aborted`, on the correct reasoning that a *stream* cannot be resumed across a
+ * reload, and `chatStore` carried the conclusion "there is no resume endpoint, so on reload it
+ * would hang forever". That conclusion stopped being true at
+ * `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`: a disconnect detaches, the service's own
+ * pump runs the turn to completion, and `api/detach.py` says in as many words that "the client
+ * recovers the answer from `GET /sessions/{id}/messages` on reconnect". This app already
+ * implements exactly that — and only inside the tab that started the turn, which is the one tab a
+ * reload destroys. So a chemist who reloaded during a ten-minute multi-tool turn was shown
+ * "Interrupted by a page reload" over an answer that existed, and the transcript rehydrate could
+ * not reach it either: that effect runs only for a conversation with **no local messages at all**.
+ *
+ * Scoped to the conversation on screen, and to its newest turn. Doing this for every persisted
+ * conversation on boot would be one long poll per conversation for answers nobody is waiting for.
+ *
+ * The same bounded poll as the live path, for the same reason: on the reload that matters the turn
+ * is often still running, so a single read would answer "not yet" and stop — which is the failure
+ * this exists to fix, one round shorter.
+ */
+export function resumeInterruptedTurn(
+  conversationId: string,
+  auth: AuthProvider,
+): (() => void) | undefined {
+  const conversation = useChatStore.getState().conversations[conversationId];
+  const sessionId = conversation?.sessionId;
+  if (!conversation || !sessionId) return undefined;
+
+  const index = conversation.messages.findLastIndex(
+    (m) => m.role === 'assistant' && m.interruptedByReload,
+  );
+  if (index < 1) return undefined;
+  const message = conversation.messages[index];
+  const question = conversation.messages[index - 1];
+  if (!message || message.role !== 'assistant') return undefined;
+  if (!question || question.role !== 'user') return undefined;
+
+  // Which copy of a repeated question this was, counted the same way the live path counts it —
+  // a chemist who asks the same thing twice must not be handed the first answer for the second.
+  const priorOccurrences = conversation.messages
+    .slice(0, index - 1)
+    .filter((m) => m.role === 'user' && m.text === question.text).length;
+
+  const abort = new AbortController();
+  const messageId = message.id;
+  void (async () => {
+    const recovered = await recoverDetachedAnswer(
+      sessionId,
+      question.text,
+      priorOccurrences,
+      abort.signal,
+      auth,
+    );
+    if (recovered === null || abort.signal.aborted) return;
+    const store = useChatStore.getState();
+    // Still the same interrupted message? A turn started in the meantime owns this conversation,
+    // and writing an old answer under it is the shape of defect `releaseTurn` above exists for.
+    const current = store.conversations[conversationId]?.messages.find((m) => m.id === messageId);
+    if (!current || current.role !== 'assistant' || !current.interruptedByReload) return;
+    store.applyEvent(conversationId, messageId, {
+      type: 'answer',
+      text: recovered,
+      confidence: null,
+      unsupported_claims: [],
+      review_required: false,
+      verified_by: null,
+    });
+    store.finishTurn(conversationId, messageId, 'done');
+    announceStatus(describeAnswer(recovered));
+  })();
+
+  return () => abort.abort();
 }
 
 /**

@@ -4,11 +4,15 @@
  * Four defects, all of them in the space between "the turn did not work" and "the chemist can try
  * again", and all of them proven against this code:
  *
- *  - Admission control and the token budget share one error code. When the service *sheds* a turn
- *    it sends `code="budget_exhausted"` with `retryable=True` and the message "server at capacity;
- *    retry shortly" — its own ADR calls this "'not now', not 'not ever'". The UI hardcoded
- *    `retryable: false` for that code, locked the composer, and told the chemist the budget was
- *    gone until it resets. The service was fine a second later.
+ *  - A shed turn reaching the chemist as something final. The service sheds when admission
+ *    control has no permit free within its timeout, and says so with `code="at_capacity"`,
+ *    `retryable=true` and the message "server at capacity; retry shortly" — its own ADR calls this
+ *    "'not now', not 'not ever'". Two versions of this client got it wrong in turn, and the second
+ *    is why this file names the code it asserts against: while the service sent a shed as a
+ *    retryable `budget_exhausted`, the UI hardcoded `retryable: false`, locked the composer and
+ *    told the chemist the budget was gone until it resets; after the service split the two codes,
+ *    the UI knew only the old one, so a shed normalised to `internal` and became a generic agent
+ *    error with no Retry offered. The service was fine a second later, both times.
  *  - The message they typed was cleared at submit and never restored, so a failure lost it.
  *  - Switching conversation mid-turn cleared the *global* composer lock, which let a second turn
  *    start and overwrite the single `streaming` slot — the first turn's `AbortController` became
@@ -70,12 +74,13 @@ function stubTurn(frames: string): void {
 
 describe('the service shedding a turn', () => {
   it('is offered as a retry rather than as a budget that will not come back', async () => {
-    // Exactly the frames `routes/turns.py` yields when the admission semaphore sheds.
+    // Exactly the frames `routes/turns.py` yields when the admission semaphore sheds: the code
+    // is `at_capacity`, not `budget_exhausted`, and the two mean opposite things.
     stubTurn(
       sseFrames([
         errorEvent({
           message: 'server at capacity; retry shortly',
-          code: 'budget_exhausted',
+          code: 'at_capacity',
           retryable: true,
           correlation_id: 'abc123',
         }),
@@ -86,9 +91,18 @@ describe('the service shedding a turn', () => {
     await sendMessage({ conversationId: cid, text: 'hello', auth: devAuth });
 
     // Before: 'budget_exhausted' — Send disabled, "New turns are refused until it resets", and
-    // no Retry anywhere. The only escape was clicking another conversation, or reloading.
+    // no Retry anywhere. The only escape was clicking another conversation, or reloading. Then,
+    // once the service gave shedding its own code: `internal`, a generic agent error, and still
+    // no Retry — the same dead end reached by not knowing the code rather than by mis-reading it.
     expect(useChatStore.getState().composerLock).toBe(false);
     expect(useChatStore.getState().banner?.action).toBe('retry');
+    // The kind is asserted as well as the affordance, because "the banner happens to offer Retry"
+    // is also true of every unclassified failure the service marks retryable. This one is
+    // classified: the same kind a 503 from the front door produces, which is the one condition
+    // reaching this client on two paths.
+    const message = useChatStore.getState().conversations[cid]?.messages.at(-1);
+    expect(message?.role === 'assistant' && message.error?.kind).toBe('capacity');
+    expect(useChatStore.getState().banner?.text).toContain('server at capacity');
   });
 
   it('still locks the composer when the budget really is exhausted', async () => {

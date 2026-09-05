@@ -50,6 +50,18 @@ const NOTE = "([A-Za-z0-9._:~!*'()%-]{1,128})";
 const JOB = "([A-Za-z0-9._:~!*'()%-]{1,128})";
 
 /**
+ * A held-open question's id.
+ *
+ * `JOB`'s shape, and for `JOB`'s reason rather than by copying it: the two producers mint it
+ * differently — the agent tool uses `await-` plus a stable hash, while a BO campaign uses
+ * `<parent workflow id>:await:<round>` so that round 4 is a different wait from round 3 — so the
+ * set is as wide as a Temporal workflow id. Pinning it to either shape is how a route spends a
+ * release 404-ing the other one. Same closed set, same length cap, same argument: the segment is
+ * forwarded still-encoded and the service uses it as a lookup key, never as a path.
+ */
+const PENDING = "([A-Za-z0-9._:~!*'()%-]{1,128})";
+
+/**
  * A stored tool result's ref.
  *
  * Narrower than every other id here, and it can be: the service defines the ref as the SHA-256
@@ -111,6 +123,25 @@ export const ROUTES: readonly Route[] = [
     pattern: new RegExp(`^/api/sessions/${SID}/messages$`),
     target: (m) => `/sessions/${m[1]}/messages`,
     sse: true,
+  },
+  // The chemist's own erasure of one conversation. Whitelisted because the alternative — what this
+  // app did before — is a "Delete conversation" that deletes it in this browser only, leaving the
+  // transcript, the checkpoints and the attachments on the service while telling somebody who
+  // deleted it *because* of what it held that it was gone.
+  {
+    method: 'DELETE',
+    pattern: new RegExp(`^/api/sessions/${SID}$`),
+    target: (m) => `/sessions/${m[1]}`,
+    sse: false,
+  },
+  // Branch a conversation from where it stands — "try a different direction from here without
+  // losing this thread". The service copies the whole thread and refuses (409) while a turn is in
+  // flight, so a fork is never a half-copied conversation.
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/sessions/${SID}/fork$`),
+    target: (m) => `/sessions/${m[1]}/fork`,
+    sse: false,
   },
   // The explicit stop. A disconnect only *detaches* from a running turn now
   // (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop in the backend), so pressing Stop is a
@@ -183,6 +214,27 @@ export const ROUTES: readonly Route[] = [
   // the decision card lives inside a turn, and a chemist who closed the tab has the id nowhere.
   // The service scopes it to the caller through the same ownership registry `GET /sessions` reads.
   { method: 'GET', pattern: /^\/api\/plans\/pending$/, target: () => '/plans/pending', sse: false },
+
+  // Questions the agent is holding a workflow open for, and the answer that releases one.
+  //
+  // **Not the `/approvals` shape that was deleted.** That mechanism had three consumers and no
+  // producer, and `tests/routes.test.ts` pins its three routes as deliberately *not* whitelisted so
+  // that re-adding a consumer without a producer fails loudly. This one has three live producers —
+  // the `request_external_input` agent tool, a BO campaign pausing for measured yields, and the
+  // connector-job path — and the service filters the listing to what the caller may actually
+  // answer, so a row that reaches the browser is one somebody can act on.
+  { method: 'GET', pattern: /^\/api\/pending$/, target: () => '/pending', sse: false },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/pending/${PENDING}/answer$`),
+    target: (m) => `/pending/${m[1]}/answer`,
+    sse: false,
+  },
+
+  // Standing-query findings. The read is the CONSUME — the service's mailbox claim marks every row
+  // it returns as read and never re-delivers it — which is why the client claims this once at boot
+  // straight into persisted state rather than polling it from a screen.
+  { method: 'GET', pattern: /^\/api\/digests$/, target: () => '/digests', sse: false },
 
   // The PR-gate review queue: machine-written knowledge waiting for a human to sign it into the
   // graph. The service calls this "the line that makes machine-written knowledge safe". Listing

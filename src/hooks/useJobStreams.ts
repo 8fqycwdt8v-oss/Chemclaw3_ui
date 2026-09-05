@@ -12,21 +12,21 @@
  *    now known — see `MAX_JOB_STREAMS` — but the failure mode is unchanged: the 429 path backs off
  *    and retries forever, so overshooting looks like "notifications quietly stopped". So there is
  *    an explicit client-side budget, and it only ever adjusts DOWNWARD.
- *  - Its claim is destructive and scoped to `job_completed` in SQL. We are one of two consumers
+ *  - Its claim is destructive and scoped to three kinds in SQL. We are one of two consumers
  *    racing for those rows, so a missed event is expected and must never be treated as an error.
  *    More streams do not multiply delivery; they multiply racers.
  *  - A legitimately silent stream must stay open. Only the connect phase is bounded.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { config } from '../env.ts';
 import { retryAfterSeconds } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from '../state/chatStore.ts';
+import type { ChatState } from '../state/chatStore.ts';
 import { logger } from '../lib/logger.ts';
 import { readEventStream } from '../lib/sse.ts';
-import { MAX_BACKOFF_MS, backoff, sleep } from '../lib/backoff.ts';
 
 /**
  * How many sessions to watch at once.
@@ -66,32 +66,17 @@ const MAX_JOB_STREAMS = 3;
 const FAILURES_BEFORE_REPORTING = 4;
 
 /**
- * How many sessions a tab nobody is looking at watches.
+ * The sessions to watch, as one comma-joined string.
  *
- * Every held stream costs a socket in the BFF's upstream pool, a slot in the service's per-pod
- * stream cap, and — the one that is not free — a claim transaction against the service's Postgres
- * pool every `session_event_poll_seconds` (2 s) for as long as it is open. At the 200-user target
- * three streams each is 600 held connections and ~300 claim transactions a second, most of them
- * produced by tabs sitting behind something else on a chemist's second monitor.
- *
- * **It is one rather than zero deliberately, and that is the whole argument.** The obvious move is
- * to close the streams while `document.hidden`, the way `TopBar`'s health poll skips its probe —
- * but a health poll's answer is worthless to a hidden tab and a job completion's is worth the most
- * to one: this module exists because "a conformer search takes minutes to hours, so the completion
- * almost always lands while they are somewhere else", and `notifyOnJobComplete` raises a desktop
- * notification for exactly that. Gating on visibility would deliver that notification when the
- * chemist next looks at the tab, which is the moment it stops being useful. So a hidden tab keeps
- * watching — it keeps watching **one** session, the one it was last on, which is where a run was
- * most likely just launched from.
- *
- * The mechanism is the budget the 429 path already uses (`jobStreamsThrottled`), not a second one.
+ * A string rather than an array because it is both the effect's dependency and the store
+ * subscription: zustand compares a selector's result with `Object.is`, so a projection to a
+ * primitive re-renders only when the watched set actually changes. Exported so the property that
+ * matters — a token flush does not move it — can be pinned without opening a socket.
  */
-const HIDDEN_JOB_STREAMS = 1;
-
 /**
  * How long a tab must stay hidden before it is treated as backgrounded.
  *
- * Without it every alt-tab tears down three streams and rebuilds them seconds later, which turns a
+ * Without it every alt-tab tears down streams and rebuilds them seconds later, which turns a
  * saving into connection churn — and 200 chemists coming back to their tabs at 09:00 would reopen
  * 600 streams at once. Half a minute is longer than any glance at another window and far shorter
  * than the runs this stream reports on.
@@ -101,7 +86,7 @@ const HIDDEN_GRACE_MS = 30_000;
 /**
  * Whether this tab has been hidden long enough to count as backgrounded.
  *
- * A hook rather than a `document.hidden` read at render time: the watch set below is a `useMemo`,
+ * A hook rather than a `document.hidden` read at render time: the watch set is a store projection,
  * so the visibility change has to arrive as a state change or nothing recomputes.
  */
 function useBackgrounded(): boolean {
@@ -131,34 +116,50 @@ function useBackgrounded(): boolean {
   return backgrounded;
 }
 
+export function watchedSessionKey(s: ChatState, backgrounded = false): string {
+  // **Two reasons to hold one stream, and only one of them is `jobStreamsThrottled`.** That flag
+  // means "this tab holds more than its share of the stream cap" and is deliberately irreversible,
+  // so a hidden tab must not set it: a chemist who comes back would never get their streams again.
+  // `backgrounded` is the reversible half, and it defaults to false so a caller that does not care
+  // about visibility — every test of the projection itself — reads exactly as it did before.
+  const budget = s.jobStreamsThrottled || backgrounded ? 1 : MAX_JOB_STREAMS;
+  const activeId = s.activeId;
+  const candidates = Object.values(s.conversations)
+    .filter((c) => c.sessionId)
+    // A conversation nobody has sent in has no job to report. This predicate is also what keeps
+    // `warmSession` from inflating the stream count: warming gives a session, not a turn.
+    .filter((c) => c.messages.length > 0 || c.id === activeId)
+    .sort((a, b) => {
+      if (a.id === activeId) return -1; // the active conversation is always watched
+      if (b.id === activeId) return 1;
+      return b.updatedAt - a.updatedAt;
+    })
+    .slice(0, budget)
+    .map((c) => c.sessionId as string);
+  return [...new Set(candidates)].join(',');
+}
+
 export function useJobStreams(): void {
   const { auth, ready } = useAuth();
-  const conversations = useChatStore((s) => s.conversations);
-  const activeId = useChatStore((s) => s.activeId);
-  const throttled = useChatStore((s) => s.jobStreamsThrottled);
-  const backgrounded = useBackgrounded();
 
-  // A stable, comparable key. The conversations map is a fresh object on every store write, so a
-  // raw array here would tear down and reopen every stream once per animation frame while a turn
-  // streams — zustand v5 has no implicit shallow compare to save us.
-  const watchKey = useMemo(() => {
-    // Both narrowings are down-only and they compose by taking the smaller: a throttled tab that
-    // is also backgrounded watches one session, not one twice.
-    const budget = throttled || backgrounded ? HIDDEN_JOB_STREAMS : MAX_JOB_STREAMS;
-    const candidates = Object.values(conversations)
-      .filter((c) => c.sessionId)
-      // A conversation nobody has sent in has no job to report. This predicate is also what keeps
-      // `warmSession` from inflating the stream count: warming gives a session, not a turn.
-      .filter((c) => c.messages.length > 0 || c.id === activeId)
-      .sort((a, b) => {
-        if (a.id === activeId) return -1; // the active conversation is always watched
-        if (b.id === activeId) return 1;
-        return b.updatedAt - a.updatedAt;
-      })
-      .slice(0, budget)
-      .map((c) => c.sessionId as string);
-    return [...new Set(candidates)].join(',');
-  }, [conversations, activeId, throttled, backgrounded]);
+  // **The projection is the subscription.** The conversations map is a fresh object on every store
+  // write, so this used to be `useChatStore((s) => s.conversations)` folded into a `useMemo`. The
+  // memo did its job — streams were not torn down and reopened once per animation frame — but it
+  // could not touch the other half: subscribing to the map at all re-renders *this hook's
+  // component* at that rate, and its component is `AppShell`, so the top bar, the composer, the
+  // entity rail and the sidebar were all dragged onto the per-token render path. Measured with the
+  // hook stubbed out, 20 token flushes went from 20 renders each of those four to 0, and ~70% of
+  // all per-frame work went with them. `MessageList.tsx` documents this exact hazard and avoids
+  // it; the shell above it did not.
+  //
+  // Selecting the key itself means zustand compares with `Object.is` and re-renders only when the
+  // watched set actually changes. The projection still runs per write, over at most
+  // `MAX_CONVERSATIONS` entries, which is microseconds.
+  const backgrounded = useBackgrounded();
+  // The selector closes over `backgrounded`, so a visibility change re-projects and the effect
+  // below tears the surplus streams down — and rebuilds them when the tab comes back, which is the
+  // half `jobStreamsThrottled` cannot express.
+  const watchKey = useChatStore((s) => watchedSessionKey(s, backgrounded));
 
   useEffect(() => {
     if (!ready || !watchKey) return;
@@ -210,6 +211,14 @@ async function openStream(
 
   /** A frame arrived, so this stream is doing its job. */
   const delivering = (): void => {
+    // The one-shot re-auth below is spent per *rejection*, not per session, and this is where it
+    // is given back. `reauthed` was set once and never cleared, so a stream that refreshed its
+    // token, then delivered for an hour, then hit the ordinary next expiry took the `return`
+    // instead of the refresh — permanently, for the life of the page. Measured over
+    // `401 → 200 (one job_completed frame, then close) → 401`: requests 3, provider asked 1,
+    // jobFeed 1, and every completion after that lost. A connection that delivered is proof the
+    // credential it used was good, which is exactly what makes the next 401 a *new* fact.
+    reauthed = false;
     if (failures === 0) return;
     failures = 0;
     useChatStore.getState().setJobStreamFailing(sessionId, false);
@@ -242,14 +251,34 @@ async function openStream(
       // back in `Retry-After`; the stream cap sends no such header. Counting a limiter refusal as
       // evidence that this tab holds too many streams would drop it to one stream for the life of
       // the page over a budget that refills in seconds — so honour the number it sent, and leave
-      // the counter alone. It is the same signal `errorFromStatus` splits the two 429s on.
+      // `consecutive429`, the cap's own counter, alone. It is the same signal `errorFromStatus`
+      // splits the two 429s on. (The *failure* counter is a different fact and does now move; see
+      // the branch itself.)
       if (res.status === 429) {
         const wait = retryAfterSeconds(res.headers.get('retry-after'));
         if (wait !== null) {
-          // Bounded by the same ceiling the backoff has. The limiter's own number is seconds, so
-          // this never bites in practice; what it prevents is a header from somewhere else in the
-          // path silently switching job push-back off for an hour.
-          await sleep(Math.min(wait * 1_000, MAX_BACKOFF_MS), controller.signal);
+          // Honouring the number is right; honouring it *silently and for ever* was not. This was
+          // the one retry path that touched neither `failed()` nor `attempt` nor the log, so a
+          // limiter refusing steadily — plausibly *because* this tab keeps coming back at exactly
+          // the rate it asked for — was invisible. Measured over 120 s of one stream at
+          // `Retry-After: 1`: **121 requests, `jobStreamsFailing` empty**, nothing logged.
+          //
+          // So it counts like every other connect that delivered nothing, and past the reporting
+          // threshold the header stops being taken at face value: a limiter that has refused four
+          // times running is not describing a queue that clears in a second, and the backoff's
+          // 15-30 s ceiling is the honest pace for it. `jobStreamsThrottled` is deliberately NOT
+          // set — that flag means "this tab holds more streams than its share of the *stream*
+          // cap", which a request-rate refusal is no evidence of, and it is irreversible.
+          attempt += 1;
+          failed('rate_limited', 429);
+          if (failures >= FAILURES_BEFORE_REPORTING) {
+            await backoff(attempt, controller.signal);
+          } else {
+            // Bounded by the same ceiling the backoff has. The limiter's own number is seconds, so
+            // this never bites in practice; what it prevents is a header from somewhere else in
+            // the path silently switching job push-back off for an hour.
+            await sleep(Math.min(wait * 1_000, MAX_BACKOFF_MS), controller.signal);
+          }
           continue;
         }
         consecutive429 += 1;
@@ -274,6 +303,14 @@ async function openStream(
       if (res.status === 401) {
         if (reauthed || !(await auth.handleUnauthorized())) {
           logger.warn('jobstream.unauthorized', { sessionId });
+          // The indicator is raised here rather than through `failed()`, and immediately rather
+          // than after four attempts. `FAILURES_BEFORE_REPORTING` exists so a rollout blip does
+          // not raise a badge, and it works because a transient failure *repeats* — this one
+          // does not, because there is no next attempt to count. It was the only terminus in
+          // this loop that returned without telling anyone, so the one death mode that is
+          // permanent was the one that showed nothing: a conformer search finishing afterwards
+          // produced no card, no badge and no notification.
+          useChatStore.getState().setJobStreamFailing(sessionId, true);
           return;
         }
         reauthed = true;
@@ -300,14 +337,21 @@ async function openStream(
         if (!frame.event) continue;
         const event = frame.event;
         try {
-          // Both endings, not just the happy one. This stream is scoped server-side to exactly
-          // `job_completed` and `job_failed`, and a job that died after the turn ended is the
-          // case the whole push-back path exists for — dropping it left the launch row saying
-          // "runs asynchronously" indefinitely.
+          // Both endings, not just the happy one. This stream is scoped server-side to
+          // `job_completed`, `job_failed` and `awaiting-answer`, and a job that died after the
+          // turn ended is the case the whole push-back path exists for — dropping it left the
+          // launch row saying "runs asynchronously" indefinitely.
           if (event.type === 'job_completed' || event.type === 'job_failed') {
             // The event carries no session id — but we know which stream we opened, so the
             // association is attached here rather than by mutating the wire contract.
             useChatStore.getState().pushJobFinished(event, sessionId);
+          } else if (event.type === 'awaiting_answer') {
+            // The third kind this stream claims (backend D-2026-09-05). It is not a job ending —
+            // it is a durable request *starting* or expiring — so it goes to its own slice rather
+            // than into the job feed, where a "question waiting on you" would render as a run that
+            // finished. The expiry push matters as much as the open: `noteAwaiting` removes on it,
+            // which is what keeps the badge from counting a question nobody can answer any more.
+            useChatStore.getState().noteAwaiting(event);
           }
         } catch {
           // one bad frame is not worth dropping the stream
@@ -335,4 +379,38 @@ async function openStream(
       await backoff(attempt, controller.signal);
     }
   }
+}
+
+/** The longest this hook will ever wait before trying a stream again. */
+const MAX_BACKOFF_MS = 30_000;
+
+/** Exponential backoff with jitter, capped at `MAX_BACKOFF_MS`, abortable. */
+function backoff(attempt: number, signal: AbortSignal): Promise<void> {
+  const base = Math.min(MAX_BACKOFF_MS, 1_000 * 2 ** Math.min(attempt, 5));
+  return sleep(base * (0.5 + Math.random() * 0.5), signal);
+}
+
+/**
+ * Wait, resolving early if the stream is torn down — a timer nobody cancels outlives the tab's
+ * interest in the answer.
+ *
+ * Both halves are cleaned up by whichever of them wins, and that is the fix rather than a
+ * tidy-up. `{ once: true }` removes a listener only when the event FIRES, and on the ordinary
+ * path it never does: the timer wins, the promise resolves, and the listener stays attached to a
+ * signal that lives for the whole stream. Measured on a stream held at the 15-30 s backoff cap
+ * for 12 simulated hours: **1,931 `abort` listeners added, 0 removed**, each retaining this
+ * closure and its timer id — from one stream, of the three a tab holds.
+ */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    // Declared after `done` and read only from inside it, which is after `setTimeout` has
+    // returned — the two refer to each other, and this is the order that keeps both `const`.
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done);
+  });
 }

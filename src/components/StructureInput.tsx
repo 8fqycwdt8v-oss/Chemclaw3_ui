@@ -729,8 +729,16 @@ function SketcherDialog({
             'rounded-xl border border-border-subtle bg-surface-raised p-3 shadow-lg',
           )}
         >
-          {/* Mounted only while open, so closing the dialog tears the editor down through the
-              effect cleanup rather than leaving a live WASM heap behind a hidden node. */}
+          {/* Mounted only while open, so closing the dialog tears the editor's React tree down
+              through the effect cleanup rather than leaving it attached to a hidden node.
+
+              It does **not** tear down the WASM heap, and this comment used to say it did.
+              Verified against the installed `ketcher-standalone@3.17.2`: Indigo runs in a worker
+              the package creates at *module* scope and shares between every struct service, and
+              nothing in `ketcher-react` terminates it — so the ~11.79 MB is retained from the
+              first Draw click for the life of the page whatever this dialog does.
+              `sketcher.ketcher.tsx`'s `destroy()` carries the reading, including why the teardown
+              the package *does* expose is deliberately not called. */}
           {open && <SketcherBody onDrawn={onDrawn} initial={initial} />}
         </Dialog.Content>
       </Dialog.Portal>

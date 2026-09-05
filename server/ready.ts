@@ -38,6 +38,26 @@ export interface Readiness {
 let cached: { at: number; value: Readiness } | null = null;
 
 /**
+ * Set once, on SIGTERM, and never cleared: this pod is going away.
+ *
+ * Readiness is where the drain belongs because readiness is the question it answers — "may a load
+ * balancer send this pod traffic?" — and the answer during a shutdown is no, whatever the upstream
+ * says. Liveness stays 200 throughout, deliberately, for the reason this module's own docstring
+ * gives: a draining pod is still serving the requests it already has, and a restart decision taken
+ * against it would kill them.
+ *
+ * Checked before the probe rather than after it, so a shutdown costs the service nothing: a pod on
+ * its way out has no business opening a fresh upstream connection every five seconds to ask a
+ * question whose answer it is going to ignore.
+ */
+let draining = false;
+
+/** Fail `/readyz` from now on. One-way — nothing here brings a pod back. */
+export function beginDraining(): void {
+  draining = true;
+}
+
+/**
  * The probe that is running right now, so N concurrent probes cost one upstream call.
  *
  * The cache alone does not do this and cannot: it is written when a probe *resolves*, so every
@@ -137,6 +157,9 @@ async function probe(): Promise<Readiness> {
 
 /** Readiness now: from cache when it is fresh, from the probe already running when it is not. */
 export async function readiness(): Promise<Readiness> {
+  // Ahead of the cache too, or a value stamped `ready` seconds before the signal would keep this
+  // pod in rotation for the rest of its cache window — the whole drain, on the shipped numbers.
+  if (draining) return { ready: false, upstreamStatus: 0, detail: 'draining' };
   if (cached && Date.now() - cached.at < PROBE_CACHE_MS) return cached.value;
   inFlight ??= probe()
     .then((value) => {
@@ -154,4 +177,8 @@ export async function readiness(): Promise<Readiness> {
 /** Test seam: the cache is process-wide, so a second test would read the first one's answer. */
 export function clearReadinessCache(): void {
   cached = null;
+  // The drain is one-way in a real process — there is no recovery from SIGTERM — but the flag is
+  // module state, so a test that drains would otherwise leave every later test in this process
+  // reading 503.
+  draining = false;
 }

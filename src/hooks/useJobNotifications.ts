@@ -27,6 +27,25 @@ export function useJobNotifications(): void {
   const notifyEnabled = useChatStore((s) => s.notifyOnJobComplete);
   const announced = useRef(new Set<string>());
 
+  /**
+   * When this page started caring. Anything already in the feed is history, not news.
+   *
+   * `jobFeed` is persisted and kept for seven days, `markJobsSeen` deliberately does not run
+   * while the tab is hidden — so "unseen" accumulates exactly as designed — and `announced` is a
+   * fresh Set per mount. Those three are individually right and together produced a burst:
+   * measured, a tab restored **in the background** holding 12 persisted-unseen items aged six
+   * days constructed **12** notifications on mount, stacked, because the `tag` is per `job_id`.
+   *
+   * A notification is a claim that something *just happened*, and a six-day-old completion is
+   * not that. The backlog is not lost and is not silently dropped either: `document.title`
+   * carries it (measured in the same run, `(9+) Chemclaw`), which is the channel that can
+   * honestly say "there are things here" without claiming any of them is new.
+   *
+   * Read in the effect below rather than here: `Date.now()` in a render body is impure, and this
+   * value belongs to the commit anyway.
+   */
+  const startedAt = useRef<number | null>(null);
+
   const unseen = jobFeed.filter((j) => !j.seen && !j.dismissed);
 
   // The one place that writes document.title. Keep it that way, or two writers will fight.
@@ -50,12 +69,18 @@ export function useJobNotifications(): void {
   }, []);
 
   useEffect(() => {
+    // Before every guard, and `??=` so it is the FIRST commit that sets it: this effect re-runs
+    // on every render (`unseen` is a fresh array), and a watermark that moved forward with them
+    // would step over a completion that had already arrived.
+    startedAt.current ??= Date.now();
     if (!notifyEnabled) return;
     if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
     // Only when they cannot already see it. A notification for a visible tab is noise.
     if (!document.hidden) return;
 
     for (const item of unseen) {
+      // `receivedAt` is when THIS client took delivery, so the comparison is against one clock.
+      if (item.receivedAt < (startedAt.current ?? 0)) continue;
       if (announced.current.has(item.event.job_id)) continue;
       announced.current.add(item.event.job_id);
       try {

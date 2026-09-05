@@ -46,7 +46,10 @@ export type ApiErrorKind =
    *  when to come back. The service computes that number specifically so a client can wait it
    *  out, so this is a pause, not a refusal. */
   | 'rate_limited'
-  /** 503 — admission control shed the turn; the service is at capacity. Retryable. */
+  /** Admission control shed the turn; the service is at capacity, and it will not be in a
+   *  moment. Retryable. Reached two ways for one condition: a 503 from the front door when the
+   *  turn is refused before the response is open, and an in-stream `at_capacity` error event when
+   *  the shed happens after it — the service sends the same sentence on both. */
   | 'capacity'
   /** `fetch` itself threw — the service is unreachable. */
   | 'network'
@@ -278,10 +281,10 @@ export function errorFromStatus(
  * left the composer unlocked, so the next message was sent into a budget that was already gone;
  * and a `storage_unavailable` the service had marked retryable was presented as final.
  *
- * Only two codes change the *kind*, because only two change what the UI must do. The rest stay
- * `agent` and are differentiated by the service's own message — which is already user-safe, and is
- * better wording than a mapping table here would invent. `retryable` comes from the event in every
- * case: it is the service's judgement, not a property of the category.
+ * Only the codes that change what the UI must *do* change the kind. The rest stay `agent` and are
+ * differentiated by the service's own message — which is already user-safe, and is better wording
+ * than a mapping table here would invent. `retryable` comes from the event in every case: it is
+ * the service's judgement, not a property of the category.
  */
 export function errorFromEvent(event: {
   message: string;
@@ -293,12 +296,23 @@ export function errorFromEvent(event: {
   switch (event.code) {
     case 'budget_exhausted':
       // The kind that can lock the composer — the same terminal state a 429 produces. Whether it
-      // *does* is the event's call, not this table's: the service sends this one code for two
-      // different things, and only it can tell them apart. A real budget exhaustion arrives
-      // `retryable=False`; admission control shedding a turn arrives `retryable=True` with
-      // "server at capacity; retry shortly", which its own ADR glosses as "'not now', not 'not
-      // ever'". Hardcoding `false` here rendered every shed as a permanent refusal.
+      // *does* is still the event's call rather than this table's, and `retryable` is passed
+      // through for that reason: the service is the only party that knows whether the budget it
+      // refused on has any way back.
+      //
+      // This code used to carry a shed turn as well, and telling the two apart from `retryable`
+      // alone was all this branch could do. The service split them (`at_capacity`, below), so the
+      // guess is gone — but the fallback is not, because an older deployment still sends a shed
+      // here as `budget_exhausted` with `retryable=true`, and `sendMessage` locks the composer
+      // only on a refusal the event itself calls final.
       return new ApiError('budget_exhausted', event.message, undefined, options);
+    case 'at_capacity':
+      // Shedding is "not now", not "not ever": the service had no admission permit free and ran
+      // nothing, so the turn is worth sending again in a moment and the composer must stay open.
+      // Same kind as the 503 the front door answers with when it sheds before the stream opens —
+      // one condition, one thing for the chemist to do, whichever side of the response header it
+      // lands on.
+      return new ApiError('capacity', event.message, undefined, options);
     case 'empty_answer':
       // Not a service failure, and not a connection problem either — the turn ran to completion
       // and produced nothing. Its own kind, so callers don't run connection-drop recovery (polling

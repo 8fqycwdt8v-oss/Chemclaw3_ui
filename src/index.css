@@ -479,3 +479,73 @@
   width: 0.5ch;
   animation: var(--animate-caret);
 }
+
+/*
+ * Print.
+ *
+ * There was no print stylesheet anywhere in this app, on a product whose one carried artefact is a
+ * protocol — `ProtocolDocument`'s own header calls it the thing "a chemist has to be able to check
+ * line by line before anything is charged into a vessel", which happens at a bench, on paper, next
+ * to the vessel. Printing it took the sidebar, the composer, the job feed and every button along
+ * with it, across however many pages that came to.
+ *
+ * Keyed on `data-print="document"` rather than on a route or a class name: the element that wants
+ * the page says so, and nothing about this rule has to know which screen it is on. Everything
+ * outside that element is hidden by hiding the body's own children and re-showing the ancestors of
+ * the marked one — `:has()` is what makes that expressible without a wrapper component.
+ */
+@media print {
+  /* The app is a full-height flex column with its own scroll containers; on paper there is one
+     flow and it is the page's. */
+  html,
+  body,
+  #root {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  /* Hide every branch that does not contain the document, then let the branch that does through. */
+  body :where(*):has([data-print='document']),
+  [data-print='document'] {
+    display: revert !important;
+    overflow: visible !important;
+    max-height: none !important;
+    flex: none !important;
+  }
+  #root > *:not(:has([data-print='document'])):not([data-print='document']) {
+    display: none !important;
+  }
+  #root *:not(:has([data-print='document'])):not([data-print='document']) [data-print='hide'],
+  [data-print='hide'] {
+    display: none !important;
+  }
+
+  /* Ink, not screen tone: the palette's soft tints print as grey blocks that swallow the text on
+     them, and a run sheet read under bench lighting needs the contrast. Borders stay, because they
+     are what separates a charge line from the one under it. */
+  [data-print='document'] * {
+    background: transparent !important;
+    color: #000 !important;
+    box-shadow: none !important;
+  }
+
+  /* A table split across a page break loses its heading, and a step split mid-sentence loses the
+     reader. */
+  [data-print='document'] :where(table, ul, ol, li, pre) {
+    break-inside: avoid;
+  }
+  [data-print='document'] :where(h2, h3) {
+    break-after: avoid;
+  }
+
+  /* A structure is the one thing on this page that must not be scaled to nothing. */
+  [data-print='document'] svg {
+    max-width: 100%;
+  }
+
+  @page {
+    margin: 14mm;
+  }
+}

@@ -173,6 +173,40 @@ describe('removing conversations does not strand live state', () => {
     });
   };
 
+  /**
+   * A `streaming` slot whose two ways of ending a turn are distinguishable.
+   *
+   * `stop()` is the real one — it posts `/sessions/{id}/turn/stop` and *then* aborts — and the
+   * abort alone only detaches. A fixture that defines `stop` as the abort cannot tell the store
+   * calling the wrong one, which is how the store came to.
+   */
+  const turnSlot = (conversationId: string) => {
+    const abort = new AbortController();
+    let asked = false;
+    let abandoned = false;
+    return {
+      abort,
+      stopped: () => asked,
+      abandoned: () => abandoned,
+      slot: {
+        conversationId,
+        messageId: 'm1',
+        abort,
+        stop: () => {
+          asked = true;
+          abort.abort();
+        },
+        // Distinct from `stop`, and tracked separately for the same reason `stopped` exists: a
+        // detach and a stop are different requests since
+        // `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`, and a fixture that collapsed them
+        // would pass whichever the store called.
+        abandon: () => {
+          abandoned = true;
+        },
+      },
+    };
+  };
+
   it('drops the deleted conversation’s draft', () => {
     seed();
     useChatStore.getState().deleteConversation('a');
@@ -181,21 +215,22 @@ describe('removing conversations does not strand live state', () => {
     expect(useChatStore.getState().drafts.b).toBe('other draft');
   });
 
-  it('aborts and unlocks when the deleted conversation owns the running turn', () => {
-    const abort = new AbortController();
-    seed({
-      composerLock: 'turn_in_flight',
-      streaming: {
-        conversationId: 'a',
-        messageId: 'm1',
-        abort,
-        stop: () => abort.abort(),
-        abandon: () => {},
-      },
-    });
+  it('stops the turn on the server, not only the local stream', () => {
+    // **`stop()`, not `abort()`.** The two stopped being equivalent at
+    // `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`: a dropped connection detaches now, so
+    // aborting alone leaves the turn generating for up to its 600 s deadline, spending the budget
+    // and holding the admission permit a queued turn waits on. `stop()` posts
+    // `/sessions/{id}/turn/stop` first.
+    //
+    // The fixture has to tell them apart, and it did not: every one of these tests seeded
+    // `stop: () => abort.abort()`, so `expect(abort.signal.aborted).toBe(true)` passed identically
+    // whichever the store called, and the store called the wrong one.
+    const { slot, stopped, abort } = turnSlot('a');
+    seed({ composerLock: 'turn_in_flight', streaming: slot });
 
     useChatStore.getState().deleteConversation('a');
 
+    expect(stopped()).toBe(true);
     // Without this the composer stays locked forever: the turn it waits on can no longer report.
     expect(abort.signal.aborted).toBe(true);
     expect(useChatStore.getState().streaming).toBeNull();
@@ -204,40 +239,26 @@ describe('removing conversations does not strand live state', () => {
   });
 
   it('leaves a turn belonging to another conversation alone', () => {
-    const abort = new AbortController();
-    seed({
-      composerLock: 'turn_in_flight',
-      streaming: {
-        conversationId: 'a',
-        messageId: 'm1',
-        abort,
-        stop: () => abort.abort(),
-        abandon: () => {},
-      },
-    });
+    const { slot, stopped, abort } = turnSlot('a');
+    seed({ composerLock: 'turn_in_flight', streaming: slot });
 
     useChatStore.getState().deleteConversation('b');
 
+    expect(stopped()).toBe(false);
     expect(abort.signal.aborted).toBe(false);
     expect(useChatStore.getState().streaming).not.toBeNull();
     expect(useChatStore.getState().composerLock).toBe('turn_in_flight');
   });
 
-  it('clearAll leaves nothing behind — drafts included', () => {
-    const abort = new AbortController();
-    seed({
-      composerLock: 'turn_in_flight',
-      streaming: {
-        conversationId: 'a',
-        messageId: 'm1',
-        abort,
-        stop: () => abort.abort(),
-        abandon: () => {},
-      },
-    });
+  it('clearAll leaves nothing behind — the server-side turn included', () => {
+    // Same argument as the delete above, with more force: "Reset app" is what a chemist reaches
+    // for when a turn is wedged, which is exactly when leaving it running is worst.
+    const { slot, stopped, abort } = turnSlot('a');
+    seed({ composerLock: 'turn_in_flight', streaming: slot });
 
     useChatStore.getState().clearAll();
 
+    expect(stopped()).toBe(true);
     expect(abort.signal.aborted).toBe(true);
     expect(useChatStore.getState().drafts).toEqual({});
     expect(useChatStore.getState().composerLock).toBe(false);

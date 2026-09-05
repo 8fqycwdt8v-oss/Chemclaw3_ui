@@ -152,8 +152,28 @@ export interface BffConfig {
   appVersion: string;
   sseHeartbeatMs: number;
   upstreamConnectTimeoutMs: number;
+  /**
+   * How long the upstream may take to begin ANSWERING before the request is abandoned.
+   *
+   * Distinct from `upstreamConnectTimeoutMs`, which covers an upstream that never accepts, and
+   * from `requestTimeoutMs`, which covers a client that never finishes sending. This is the one
+   * that was missing, and its absence was the only unrecoverable failure on this path — see the
+   * comment at its use in `server/proxy.ts`. `0` disables it and restores that.
+   */
+  upstreamHeadersTimeoutMs: number;
   /** How long a client may take to *send* a request before it is disconnected. */
   requestTimeoutMs: number;
+  /**
+   * How long a client may take to send the request HEADERS. The tighter half of the pair above.
+   *
+   * Node refuses a server whose `headersTimeout` exceeds its `requestTimeout`, so the value used
+   * is clamped to it — see `createBffServer`.
+   */
+  headersTimeoutMs: number;
+  /** Client connections this process will hold at once, whatever is on them. */
+  maxConnections: number;
+  /** How long `/readyz` fails before the listening socket is closed on SIGTERM. */
+  shutdownDrainMs: number;
   /** Upstream keep-alive sockets this process will hold at once for ORDINARY (non-SSE) calls. */
   maxUpstreamSockets: number;
   /** Upstream sockets reserved for the long-lived SSE routes, in a pool of their own. */
@@ -235,17 +255,63 @@ export const cfg: BffConfig = {
   maxMessageCharsIsValid,
   sseHeartbeatMs: num('SSE_HEARTBEAT_MS', 15_000),
   upstreamConnectTimeoutMs: num('UPSTREAM_CONNECT_TIMEOUT_MS', 10_000),
+  // Deliberately generous rather than tight. It bounds time-to-first-response-*header*, and the
+  // slowest legitimate case here is a route the backend answers after real work (a protocol
+  // generation, a durable launch) — not a turn, whose headers arrive at once and whose body is the
+  // slow part. What matters is that a hung backend now recycles the socket pool on its own instead
+  // of holding it until a human notices; a deployment that knows its backend can tighten this.
+  upstreamHeadersTimeoutMs: num('UPSTREAM_HEADERS_TIMEOUT_MS', 120_000),
   // Time to RECEIVE a request, not to answer one, so this bounds nothing about a 600 s turn or a
   // silent job stream — both of those are *responses*. It used to be 0 (disabled), and the cost
   // was measured: 129 unauthenticated one-byte POSTs each claimed one of the upstream agent's
   // keep-alive sockets and never released it, which took the whole /api surface offline until the
   // attacker let go — with no credential, and with no recovery short of the attacker letting go.
   //
-  // The default is 130 s rather than something tighter because Node refuses `headersTimeout >
-  // requestTimeout`, and `headersTimeout` is pinned just above the 120 s keep-alive this process
-  // needs in front of a load balancer. A deployment that knows its own front end can tighten
-  // this; what matters is that the bound exists, so the pool recycles on its own.
+  // The default is 130 s rather than something tighter because this bounds the whole request, body
+  // included, and the largest legitimate one here is a 32 MB attachment from a bench laptop on
+  // hotel wifi. The *header* phase is bounded much more tightly, on its own knob below.
+  //
+  // This used to be stated as "130 s because Node refuses `headersTimeout > requestTimeout` and
+  // `headersTimeout` is pinned just above the 120 s keep-alive". That was a real constraint on a
+  // belief that is no longer true of this runtime — see `headersTimeoutMs`.
   requestTimeoutMs: num('REQUEST_TIMEOUT_MS', 130_000),
+  // Time to receive the request HEADERS, and it was 125 s "just above the LB idle timeout".
+  //
+  // That reason describes a Node that stopped existing before 14.11: `headersTimeout` used to run
+  // from the moment the SOCKET was accepted, so a value under the fronting keep-alive really did
+  // kill the second request on a reused connection. It runs from the first byte of the request
+  // now. Measured on this runtime (v22.22.2) with `headersTimeout: 500`: a keep-alive connection
+  // left idle for 1,500 ms — three times the bound — served its second request normally, in
+  // 1,510 ms end to end; a connection dribbling one header byte every 200 ms was answered 408 and
+  // closed at 510 ms. The bound applies to the header phase and to nothing else.
+  //
+  // So the only real constraint is `headersTimeout <= requestTimeout`, and the number can be what
+  // it should have been: long enough for any header block a real client sends in one segment,
+  // short enough that a socket held open by a request that never arrives costs 30 s rather than
+  // 125 s. It bounds the header phase only — a 600 s turn is a *response* and a 32 MB upload is a
+  // *body*, and neither is affected.
+  headersTimeoutMs: num('HEADERS_TIMEOUT_MS', 30_000),
+  // Client connections held at once. Nothing bounded this, so the pod's worst-case file
+  // descriptor and per-socket buffer use was whatever a caller decided to open.
+  //
+  // Be precise about what it buys, because the finding that asked for it overstated the case:
+  // running out of descriptors at accept() is NOT a crash on this runtime. Measured with the
+  // server process at `ulimit -n 96` and 300 connections arriving from another process, it
+  // emitted no `error` on the server, raised no exception, and stayed listening — the surplus is
+  // dropped silently. What this adds is a ceiling this process *chose*, at which it sheds, rather
+  // than an unknown one the kernel enforces; 1024 is twice the upstream socket pool, so every
+  // proxied request the pool can carry has a connection plus as many again for static assets and
+  // probes.
+  //
+  // The cost is stated rather than hidden: a shed connection is destroyed without a response, so
+  // a client over the ceiling reads a reset rather than a 503. There is no way to answer one
+  // politely at this layer — the connection is refused before any request exists to answer.
+  maxConnections: num('MAX_CONNECTIONS', 1_024),
+  // How long `/readyz` answers 503 before the listening socket closes on SIGTERM. One
+  // Kubernetes readiness period (its `periodSeconds` default is 10 s), so at least one probe
+  // observes the refusal and takes this pod out of rotation before it stops accepting. See the
+  // shutdown handler in `server/index.ts` for what it was measured against.
+  shutdownDrainMs: num('SHUTDOWN_DRAIN_MS', 10_000),
   // The other half of that measurement: the pool was 128 and the outage threshold was 129. Raised
   // and made configurable so a legitimate burst of concurrent turns is not sharing a ceiling with
   // whatever is holding sockets open.
@@ -316,6 +382,32 @@ export function validateConfig(c: BffConfig = cfg): string[] {
     const parsed = new URL(c.apiUrl);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       problems.push(`CHEMCLAW_API_URL must be http(s), got ${parsed.protocol}`);
+    }
+    // A path prefix on the upstream is silently discarded, so refuse it rather than serve it.
+    //
+    // Nothing in this process ever reads `pathname`: `server/proxy.ts` and `server/ready.ts` both
+    // take `protocol`, `hostname` and `port` and then build the upstream path from the route
+    // table, which starts at the gateway root. So `CHEMCLAW_API_URL=https://gw.example/chemclaw` —
+    // the ordinary shape for a service behind a shared ingress — boots clean, reports ready, and
+    // requests `/jobs` from a gateway that serves it at `/chemclaw/jobs`. Every `/api` route 404s
+    // and the one thing that would explain it, the configured address, looks right in the startup
+    // line.
+    //
+    // Refused rather than honoured, in the posture this function already takes for `AUTH_MODE` and
+    // `MAX_MESSAGE_CHARS`: honouring it means threading a prefix through two modules and a route
+    // table for a deployment that can put the prefix in its ingress instead, and a half-honoured
+    // prefix is the same silent 404 with more places to look for it.
+    //
+    // Only the path. A query string, a fragment or userinfo on this value is dropped just as
+    // silently and is not refused here — nothing produces one, and a refusal nobody can trigger is
+    // a rule nobody reads.
+    else if (parsed.pathname !== '/' && parsed.pathname !== '') {
+      problems.push(
+        `CHEMCLAW_API_URL must name the service root, not a path under it: ${JSON.stringify(
+          c.apiUrl,
+        )} carries the path ${JSON.stringify(parsed.pathname)}, which this process never sends. ` +
+          `Use ${JSON.stringify(parsed.origin)} and let the ingress add the prefix.`,
+      );
     }
   } catch {
     problems.push(`CHEMCLAW_API_URL is not a valid URL: ${JSON.stringify(c.apiUrl)}`);

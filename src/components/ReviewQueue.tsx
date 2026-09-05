@@ -315,13 +315,34 @@ function NoPlansWaiting({ view }: { view: PendingPlansView }): React.JSX.Element
   );
 }
 
-/** How much of the answer is missing, said plainly — a short list that looks complete is worse. */
-function PartialScan({ unread }: { unread: number }): React.JSX.Element | null {
-  if (unread === 0) return null;
+/**
+ * How much of the answer is missing, said plainly — a short list that looks complete is worse.
+ *
+ * **Two different shortfalls, and the service reports them apart because they are not one claim.**
+ * `unread` counts *gated* conversations whose plan the scan did not get to. `truncated` is the
+ * walk through the listing stopping before the end, so it carries no count at all: the service
+ * never learned whether the conversations beyond it are gated, and folding them into `unread`
+ * would be inventing plans that may not exist. Reading only the first left the second invisible —
+ * a service that stopped looking rendered exactly like one that had finished, which is the
+ * confident emptiness this whole section exists to refuse.
+ */
+function PartialScan({ view }: { view: PendingPlansView }): React.JSX.Element | null {
+  // `=== true` rather than truthiness: the field is additive, so a service that predates it sends
+  // nothing, and "not reported" must not become a claim in either direction.
+  const stopped = view.truncated === true;
+  if (view.unread === 0 && !stopped) return null;
+  const unchecked =
+    view.unread > 0
+      ? `${view.unread} older ${view.unread === 1 ? 'conversation was' : 'conversations were'} not checked`
+      : '';
+  const sentence = unchecked
+    ? stopped
+      ? `${unchecked}, and the scan stopped before the end of your conversations, so this list may be short.`
+      : `${unchecked}, so this list may be short.`
+    : 'The scan stopped before the end of your conversations, so this list may be short.';
   return (
     <p role="status" className="text-xs text-ink-muted">
-      {unread} older {unread === 1 ? 'conversation was' : 'conversations were'} not checked, so this
-      list may be short. Open one from the sidebar to see its plan.
+      {sentence} Open one from the sidebar to see its plan.
     </p>
   );
 }
@@ -367,7 +388,7 @@ function PlanInbox(): React.JSX.Element {
     return (
       <div className="flex flex-col gap-3">
         <NoPlansWaiting view={view} />
-        <PartialScan unread={view.unread} />
+        <PartialScan view={view} />
       </div>
     );
   }
@@ -408,7 +429,7 @@ function PlanInbox(): React.JSX.Element {
           </li>
         ))}
       </ul>
-      <PartialScan unread={view.unread} />
+      <PartialScan view={view} />
     </div>
   );
 }

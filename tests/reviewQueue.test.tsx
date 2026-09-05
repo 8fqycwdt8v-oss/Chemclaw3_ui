@@ -315,6 +315,40 @@ describe('the plan inbox', () => {
     expect(await screen.findByText(/5 older conversations were not checked/)).toBeTruthy();
   });
 
+  it('admits when the scan stopped before the end of the listing', async () => {
+    // The fourth reading of an empty list, and the one `unread` cannot carry: the walk through the
+    // caller's conversations stopped early, so the service never learned whether what lies beyond
+    // it is even gated — there is no count, only the admission. Rendered against an empty queue,
+    // because that is where a silent shortfall does its damage: "No plan is waiting on you" is
+    // otherwise a claim about conversations nobody looked at.
+    pending = { plans: [], considered: 30, gated: 30, unread: 0, truncated: true };
+    serve();
+    renderQueue();
+
+    expect(
+      await screen.findByText(/scan stopped before the end of your conversations/),
+    ).toBeTruthy();
+
+    // Both shortfalls at once: one sentence, both facts, and the count still belongs to `unread`.
+    cleanup();
+    pending = { ...PENDING, unread: 2, truncated: true };
+    renderQueue();
+    const notice = await screen.findByText(/2 older conversations were not checked/);
+    expect(notice.textContent).toContain('the scan stopped before the end of your conversations');
+  });
+
+  it('says nothing extra when the service does not report the walk at all', async () => {
+    // `truncated` is additive on the wire, so a service that predates it sends nothing. Absent is
+    // "not reported" and must not turn into either claim — the screen says exactly what it said
+    // before the field existed.
+    pending = { plans: [], considered: 3, gated: 3, unread: 0 };
+    serve();
+    renderQueue();
+
+    expect(await screen.findByText(/No plan is waiting on you/)).toBeTruthy();
+    expect(screen.queryByText(/scan stopped/)).toBeNull();
+  });
+
   it('says the question could not be asked, instead of answering it with an empty list', async () => {
     // `listPendingPlans` deliberately does not swallow the failure into `[]`. "We could not ask"
     // and "nothing is waiting" are opposite things to tell somebody whose work is blocked.

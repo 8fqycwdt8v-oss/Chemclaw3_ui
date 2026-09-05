@@ -279,6 +279,18 @@ export type ErrorCode =
   | 'llm_timeout'
   | 'turn_timeout'
   | 'budget_exhausted'
+  /**
+   * Admission control shed this turn: the service had no permit free within its admission
+   * timeout, so nothing ran at all.
+   *
+   * Its own member rather than `budget_exhausted`, because the two are opposite instructions —
+   * this one is "we are busy, retry in a moment" (`retryable: true`) and that one is "the budget
+   * is spent, stop retrying" (`retryable: false`). They shared a code until the service split
+   * them, and this app is the surface that paid for it: `errorFromEvent` had to read `retryable`
+   * to work out which of the two had arrived, on a taxonomy whose whole contract is that the code
+   * says what to do next.
+   */
+  | 'at_capacity'
   | 'loop_cap_reached'
   | 'spend_cap_reached'
   | 'bad_tool_arguments'
@@ -290,6 +302,7 @@ const ERROR_CODES = new Set<string>([
   'llm_timeout',
   'turn_timeout',
   'budget_exhausted',
+  'at_capacity',
   'loop_cap_reached',
   'spend_cap_reached',
   'bad_tool_arguments',
@@ -776,7 +789,9 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         type: 'error',
         message: asString(o.message, 'The turn failed.'),
         // An unrecognised code degrades to `internal` rather than dropping the event: a service
-        // that grew a ninth code should still be able to end a turn here.
+        // that grew a code this build has not been taught should still be able to end a turn
+        // here. Not "a ninth code", which is what this said while nine were declared: a count in
+        // a comment is a claim about a commit, and `at_capacity` made that one wrong.
         code: ERROR_CODES.has(asString(o.code)) ? (o.code as ErrorCode) : 'internal',
         retryable: o.retryable === true,
         correlation_id: asString(o.correlation_id),

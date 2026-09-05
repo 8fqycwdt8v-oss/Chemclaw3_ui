@@ -6,14 +6,18 @@
  * appear inside the normal chrome instead of replacing it.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router';
 import { configProblems } from './env.ts';
 import { useAuth } from './auth/AuthContext.tsx';
 import { useChatStore } from './state/chatStore.ts';
 import { api } from './api/client.ts';
+import { logger } from './lib/logger.ts';
 import { useJobStreams } from './hooks/useJobStreams.ts';
 import { useJobNotifications } from './hooks/useJobNotifications.ts';
 import { useVisualViewport } from './hooks/useVisualViewport.ts';
+import { useShortcuts, type Shortcut } from './hooks/useShortcuts.ts';
+import { ShortcutSheet } from './components/ShortcutSheet.tsx';
 import { Sidebar } from './components/Sidebar.tsx';
 import { TopBar } from './components/TopBar.tsx';
 import { MessageList } from './components/MessageList.tsx';
@@ -24,6 +28,7 @@ import { EntityRail } from './components/EntityRail.tsx';
 // `ChatMessage`); it moved to its own module so it could be tested against real backend payloads
 // rather than only through a rendered shell.
 import { transcriptToMessages } from './state/transcript.ts';
+import { resumeInterruptedTurn } from './state/sendMessage.ts';
 
 function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
   return (
@@ -127,6 +132,69 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
   }, [conversationId, sessionId, messageCount, fromServer, auth, ready, nonce]);
 }
 
+/**
+ * Pick up an answer a reload interrupted, for the conversation on screen.
+ *
+ * Separate from `useRemoteTranscript` because it is a different question with a different
+ * precondition. That effect asks "does this conversation have a history I have not read?" and
+ * refuses to run once the conversation has any local message at all — which is what made it blind
+ * to this case, where the conversation is full and one message in it is a hole. This one asks "is
+ * the newest turn a turn that was cut off by a reload, and did the server finish it?".
+ *
+ * Keyed on the conversation and torn down on navigation, so switching away stops the poll.
+ */
+function useResumeInterruptedTurn(conversationId: string | undefined): void {
+  const { auth, ready } = useAuth();
+  // A boolean, not the message: this must fire when a conversation *acquires* an interrupted turn
+  // (a reload, or switching into one) and never again on the token flushes that follow.
+  const interrupted = useChatStore((s) =>
+    conversationId
+      ? (s.conversations[conversationId]?.messages.some(
+          (m) => m.role === 'assistant' && m.interruptedByReload,
+        ) ?? false)
+      : false,
+  );
+
+  useEffect(() => {
+    if (!ready || !conversationId || !interrupted) return;
+    return resumeInterruptedTurn(conversationId, auth);
+  }, [auth, ready, conversationId, interrupted]);
+}
+
+/**
+ * Claim the standing-query digests, once per page.
+ *
+ * At the top of the app rather than on `/review`, and the reason is the service's own contract:
+ * `GET /digests` is a **destructive claim** — a row it returns is marked consumed and is never
+ * re-delivered. So this has to happen somewhere that is mounted for the life of the session and
+ * that writes straight into the persisted store. Reading it from the screen that displays it would
+ * destroy a digest for anyone who opened that screen and navigated away before the response
+ * landed.
+ *
+ * Once, not on an interval. A digest is produced at most once per subscription per day; polling it
+ * would be a claim per poll against a mailbox that is usually empty, and the one thing worse than
+ * not seeing a digest is claiming one into a page that is closing.
+ */
+function useDigests(): void {
+  const { auth, ready } = useAuth();
+  const claimed = useRef(false);
+
+  useEffect(() => {
+    if (!ready || claimed.current) return;
+    // Latched *before* the request, not after: StrictMode invokes this effect twice in
+    // development, and a second claim would consume rows the first one is still carrying.
+    claimed.current = true;
+    void api
+      .listDigests(auth)
+      .then((digests) => useChatStore.getState().addDigests(digests))
+      .catch(() => {
+        // Silent, and the latch stays closed. A failed claim consumed nothing, but retrying on
+        // the next render is how a flapping network turns one mailbox read into many.
+        logger.debug('digests.claim_failed', {});
+      });
+  }, [auth, ready]);
+}
+
 export function AppShell({
   conversationId,
   children,
@@ -136,9 +204,48 @@ export function AppShell({
   children?: React.ReactNode;
 }): React.JSX.Element {
   const [rehydrateNonce, setRehydrateNonce] = useState(0);
+  const [showingShortcuts, setShowingShortcuts] = useState(false);
+  const navigate = useNavigate();
+
+  // Held in a memo so the listener is bound once rather than on every render of the shell.
+  const shortcuts = useMemo<Shortcut[]>(
+    () => [
+      {
+        key: 'k',
+        mod: true,
+        label: 'New conversation',
+        run: () => {
+          const id = useChatStore.getState().createConversation();
+          void navigate(`/c/${id}`);
+        },
+      },
+      {
+        key: '/',
+        mod: true,
+        label: 'Search conversations',
+        run: () => document.getElementById('conversation-search')?.focus(),
+      },
+      {
+        key: 'j',
+        mod: true,
+        label: 'Write a message',
+        run: () => document.getElementById('composer')?.focus(),
+      },
+      {
+        key: '?',
+        shift: true,
+        label: 'Show this list',
+        run: () => setShowingShortcuts(true),
+      },
+    ],
+    [navigate],
+  );
+  useShortcuts(shortcuts);
 
   useVisualViewport();
   useRemoteTranscript(conversationId, rehydrateNonce);
+  useResumeInterruptedTurn(conversationId);
+  useDigests();
   // Watches several conversations, not just this one: a job launched in one and completing while
   // the chemist reads another is the case the feature exists for.
   useJobStreams();
@@ -157,6 +264,11 @@ export function AppShell({
 
   return (
     <div className="flex h-full">
+      <ShortcutSheet
+        shortcuts={shortcuts}
+        open={showingShortcuts}
+        onOpenChange={setShowingShortcuts}
+      />
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar onRetry={onRetry} conversationId={children ? undefined : conversationId} />

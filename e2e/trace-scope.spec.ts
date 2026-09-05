@@ -26,7 +26,7 @@ test('the trace reader sees the tools, not the question', async ({ page }) => {
   await page
     .getByPlaceholder(/Ask about a reaction/)
     .fill(`Use ${NOT_CALLED} on this, and tell me the pKa of acetic acid.`);
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
 
   const answer = page.getByRole('article', { name: 'Assistant answer' }).last();
   await expect(answer).toContainText('4.76', { timeout: 15_000 });
@@ -57,7 +57,7 @@ test('the tool names are the calls the turn made', async ({ page }) => {
   await page
     .getByPlaceholder(/Ask about a reaction/)
     .fill('Screen this azide and tell me about the hazards.');
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByRole('article', { name: 'Assistant answer' }).last()).toContainText(
     '4.76',
     { timeout: 15_000 },

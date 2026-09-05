@@ -31,6 +31,36 @@
       content="Chemclaw — a process and analytical development assistant for pharmaceutical and chemical R&amp;D."
     />
 
+    <!--
+      The one font face the first paint certainly needs.
+
+      Body text is `--font-sans` (src/index.css), which is 'Inter Variable' — so its latin subset
+      is on the critical path of every page. Without this it is discovered three hops in: fetch
+      index.html, fetch the stylesheet, parse it, match a unicode-range, then fetch the font. This
+      starts it with the HTML instead, and `font-display: swap` means the difference is how long a
+      chemist reads the fallback typeface rather than whether they read anything.
+
+      The href is checked, not assumed: Vite rewrites `<link href>` in this file through the same
+      asset pipeline the `@fontsource-variable` CSS import goes through and DEDUPES it, so this
+      emits no second copy and resolves to the byte-identical hashed path the stylesheet's
+      `@font-face` names (verified in `npm run build:client`; `tests/fontLoading.test.ts` holds
+      it). Writing the hashed name here by hand would be the mistake — the hash is content-derived
+      and changes with the package.
+
+      Only this face. 'JetBrains Mono Variable' is the other candidate and is deliberately not
+      preloaded: nothing in the shell, the sidebar or the composer is monospaced, so it is needed
+      only once a transcript with a code span or a SMILES renders — conditional on what the reader
+      restored — and a preload the browser does not use inside a few seconds is 40 kB of
+      critical-path bandwidth plus a console warning saying so.
+    -->
+    <link
+      rel="preload"
+      as="font"
+      type="font/woff2"
+      crossorigin
+      href="./node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2"
+    />
+
     <script type="module" src="/src/main.tsx"></script>
   </head>
   <body class="h-full">

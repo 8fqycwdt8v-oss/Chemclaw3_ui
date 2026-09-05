@@ -73,12 +73,35 @@ export function ActivityRow({
   // reasons that are not a state change at all.
   const announced = useRef<string | null>(null);
   const streaming = message.status === 'streaming';
+  /*
+   * The effect depends on two strings, and it used to depend on `activity`.
+   *
+   * `turnActivity` is a pure derivation that builds a *fresh object* on every call — which is the
+   * whole reason it is a function over the message rather than state on it, and is right. But an
+   * object in a dependency list is compared by identity, so the list never matched: this row
+   * re-renders once per animation frame while tokens arrive (`updateAssistant` replaces the
+   * messages array every frame), and the announcement effect was therefore scheduled ~60 times a
+   * second to reach its own `announced.current === kind` guard and return. Measured over 121
+   * renders of one streaming turn, the effect ran **121 times and announced twice**; with the two
+   * strings below it runs twice and announces the same twice.
+   *
+   * `kind` alone is not enough to depend on, because the body reads the rest of the activity to
+   * build the sentence — that is the stale closure `react-hooks/exhaustive-deps` exists to catch,
+   * and suppressing it here would be the same bug with a comment on it. So the sentence is derived
+   * *in render*, where it is a switch and a template string, and the effect depends on the two
+   * values it actually uses. Both are strings, so an unchanged turn re-renders without scheduling
+   * anything at all, and a changed one still announces exactly once — the announcement still fires
+   * on the KIND changing, never on the label, so a plan that renames step 3 while the same tool is
+   * out is silent.
+   */
+  const kind = activity.kind;
+  const sentence = describeActivity(activity);
   useEffect(() => {
     if (!streaming) return;
-    if (announced.current === activity.kind) return;
-    announced.current = activity.kind;
-    announceStatus(describeActivity(activity));
-  }, [streaming, activity]);
+    if (announced.current === kind) return;
+    announced.current = kind;
+    announceStatus(sentence);
+  }, [streaming, kind, sentence]);
 
   return (
     <span

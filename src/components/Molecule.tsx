@@ -25,7 +25,13 @@
  * The bundle argument survives intact and is answered structurally: `src/chem/rdkit.ts` is behind a
  * dynamic `import()`, so the WASM is its own chunk and index.html preloads none of it. Measured
  * across the swap alone, the entry chunk went 485.86 kB → 485.78 kB — the 6.9 MB binary and its
- * 74 kB loader are separate emitted assets, fetched the first time a structure appears.
+ * 74 kB loader are separate emitted assets, fetched the first time a structure appears. That
+ * *delta* is what the argument rests on and it is still true; the 485 kB absolute this used to
+ * carry is not, and `chem/rdkit.ts` published 509 kB for the same chunk in the same breath. No
+ * current size replaces them — measured twice in one afternoon the entry moved by 4 kB with
+ * nothing here touched, so `chem/rdkit.ts` records why that number does not belong in prose. The
+ * invariant to read is the structural one: no chemistry in the entry but the dynamic import that
+ * reaches it, which `tests/entryChunk.test.ts` asserts.
  *
  * Keeping smiles-drawer alongside for depiction was considered and dropped — any page with a rail
  * has already fetched RDKit, so it would be 190 kB of duplicate capability and, worse, a second

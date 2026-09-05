@@ -27,6 +27,7 @@ describe('the event contract admits every member of its own union', () => {
     job_started: { job_id: 'j1', kind: 'qm' },
     job_completed: { job_id: 'j1', summary: {} },
     job_failed: { job_id: 'j1', reason: 'no' },
+    awaiting_answer: { request_id: 'await-1' },
     capability_degraded: { connectors: ['eln'] },
     tool_failed: { tool: 'find_notes', message: 'boom' },
     tool_result: { tool: 'find_notes', preview: 'x' },
@@ -110,6 +111,22 @@ const full: Array<[string, Record<string, unknown>]> = [
   ['job_started', { job_id: 'j1', kind: 'qm', plan_step: 'run the conformer search' }],
   ['job_completed', { job_id: 'j1', summary: { converged: true } }],
   ['job_failed', { job_id: 'j1', reason: 'the solver diverged' }],
+  // Both pushes' fields at once, which no single frame from the service carries: the open sends
+  // `kind`/`asked_of`/`due_at`, the expiry sends `subject`/`reminders`. This fixture is a
+  // field-survival check rather than a realistic frame, and splitting it into two would only test
+  // half the fields twice.
+  [
+    'awaiting_answer',
+    {
+      request_id: 'await-9f2c',
+      state: 'expired',
+      subject: 'Isolated yield for arm B3',
+      kind: 'measurement',
+      asked_of: 'process-chemist',
+      due_at: '2026-09-06T00:00:00Z',
+      reminders: 2,
+    },
+  ],
   ['capability_degraded', { connectors: ['eln'] }],
   ['tool_failed', { tool: 'submit_qm_job', message: 'refused', reason: 'plan_gate', agent: 'x' }],
   [

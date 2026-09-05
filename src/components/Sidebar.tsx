@@ -13,11 +13,13 @@
  * sharpest edge in the product.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useLocation, useNavigate } from 'react-router';
 import {
   FileCheck2,
   FlaskConical,
+  GitBranch,
   MoreHorizontal,
   Plus,
   Search,
@@ -25,14 +27,18 @@ import {
   Trash2,
   TriangleAlert,
 } from 'lucide-react';
-import { api } from '../api/client.ts';
+import { api, type SessionSummary } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
+import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore, newConversation } from '../state/chatStore.ts';
+import type { ChatState } from '../state/chatStore.ts';
+import type { Conversation } from '../state/types.ts';
 import { announceStatus } from '../state/announce.ts';
 import { relativeTime } from '../lib/format.ts';
 import { logger } from '../lib/logger.ts';
 import { cn } from '@/lib/utils';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -45,10 +51,77 @@ import { StatusDot } from '@/components/chem/StatusDot';
 import { NotifyToggle } from '@/components/chem/NotifyToggle';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
-/** Pull server-side sessions once. Anything not known locally is added as a stub. */
-function useServerSessions(): 'idle' | 'degraded' {
+/**
+ * Fold one page of the service's sessions into the local list.
+ *
+ * Shared by the first read and by "Load more", so the two cannot drift about what a restored
+ * conversation looks like. Returns the ids it added, which is what tells the caller whether the
+ * page was worth asking for.
+ */
+function adoptSessions(remote: SessionSummary[]): number {
+  const state = useChatStore.getState();
+  const known = new Set(
+    Object.values(state.conversations)
+      .map((c) => c.sessionId)
+      .filter(Boolean),
+  );
+  const additions = remote.filter((s) => !known.has(s.session_id));
+  if (additions.length === 0) return 0;
+
+  useChatStore.setState((s) => {
+    const next = { ...s.conversations };
+    const ids: string[] = [];
+    for (const summary of additions) {
+      const created = summary.created_at ? Date.parse(summary.created_at) : Date.now();
+      // **The service names its sessions now, and this used to ignore it.** The comment here read
+      // "the server has never sent one, so the guard was decoration in front of a constant" — true
+      // when written, false since `routes/sessions.py` began constructing
+      // `SessionSummary(..., title=title)` from the session's first user message. The guard was
+      // deleted one release before it became load-bearing, so every restored conversation read
+      // "Earlier conversation" until somebody clicked into it and `hydrateTranscript` renamed it
+      // from a transcript it had to fetch first. The placeholder stays as the fallback for a
+      // service that predates the field, and for a session minted before anyone had spoken.
+      const named = summary.title?.trim();
+      // `updated_at` is the newest stored message; `created_at` is when the session was *started*.
+      // Sorting by the second is what put a conversation opened last Tuesday and abandoned above
+      // one used an hour ago — the bug this file's own sort comment names.
+      const touched = summary.updated_at ? Date.parse(summary.updated_at) : created;
+      const conversation = {
+        ...newConversation(),
+        sessionId: summary.session_id,
+        title: named || 'Earlier conversation',
+        createdAt: created,
+        // Was left at Date.now() from newConversation(), so every conversation restored
+        // from the server read "just now" — the one thing a timestamp exists to deny.
+        updatedAt: Number.isNaN(touched) ? created : touched,
+        // The backend has a transcript for this one, so the rehydrate effect should read it.
+        sessionOrigin: 'server' as const,
+      };
+      next[conversation.id] = conversation;
+      ids.push(conversation.id);
+    }
+    return { conversations: next, order: [...s.order, ...ids] };
+  });
+  return additions.length;
+}
+
+/**
+ * Pull server-side sessions. Anything not known locally is added as a stub.
+ *
+ * Paged, because the service caps a listing at `service_max_listed_sessions` (100) and advertises
+ * `X-Next-Cursor` when there may be more — so conversation 101 was not below a fold, it was never
+ * fetched, and nothing said so. The first page is read on mount; the rest is a control, because
+ * pulling every page on boot would be a hundred round trips for a list nobody scrolled.
+ */
+function useServerSessions(): {
+  health: 'idle' | 'degraded';
+  more: (() => void) | null;
+  loadingMore: boolean;
+} {
   const { auth, ready } = useAuth();
   const [health, setHealth] = useState<'idle' | 'degraded'>('idle');
+  const [cursor, setCursor] = useState('');
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     // The placeholder provider throws rather than sending an unauthenticated request, so running
@@ -57,47 +130,13 @@ function useServerSessions(): 'idle' | 'degraded' {
     let cancelled = false;
     void (async () => {
       try {
-        const remote = await api.listSessions(auth);
+        const page = await api.pageSessions(auth);
         if (cancelled) return;
         // Reset on success: without this a single failure latched the warning permanently, so a
         // transient hiccup left "showing local conversations only" on screen for the session.
         setHealth('idle');
-        if (remote.length === 0) return;
-        const state = useChatStore.getState();
-        const known = new Set(
-          Object.values(state.conversations)
-            .map((c) => c.sessionId)
-            .filter(Boolean),
-        );
-        const additions = remote.filter((s) => !known.has(s.session_id));
-        if (additions.length === 0) return;
-
-        useChatStore.setState((s) => {
-          const next = { ...s.conversations };
-          const ids: string[] = [];
-          for (const summary of additions) {
-            const created = summary.created_at ? Date.parse(summary.created_at) : Date.now();
-            const conversation = {
-              ...newConversation(),
-              sessionId: summary.session_id,
-              // A placeholder with a short life now: opening this conversation reads its
-              // transcript, and `hydrateTranscript` renames it from the first thing that was
-              // actually asked. It used to be `summary.title?.trim() || …`, which looked like it
-              // was preferring a server-supplied name — the server has never sent one, so the
-              // guard was decoration in front of a constant.
-              title: 'Earlier conversation',
-              createdAt: created,
-              // Was left at Date.now() from newConversation(), so every conversation restored
-              // from the server read "just now" — the one thing a timestamp exists to deny.
-              updatedAt: created,
-              // The backend has a transcript for this one, so the rehydrate effect should read it.
-              sessionOrigin: 'server' as const,
-            };
-            next[conversation.id] = conversation;
-            ids.push(conversation.id);
-          }
-          return { conversations: next, order: [...s.order, ...ids] };
-        });
+        setCursor(page.next);
+        adoptSessions(page.sessions);
       } catch (err) {
         // A backend without the listing endpoint and a backend that refused our token are not the
         // same thing, and silently showing a local-only list made them look identical. Not worth
@@ -115,7 +154,148 @@ function useServerSessions(): 'idle' | 'degraded' {
     };
   }, [auth, ready]);
 
-  return health;
+  const more = useCallback(() => {
+    if (!cursor || loadingMore) return;
+    setLoadingMore(true);
+    void api
+      .pageSessions(auth, cursor)
+      .then((page) => {
+        setCursor(page.next);
+        adoptSessions(page.sessions);
+      })
+      .catch((err: unknown) => {
+        // A cursor this deployment cannot resume is a 422 and is final for this listing: clearing
+        // it takes the control off screen rather than offering a button that will never work.
+        logger.warn('sessions.page_failed', {
+          kind: err instanceof ApiError ? err.kind : 'unknown',
+        });
+        setCursor('');
+      })
+      .finally(() => setLoadingMore(false));
+  }, [auth, cursor, loadingMore]);
+
+  return { health, more: cursor ? more : null, loadingMore };
+}
+
+/**
+ * Everything in one conversation a search should reach, lowercased, cached on the conversation.
+ *
+ * Keyed on the conversation *object*, which the store replaces only when that conversation
+ * actually changes — so a streaming turn rebuilds one entry per animation frame and the other
+ * twenty-nine are read straight back. Without it the scan below allocated a lowercased copy of
+ * every message body in every conversation on every frame: measured at 30 conversations × 200
+ * messages, 2.1 ms per frame, i.e. ~128 ms of string work per second of streaming, for as long
+ * as the reader has anything typed in the box.
+ *
+ * A `WeakMap` rather than an LRU because the right eviction rule is exactly "the conversation is
+ * gone", and that is the one rule a `WeakMap` applies for free.
+ */
+const haystacks = new WeakMap<Conversation, string>();
+
+function haystack(c: Conversation): string {
+  const cached = haystacks.get(c);
+  if (cached !== undefined) return cached;
+  // Titles are derived from the first message, so searching them alone would miss anything said
+  // later — which is most of what a chemist wants to find again (a batch number, a ligand).
+  const built = [
+    c.title,
+    ...c.messages.map((m) => (m.role === 'user' ? m.text : m.finalText || m.streamedText)),
+  ]
+    .join('\n')
+    .toLowerCase();
+  haystacks.set(c, built);
+  return built;
+}
+
+/**
+ * The conversation ids this panel lists, newest first, narrowed by the search box.
+ *
+ * Exported and pure so the subscription above can be a shallow-compared array rather than the
+ * whole conversations map — see the comment at its one call site.
+ */
+export function visibleConversationIds(state: ChatState, needle: string): string[] {
+  // The store prepends on create but server-merged stubs were appended, so a conversation used
+  // ten minutes ago could sit below one from last month.
+  const sorted = [...state.order].sort(
+    (a, b) => (state.conversations[b]?.updatedAt ?? 0) - (state.conversations[a]?.updatedAt ?? 0),
+  );
+  if (!needle) return sorted;
+  return sorted.filter((id) => {
+    const c = state.conversations[id];
+    return c ? haystack(c).includes(needle) : false;
+  });
+}
+
+/**
+ * Remove a conversation from this browser *and* from the service.
+ *
+ * Server first, then local, and the order is the whole point: a local delete that ran first would
+ * leave the caller with no session id to send if the request failed, and the chemist believing the
+ * conversation was gone when the service still holds it.
+ *
+ * A failure is reported and the conversation stays. That is the honest outcome — "it is gone" is
+ * the claim this function exists to make true — and it is recoverable: the row is still there to
+ * try again.
+ */
+async function deleteConversation(id: string, auth: AuthProvider): Promise<void> {
+  const sessionId = useChatStore.getState().conversations[id]?.sessionId;
+  if (sessionId) {
+    try {
+      await api.deleteSession(sessionId, auth);
+    } catch (err) {
+      logger.warn('session.delete_failed', {
+        kind: err instanceof ApiError ? err.kind : 'unknown',
+      });
+      useChatStore.getState().setBanner({
+        kind: 'warn',
+        text:
+          err instanceof Error
+            ? `This conversation was not deleted on the server: ${err.message}`
+            : 'This conversation was not deleted on the server.',
+        action: 'retry',
+      });
+      return;
+    }
+  }
+  useChatStore.getState().deleteConversation(id);
+}
+
+/**
+ * Copy this conversation onto a new session and open it.
+ *
+ * The local half is a fresh conversation pointed at the forked session with the parent's messages
+ * carried over, so the branch reads as a branch rather than as an empty thread that happens to
+ * share a history on the server. `sessionOrigin: 'server'` is deliberate: the service holds the
+ * authoritative copy, and the transcript rehydrate is what reconciles the two if they differ.
+ */
+async function forkConversation(
+  id: string,
+  auth: AuthProvider,
+  // `react-router`'s own `navigate` returns a promise, so a `void` parameter type would make every
+  // call site a `no-misused-promises` error rather than this one declaration.
+  navigate: (to: string) => void | Promise<void>,
+): Promise<void> {
+  const parent = useChatStore.getState().conversations[id];
+  if (!parent?.sessionId) return;
+  try {
+    const { session_id } = await api.forkSession(parent.sessionId, auth);
+    const branch = useChatStore.getState().adoptFork(id, session_id);
+    if (branch) void navigate(`/c/${branch}`);
+  } catch (err) {
+    // 409 (a turn in flight) and 501 (no durable store) are both facts about *now*, and both are
+    // recoverable by the reader — one by waiting, one by not asking again. A banner says which.
+    useChatStore.getState().setBanner({
+      kind: 'warn',
+      text:
+        err instanceof ApiError && err.status === 409
+          ? 'This conversation has a turn running. A branch cannot be taken until it finishes.'
+          : err instanceof ApiError && err.status === 501
+            ? 'This deployment does not keep conversations on the server, so there is nothing to branch.'
+            : err instanceof Error
+              ? `This conversation was not branched: ${err.message}`
+              : 'This conversation was not branched.',
+    });
+  }
 }
 
 function ConversationRow({
@@ -128,6 +308,8 @@ function ConversationRow({
   onSelect: () => void;
 }): React.JSX.Element | null {
   const conversation = useChatStore((s) => s.conversations[id]);
+  const { auth } = useAuth();
+  const navigate = useNavigate();
   if (!conversation) return null;
 
   return (
@@ -179,14 +361,46 @@ function ConversationRow({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
           {/* deleteConversation has existed in the store from the start and no UI ever called it,
-              so the only way to remove one conversation was to delete all of them. */}
+              so the only way to remove one conversation was to delete all of them.
+
+              **Two things were wrong with the version that gave it one.** It was a local map
+              delete — the server session, its transcript, its checkpoints, its attachments and its
+              ownership row all survived — so the chemist who deleted a conversation *because* it
+              held something they did not want kept had been told something untrue. And it was one
+              click on a 24px control, with no confirmation and no undo, in a codebase that confirms
+              the plan decision, the protocol status move and "Clear all conversations".
+
+              `onSelect` is prevented so the menu does not close and unmount the dialog it is
+              opening. */}
+          {/* Branch it, keeping both. The service copies the whole thread under a new id and
+              refuses while a turn is in flight, so a fork is never a half-copied conversation.
+              This is also the version of "edit and resend" that keeps the original: the message
+              control refills the composer in place, this one gives the new question its own
+              thread. */}
           <DropdownMenuItem
-            tone="danger"
-            onSelect={() => useChatStore.getState().deleteConversation(id)}
+            onSelect={() => {
+              // A statement body, not `() => void fork(…)`: the rule reads the expression form as
+              // returning the promise. `forkConversation` reports its own failures through the
+              // banner, so there is nothing here to await.
+              void forkConversation(id, auth, navigate);
+            }}
           >
-            <Trash2 />
-            Delete conversation
+            <GitBranch />
+            Branch this conversation
           </DropdownMenuItem>
+          <ConfirmDialog
+            trigger={
+              <DropdownMenuItem tone="danger" onSelect={(e) => e.preventDefault()}>
+                <Trash2 />
+                Delete conversation
+              </DropdownMenuItem>
+            }
+            title="Delete this conversation?"
+            description="It is removed from this browser and from the server — the transcript, its attachments and everything keyed by it. This cannot be undone."
+            confirmLabel="Delete it"
+            variant="destructive"
+            onConfirm={() => void deleteConversation(id, auth)}
+          />
         </DropdownMenuContent>
       </DropdownMenu>
     </li>
@@ -200,11 +414,15 @@ function SidebarLink({
   icon,
   children,
   onNavigate,
+  count = 0,
 }: {
   to: string;
   icon: React.ReactNode;
   children: React.ReactNode;
   onNavigate?: () => void;
+  /** How many things are waiting behind this link. `0` renders nothing at all — an empty badge
+   *  reads as a broken one, and "nothing is waiting" is the state this app is in almost always. */
+  count?: number;
 }): React.JSX.Element {
   const navigate = useNavigate();
   const location = useLocation();
@@ -226,41 +444,40 @@ function SidebarLink({
         {icon}
       </span>
       {children}
+      {count > 0 && (
+        // The number is in the accessible name rather than beside it as a bare digit: a screen
+        // reader announcing "Review queue 2" says nothing about what the 2 counts, and this link
+        // also leads to note proposals, which this badge is not about.
+        <Badge tone="warn" className="ml-auto" aria-label={`${count} waiting on you`}>
+          {count}
+        </Badge>
+      )}
     </Button>
   );
 }
 
 export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.JSX.Element {
   const navigate = useNavigate();
-  const order = useChatStore((s) => s.order);
   const activeId = useChatStore((s) => s.activeId);
-  const conversations = useChatStore((s) => s.conversations);
-  const degraded = useServerSessions();
+  const { health: degraded, more: loadMoreSessions, loadingMore } = useServerSessions();
   const throttled = useChatStore((s) => s.jobStreamsThrottled);
   const streamsFailing = useChatStore((s) => s.jobStreamsFailing.length > 0);
+  // A number, not the list: zustand compares with `Object.is`, so subscribing to the array itself
+  // would re-render this whole panel on every `syncAwaiting` that changed nothing.
+  const awaiting = useChatStore((s) => s.awaiting.length);
   const [query, setQuery] = useState('');
-
-  // The store prepends on create but server-merged stubs were appended, so a conversation used
-  // ten minutes ago could sit below one from last month.
-  const sorted = [...order].sort(
-    (a, b) => (conversations[b]?.updatedAt ?? 0) - (conversations[a]?.updatedAt ?? 0),
-  );
-
-  // Titles are derived from the first message, so searching them alone would miss anything said
-  // later — which is most of what a chemist wants to find again (a batch number, a ligand).
   const needle = query.trim().toLowerCase();
-  const matches = needle
-    ? sorted.filter((id) => {
-        const c = conversations[id];
-        if (!c) return false;
-        if (c.title.toLowerCase().includes(needle)) return true;
-        return c.messages.some((m) =>
-          (m.role === 'user' ? m.text : (m.finalText ?? m.streamedText))
-            .toLowerCase()
-            .includes(needle),
-        );
-      })
-    : sorted;
+
+  // **The list is subscribed to as ids, not as the conversation map.** `updateAssistant` replaces
+  // `state.conversations` on every animation-frame token flush, so `useChatStore((s) =>
+  // s.conversations)` changed identity ~60×/s and re-rendered this whole panel — every row, each
+  // with its own `DropdownMenu` — for the entire duration of every answer. Measured on the
+  // sidebar alone: 2.8 ms/flush at one conversation, 50.5 ms at thirty, linear in a number the
+  // chemist grows over time. The projection below still runs per write (that is what zustand
+  // compares) but it returns the same *shallow* array while the order and the match set hold, so
+  // React does nothing. `ConversationRow` already subscribes to its own conversation, so the one
+  // row that genuinely changed still re-renders — which is the whole of what should.
+  const visible = useChatStore(useShallow((s) => visibleConversationIds(s, needle)));
 
   return (
     <>
@@ -297,21 +514,25 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
       </div>
 
       <nav aria-label="Conversations" className="flex-1 overflow-y-auto px-2 pb-3">
-        {needle && matches.length === 0 && (
+        {needle && visible.length === 0 && (
           <p className="px-2.5 py-2 text-xs text-ink-muted">
             Nothing matches “{query.trim()}”. Only conversations stored in this browser are
             searched.
           </p>
         )}
         <ul className="space-y-1">
-          {matches.map((id) => (
+          {visible.map((id) => (
             <ConversationRow
               key={id}
               id={id}
               active={id === activeId}
               onSelect={() => {
-                const title = conversations[id]?.title ?? 'conversation';
-                const count = conversations[id]?.messages.length ?? 0;
+                // Read at click time rather than subscribed: the announcement wants the title and
+                // the length as they are when the reader acts, and subscribing to the map to get
+                // them is what put this panel on the per-token render path.
+                const opened = useChatStore.getState().conversations[id];
+                const title = opened?.title ?? 'conversation';
+                const count = opened?.messages.length ?? 0;
                 void navigate(`/c/${id}`);
                 onNavigate?.();
                 // Land the reader in the transcript rather than leaving focus on a list item
@@ -323,6 +544,25 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
             />
           ))}
         </ul>
+
+        {/* Only when the service said there is a next page. The listing is capped at
+            `service_max_listed_sessions`, and before this the cap was invisible: conversation 101
+            was not below a fold, it was never fetched, and nothing on screen said so. Hidden while
+            a search is active, because the search reads what is in this browser and a page fetched
+            now would not be in it yet. */}
+        {loadMoreSessions && !needle && (
+          <div className="px-1 pt-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-start"
+              disabled={loadingMore}
+              onClick={loadMoreSessions}
+            >
+              {loadingMore ? 'Loading…' : 'Load earlier conversations'}
+            </Button>
+          </div>
+        )}
       </nav>
 
       <div className="space-y-3 border-t border-border-subtle p-3">
@@ -330,7 +570,12 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
             because they are where a chemist goes occasionally, and the list is where they go
             every time. */}
         <nav aria-label="Other views" className="flex flex-col gap-1">
-          <SidebarLink to="/review" icon={<FileCheck2 />} onNavigate={onNavigate}>
+          {/* The count is on this link and not on a toast, because a question held open for a
+              person has a deadline measured in days: it must be visible on every screen for as
+              long as it is open, and gone the moment it is not. Before the service delivered
+              `awaiting_answer` at all, the only trace of a paused campaign was a durable run that
+              appeared to execute for a week (backend D-2026-09-05). */}
+          <SidebarLink to="/review" icon={<FileCheck2 />} onNavigate={onNavigate} count={awaiting}>
             Review queue
           </SidebarLink>
           {/* A design outlives the conversation that drafted it — corrected by somebody who was

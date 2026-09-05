@@ -68,6 +68,7 @@ function watchOneSession(): { unmount: () => void } {
     },
     activeId: 'c1',
     jobStreamsThrottled: false,
+    jobStreamsFailing: [],
   });
   return renderHook(() => useJobStreams());
 }
@@ -97,6 +98,43 @@ describe('a 429 that carries Retry-After', () => {
     // been shown to happen. A rate limit is not evidence of an over-subscribed cap, and it is the
     // one 429 here that recovers on its own.
     expect(useChatStore.getState().jobStreamsThrottled).toBe(false);
+  });
+});
+
+/**
+ * Honouring the header is right. Honouring it silently and for ever was not.
+ *
+ * That branch touched neither `failed()` nor `attempt` and did not log, so it was the one retry
+ * path in this hook with no counter, no escalation and no indicator behind it. A limiter refusing
+ * steadily — plausibly *because* this tab keeps coming back at exactly the rate it asked for —
+ * simply carried on. Measured over 120 s of one stream at `Retry-After: 1`: **121 requests,
+ * `jobStreamsFailing` empty**, and that is one of the three streams a tab holds.
+ *
+ * Afterwards, over the same 120 s: **9 requests**, the indicator raised. The ceiling is the same
+ * `FAILURES_BEFORE_REPORTING` every other failure here uses, and past it the header stops being
+ * taken at face value — a limiter that has refused four times running is not describing a queue
+ * that clears in a second.
+ */
+describe('a 429 that keeps carrying Retry-After', () => {
+  it('is counted and escalated rather than retried in silence for ever', async () => {
+    stubRateLimited({ 'retry-after': '1' });
+    const { unmount } = watchOneSession();
+    vi.useFakeTimers();
+    try {
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      // The old loop ran at the rate the header asked for, indefinitely. Ten leaves ample room
+      // for the backoff's jitter while staying an order of magnitude under 121.
+      expect(connects).toBeLessThanOrEqual(10);
+      expect(useChatStore.getState().jobStreamsFailing).toEqual([SID]);
+      // Still not the stream cap. That flag is irreversible for the life of the page and means
+      // "this tab holds more streams than its share" — a request-rate refusal is no evidence of
+      // it, and the test above pins the same thing over the first two refusals.
+      expect(useChatStore.getState().jobStreamsThrottled).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      unmount();
+    }
   });
 });
 

@@ -25,10 +25,17 @@
  *
  * ## What it costs, and where
  *
- * Roughly 3.4 MB of JavaScript plus an 11.8 MB Indigo `.wasm`, none of it in the main bundle: this
- * module is reached only through `sketcher.ts`'s dynamic `import()`, so a chemist who pastes SMILES
- * and never draws downloads none of it. Verified in `npm run build:client` — the Ketcher chunk and
- * the Indigo binary are separate emitted assets and the entry chunk is unchanged.
+ * Measured on 2026-09-05 with `npm run build:client`, because the figure this paragraph used to
+ * carry — "roughly 3.4 MB of JavaScript" — was less than half of it. This module's own chunk is
+ * **7.71 MB**; with the three it pulls in (`index.modern` ×2 and the Indigo worker) it is
+ * **9.40 MB of JavaScript**, plus **180 kB** of Ketcher stylesheet and an **11.79 MB** Indigo
+ * `.wasm`. None of it is in the main bundle: this module is reached only through `sketcher.ts`'s
+ * dynamic `import()`, so a chemist who pastes SMILES and never draws downloads none of it, and the
+ * entry chunk is unchanged by its presence — which is the claim that mattered and is still true.
+ *
+ * The size is also the argument for `sketcher.ts` retrying a failed load rather than memoising it:
+ * at 7.71 MB for the first chunk alone, a dropped connection is an ordinary event, not a verdict
+ * about the browser.
  *
  * ## Build-time notes that were not obvious
  *
@@ -56,6 +63,7 @@ import { Editor } from 'ketcher-react';
 import { StandaloneStructServiceProvider } from 'ketcher-standalone/dist/binaryWasm';
 import 'ketcher-react/dist/index.css';
 import type { MountSketcher, SketcherSession } from './sketcher.ts';
+import { withLoadTimeout } from './toolkitLoad.ts';
 
 /** The sliver of Ketcher's instance this adapter uses. Narrow on purpose: it is the whole of the
  *  contract a replacement would have to satisfy. */
@@ -73,22 +81,17 @@ const HIDDEN_BUTTONS = {
   miew: { hidden: true },
 } as const;
 
-/** How long to wait for the editor to report itself ready before giving up. Indigo's WASM is
- *  ~12 MB, so this is generous — but unbounded would mean a dialog that spins forever on a failed
- *  fetch, and the caller's fallback (paste, drop) is better than that. */
-const INIT_TIMEOUT_MS = 60_000;
-
 export const mountKetcher: MountSketcher = async (host, initial) => {
   const root = createRoot(host);
 
   // Resolved *with* the editor rather than beside it, so everything after the await has a live
   // instance rather than a `| null` nothing can narrow.
-  const ready = new Promise<KetcherInstance>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error('The structure editor did not finish loading.')),
-      INIT_TIMEOUT_MS,
-    );
-
+  //
+  // The wait is bounded by `toolkitLoad.ts`, which is where the 60 s this used to declare for
+  // itself now lives: an unbounded wait is a dialog that spins for ever on a fetch nobody answers,
+  // and the same sentence was true of `loadRDKit`, which had no bound at all. One number, two
+  // seams, and the reasoning is written down once.
+  const ready = new Promise<KetcherInstance>((resolve) => {
     root.render(
       <Editor
         staticResourcesUrl=""
@@ -98,17 +101,14 @@ export const mountKetcher: MountSketcher = async (host, initial) => {
         // paste it could not parse. They are not reasons to tear the editor down, and they are
         // not ours to render, so they go to the console and the drawing carries on.
         errorHandler={(message) => console.warn('[ketcher]', message)}
-        onInit={(ketcher) => {
-          clearTimeout(timer);
-          resolve(ketcher as unknown as KetcherInstance);
-        }}
+        onInit={(ketcher) => resolve(ketcher as unknown as KetcherInstance)}
       />,
     );
   });
 
   let instance: KetcherInstance;
   try {
-    instance = await ready;
+    instance = await withLoadTimeout(ready, 'The structure editor did not finish loading.');
   } catch (err) {
     root.unmount();
     throw err;
@@ -141,6 +141,26 @@ export const mountKetcher: MountSketcher = async (host, initial) => {
       // Deferred: React refuses to unmount a root synchronously from inside a render or an effect
       // of the tree being unmounted, and the close button that calls this is usually in one.
       setTimeout(() => root.unmount(), 0);
+      // **This unmounts the editor's React tree and nothing else.** The Indigo heap stays, and it
+      // stays on purpose. Read against the installed `ketcher-standalone@3.17.2`
+      // (`dist/binaryWasm/main.js`): the worker is `var indigoWorker = new Worker(…)` at *module*
+      // scope, so it spawns when this chunk is imported rather than when an editor mounts; every
+      // `IndigoService` takes that same one (`this.worker = indigoWorker`); and `IndigoService`
+      // does have a `destroy()` that calls `this.worker.terminate()`, which nothing in
+      // `ketcher-react@3.17.2` ever calls.
+      //
+      // So it is terminable, and this is a decision rather than a limitation. Wrapping the
+      // provider to capture the service Ketcher builds and calling its `destroy()` here would
+      // free ~11.79 MB — **once**. Module scope runs a single time and `loadSketcher` memoises the
+      // chunk, so nothing can spawn a second worker: the first close would leave every later Draw
+      // click mounting an editor whose backend is dead, which surfaces as `onInit` never firing
+      // and the 60 s load timeout, with the button still there offering itself. Trading a working
+      // feature for one page's memory is the wrong way round; holding the heap warm for the next
+      // click is the same bet the memoised chunk already makes.
+      //
+      // `tests/ketcherWorker.test.ts` pins all of it against the installed package, so an upstream
+      // that spawns per service — the one change that would make terminating safe — turns this
+      // comment red rather than letting it outlive its reason.
     },
   };
 

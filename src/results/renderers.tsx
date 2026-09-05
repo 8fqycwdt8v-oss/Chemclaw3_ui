@@ -28,6 +28,7 @@
  * something the full view does not.
  */
 
+import { useState } from 'react';
 import { Download } from 'lucide-react';
 import { formatScientificNumber, toolLabel } from '../lib/format.ts';
 import { Molecule } from '../components/Molecule.tsx';
@@ -36,6 +37,7 @@ import { UseStructure } from '@/components/chem/UseStructure';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { BestSoFarChart, ParetoScatter, sig } from '@/components/chem/Charts';
+import { cn } from '@/lib/utils';
 import {
   firstRecordList,
   isObject,
@@ -213,14 +215,129 @@ function Cell({
   );
 }
 
-/** "3 of 11 shown" — said whenever a compact view is not the whole table, so a card can never be
- *  mistaken for the result. */
-function Trimmed({ shown, total }: { shown: number; total: number }): React.JSX.Element | null {
+/**
+ * How many rows the **full** view draws before it stops and offers the rest.
+ *
+ * `take` below is the identity when not compact, which was the whole of the full view's row
+ * policy: every record the service sent became a `<tr>`, and every numeric cell in it a formatted
+ * string. Measured under vitest + happy-dom (which inflates DOM work, so read the ratios rather
+ * than the absolutes) against a ten-column result: 50 rows ~52 ms, 500 rows ~277 ms, 2,000 rows
+ * ~1,133 ms for 20,000 cells — linear in rows, which is what makes a cap a bound rather than a
+ * hope. At 100 the same measurement is 45-93 ms across runs — the twentieth the linearity predicts,
+ * plus the noise happy-dom adds to a number that small.
+ *
+ * **What it costs is a click on the results that exceed it**, and the click draws the next hundred
+ * — or all of them, at the price above, which is the reader's to spend once they have been told
+ * what they are asking for.
+ *
+ * **What a cap must never do here is subtract.** The CSV is built from the whole record set and
+ * stays that way (its docstring is explicit that a run sheet retyped by hand is where a
+ * transcription error enters a campaign), and so does the header union. Both were named in the
+ * review as part of the cost and neither is: measured over 2,000 records, `flatMap(Object.keys)`
+ * plus the `Set` is 1.0 ms and `toCsv` 2.6 ms, together ~0.3% of that render. The union is over
+ * every record on purpose — a column that appears only in row 1,500 is still a column.
+ */
+const FULL_ROW_LIMIT = 100;
+
+/**
+ * The same, for a grid of drawn structures, and the number is far smaller because a structure is
+ * not a row.
+ *
+ * Each `<Molecule>` awaits an already-resolved loader, so N draws are N microtasks in one task with
+ * no paint between them: the grid does not appear progressively, it appears at the end. Measured in
+ * bare node against the real RDKit WASM (`@rdkit/rdkit` 2025.3.4-1.0.0) over drug-like SMILES:
+ * **5.2 ms and 10.3 kB of SVG per structure** — so the uncapped 50-hit grid was 258 ms blocked and
+ * 516 kB in the DOM, and a 200-hit similarity result 1.03 s and 2.0 MB.
+ *
+ * 24 is the largest count that stays near a 100 ms interaction budget while filling the grid
+ * evenly: `minmax(9.5rem,1fr)` gives two to six columns depending on where the result is drawn, and
+ * 24 divides by all of them, so no row is ragged. **It costs 124 ms and 0.25 MB** — a quarter over
+ * that budget, which is the price of not making a reader page through a 3-column grid four hits at
+ * a time.
+ */
+const FULL_STRUCTURE_LIMIT = 24;
+
+/**
+ * A cap on a long list, and the state that lifts it.
+ *
+ * Compact is unchanged: a fixed slice, with `Trimmed` pointing at the full result. The full view is
+ * what gained a cap — see the two constants above for the measurements the numbers come from — and
+ * it is a *cap*, never a truncation, which is the distinction the whole of this file is arranged
+ * around. Something on screen always says how many were drawn out of how many, and the control that
+ * draws the rest is beside that sentence.
+ */
+interface Cap {
+  /** How many items to draw. */
+  limit: number;
+  /** One page — what "show more" adds. */
+  page: number;
+  /** Lift the cap by a page, or all the way. Absent in the compact card, which does not offer it. */
+  more: ((all: boolean) => void) | null;
+}
+
+function useCap(total: number, compact: boolean, compactLimit: number, fullLimit: number): Cap {
+  const [limit, setLimit] = useState(fullLimit);
+  if (compact) return { limit: compactLimit, page: compactLimit, more: null };
+  return {
+    limit,
+    page: fullLimit,
+    more: (all: boolean) => setLimit(all ? total : limit + fullLimit),
+  };
+}
+
+/**
+ * "3 of 11 shown" — said whenever a view is not the whole list, so neither a card nor a capped full
+ * view can be mistaken for the result.
+ *
+ * Two sentences, because the two views offer different things: a compact card cannot show more
+ * without becoming the panel, so it names the panel; the full view can, so it offers the control.
+ * `csv` is set where the download beside the list covers the whole set, which is the answer to "so
+ * where are the other 1,900" that does not involve clicking anything.
+ */
+function Trimmed({
+  shown,
+  total,
+  cap,
+  noun = 'row',
+  csv = false,
+  className,
+}: {
+  shown: number;
+  total: number;
+  cap?: Cap;
+  /** Singular; pluralised here. What is being counted, so the sentence is about hits or structures
+   *  rather than about "items". */
+  noun?: string;
+  csv?: boolean;
+  /** For a caller whose own container carries no gap — the sentence has to sit off the list. */
+  className?: string;
+}): React.JSX.Element | null {
   if (shown >= total) return null;
+  if (!cap?.more) {
+    return (
+      <p className={cn('text-2xs text-ink-subtle', className)}>
+        {shown} of {total} shown — open the full result for the rest.
+      </p>
+    );
+  }
+  const remaining = total - shown;
   return (
-    <p className="text-2xs text-ink-subtle">
-      {shown} of {total} shown — open the full result for the rest.
-    </p>
+    <div className={cn('flex flex-wrap items-center gap-x-2 gap-y-1', className)}>
+      {/* Always plural: this branch is unreachable unless at least two exist. */}
+      <p className="text-2xs text-ink-subtle">
+        {shown} of {total} {noun}s drawn — the rest are held back to keep this view responsive, not
+        dropped
+        {csv && ', and the CSV above is the whole set'}.
+      </p>
+      <Button variant="outline" size="xs" onClick={() => cap.more?.(false)}>
+        Show {Math.min(cap.page, remaining)} more
+      </Button>
+      {remaining > cap.page && (
+        <Button variant="link" size="xs" onClick={() => cap.more?.(true)}>
+          Show all {total}
+        </Button>
+      )}
+    </div>
   );
 }
 
@@ -241,6 +358,12 @@ function HazardScreen({ data, compact, onUsed }: ResultViewProps): React.JSX.Ele
   const flags = rows(data.flags);
   const screened = strings(data.screened);
   const shownFlags = take(flags, compact, 3);
+  // The screened list draws one structure per entry, so it is the structure grid again under
+  // another name and it takes the same cap. The flag table above is not capped: its rows come from
+  // a rule table rather than from a corpus, they are the finding itself, and holding one back to
+  // save a millisecond would be this file dropping a hazard row.
+  const screenedCap = useCap(screened.length, compact, 3, FULL_STRUCTURE_LIMIT);
+  const shownScreened = screened.slice(0, screenedCap.limit);
 
   return (
     <>
@@ -258,13 +381,20 @@ function HazardScreen({ data, compact, onUsed }: ResultViewProps): React.JSX.Ele
             Screened
           </h3>
           <ul className="flex flex-wrap gap-3">
-            {take(screened, compact, 3).map((smiles) => (
+            {shownScreened.map((smiles) => (
               <li key={smiles} className="flex flex-col items-end gap-1">
                 <Molecule smiles={smiles} maxWidth={compact ? 132 : 180} />
                 <UseStructure smiles={smiles} onUsed={onUsed} />
               </li>
             ))}
           </ul>
+          <Trimmed
+            shown={shownScreened.length}
+            total={screened.length}
+            cap={screenedCap}
+            noun="structure"
+            className="mt-1.5"
+          />
         </div>
       )}
 
@@ -488,7 +618,13 @@ function RunSheet({ data, tool, compact }: ResultViewProps): React.JSX.Element {
 function StructureHits({ data, tool, compact, onUsed }: ResultViewProps): React.JSX.Element {
   const hits = rows(data.hits);
   const subject = str(data.subject) || 'record';
-  const shown = take(hits, compact, 6);
+  // Capped in the full view too, which it was not: every hit drew a `<Molecule>`, each awaiting an
+  // already-resolved loader, so the draws run as microtasks inside one task and the browser paints
+  // nothing until the last one is done. See `FULL_STRUCTURE_LIMIT` for the 5.2 ms and 10.3 kB per
+  // structure this is derived from — a 200-hit similarity result was a second of frozen tab and
+  // 2 MB of SVG, arriving all at once with no sign that anything was happening.
+  const cap = useCap(hits.length, compact, 6, FULL_STRUCTURE_LIMIT);
+  const shown = hits.slice(0, cap.limit);
   const structureOf = (hit: Json): string => str(hit.smiles) || str(hit.label);
   const citationOf = (hit: Json): string => str(hit.compound_note_id) || str(hit.id);
 
@@ -569,7 +705,7 @@ function StructureHits({ data, tool, compact, onUsed }: ResultViewProps): React.
               );
             })}
           </ul>
-          <Trimmed shown={shown.length} total={hits.length} />
+          <Trimmed shown={shown.length} total={hits.length} cap={cap} noun="hit" csv={!compact} />
         </>
       )}
     </>
@@ -924,8 +1060,13 @@ function ValueStrip({ data, compact }: ResultViewProps): React.JSX.Element {
 function AutoTable({ data, tool, compact }: ResultViewProps): React.JSX.Element {
   const key = firstRecordList(data);
   const records = key ? rows(data[key]) : [];
+  // Over every record, not over the ones drawn: a column that first appears in row 1,500 is still a
+  // column, and it costs 1.0 ms at 2,000 records. The CSV below is the whole set for the same
+  // reason — it is the escape hatch, and an escape hatch that had been capped too would be a
+  // second, quieter truncation.
   const headers = [...new Set(records.flatMap((r) => Object.keys(r)))];
-  const shown = take(records, compact, 3);
+  const cap = useCap(records.length, compact, 3, FULL_ROW_LIMIT);
+  const shown = records.slice(0, cap.limit);
   return (
     <>
       {!compact && (
@@ -959,7 +1100,7 @@ function AutoTable({ data, tool, compact }: ResultViewProps): React.JSX.Element 
           </tr>
         ))}
       />
-      <Trimmed shown={shown.length} total={records.length} />
+      <Trimmed shown={shown.length} total={records.length} cap={cap} noun="row" csv={!compact} />
     </>
   );
 }

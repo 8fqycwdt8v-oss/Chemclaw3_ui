@@ -28,8 +28,8 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { FileDiff, FlaskConical, History, MessageSquarePlus, Pencil } from 'lucide-react';
-import { useNavigate, useParams } from 'react-router';
+import { FileDiff, FlaskConical, History, MessageSquarePlus, Pencil, Printer } from 'lucide-react';
+import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { api, type ProtocolView } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
@@ -381,7 +381,32 @@ export function ProtocolDocument(): React.JSX.Element {
     error: string | null;
   } | null>(null);
   /** The revision being read. `undefined` is the head, which is what a fresh open wants. */
-  const [at, setAt] = useState<number | undefined>(undefined);
+  /**
+   * Which revision is on screen — in the URL, not in component state.
+   *
+   * The route's own comment argues for the design id being in the URL "so a shared link and a
+   * reload land on the same one", and every word of it applies to the revision: a QA reviewer asked
+   * to look at what changed in revision 3 could not be sent there, because `?revision=` existed on
+   * `api.getProtocol` and nowhere in the address bar. `replace` rather than a push, so stepping
+   * through a history does not fill the Back button with one entry per revision.
+   */
+  const [params, setParams] = useSearchParams();
+  const requested = Number(params.get('revision') ?? '');
+  const at = Number.isInteger(requested) && requested > 0 ? requested : undefined;
+  const setAt = useCallback(
+    (revision: number | undefined): void => {
+      setParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          if (revision === undefined) next.delete('revision');
+          else next.set('revision', String(revision));
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setParams],
+  );
   const [nonce, setNonce] = useState(0);
   const [editing, setEditing] = useState(false);
   const [diff, setDiff] = useState<DesignDiff | null>(null);
@@ -550,7 +575,9 @@ export function ProtocolDocument(): React.JSX.Element {
   const headers = records.length > 0 ? Object.keys(records[0]!) : [];
 
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto p-4">
+    // `data-print="document"` is what the print stylesheet keys on: it takes everything that is not
+    // inside this element off the page. See `@media print` in `src/index.css`.
+    <div data-print="document" className="min-h-0 flex-1 overflow-y-auto p-4">
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-7">
         <header className="flex flex-col gap-3">
           <div>
@@ -631,7 +658,16 @@ export function ProtocolDocument(): React.JSX.Element {
             </div>
           )}
 
-          <div className="flex flex-wrap gap-2">
+          <div data-print="hide" className="flex flex-wrap gap-2">
+            {/* The one artefact here that leaves the screen. This document is described in its own
+                header comment as the thing "a chemist has to be able to check line by line before
+                anything is charged into a vessel" — which happens at a bench, on paper, next to
+                the vessel. There was no print stylesheet anywhere in the app, so printing it took
+                the sidebar, the composer and the job feed along with it. */}
+            <Button size="sm" variant="outline" onClick={() => window.print()}>
+              <Printer aria-hidden className="size-3.5" />
+              Print
+            </Button>
             <Button size="sm" variant="outline" disabled={stale} onClick={() => setEditing(true)}>
               <Pencil aria-hidden className="size-3.5" />
               Edit this protocol

@@ -31,7 +31,8 @@ import { log } from './log.ts';
 import { handleClientEvents } from './clientEvents.ts';
 import { readiness } from './ready.ts';
 import { renderMetrics, requestFinished, requestStarted } from './metrics.ts';
-import type { ProxyTrace } from './proxy.ts';
+import { CORRELATION_HEADER, mintCorrelationId } from './correlation.ts';
+import type { RequestTrace } from './proxy.ts';
 
 /**
  * The headers that make this origin safe to be, applied to **every** response.
@@ -162,12 +163,7 @@ const CLIENT_CLOSED_REQUEST = 499;
  * `writableFinished`), so an abort was being handled correctly everywhere except in what this
  * process says about it.
  */
-function observe(
-  req: http.IncomingMessage,
-  res: http.ServerResponse,
-  label: { route: string },
-  trace: ProxyTrace,
-): void {
+function observe(req: http.IncomingMessage, res: http.ServerResponse, trace: RequestTrace): void {
   const startedAt = Date.now();
   const bytes = countBytes(res);
   requestStarted();
@@ -177,11 +173,11 @@ function observe(
     // `res.finished` was deprecated for saying yes as soon as `end()` was *called*.
     const aborted = !res.writableFinished;
     const status = aborted ? CLIENT_CLOSED_REQUEST : res.statusCode;
-    requestFinished(label.route, req.method ?? 'GET', status, durationMs / 1000);
+    requestFinished(trace.route, req.method ?? 'GET', status, durationMs / 1000);
     log.info('request', {
       method: req.method ?? 'GET',
       // The PATTERN, never the id-bearing path: see `ResolvedRoute.template`.
-      route: label.route,
+      route: trace.route,
       status,
       duration_ms: durationMs,
       bytes: bytes(),
@@ -189,11 +185,46 @@ function observe(
       // and this is what tells a reader the stream was answering when the client left.
       ...(aborted ? { aborted: true, sent_status: res.statusCode } : {}),
       ...(trace.upstreamMs === null ? {} : { upstream_ms: trace.upstreamMs }),
-      // The join key. Present on any request the service answered, which is what makes a line
-      // here and a line there the same incident rather than two.
+      // The join key, and it is on EVERY line now. It used to be read off the upstream response,
+      // so a 502, a 499, a 413 and every `/api:blocked` logged `""` — the entire population during
+      // an outage, which is when somebody is trying to join a browser's report to the request that
+      // caused it. See `server/correlation.ts`.
       correlation_id: trace.correlationId,
     });
   });
+}
+
+/**
+ * What to do when the handler for a request rejects.
+ *
+ * Two dispatch arms here are asynchronous and were `void`ed — `readiness()` and
+ * `handleClientEvents()`. `void` on a promise says "I am not waiting for this", and what it
+ * actually bought was that a rejection from either became an `unhandledRejection`, which Node 22
+ * treats as fatal by default: one request that threw where nobody was looking would take the
+ * process down, killing every SSE stream on it. Neither is *expected* to reject — `readiness()`
+ * resolves a verdict rather than throwing, and `handleClientEvents` catches its own parse — and
+ * that is the argument for catching rather than against it, because a rejection here means the
+ * assumption has already been wrong once.
+ *
+ * The answer is a 500 only if nothing has been written yet: a rejection *after* `writeHead` (the
+ * likely one, `ERR_HTTP_HEADERS_SENT` on a response that raced a client abort) has no room for a
+ * status, and the access line `observe` writes on `close` records what really happened either way.
+ */
+function failRequest(
+  res: http.ServerResponse,
+  trace: RequestTrace,
+  stage: string,
+  error: unknown,
+): void {
+  log.error('request handler failed', {
+    route: trace.route,
+    stage,
+    error: error instanceof Error ? error.message : String(error),
+    correlation_id: trace.correlationId,
+  });
+  if (res.headersSent || res.writableEnded) return;
+  res.writeHead(500, { 'content-type': 'application/json' });
+  res.end('{"detail":"internal error"}');
 }
 
 export function createRequestListener(): http.RequestListener {
@@ -206,31 +237,45 @@ export function createRequestListener(): http.RequestListener {
     const path = rawUrl.split('?', 1)[0] ?? '/';
     const method = req.method ?? 'GET';
 
-    const label = { route: 'static' };
-    const trace: ProxyTrace = { upstreamMs: null, correlationId: '' };
-    observe(req, res, label, trace);
+    // One trace per request, narrowed as dispatch proceeds and read by `observe` when the response
+    // closes. The correlation id is minted HERE — before any route is chosen, so the line for a
+    // blocked path or a refused body carries one too — and put on the response immediately, so the
+    // browser can quote it back on `/api/client-events` whatever happens next. A proxied response
+    // may overwrite it with the service's own; `writeHead` beats `setHeader`, which is what makes
+    // that free.
+    const trace: RequestTrace = {
+      route: 'static',
+      upstreamMs: null,
+      correlationId: mintCorrelationId(),
+    };
+    res.setHeader(CORRELATION_HEADER, trace.correlationId);
+    observe(req, res, trace);
 
     if (path === '/healthz') {
       // Liveness, and deliberately still a literal: it answers "is this process serving?", which
-      // is the only question a restart decision may be made on. Readiness is `/readyz` below.
-      label.route = '/healthz';
+      // is the only question a restart decision may be made on. Readiness is `/readyz` below, and
+      // it is the one that fails while this pod is draining — a draining pod is still serving what
+      // it already has, and restarting it would take those requests with it.
+      trace.route = '/healthz';
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end('{"status":"ok"}');
       return;
     }
 
     if (path === '/readyz') {
-      label.route = '/readyz';
-      void readiness().then((state) => {
-        res.writeHead(state.ready ? 200 : 503, { 'content-type': 'application/json' });
-        res.end(
-          JSON.stringify({
-            status: state.ready ? 'ready' : 'degraded',
-            upstream_status: state.upstreamStatus,
-            ...(state.detail ? { detail: state.detail } : {}),
-          }),
-        );
-      });
+      trace.route = '/readyz';
+      void readiness()
+        .then((state) => {
+          res.writeHead(state.ready ? 200 : 503, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              status: state.ready ? 'ready' : 'degraded',
+              upstream_status: state.upstreamStatus,
+              ...(state.detail ? { detail: state.detail } : {}),
+            }),
+          );
+        })
+        .catch((error: unknown) => failRequest(res, trace, 'readiness', error));
       return;
     }
 
@@ -238,7 +283,7 @@ export function createRequestListener(): http.RequestListener {
       // This pod's own numbers, not the service's — `/api/metrics` is deliberately NOT
       // whitelisted and must stay that way. Unauthenticated, like every other `/metrics` in this
       // family, which is why nothing here carries an actor, a session or a path as a label.
-      label.route = '/metrics';
+      trace.route = '/metrics';
       const body = renderMetrics();
       res.writeHead(200, {
         'content-type': 'text/plain; version=0.0.4; charset=utf-8',
@@ -249,7 +294,7 @@ export function createRequestListener(): http.RequestListener {
     }
 
     if (path === '/config.js') {
-      label.route = '/config.js';
+      trace.route = '/config.js';
       serveConfigJs(res);
       return;
     }
@@ -257,8 +302,10 @@ export function createRequestListener(): http.RequestListener {
     if (path === '/api/client-events') {
       // Answered HERE, never forwarded: the service has no such route, so this pod's log is the
       // sink. It is not in `server/routes.ts` because that list is what gets proxied.
-      label.route = '/api/client-events';
-      void handleClientEvents(req, res);
+      trace.route = '/api/client-events';
+      void handleClientEvents(req, res).catch((error: unknown) =>
+        failRequest(res, trace, 'client-events', error),
+      );
       return;
     }
 
@@ -268,13 +315,13 @@ export function createRequestListener(): http.RequestListener {
         // Not whitelisted: answered here, upstream never contacted. Labelled as one bucket rather
         // than by path — an un-whitelisted path is attacker-chosen, so using it as a metric label
         // would let anyone mint time series in this process.
-        label.route = '/api:blocked';
+        trace.route = '/api:blocked';
         log.debug('blocked un-whitelisted request', { method, path });
         res.writeHead(404, { 'content-type': 'application/json' });
         res.end('{"detail":"not found"}');
         return;
       }
-      label.route = `/api${route.template}`;
+      trace.route = `/api${route.template}`;
       // Preserve the query string — the backend takes none today, but dropping it silently
       // would be a confusing bug the day it does.
       const query = rawUrl.slice(path.length);
@@ -283,8 +330,8 @@ export function createRequestListener(): http.RequestListener {
         res,
         route.path + query,
         route.sse,
-        route.upload ? cfg.maxUploadBytes : cfg.maxBodyBytes,
         trace,
+        route.upload ? cfg.maxUploadBytes : cfg.maxBodyBytes,
       );
       return;
     }
@@ -296,6 +343,15 @@ export function createRequestListener(): http.RequestListener {
   };
 }
 
+/**
+ * The header-phase bound actually applied: the configured one, or the whole-request bound if that
+ * is tighter.
+ *
+ * Node refuses to construct a server whose `headersTimeout` exceeds its `requestTimeout`, and both
+ * are operator-settable, so the clamp is here rather than in the operator's head.
+ */
+const headersTimeout = Math.min(cfg.headersTimeoutMs, cfg.requestTimeoutMs);
+
 /** The server, configured but not listening. */
 export function createBffServer(): http.Server {
   const server = http.createServer(
@@ -304,9 +360,16 @@ export function createBffServer(): http.Server {
       // `connectionsCheckingInterval` — 30 s by default. A bound that is only enforced up to 30 s
       // late is not the bound it claims to be, so the sweep is derived from the timeout instead of
       // being left at a default that has nothing to do with it.
+      //
+      // From the TIGHTER of the two, which it was not: derived from `requestTimeout` alone it
+      // came out at 30 s, and the 30 s header bound below would then have been enforced at up to
+      // 60 s. Measured on this runtime with a socket sending a request line and nothing else:
+      // `headersTimeout` 1,000 ms with a 5,000 ms sweep held it 5,008 ms; the same bound with a
+      // 250 ms sweep held it 1,002 ms. The sweep is the bound, whenever it is the larger number.
+      // `headersTimeout` is already the smaller of the two, by the clamp above.
       connectionsCheckingInterval: Math.max(
         1_000,
-        Math.min(30_000, Math.floor(cfg.requestTimeoutMs / 4)),
+        Math.min(30_000, Math.floor(headersTimeout / 4)),
       ),
       // Time to RECEIVE a request, not to respond, so this bounds nothing about a 600 s turn or a
       // job stream that is silent for minutes — both of those are responses. It was 0 (disabled)
@@ -315,14 +378,19 @@ export function createBffServer(): http.Server {
       // /api surface offline until they were released. See `cfg.requestTimeoutMs`.
       requestTimeout: cfg.requestTimeoutMs,
       // Must exceed any fronting load balancer's idle timeout, or connection reuse races produce
-      // sporadic 502s. `headersTimeout` sits just above it for the same reason, and Node refuses
-      // to start a server whose `headersTimeout` exceeds its `requestTimeout` — which is why the
-      // default of the latter is stated in terms of this pair rather than picked round.
+      // sporadic 502s. This one really is about the LB; `headersTimeout` no longer is, and used to
+      // be pinned above this value for a reason that stopped being true before Node 14.11 — see
+      // `cfg.headersTimeoutMs` for what that costs and what was measured.
       keepAliveTimeout: 120_000,
-      headersTimeout: Math.min(125_000, cfg.requestTimeoutMs),
+      headersTimeout,
     },
     createRequestListener(),
   );
+
+  // A ceiling this process chooses, rather than the one its file-descriptor limit imposes. Not set
+  // in `createServer` options because it is a property of the server object rather than one of
+  // them. See `cfg.maxConnections` — including what it does not buy.
+  server.maxConnections = cfg.maxConnections;
 
   return server;
 }

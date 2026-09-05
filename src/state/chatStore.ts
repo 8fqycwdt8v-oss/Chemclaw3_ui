@@ -46,23 +46,6 @@ export interface JobFeedItem {
   dismissed: boolean;
 }
 
-/**
- * One open question, reduced to the four fields anything renders.
- *
- * The two `awaiting_answer` pushes carry disjoint fields — the open sends `kind`, `asked_of` and
- * `due_at`; the expiry sends `subject` — so every one of these except the id is routinely empty on
- * the frame it arrives in, and a surface must render the absence rather than infer a value. What
- * fills them in properly is `syncAwaiting`, off `GET /pending`, which carries all of them at once.
- */
-export interface AwaitingBrief {
-  request_id: string;
-  subject: string;
-  kind: string;
-  /** ISO-8601, or empty when this push did not carry one — which is "no deadline shown", never
-   *  "no deadline". */
-  due_at: string;
-}
-
 /** Exactly the slice `partialize` writes to localStorage, and what `migrate` must return. */
 interface PersistedState {
   conversations: Record<string, Conversation>;
@@ -522,11 +505,20 @@ export interface ChatState {
    * (a question nobody is told about) would come back as its mirror image: a badge for a question
    * somebody already answered.
    *
-   * A brief rather than the event, because the fields the two pushes carry are disjoint and only
-   * these four are ever rendered. `state` is not among them: an entry is here *because* it is
-   * waiting, and an expiry removes it.
+   * **Request ids, and nothing else.** It carried a four-field brief — `subject`, `kind`, `due_at`
+   * beside the id — written by both producers and read by *nobody*: the only consumers of this
+   * slice are the sidebar badge, which reads `.length`, and the inbox, which reads
+   * `awaitingRevision` and renders from its own `GET /pending` response. That is the shape
+   * `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` names — a field whose
+   * docstring describes what a reader would do with it, and no reader. Deleting it also deletes a
+   * defect it had grown: `syncAwaiting` compared only ids, so a `/pending` read that corrected a
+   * `due_at` the stream never carried was discarded as "unchanged", which is the one job that
+   * function has. A set of ids compared by id is correct by construction.
+   *
+   * `state` was never in it either: an entry is here *because* it is waiting, and an expiry
+   * removes it.
    */
-  awaiting: AwaitingBrief[];
+  awaiting: string[];
   /**
    * Bumped by `noteAwaiting` and **never by `syncAwaiting`** — the count of times the *stream* said
    * something changed.
@@ -595,8 +587,8 @@ export interface ChatState {
    * useful event rather than a second copy of the open: the workflow pushes again when the deadline
    * passes, and a badge that only ever counted up would show a question that can no longer be
    * answered. Idempotent on `request_id` because reminders re-push the same request and the stream
-   * is at-least-once on reconnect; the existing entry is kept rather than replaced, since a
-   * reminder's payload is identical and `syncAwaiting` is what corrects a stale one.
+   * is at-least-once on reconnect — and since the list holds ids, a re-push has nothing to correct
+   * and the second one is simply dropped.
    */
   noteAwaiting: (event: AwaitingAnswerEvent) => void;
   /**
@@ -605,8 +597,10 @@ export interface ChatState {
    * The stream says *that* something changed; this says *what is true*. Anything that reads the
    * inbox calls it, so answering a question in another tab, or a request opened while this tab was
    * closed, both reconcile on the next read rather than waiting for a frame that will never come.
+   * `App.tsx` calls it once per page as well as the inbox, because the claim behind the stream is
+   * destructive and a reload therefore replays nothing.
    */
-  syncAwaiting: (briefs: AwaitingBrief[]) => void;
+  syncAwaiting: (requestIds: string[]) => void;
   /**
    * Record digests claimed from the service, dropping any this browser already holds.
    *
@@ -628,6 +622,17 @@ export interface ChatState {
   dismissJobItem: (jobId: string) => void;
   restoreJobItem: (jobId: string) => void;
   markJobsSeen: () => void;
+  /**
+   * Stop a reload-interrupted turn from being polled for again.
+   *
+   * `finishTurn` clears `interruptedByReload` for every turn that *settles*; this is the one exit
+   * that settles nothing — recovery spent its whole budget and the answer is not on the server.
+   * Without it the flag persists and every future boot re-runs the full 630 s poll.
+   *
+   * Keyed on the flag still being set, so a newer turn that has taken this message's place is
+   * left alone — the same ownership rule the rest of the recovery path follows.
+   */
+  giveUpOnInterruptedTurn: (conversationId: string, messageId: string) => void;
   setJobStreamsThrottled: (throttled: boolean) => void;
   setJobStreamFailing: (sessionId: string, failing: boolean) => void;
   setNotifyOnJobComplete: (enabled: boolean) => void;
@@ -856,6 +861,36 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
   }
   if (!stored?.conversations || !Array.isArray(stored.order)) return next;
 
+  /**
+   * The two slices whose rows a re-fetch cannot replace, folded back unconditionally.
+   *
+   * **This merge covered conversations, order and drafts, and those are the three that could be
+   * refetched.** `digests` and `jobFeed` could not, and were the ones being destroyed: `GET
+   * /digests` is a *destructive claim* — this file's own `PersistedState.digests` says "the read
+   * is the consume … never re-delivers it" — and `useDigests` claims once per page, so every open
+   * tab claims. Tab B claims a standing-query finding; tab A flushes 750 ms later; the finding is
+   * gone from disk, gone from the service, and gone from both tabs on the next reload. Job
+   * endings are the same shape (`dismissJobItem`: "the backend's is consumed").
+   *
+   * Folded ABOVE the `extra.length === 0` return, because the conversation half being unchanged
+   * is exactly the common case in which the other tab has nonetheless claimed something.
+   */
+  const union = <T>(ours: T[], theirs: T[] | undefined, keyOf: (row: T) => string): T[] => {
+    if (!Array.isArray(theirs) || theirs.length === 0) return ours;
+    const known = new Set(ours.map(keyOf));
+    const added = theirs.filter((row) => !known.has(keyOf(row)));
+    return added.length === 0 ? ours : [...ours, ...added];
+  };
+  const jobFeed = union(next.jobFeed, stored.jobFeed, (j) => j.event.job_id).slice(0, MAX_JOB_FEED);
+  // The same `(query, note ids)` identity `addDigests` dedups on, so a row claimed by both tabs
+  // folds to one rather than reading as two findings.
+  const digests = union(
+    next.digests ?? [],
+    stored.digests,
+    (d) => `${d.query}\u0000${d.noteIds.join(',')}`,
+  );
+  const carried: PersistedState = { ...next, jobFeed, digests };
+
   const extra = stored.order.filter((id) => {
     if (tombstoned.has(id)) return false;
     const theirs = stored.conversations[id];
@@ -863,12 +898,12 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
     const ours = next.conversations[id];
     return !ours || theirs.updatedAt > ours.updatedAt;
   });
-  if (extra.length === 0) return next;
+  if (extra.length === 0) return carried;
 
   const conversations = { ...next.conversations };
   for (const id of extra) conversations[id] = stored.conversations[id] as Conversation;
   return {
-    ...next,
+    ...carried,
     conversations,
     order: [...next.order, ...extra.filter((id) => !next.order.includes(id))],
     drafts: {
@@ -880,7 +915,10 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
 
 function writeChatStorageNow(name: string, value: StorageValue<PersistedState>): void {
   if (!storageWritable) return;
-  let state: PersistedState | null = withinLearnedCap(mergeWithStored(name, value.state));
+  const merged = mergeWithStored(name, value.state);
+  /** How many conversations this write *wanted* to keep, before the learned cap trimmed it. */
+  const wanted = merged.order.length;
+  let state: PersistedState | null = withinLearnedCap(merged);
   /**
    * Whether this write had to shed to land — and the only condition under which anything is
    * learned.
@@ -898,10 +936,30 @@ function writeChatStorageNow(name: string, value: StorageValue<PersistedState>):
   while (state) {
     try {
       localStorage.setItem(name, JSON.stringify({ ...value, state }));
-      // Only ever downward, and never to zero: a cap of nothing is the empty-state bug again by
-      // another route.
+      // Never to zero: a cap of nothing is the empty-state bug again by another route.
       if (shed) {
         learnedConversationCap = Math.max(1, Math.min(learnedConversationCap, state.order.length));
+      } else if (wanted > learnedConversationCap && learnedConversationCap < MAX_CONVERSATIONS) {
+        // **And it has to be able to come back up.** "Only ever downward" made one transient
+        // over-quota write cap the tab for the life of the page: measured at a 30 kB budget, 12
+        // fat conversations learned a cap of 6, and after all twelve were *deleted* and eight
+        // tiny ones created, two of the eight were silently never persisted — with
+        // `storageWritable` still true and nothing warning. The trigger (one oversized
+        // conversation) is precisely the thing a chemist deletes to fix it, so the old rule
+        // punished the remedy.
+        //
+        // It probes upward by ONE rather than jumping to `wanted`, and that is forced rather than
+        // cautious: `withinLearnedCap` truncates *before* the write, so a success only ever proves
+        // the cap itself fits — it says nothing about `cap + 1`, let alone `wanted`. The first
+        // attempt at this raised the cap to `state.order.length`, which after truncation always
+        // equals the cap, so it could never fire at all. One step per successful write converges
+        // in a few flushes and each over-reach costs exactly the one shed cycle the docstring
+        // above already budgets for.
+        //
+        // `wanted > cap` is the trigger, so a tab with fewer conversations than its cap never
+        // probes — and the empty-store trap cannot recur, because `wanted === 0` never exceeds a
+        // cap floored at 1.
+        learnedConversationCap += 1;
       }
       return;
     } catch {
@@ -1108,10 +1166,15 @@ export const useChatStore = create<ChatState>()(
         set((s) => {
           const { [id]: _removed, ...rest } = s.conversations;
           const { [id]: _draft, ...drafts } = s.drafts;
+          // Keyed by conversation id and read by nobody else once the conversation is gone — the
+          // same argument the entity index above is dropped on. Left behind, it grew without
+          // bound for the life of the slot.
+          const { [id]: _profile, ...sessionProfiles } = s.sessionProfiles;
           const order = s.order.filter((x) => x !== id);
           return {
             conversations: rest,
             drafts,
+            sessionProfiles,
             order,
             activeId: s.activeId === id ? (order[0] ?? null) : s.activeId,
             // Without this, deleting mid-turn leaves the composer locked with nothing to unlock
@@ -1141,6 +1204,16 @@ export const useChatStore = create<ChatState>()(
             order: [fresh.id],
             activeId: fresh.id,
             drafts: {},
+            // **Content, and it was being left behind.** `clearAll` is half of
+            // `forgetLocalHistory()` — sign-out on a shared analytical-development workstation —
+            // and zustand *merges* a partial, so a key this object does not name survives. These
+            // two carry the previous chemist's work: a digest holds their saved-query text and the
+            // note ids it found, and `sessionProfiles` names the agent each of their conversations
+            // ran on. The ordering argument below (`clearAll` writes through persist *before*
+            // `clearStorage()` removes the key) is what made the omission durable rather than
+            // momentary — the surviving values get re-written into the fresh slot.
+            digests: [],
+            sessionProfiles: {},
             jobStreamsThrottled: false,
             jobStreamsFailing: [],
             awaiting: [],
@@ -1447,12 +1520,22 @@ export const useChatStore = create<ChatState>()(
         // as long as it took, and the summary line has no other way to say so. `stalled` is
         // cleared because the flag describes a stream that is still open and silent, and leaving
         // it set would put "no activity" beside a finished answer for ever.
+        //
+        // **And `interruptedByReload` is cleared, because nothing else ever cleared it.**
+        // `partialize` stamps it on a turn cut off by a reload and `resumeInterruptedTurn` reads
+        // it — but the flag was never removed, so every persisted copy from then on carried it and
+        // every subsequent boot re-entered the recovery poll. Two costs, both measured: a
+        // recoverable turn was re-fetched and `endedAt` rewritten to *now* (a 3 s turn recorded as
+        // 63.5 s in the probe, and as hours after an overnight reload), and an *un*recoverable one
+        // ran the full 630 s / 210-request budget on every page load, for ever, behind a message
+        // already shown as aborted. A settled turn is not interrupted, whichever way it settled.
         set((s) =>
           updateAssistant(s, conversationId, messageId, (m) => ({
             ...m,
             status,
             endedAt: Date.now(),
             stalled: false,
+            interruptedByReload: false,
           })),
         );
       },
@@ -1464,9 +1547,22 @@ export const useChatStore = create<ChatState>()(
             status: 'error',
             endedAt: Date.now(),
             stalled: false,
+            // Same rule as `finishTurn`: a turn that ended is no longer interrupted.
+            interruptedByReload: false,
             error,
           })),
         );
+      },
+
+      giveUpOnInterruptedTurn(conversationId, messageId) {
+        set((s) => {
+          const message = s.conversations[conversationId]?.messages.find((m) => m.id === messageId);
+          if (!message || message.role !== 'assistant' || !message.interruptedByReload) return {};
+          return updateAssistant(s, conversationId, messageId, (m) => ({
+            ...m,
+            interruptedByReload: false,
+          }));
+        });
       },
 
       setComposerLock(composerLock) {
@@ -1510,38 +1606,32 @@ export const useChatStore = create<ChatState>()(
       noteAwaiting(event) {
         set((s) => {
           if (event.state !== 'waiting') {
-            const rest = s.awaiting.filter((a) => a.request_id !== event.request_id);
+            const rest = s.awaiting.filter((id) => id !== event.request_id);
             // Same identity when nothing was removed, so an expiry for a request this tab never
             // saw open does not re-render every consumer of the list — nor re-read the inbox.
             return rest.length === s.awaiting.length
               ? {}
               : { awaiting: rest, awaitingRevision: s.awaitingRevision + 1 };
           }
-          if (s.awaiting.some((a) => a.request_id === event.request_id)) return {};
+          if (s.awaiting.includes(event.request_id)) return {};
           return {
             awaitingRevision: s.awaitingRevision + 1,
-            awaiting: [
-              ...s.awaiting,
-              {
-                request_id: event.request_id,
-                subject: event.subject,
-                kind: event.kind,
-                due_at: event.due_at,
-              },
-            ],
+            awaiting: [...s.awaiting, event.request_id],
           };
         });
       },
 
-      syncAwaiting(briefs) {
+      syncAwaiting(requestIds) {
         set((s) => {
           // Compared before writing because this runs on every read of the inbox, and the common
           // outcome is "unchanged" — a fresh array each time would re-render the sidebar badge on
-          // a timer for the life of the page.
+          // a timer for the life of the page. Comparing every element is the whole comparison now
+          // that an element is the id; it used to compare the id of a four-field record and drop
+          // the other three silently.
           const same =
-            briefs.length === s.awaiting.length &&
-            briefs.every((b, i) => b.request_id === s.awaiting[i]?.request_id);
-          return same ? {} : { awaiting: briefs };
+            requestIds.length === s.awaiting.length &&
+            requestIds.every((id, i) => id === s.awaiting[i]);
+          return same ? {} : { awaiting: requestIds };
         });
       },
 

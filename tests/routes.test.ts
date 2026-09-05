@@ -159,10 +159,24 @@ describe('proxy route whitelist', () => {
 
     it('refuses a raw separator, an over-long id, and the wrong verb', () => {
       expect(resolveRoute('GET', '/api/notes/note-a/b')).toBeNull();
-      expect(resolveRoute('GET', `/api/notes/${'n'.repeat(129)}`)).toBeNull();
+      expect(resolveRoute('GET', `/api/notes/${'n'.repeat(513)}`)).toBeNull();
       // The graph is written through the PR gate, never by a client PUT.
       expect(resolveRoute('POST', '/api/notes/note-1')).toBeNull();
       expect(resolveRoute('DELETE', '/api/notes/note-1')).toBeNull();
+    });
+
+    it('resolves a note slug whose characters cost three bytes each', () => {
+      // **The cap is measured against the ENCODED segment.** The character class here is wide on
+      // purpose — the docstring argues a model-written slug must never 404 at the BFF — and the
+      // old 128 then refused any non-ASCII slug past about 42 characters, because
+      // `encodeURIComponent` spends three characters per byte. Seventeen CJK characters was
+      // enough, and `api.getNote` does not swallow a 404, so the citation chip hard-errored.
+      const cjk = `note-${'酸化的リン酸化阻害剤'.repeat(2)}`;
+      const encoded = encodeURIComponent(cjk);
+      expect(encoded.length).toBeGreaterThan(128);
+      expect(resolveRoute('GET', `/api/notes/${encoded}`)).toMatchObject({
+        path: `/notes/${encoded}`,
+      });
     });
   });
 
@@ -190,7 +204,7 @@ describe('proxy route whitelist', () => {
         path: '/jobs/calc-Suzuki(A)',
       });
       expect(resolveRoute('DELETE', '/api/jobs/a/b')).toBeNull();
-      expect(resolveRoute('DELETE', `/api/jobs/${'j'.repeat(129)}`)).toBeNull();
+      expect(resolveRoute('DELETE', `/api/jobs/${'j'.repeat(513)}`)).toBeNull();
     });
   });
 

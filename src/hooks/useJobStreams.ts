@@ -203,8 +203,22 @@ async function openStream(
       // splits the two 429s on. (The *failure* counter is a different fact and does now move; see
       // the branch itself.)
       if (res.status === 429) {
-        const wait = retryAfterSeconds(res.headers.get('retry-after'));
-        if (wait !== null) {
+        // **Presence picks the branch; parsing only supplies the number.** These are two decisions
+        // and this file made them one: `retryAfterSeconds` returns `null` for a header it cannot
+        // read — an HTTP-date from a gateway, a `0`, a stray character — so a limiter refusal
+        // whose header survived the hop in a shape this parser does not accept fell into the
+        // stream-cap branch below, and two of them set `jobStreamsThrottled`, which is
+        // irreversible: this tab watches one conversation instead of three for the life of the
+        // page, over a budget that refilled in seconds. `errorFromStatus` already splits the two
+        // 429s exactly this way, and its own comment says so; this is the file its docstring
+        // claims does "the same thing for the same reason".
+        const header = res.headers.get('retry-after');
+        if (header?.trim()) {
+          // `null` when the value is present but unreadable, which is a different thing from
+          // absent: the branch is already decided, and what is missing is only the number. The
+          // wait then comes from the backoff below rather than from an invented constant —
+          // `sleep(0)` on an unreadable header would be a hot retry loop.
+          const wait = retryAfterSeconds(header);
           // Honouring the number is right; honouring it *silently and for ever* was not. This was
           // the one retry path that touched neither `failed()` nor `attempt` nor the log, so a
           // limiter refusing steadily — plausibly *because* this tab keeps coming back at exactly
@@ -219,7 +233,7 @@ async function openStream(
           // cap", which a request-rate refusal is no evidence of, and it is irreversible.
           attempt += 1;
           failed('rate_limited', 429);
-          if (failures >= FAILURES_BEFORE_REPORTING) {
+          if (failures >= FAILURES_BEFORE_REPORTING || wait === null) {
             await backoff(attempt, controller.signal);
           } else {
             // Bounded by the same ceiling the backoff has. The limiter's own number is seconds, so
@@ -229,9 +243,27 @@ async function openStream(
           }
           continue;
         }
+        // **This was the last retry path that told nobody.** It called neither `failed()` nor
+        // the logger nor `attempt`, and once `jobStreamsThrottled` is already true
+        // `setJobStreamsThrottled(true)` is a no-op — so a tab persistently over the per-user cap
+        // spun at the 15-30 s backoff for the life of the page with nothing recorded anywhere.
+        // Measured over 12 simulated hours on one watched session: **1,932 requests, 0 log lines,
+        // `jobStreamsFailing` empty**. That is the module docstring's own named hazard
+        // ("notifications quietly stopped") surviving in the one branch the client-side budget
+        // cannot fix, because the budget reduces how many streams there are, not whether the
+        // survivor reports.
         consecutive429 += 1;
         if (consecutive429 >= 2) useChatStore.getState().setJobStreamsThrottled(true);
-        await backoff(6, controller.signal);
+        attempt += 1;
+        failed('stream_cap', 429);
+        // **The wait stays at the ceiling, and the counter is what moves.** This branch used to
+        // pass the literal `6` — `backoff`'s saturation point, so 15–30 s — and making it share
+        // `attempt` with every other retry path dropped the *first* cap refusal to 1–2 s. That is
+        // the wrong pace for this refusal specifically: a concurrent-stream cap is not a transient
+        // failure that clears while you wait, it is a statement that something else holds the
+        // slots, so coming back in a second is the hammering the constant existed to prevent.
+        // `attempt` still rises, because it is also the failure count this branch now reports on.
+        await backoff(Math.max(attempt, 6), controller.signal);
         continue;
       }
       consecutive429 = 0;
@@ -249,7 +281,33 @@ async function openStream(
       // cannot recover, stop watching. The conversation still works; only push-back is lost, and
       // the turn path will surface the sign-in prompt on the next message.
       if (res.status === 401) {
-        if (reauthed || !(await auth.handleUnauthorized())) {
+        // **`handleUnauthorized` is typed `Promise<boolean>` and one shipped provider throws.**
+        // `createDevAuth` rejects with an actionable `ApiError` ("Redeploy it with AUTH_MODE=msal…")
+        // for the UI-in-dev-mode / backend-with-Entra-required combination — which
+        // `server/ready.ts` does not detect either, because its probe only runs in `msal` mode. The
+        // await sat inside the outer `try`, so that rejection landed in the bare `catch` below and
+        // was classified `transport`: retry for ever, message discarded, and the `jobstream.
+        // unauthorized` terminus never reached. Measured over 12 simulated hours: **1,918 requests,
+        // 1,918 recovery attempts, and not one log line carrying the actionable text.**
+        //
+        // `!reauthed &&` keeps the original short-circuit: the one-shot is spent per rejection, and
+        // asking a provider that has already been asked is both pointless and, under MSAL, a
+        // second redirect.
+        let recovered = false;
+        if (!reauthed) {
+          try {
+            recovered = await auth.handleUnauthorized();
+          } catch {
+            // A provider that cannot even attempt recovery has answered the question: it cannot.
+            recovered = false;
+          }
+        }
+        // Every other terminus in this loop checks this first; this one did not, so the store
+        // write below could land *after* the effect cleanup had aborted the stream and cleared the
+        // flag for this session — leaving a "job notifications failing" indicator that nothing
+        // would ever clear again, on a session nothing is watching.
+        if (controller.signal.aborted) return;
+        if (reauthed || !recovered) {
           logger.warn('jobstream.unauthorized', { sessionId });
           // The indicator is raised here rather than through `failed()`, and immediately rather
           // than after four attempts. `FAILURES_BEFORE_REPORTING` exists so a rollout blip does
@@ -274,7 +332,11 @@ async function openStream(
 
       // `readEventStream` cancels its reader on the way out (loop exit, throw, or this iterator
       // being abandoned), so there is nothing left to clean up here.
+      //
+      // Whether this connection delivered anything at all — see the close handling below.
+      let sawFrame = false;
       for await (const frame of readEventStream(res.body)) {
+        sawFrame = true;
         // A frame arrived, so this connection is doing its job — only now is the escalation
         // reset. Resetting it at connect time meant a connect-then-immediately-close cycle
         // could repeat for ever without the delay ever growing. A frame this build cannot use
@@ -316,7 +378,13 @@ async function openStream(
       // A body that ends without ever delivering a frame is a failure however clean the close
       // was: it is the rollout loop this file already paid for once, and the chemist's view of it
       // is the same as a 502's — completions stop arriving.
-      failed('closed');
+      //
+      // **"Without ever delivering a frame" is what the comment said and not what the code did.**
+      // `failed('closed')` ran unconditionally, so every ordinary reconnect of a *healthy* stream
+      // shipped a WARN to the BFF log, and a stream that had delivered then hit three real
+      // failures raised the badge one attempt early. `sawFrame` is the condition the sentence
+      // already described.
+      if (!sawFrame) failed('closed');
       await backoff(attempt, controller.signal);
     } catch {
       if (controller.signal.aborted) return;

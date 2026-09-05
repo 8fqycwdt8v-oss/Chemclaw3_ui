@@ -247,7 +247,16 @@ export function ProtocolEditor({
       onOpenChange(true);
       return;
     }
-    if (dirty() && !confirmingDiscard) {
+    // **`confirmingDiscard` is not part of this test, and including it discarded the edits.**
+    // Once the warning is showing the flag is `true`, so a second Escape — the reflex of somebody
+    // whose first one appeared to do nothing, which is exactly what happens when the warning
+    // renders off-screen in a scrolling panel — fell straight through to `onOpenChange(false)`
+    // with neither answer given. The guard refused the first close and permitted the second, on
+    // the one irreversible loss in this editor.
+    //
+    // The flag's job is to decide whether the banner is on screen, and nothing else. Discarding
+    // deliberately goes through the banner's own button, which calls `onOpenChange(false)` direct.
+    if (dirty()) {
       setConfirmingDiscard(true);
       return;
     }
@@ -383,13 +392,15 @@ export function ProtocolEditor({
         // Radix closes on both of these before `onOpenChange` can decline, so the interception has
         // to happen here as well as there.
         onEscapeKeyDown={(e) => {
-          if (dirty() && !confirmingDiscard) {
+          // No `confirmingDiscard` in the condition — see `requestClose`. A repeated Escape must
+          // keep being refused, not pass on the second press.
+          if (dirty()) {
             e.preventDefault();
             setConfirmingDiscard(true);
           }
         }}
         onPointerDownOutside={(e) => {
-          if (dirty() && !confirmingDiscard) {
+          if (dirty()) {
             e.preventDefault();
             setConfirmingDiscard(true);
           }
@@ -405,6 +416,16 @@ export function ProtocolEditor({
             <div
               role="alertdialog"
               aria-label="Discard your edits?"
+              // **Focused, and scrolled to.** This sits at child index 1 of a `overflow-y-auto`
+              // panel, so a chemist editing the arms table at the bottom of a 56rem sheet pressed
+              // Escape and saw nothing change — which is what made them press it again. And
+              // `role="alertdialog"` is not a live region: it announces only when focus moves into
+              // it, so a screen-reader user was told nothing at all that their close was refused.
+              tabIndex={-1}
+              ref={(el) => {
+                el?.focus();
+                el?.scrollIntoView({ block: 'nearest' });
+              }}
               className="flex flex-col gap-2 rounded-lg border border-danger/40 bg-danger-soft px-3 py-2 text-xs text-danger-ink"
             >
               <p>

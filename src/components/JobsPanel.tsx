@@ -225,7 +225,13 @@ export function JobsPanel(): React.JSX.Element {
   // somebody rather than only clicked to. The parameter is read here rather than passed in, for
   // the reason `ProtocolDocument` gives about its own design id: the URL is the one thing that
   // says what is open, so a shared link and a reload land in the same place.
-  const { jobId: deepLinked } = useParams();
+  //
+  // **And it is the only thing that says so.** This used to seed a `useState` from the parameter,
+  // which made the URL an *entry point* rather than the state: React Router keeps this component
+  // mounted across `/jobs/a` → `/jobs/b`, so a second link — followed from another tab, from Back
+  // or Forward, or from anywhere in the app — changed the address bar and left the first run's
+  // sheet on screen. Clicking a row navigates instead, so the two directions cannot disagree.
+  const { jobId: openId = null } = useParams();
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [submitted, setSubmitted] = useState('');
@@ -233,7 +239,6 @@ export function JobsPanel(): React.JSX.Element {
   // the list on the way into the effect is a second render and a lint error, and this way a
   // stale list is never shown under a new search either.
   const [loaded, setLoaded] = useState<{ query: string; list: JobRecordSummary[] } | null>(null);
-  const [openId, setOpenId] = useState<string | null>(deepLinked ?? null);
   const jobs = loaded?.query === submitted ? loaded.list : null;
 
   useEffect(() => {
@@ -301,7 +306,9 @@ export function JobsPanel(): React.JSX.Element {
               <li key={job.job_id}>
                 <button
                   type="button"
-                  onClick={() => setOpenId(job.job_id)}
+                  // Navigating rather than setting state, so what is open is the URL and only
+                  // the URL — see the note on `openId` above.
+                  onClick={() => void navigate(`/jobs/${encodeURIComponent(job.job_id)}`)}
                   className="w-full rounded-lg border border-border-subtle bg-surface-raised p-3 text-left transition-colors hover:bg-surface-sunken focus-ring"
                 >
                   <div className="flex flex-wrap items-center gap-2">
@@ -334,10 +341,9 @@ export function JobsPanel(): React.JSX.Element {
             open
             onOpenChange={(next) => {
               if (next) return;
-              setOpenId(null);
-              // Closing a sheet the URL opened has to move the URL too, or Back is the only way
-              // out of a route that keeps reopening it.
-              if (deepLinked) void navigate('/jobs', { replace: true });
+              // Closing is a navigation for the same reason opening is. `replace`, so Back from a
+              // closed sheet returns to wherever the reader came from rather than reopening it.
+              void navigate('/jobs', { replace: true });
             }}
           />
         )}

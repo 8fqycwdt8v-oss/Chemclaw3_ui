@@ -136,3 +136,53 @@ describe('the budget', () => {
     expect(wasm.parses).toBe(5);
   });
 });
+
+describe('the same structure drawn from three places at once', () => {
+  it('parses once, not once per caller', async () => {
+    const { moleculeSvg } = await import('../src/chem/rdkit.ts');
+
+    // The case the cache above cannot help with, and the one this application actually produces:
+    // the entity rail, the answer and a result card all mount their effects in the same tick, all
+    // three miss a cache that is only filled when a draw *finishes*, and all three block the main
+    // thread on the same 9.71 ms depiction. Two of those three were pure waste.
+    const [a, b, c] = await Promise.all([
+      moleculeSvg('CCO', SIZE),
+      moleculeSvg('CCO', SIZE),
+      moleculeSvg('CCO', SIZE),
+    ]);
+
+    expect(a).toContain('data-smiles="CCO"');
+    expect(b).toBe(a);
+    expect(c).toBe(a);
+    expect(wasm.parses).toBe(1);
+  });
+
+  it('still separates two themes asked for together', async () => {
+    const { moleculeSvg } = await import('../src/chem/rdkit.ts');
+
+    const [light, dark] = await Promise.all([
+      moleculeSvg('CCO', { ...SIZE, dark: false }),
+      moleculeSvg('CCO', { ...SIZE, dark: true }),
+    ]);
+
+    // Sharing is keyed on all four inputs, like the cache. Collapsing these two would put light
+    // strokes on a dark card — the defect the size and theme are in the key to prevent.
+    expect(light).toContain('data-dark="n"');
+    expect(dark).toContain('data-dark="y"');
+    expect(wasm.parses).toBe(2);
+  });
+
+  it('leaves nothing behind when the draw refuses, so a later call retries', async () => {
+    const { moleculeSvg } = await import('../src/chem/rdkit.ts');
+
+    const [first, second] = await Promise.all([moleculeSvg('ZZZ', SIZE), moleculeSvg('ZZZ', SIZE)]);
+    expect(first).toBeNull();
+    expect(second).toBeNull();
+    expect(wasm.parses).toBe(1);
+
+    // The shared promise is dropped when it settles, refusal included — a `null` is not a fact
+    // about the input (see above) and a sticky one would be the memoised-failure defect again.
+    expect(await moleculeSvg('ZZZ', SIZE)).toBeNull();
+    expect(wasm.parses).toBe(2);
+  });
+});

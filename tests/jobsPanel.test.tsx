@@ -21,7 +21,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { JobsPanel } from '../src/components/JobsPanel.tsx';
 import { stubFetch } from './helpers.ts';
 import type { DurableJobStatus, JobRecordSummary } from '../src/api/client.ts';
@@ -127,14 +127,28 @@ afterEach(() => {
   restore = null;
 });
 
+/**
+ * The panel under its real routes, because what is open is now the URL and only the URL.
+ *
+ * A bare `MemoryRouter` gives `useParams()` an empty object, so a panel that reads what is open
+ * off the path opens nothing in one — which is not a defect in the panel, it is this harness
+ * declaring a route the app declares too. Both paths are here so a click can navigate.
+ */
+function mountJobs(at = '/jobs'): void {
+  render(
+    <MemoryRouter initialEntries={[at]}>
+      <Routes>
+        <Route path="/jobs" element={<JobsPanel />} />
+        <Route path="/jobs/:jobId" element={<JobsPanel />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
 describe('JobsPanel', () => {
   it('leads with why a run happened, not with its id', async () => {
     serve();
-    render(
-      <MemoryRouter>
-        <JobsPanel />
-      </MemoryRouter>,
-    );
+    mountJobs();
 
     expect(
       await screen.findByText('Decide whether 2-MeTHF or CPME favours the coupling.'),
@@ -145,11 +159,7 @@ describe('JobsPanel', () => {
   it('searches the rationale, and says that is what it searched', async () => {
     // Otherwise a chemist searching for a result reads "no run matches that" as "we never ran it".
     serve();
-    render(
-      <MemoryRouter>
-        <JobsPanel />
-      </MemoryRouter>,
-    );
+    mountJobs();
     await screen.findByText('compare_solvents');
 
     fireEvent.change(screen.getByLabelText('Search runs'), { target: { value: 'nitration' } });
@@ -162,11 +172,7 @@ describe('JobsPanel', () => {
 
   it('asks for cancellation without claiming the job stopped', async () => {
     serve();
-    render(
-      <MemoryRouter>
-        <JobsPanel />
-      </MemoryRouter>,
-    );
+    mountJobs();
     fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
     await screen.findByText('running');
 
@@ -184,11 +190,7 @@ describe('JobsPanel', () => {
     mode.current = 'msal';
     mode.roles = [];
     serve();
-    render(
-      <MemoryRouter>
-        <JobsPanel />
-      </MemoryRouter>,
-    );
+    mountJobs();
     fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
     await screen.findByText('running');
 
@@ -200,11 +202,7 @@ describe('JobsPanel', () => {
     // Otherwise "still loading" and "this failed and will never load" are the same screen.
     jobReadFails = true;
     serve();
-    render(
-      <MemoryRouter>
-        <JobsPanel />
-      </MemoryRouter>,
-    );
+    mountJobs();
     fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
 
     await screen.findByRole('status');
@@ -231,11 +229,7 @@ describe('JobsPanel', () => {
       completed_at: null,
     };
     serve([campaign, RECORD]);
-    render(
-      <MemoryRouter>
-        <JobsPanel />
-      </MemoryRouter>,
-    );
+    mountJobs();
 
     // The badge is in the list, where a reader is scanning rows.
     const row = await screen.findByRole('button', { name: /start_optimization_campaign/ });
@@ -253,11 +247,7 @@ describe('JobsPanel', () => {
 
   it('distinguishes an empty registry from an empty search', async () => {
     serve([]);
-    render(
-      <MemoryRouter>
-        <JobsPanel />
-      </MemoryRouter>,
-    );
+    mountJobs();
     expect(await screen.findByText('No runs recorded yet')).toBeTruthy();
   });
 });

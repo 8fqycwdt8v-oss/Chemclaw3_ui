@@ -490,9 +490,18 @@
  * with it, across however many pages that came to.
  *
  * Keyed on `data-print="document"` rather than on a route or a class name: the element that wants
- * the page says so, and nothing about this rule has to know which screen it is on. Everything
- * outside that element is hidden by hiding the body's own children and re-showing the ancestors of
- * the marked one — `:has()` is what makes that expressible without a wrapper component.
+ * the page says so, and nothing about this rule has to know which screen it is on.
+ *
+ * **The hiding rule is scoped to `body:has([data-print='document'])`, and the first draft was not.**
+ * Without that guard the selector reads "hide every `#root` child that does not contain a protocol
+ * document", which on every *other* screen is every child there is: measured in Chromium, Ctrl+P on
+ * a conversation — the transcript, the structures, the tables — produced a blank sheet. A rule
+ * written for one page must say which page it is for; `:has()` on the body is how, because the
+ * marked element is a descendant of `#root` and there is no wrapper to key on.
+ *
+ * The hide is by *descendant*, not by direct child. `#root > *` never reaches the sidebar or the
+ * topbar, which sit one level further in under the app's layout column — so the rule it replaced
+ * hid nothing on the page it was written for and everything on the pages it was not.
  */
 @media print {
   /* The app is a full-height flex column with its own scroll containers; on paper there is one
@@ -514,10 +523,13 @@
     max-height: none !important;
     flex: none !important;
   }
-  #root > *:not(:has([data-print='document'])):not([data-print='document']) {
+  body:has([data-print='document'])
+    #root
+    *:not(:has([data-print='document'])):not([data-print='document']):not(
+      [data-print='document'] *
+    ) {
     display: none !important;
   }
-  #root *:not(:has([data-print='document'])):not([data-print='document']) [data-print='hide'],
   [data-print='hide'] {
     display: none !important;
   }

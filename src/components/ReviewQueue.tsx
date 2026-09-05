@@ -544,16 +544,11 @@ function PendingInbox(): React.JSX.Element {
         // The service is the authority on what is open; the `awaiting_answer` stream only says
         // that something changed. Reconciling here is what keeps the sidebar badge honest after
         // an answer given in another tab, and what fills in the fields neither push carries whole.
-        useChatStore.getState().syncAwaiting(
-          next.requests
-            .filter((r) => r.state === 'waiting')
-            .map((r) => ({
-              request_id: r.request_id,
-              subject: r.subject,
-              kind: r.kind,
-              due_at: r.due_at,
-            })),
-        );
+        useChatStore
+          .getState()
+          .syncAwaiting(
+            next.requests.filter((r) => r.state === 'waiting').map((r) => r.request_id),
+          );
       })
       .catch(() => !cancelled && setFailed(true));
     return () => {
@@ -704,11 +699,17 @@ function Proposals(): React.JSX.Element {
   // `/review/:proposalId` opens this queue with that proposal's sheet already up, so a reviewer can
   // be *sent* to one rather than told to find it. Coerced here because a path segment is a string
   // and every proposal route downstream takes a number.
+  //
+  // **And the URL is the only thing that says what is open.** This used to seed a `useState` from
+  // the parameter, which made the address an *entry point* rather than the state: React Router
+  // keeps this component mounted across `/review/7` → `/review/8`, so a second link — followed
+  // from another tab, from Back or Forward, or from anywhere in the app — moved the address bar
+  // and left the first proposal's sheet on screen. On a sign-off surface that is the worst
+  // possible version of the bug: the reviewer reads one proposal at an address naming another.
   const { proposalId } = useParams();
   const navigate = useNavigate();
-  const deepLinked = proposalId && /^[0-9]{1,19}$/.test(proposalId) ? Number(proposalId) : null;
+  const openId = proposalId && /^[0-9]{1,19}$/.test(proposalId) ? Number(proposalId) : null;
   const [proposals, setProposals] = useState<ProposalSummary[] | null>(null);
-  const [openId, setOpenId] = useState<number | null>(deepLinked);
   const [nonce, setNonce] = useState(0);
   const [loadingOlder, setLoadingOlder] = useState(false);
   /** Set once a page came back short or empty: there is nothing older to offer. */
@@ -762,26 +763,29 @@ function Proposals(): React.JSX.Element {
         open
         onOpenChange={(next) => {
           if (next) return;
-          setOpenId(null);
-          // Closing a sheet the URL opened has to move the URL too, or Back is the only way out
-          // of a route that keeps reopening it.
-          if (deepLinked !== null) void navigate('/review', { replace: true });
+          // Closing is a navigation for the same reason opening is. `replace`, so Back from a
+          // closed sheet returns to wherever the reader came from rather than reopening it.
+          void navigate('/review', { replace: true });
         }}
         onDecided={reload}
       />
     ) : null;
 
-  if (!proposals) {
-    return (
-      <>
+  // **One returned tree, with the sheet at a fixed position.** This used to return three
+  // structurally different fragments — loading, empty, list — each with `{sheet}` at a different
+  // child index, so when a deep link opened the sheet while `proposals` was still `null` and the
+  // listing then landed, React reconciled a *different* shape at that position and unmounted and
+  // remounted `ProposalSheet`. Measured: the proposal was fetched twice for one open, and
+  // `reason` — component state, and the rejection justification this queue requires — was wiped
+  // between the chemist typing it and the list arriving. On a sign-off surface, silently.
+  //
+  // `JobsPanel` has always had this right, and the same probe against `/jobs/:jobId` reads the job
+  // exactly once; this is that shape.
+  return (
+    <>
+      {!proposals ? (
         <Loading>Reading the review queue…</Loading>
-        {sheet}
-      </>
-    );
-  }
-  if (proposals.length === 0) {
-    return (
-      <>
+      ) : proposals.length === 0 ? (
         <EmptyState
           icon={<FileCheck2 className="size-5" />}
           title="No notes are waiting for review"
@@ -789,43 +793,42 @@ function Proposals(): React.JSX.Element {
           Everything the agent has proposed has been decided. A new proposal appears here the moment
           a turn opens one.
         </EmptyState>
-        {sheet}
-      </>
-    );
-  }
-
-  return (
-    <>
-      <ul className="flex flex-col gap-2">
-        {proposals.map((proposal) => (
-          <li key={proposal.id}>
-            <button
-              type="button"
-              onClick={() => setOpenId(proposal.id)}
-              className="w-full rounded-lg border border-border-subtle bg-surface-raised p-3 text-left transition-colors hover:bg-surface-sunken focus-ring"
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-xs break-all">{proposal.note_id}</span>
-                <Badge tone="neutral">{proposal.note_type}</Badge>
-                <Badge tone={STATE_TONE[proposal.state] ?? 'neutral'}>{proposal.state}</Badge>
-              </div>
-              <p className="mt-1 text-2xs text-ink-subtle">
-                proposed by {proposal.actor} {when(proposal.submitted_at)}
-              </p>
-            </button>
-          </li>
-        ))}
-      </ul>
-      {/* Only while a full page came back — the service caps the listing, and a short page is the
+      ) : (
+        <>
+          <ul className="flex flex-col gap-2">
+            {proposals.map((proposal) => (
+              <li key={proposal.id}>
+                <button
+                  type="button"
+                  // Navigating rather than setting state, so what is open is the URL and only
+                  // the URL — see the note on `openId` above.
+                  onClick={() => void navigate(`/review/${proposal.id}`)}
+                  className="w-full rounded-lg border border-border-subtle bg-surface-raised p-3 text-left transition-colors hover:bg-surface-sunken focus-ring"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-xs break-all">{proposal.note_id}</span>
+                    <Badge tone="neutral">{proposal.note_type}</Badge>
+                    <Badge tone={STATE_TONE[proposal.state] ?? 'neutral'}>{proposal.state}</Badge>
+                  </div>
+                  <p className="mt-1 text-2xs text-ink-subtle">
+                    proposed by {proposal.actor} {when(proposal.submitted_at)}
+                  </p>
+                </button>
+              </li>
+            ))}
+          </ul>
+          {/* Only while a full page came back — the service caps the listing, and a short page is the
           evidence there is nothing older. Asking for one row beyond the ceiling to know for sure
           would cost every listing an extra row to answer a question the next request answers for
           free by coming back empty, which is the argument the service makes for its own cursor. */}
-      {!exhausted && proposals.length >= PAGE_IS_FULL && (
-        <div className="mt-2">
-          <Button variant="ghost" size="sm" disabled={loadingOlder} onClick={older}>
-            {loadingOlder ? 'Loading…' : 'Load older proposals'}
-          </Button>
-        </div>
+          {!exhausted && proposals.length >= PAGE_IS_FULL && (
+            <div className="mt-2">
+              <Button variant="ghost" size="sm" disabled={loadingOlder} onClick={older}>
+                {loadingOlder ? 'Loading…' : 'Load older proposals'}
+              </Button>
+            </div>
+          )}
+        </>
       )}
       {sheet}
     </>

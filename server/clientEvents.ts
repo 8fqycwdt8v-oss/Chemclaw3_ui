@@ -28,6 +28,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { cfg } from './config.ts';
 import { log } from './log.ts';
 
 /** Much smaller than `maxBodyBytes`: twenty log entries do not need two megabytes. */
@@ -171,7 +172,6 @@ function readBody(req: IncomingMessage): Promise<string | null> {
  * `server/app.ts` books every response, so they are already
  * `chemclaw_ui_requests_total{route="/api/client-events",status="429"}`.
  */
-const PROCESS_BATCHES_PER_MINUTE = 600;
 const BUDGET_WINDOW_MS = 60_000;
 
 /**
@@ -186,7 +186,10 @@ let budget = { count: 0, resetAt: 0 };
 /** Whether this batch is within the budget, charging it when it is. */
 function withinBudget(now: number): boolean {
   if (now >= budget.resetAt) budget = { count: 0, resetAt: now + BUDGET_WINDOW_MS };
-  if (budget.count >= PROCESS_BATCHES_PER_MINUTE) return false;
+  // From config, so the knob an operator turns is the number in force. It was a module constant
+  // of 600 while `cfg.clientEventsRatePerMin` existed, was clamped, and was pinned by a test —
+  // and was read by nothing at all.
+  if (budget.count >= cfg.clientEventsRatePerMin) return false;
   budget.count += 1;
   return true;
 }

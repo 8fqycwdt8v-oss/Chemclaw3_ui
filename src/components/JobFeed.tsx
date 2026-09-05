@@ -31,18 +31,30 @@ import { JobFailureCard, JobResultCard } from './JobResultCard.tsx';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
+/**
+ * One title per conversation, which is all a card needs to name where its job came from.
+ *
+ * Exported, and that is the whole point of it being a named function rather than an inline arrow:
+ * `tests/renderStorm.test.tsx` pins that a token flush does not change what this returns, and the
+ * arm that used to retype the projection would have gone on passing over a selector widened back
+ * to the whole map. Its two siblings there — `visibleConversationIds` and `watchedSessionKey` —
+ * are imported for that reason; this one was the copy. The same file also scans this module for a
+ * second whole-map read, which is what stops the extraction from being defeated by the component
+ * simply not using it.
+ *
+ * Selecting the conversation map whole put this panel on the per-token render path, because
+ * `updateAssistant` replaces that map on every animation-frame flush. A record of titles changes
+ * when a conversation is named, which is once.
+ */
+export const jobFeedTitles = (s: {
+  conversations: Record<string, { title: string }>;
+}): Record<string, string> =>
+  Object.fromEntries(Object.entries(s.conversations).map(([id, c]) => [id, c.title]));
+
 export function JobFeed(): React.JSX.Element | null {
   const jobFeed = useChatStore((s) => s.jobFeed);
   const activeId = useChatStore((s) => s.activeId);
-  // Titles only, shallow-compared. Selecting `s.conversations` whole put this panel on the
-  // per-token render path — `updateAssistant` replaces that map on every animation-frame flush —
-  // to read one string per card. A record of titles changes when a conversation is named, which
-  // is once.
-  const titles = useChatStore(
-    useShallow((s) =>
-      Object.fromEntries(Object.entries(s.conversations).map(([id, c]) => [id, c.title])),
-    ),
-  );
+  const titles = useChatStore(useShallow(jobFeedTitles));
   const dismiss = useChatStore((s) => s.dismissJobItem);
   const restore = useChatStore((s) => s.restoreJobItem);
   const [undoable, setUndoable] = useState<string | null>(null);

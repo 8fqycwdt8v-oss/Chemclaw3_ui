@@ -21,7 +21,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, Route, Routes } from 'react-router';
 import { ReviewQueue } from '../src/components/ReviewQueue.tsx';
 import { stubFetch } from './helpers.ts';
 import type { PendingPlans, ProposalDetail, ProposalSummary } from '../src/api/client.ts';
@@ -96,11 +96,21 @@ const decisions: unknown[] = [];
 /** What the plan inbox route answers this test — replaced per test, never per assertion. */
 let pending: PendingPlans | 'fails' = PENDING;
 
-/** The screen under a router, which `Link` needs and the app always provides. */
-function renderQueue(): void {
+/**
+ * The screen under its real routes, which `Link` needs and the app always provides.
+ *
+ * Both paths, because what proposal is open is the URL and only the URL: a bare `MemoryRouter`
+ * gives `useParams()` an empty object, so a click that navigates to `/review/:proposalId` would
+ * land on no route and open nothing. That is this harness declaring what the app declares, not a
+ * concession the panel needs.
+ */
+function renderQueue(at = '/review'): void {
   render(
-    <MemoryRouter>
-      <ReviewQueue />
+    <MemoryRouter initialEntries={[at]}>
+      <Routes>
+        <Route path="/review" element={<ReviewQueue />} />
+        <Route path="/review/:proposalId" element={<ReviewQueue />} />
+      </Routes>
     </MemoryRouter>,
   );
 }

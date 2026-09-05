@@ -88,8 +88,29 @@ import { withLoadTimeout } from './toolkitLoad.ts';
  * legal 600-character chain still costs ~0.3 s to parse and ~1.7 s to draw on the main thread, and
  * emits ~300 kB of SVG. Bounding that properly means a worker, which is a change of shape rather
  * than a constant. This bounds the unrecoverable failure, not the slow one.
+ *
+ * **It is exported because the refusal it causes is not a chemical verdict.** Re-measured against
+ * the same binary on 2026-09-05: 600 chars parse and draw (302,187 characters of SVG, 0.6 s), 800
+ * do (403,077, 1.3 s), 1,000 do (503,967, 2.4 s), 1,040 parses and the *draw* throws with the
+ * runtime still alive, and 1,100 traps and kills it. So every string between 601 and ~1,099
+ * characters is a molecule RDKit can read and this module declines to — and a helper that answers
+ * `null` for it is saying "not a molecule" about something that is one. That distinction is the
+ * same one `rdkitAvailable()` exists for, and it is kept the same way: a cheap predicate the two
+ * surfaces that make a claim consult before making it, rather than a third value threaded through
+ * every helper.
  */
-const MAX_PARSED_SMILES_CHARS = 600;
+export const MAX_PARSED_SMILES_CHARS = 600;
+
+/**
+ * Is this string past what this module will hand to the parser?
+ *
+ * A negative from `isMolecule`, `canonicalSmiles` or `moleculeSvg` about such a string is a refusal
+ * by this module, not a verdict about the chemistry. Anything about to tell a chemist their string
+ * is not a molecule asks this first — see `MAX_PARSED_SMILES_CHARS`.
+ */
+export function tooLongToParse(smiles: string): boolean {
+  return smiles.length > MAX_PARSED_SMILES_CHARS;
+}
 
 /**
  * Set when a call has left the WASM runtime dead, so `loadRDKit` stops handing it out.
@@ -241,6 +262,15 @@ function stillAlive(rdkit: RDKitModule): boolean {
  * The bound is here rather than in `withMol` because a molblock is legitimately long — a
  * thousand-atom `.mol` file is tens of kilobytes of text — and measured, the molfile parser
  * degrades to "invalid" rather than trapping, so it does not need this and would be broken by it.
+ *
+ * **Re-measured on 2026-09-05, because "the molblock path is unbounded" is a reasonable thing to
+ * suspect and the suspicion is what should be tested, not the prose.** V2000 chains fed straight
+ * to `get_mol`: 100 atoms (8 kB) and 500 (42 kB) parse; 999 (83 kB) raises a JS
+ * `RangeError: Maximum call stack size exceeded` out of the canonical ranking and the runtime is
+ * **still alive** afterwards; 1,500 through 50,000 atoms (125 kB → 4.3 MB) return `null` in
+ * 3–33 ms, because V2000's counts field is three digits wide and a longer file is malformed by
+ * construction. Nothing in that range poisons the heap and nothing takes long enough to freeze a
+ * tab, which is what a bound here would be for. There is none, deliberately.
  */
 function withSmilesMol<T>(rdkit: RDKitModule, smiles: string, fn: (mol: JSMol) => T): T | null {
   if (smiles.length > MAX_PARSED_SMILES_CHARS) return null;
@@ -440,8 +470,21 @@ let svgCacheChars = 0;
 const svgKey = (smiles: string, opts: DrawOptions): string =>
   `${opts.width}x${opts.height}|${opts.dark ? 'dark' : 'light'}|${smiles}`;
 
-/** Keep `svg`, evicting least-recently-used drawings until the budget is met again. */
+/**
+ * Keep `svg`, evicting least-recently-used drawings until the budget is met again.
+ *
+ * **The replaced entry's length is subtracted.** `svgCacheChars` is the size of the map and this is
+ * the only function that writes either, so keeping the two agreeing across a `set` that replaces is
+ * this function's own job rather than a promise it extracts from its caller. Without it a key
+ * written twice bills twice, the budget is understated by a whole drawing, and the cache evicts
+ * entries it still has room for — which is the 111.6 ms this cache exists to end, coming back
+ * quietly. Today no caller can reach that: `moleculeSvg` answers a hit before drawing and the
+ * in-flight table below collapses concurrent misses on one key, which is exactly the pair that
+ * used to reach it.
+ */
 function remember(key: string, svg: string): void {
+  const replaced = svgCache.get(key);
+  if (replaced !== undefined) svgCacheChars -= replaced.length;
   svgCache.set(key, svg);
   svgCacheChars += svg.length;
   // A `Map` iterates in insertion order and a hit re-inserts (see below), so the first key is the
@@ -478,6 +521,29 @@ export async function moleculeSvg(smiles: string, opts: DrawOptions): Promise<st
     return hit;
   }
 
+  // A drawing already under way is joined rather than started again. The cache above only helps
+  // once a draw has *finished*, and the case this application actually produces is the other one:
+  // one compound in the rail, the answer and a result card mounts three effects in the same tick,
+  // all three miss, and all three block the main thread on the same WASM depiction — 9.71 ms each
+  // for atorvastatin, of which two are pure waste. Keyed on the same four inputs as the cache, so
+  // two sizes or two themes of one structure are still two drawings.
+  const drawing = inFlight.get(key);
+  if (drawing) return drawing;
+  const started = drawOnce(key, smiles, opts);
+  inFlight.set(key, started);
+  try {
+    return await started;
+  } finally {
+    inFlight.delete(key);
+  }
+}
+
+/** Draws in progress, so concurrent callers for one key share one WASM call. */
+const inFlight = new Map<string, Promise<string | null>>();
+
+/** One depiction, from the loader to the cache. Split out of `moleculeSvg` so the in-flight table
+ *  above holds a promise that is already running before any caller awaits it. */
+async function drawOnce(key: string, smiles: string, opts: DrawOptions): Promise<string | null> {
   const rdkit = await loadRDKit();
   if (!rdkit) return null;
 

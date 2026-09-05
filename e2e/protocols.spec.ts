@@ -107,3 +107,39 @@ test('a protocol result renders as a protocol under the answer', async ({ page }
     `/protocols/${DESIGN}`,
   );
 });
+
+/**
+ * The print stylesheet, in the only place it is real.
+ *
+ * `@media print` is invisible to the unit suite — happy-dom neither evaluates `:has()` nor lays
+ * anything out, so every assertion there would pass against a rule that hides the whole app. It did:
+ * the first draft of `#root > *:not(:has([data-print='document']))` hid **nothing** on the protocol
+ * page (the shell's chrome sits one level deeper than a direct child of `#root`) and **everything**
+ * on every other page (no document, so no child contains one). Both arms are asserted here, and the
+ * second is the one that matters — a print rule written for one screen must not blank the others.
+ */
+test('printing takes the protocol and leaves the chrome behind', async ({ page }) => {
+  await page.goto(`/protocols/${DESIGN}`);
+  await expect(page.getByText('Amination solvent screen')).toBeVisible();
+
+  await page.emulateMedia({ media: 'print' });
+  await expect(page.locator('[data-print="document"]')).toBeVisible();
+  await expect(page.getByRole('banner')).toBeHidden();
+  await expect(page.getByRole('navigation', { name: 'Conversations' })).toBeHidden();
+  // The controls inside the document go too — they are the one thing paper cannot use.
+  await expect(page.locator('[data-print="document"] [data-print="hide"]').first()).toBeHidden();
+});
+
+test('printing a conversation prints the conversation, not a blank sheet', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('textbox', { name: /Message/ }).fill('Design the amination screen');
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+  const block = page.locator('[data-result-block="protocol"]');
+  await expect(block).toBeVisible({ timeout: 15_000 });
+
+  await page.emulateMedia({ media: 'print' });
+  // No `data-print="document"` on this screen, so the hiding rule must not apply at all.
+  await expect(page.locator('[data-print="document"]')).toHaveCount(0);
+  await expect(block).toBeVisible();
+  await expect(page.locator('#transcript').getByText('Design the amination screen')).toBeVisible();
+});

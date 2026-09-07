@@ -26,6 +26,7 @@
  * contract that lives in another repository, and nothing mechanical connects them — the backend
  * can add a member and stay green, and so can this. Until something checks the two against each
  * other, the only defence is that a backend change is not finished until it lands here.
+
  *
  * Then it happened three more times on FIELDS rather than members, which the count above cannot
  * catch at all: `plan.plan_hash`, `tool_failed.reason` and `evidence_source.failed` were each added
@@ -56,6 +57,20 @@
  * and expiry since the workflow was built and claimed by nothing, so it aged out undelivered —
  * which is the *sixth* form of the same failure this file keeps recording, one repository further
  * upstream: a producer with no consumer instead of a member with no mirror.
+ *
+ * **And then there were seventeen, because one of them was deleted.** `handoff` is the same seam
+ * failing in the direction the paragraphs above never consider: not a member missing from this
+ * mirror, but a member of this mirror that nothing upstream can send. The specialist team that
+ * raised it was deleted, and the event model outlived its producer — measured rather than assumed,
+ * a grep over the service finds the class and its union membership and nothing anywhere that
+ * constructs one. That failure is not silent the way the six above were; it is a consumer chain
+ * that reads as a live feature, and this repo carried the whole of one: the member, the branch in
+ * `normalizeEvent`, a `TraceKind`, a step counted in the turn summary, and a "Handed to X" row in
+ * the trace panel, none of which could ever render. It is gone, and
+ * `tests/eventContract.test.ts` pins the absence — so mirroring it again means bringing the
+ * producer with it. (The count in the paragraph above is left as it was written: it was true of
+ * the commit that wrote it, and renumbering prose every time the union moves is how the numbers in
+ * it stop being checkable at all.)
  *
  * This file is imported by both the SPA (bundled by Vite) and the mock backend (bundled by
  * esbuild). Keep it dependency-free.
@@ -508,18 +523,6 @@ export interface EvidenceSourceEvent {
   failed?: boolean;
 }
 
-export interface HandoffEvent {
-  type: 'handoff';
-  /** The specialist being entered, or **empty when control returned** to the agent above it. The
-   *  empty string is a declared value here, not a missing field: the pair brackets a specialist's
-   *  work, and dropping the second one leaves a trace showing a turn stuck inside a specialist it
-   *  already left. Matches the `agent` stamped on the events raised in between. */
-  to: string;
-  /** The supervisor's own stated reason for delegating — prose for a human. Nothing branches on
-   *  it, and it is empty on the hand back. */
-  reason: string;
-}
-
 export type ChemclawEvent =
   | QueuedEvent
   | PlanEvent
@@ -533,7 +536,6 @@ export type ChemclawEvent =
   | ToolFailedEvent
   | ToolResultEvent
   | EvidenceSourceEvent
-  | HandoffEvent
   | QuestionEvent
   | NoteProposedEvent
   | ApprovalRequestEvent
@@ -555,7 +557,6 @@ const EVENT_TYPES = new Set<string>([
   'tool_failed',
   'tool_result',
   'evidence_source',
-  'handoff',
   'question',
   'note_proposed',
   'approval_request',
@@ -769,10 +770,6 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         chunks: asCount(o.chunks),
         failed: o.failed === true,
       };
-    case 'handoff':
-      // `to` falls back to '' deliberately — that is the hand-back, a declared value, so there is
-      // no sentinel to distinguish a malformed frame from a real return to the main agent.
-      return { type: 'handoff', to: asString(o.to), reason: asString(o.reason) };
     case 'question':
       return {
         type: 'question',

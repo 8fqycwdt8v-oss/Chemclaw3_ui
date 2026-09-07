@@ -590,30 +590,6 @@ function Row({
         </Step>
       );
 
-    case 'handoff':
-      // Both halves are rendered. Showing only the entry would leave the trace reading as though
-      // the turn never came back, which is the misattribution the `agent` stamp exists to prevent.
-      return entry.handoff?.to ? (
-        <Step tone="idle">
-          <Line
-            label={
-              <>
-                Handed to <span className="font-medium">{entry.handoff.to}</span>
-              </>
-            }
-            badge={
-              entry.handoff.reason ? (
-                <span className="text-2xs text-ink-subtle">— {entry.handoff.reason}</span>
-              ) : undefined
-            }
-          />
-        </Step>
-      ) : (
-        <Step tone="idle">
-          <p className="text-2xs text-ink-subtle">Back to the main agent</p>
-        </Step>
-      );
-
     case 'question':
     case 'approval_request':
       // Rendered as interactive cards in the message body, not as inert trace lines.

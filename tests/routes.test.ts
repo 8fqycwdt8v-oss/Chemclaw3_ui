@@ -26,9 +26,6 @@ describe('proxy route whitelist', () => {
       ['GET', `/api/sessions/${SID}/tool-results/${REF}`, `/sessions/${SID}/tool-results/${REF}`],
       ['GET', '/api/notes/note-suzuki-42', '/notes/note-suzuki-42'],
       ['GET', '/api/profiles', '/profiles'],
-      ['GET', '/api/proposals', '/proposals'],
-      ['GET', '/api/proposals/42', '/proposals/42'],
-      ['POST', '/api/proposals/42/decision', '/proposals/42/decision'],
       ['GET', '/api/jobs', '/jobs'],
       ['GET', '/api/jobs/qm-7', '/jobs/qm-7'],
       ['DELETE', '/api/jobs/qm-7', '/jobs/qm-7'],
@@ -92,6 +89,23 @@ describe('proxy route whitelist', () => {
       ['GET', '/api/approvals'],
       ['GET', '/api/approvals/approval-q-42'],
       ['POST', '/api/approvals/approval-q-42/decision'],
+    ] as const) {
+      expect(resolveRoute(method, path), `${method} ${path}`).toBeNull();
+    }
+  });
+
+  it('does not proxy the deleted knowledge-proposal routes', () => {
+    // The same shape as the approval holds above, one gate later. Chemclaw3 deleted the PR gate
+    // and its `GET /proposals`, `GET /proposals/{id}` and `POST /proposals/{id}/decision`
+    // (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): knowledge is written directly and
+    // corrected, so there is nothing left to approve. This repo deleted the client half first and
+    // left the three whitelist rows behind, which is the worst half to keep — the proxy still
+    // resolves them, so whoever writes the next consumer gets a route that forwards cleanly to a
+    // 404 rather than a resolver that says no.
+    for (const [method, path] of [
+      ['GET', '/api/proposals'],
+      ['GET', '/api/proposals/42'],
+      ['POST', '/api/proposals/42/decision'],
     ] as const) {
       expect(resolveRoute(method, path), `${method} ${path}`).toBeNull();
     }
@@ -180,23 +194,7 @@ describe('proxy route whitelist', () => {
     });
   });
 
-  describe('proposals and jobs', () => {
-    it('takes a proposal id as a number and nothing else', () => {
-      // Upstream it is a bigserial. Anything else is a client bug, and a pattern that accepted
-      // a slug would forward a path segment the service cannot look up.
-      for (const bad of ['note-1', '4.2', '-1', '', '1'.repeat(20)]) {
-        expect(resolveRoute('GET', `/api/proposals/${bad}`), bad).toBeNull();
-      }
-    });
-
-    it('does not offer a verb the gate does not have', () => {
-      // Decisions go through POST /decision. A PUT or DELETE on a proposal would be a way to
-      // close the gate without recording who closed it.
-      expect(resolveRoute('DELETE', '/api/proposals/42')).toBeNull();
-      expect(resolveRoute('POST', '/api/proposals/42')).toBeNull();
-      expect(resolveRoute('POST', '/api/proposals')).toBeNull();
-    });
-
+  describe('jobs', () => {
     it('reaches a job by both of its verbs, and refuses a raw separator', () => {
       // GET reads it, DELETE asks for cancellation. The role gate is upstream: refusing to proxy
       // DELETE would break the caller who *is* entitled to use it.

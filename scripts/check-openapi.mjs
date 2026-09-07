@@ -81,8 +81,8 @@ try {
   console.error(`  ✗ GET ${base}/openapi.json — ${err.message}`);
   console.error(`
   The FastAPI service serves this and the BFF deliberately does not proxy it, so point this at the
-  service directly — \`uvicorn service.app:create_app --factory --port 8080\` in the Chemclaw3
-  repo, or the compose service on the internal network.
+  service directly — \`uvicorn chemclaw.api.app:create_app --factory --port 8080\` in the
+  Chemclaw3 repo, or the compose service on the internal network.
 `);
   process.exit(1);
 }
@@ -107,6 +107,7 @@ const SAMPLES = [
   'calc-compare_solvents-0123456789abcdef', // a durable job id
   'approval-Suzuki(A)', // a model-authored approval hold id
   '0123456789abcdef'.repeat(4), // a sha256 digest, as a content-addressed ref
+  'design-0123456789ab', // an experiment design id: `design-` plus twelve lowercase hex
 ];
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];

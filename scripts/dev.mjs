@@ -5,7 +5,7 @@
  * There is no mock backend in this project by design — the frontend and the FastAPI service are
  * developed and tested against each other. Set CHEMCLAW_API_URL to wherever yours is running:
  *
- *   uvicorn service.app:create_app --factory --port 8080     (in the Chemclaw3 repo)
+ *   uvicorn chemclaw.api.app:create_app --factory --port 8080   (in the Chemclaw3 repo)
  *   npm run dev                                              (here)
  *
  * or bring both up together with `docker compose up`.

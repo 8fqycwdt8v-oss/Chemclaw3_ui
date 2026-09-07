@@ -92,9 +92,9 @@ const RESULT_REF = '([0-9a-f]{64})';
  *
  * The revision selectors (`?revision=`, `?from=`, `?to=`) are not matched here at all. This
  * resolver is handed the pathname alone — `server/app.ts` slices the query string off, forwards it
- * untouched and lets the service validate it — which is the same arrangement `GET /jobs` and
- * `GET /proposals` already run under. `src/api/client.ts` coerces each to an integer before it
- * builds the URL, so a non-integer is not a request this app can make.
+ * untouched and lets the service validate it — which is the same arrangement `GET /jobs` already
+ * runs under. `src/api/client.ts` coerces each to an integer before it builds the URL, so a
+ * non-integer is not a request this app can make.
  */
 const DESIGN = '(design-[0-9a-f]{12})';
 
@@ -246,24 +246,6 @@ export const ROUTES: readonly Route[] = [
   // it returns as read and never re-delivers it — which is why the client claims this once at boot
   // straight into persisted state rather than polling it from a screen.
   { method: 'GET', pattern: /^\/api\/digests$/, target: () => '/digests', sse: false },
-
-  // The PR-gate review queue: machine-written knowledge waiting for a human to sign it into the
-  // graph. The service calls this "the line that makes machine-written knowledge safe". Listing
-  // is keyset-paginated (`before_id`) and state-filtered through the query string, which the
-  // proxy forwards untouched.
-  { method: 'GET', pattern: /^\/api\/proposals$/, target: () => '/proposals', sse: false },
-  {
-    method: 'GET',
-    pattern: /^\/api\/proposals\/([0-9]{1,19})$/,
-    target: (m) => `/proposals/${m[1]}`,
-    sse: false,
-  },
-  {
-    method: 'POST',
-    pattern: /^\/api\/proposals\/([0-9]{1,19})\/decision$/,
-    target: (m) => `/proposals/${m[1]}/decision`,
-    sse: false,
-  },
 
   // The durable-run registry.
   //

@@ -9,6 +9,29 @@
 export type ApiErrorKind =
   /** 401 — missing or invalid bearer token. Re-authenticate. */
   | 'unauthorized'
+  /**
+   * 403 — the service understood the call, identified the caller, and refused it: the caller does
+   * not hold the role or the ownership the route asks for.
+   *
+   * A refusal, never a fault, and the distinction is the whole reason this kind exists. Before it,
+   * a 403 fell to the `default` branch and became `network` — the kind meaning "`fetch` threw, the
+   * service is unreachable" — which is wrong in three ways at once: it is `retryable`, so anything
+   * reading that flag offers Retry for a call that will refuse identically for as long as it is
+   * pressed; its fallback sentence is "an unexpected status", which is what you say about a
+   * response nobody predicted rather than about a documented gate; and it left every caller that
+   * wanted to tell an entitlement apart from an outage comparing `err.status === 403` by hand,
+   * which is exactly the raw-number guessing the 409 comment below argues against.
+   *
+   * Three live producers, and each detail is written for the person reading it — the operator role
+   * a job cancellation needs, "this request is not routed to you" on a held-open question, the
+   * review role somebody else's design needs — so the service's own sentence is preferred to
+   * anything this table could invent, exactly as everywhere else here.
+   *
+   * Distinct from `unauthorized` (401): re-authenticating changes nothing, because the token was
+   * read and accepted. It is the roles inside it that are the answer, and only an administrator
+   * can change those. Sending a chemist to a login page for one is a loop.
+   */
+  | 'forbidden'
   /** 404 — unknown session, someone else's session, or one evicted from the backend's live-session
    *  LRU. The backend deliberately makes these indistinguishable, so treat all three the same:
    *  the handle is dead, mint a new one. */
@@ -206,6 +229,16 @@ export function errorFromStatus(
         'unauthorized',
         'Your session has expired. Please sign in again.',
         401,
+        options,
+      );
+    case 403:
+      // The service's own sentence when it sent one — each of the three producers names the
+      // entitlement, which nothing here could reconstruct. The fallback says what kind of refusal
+      // this is rather than that it was unexpected, because a gate answering is not a surprise.
+      return new ApiError(
+        'forbidden',
+        detail || 'You do not have permission to do that.',
+        403,
         options,
       );
     case 404:

@@ -452,8 +452,6 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
         kind: 'approval_request',
         approval: { prompt: event.prompt },
       };
-    case 'handoff':
-      return { ...base, kind: 'handoff', handoff: { to: event.to, reason: event.reason } };
     default:
       return null;
   }

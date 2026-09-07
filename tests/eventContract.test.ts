@@ -32,7 +32,6 @@ describe('the event contract admits every member of its own union', () => {
     tool_failed: { tool: 'find_notes', message: 'boom' },
     tool_result: { tool: 'find_notes', preview: 'x' },
     evidence_source: { source: 'graph', chunks: 4 },
-    handoff: { to: 'safety', reason: 'hazard check' },
     question: { question: 'which?', options: [] },
     note_proposed: { note_id: 'n1', reference: 'ref' },
     approval_request: { prompt: 'ok?', approval_id: 'a1' },
@@ -57,11 +56,49 @@ describe('the event contract admits every member of its own union', () => {
     }
   });
 
-  it('treats an empty handoff target as the hand back rather than a bad frame', () => {
-    // `to: ''` is a declared value: it is how the backend says control returned to the main agent.
-    // A reader that discarded it would show a turn stuck inside a specialist it had already left.
-    const back = normalizeEvent({ type: 'handoff', to: '', reason: '' });
-    expect(back).toEqual({ type: 'handoff', to: '', reason: '' });
+  it('drops a handoff frame, because nothing upstream can produce one', () => {
+    // The opposite direction from every other assertion in this file, and it is the direction the
+    // approval holds already taught (`ISSUES.md`, "was Issue 3"): a consumer with no producer is a
+    // feature that reads as real and is not.
+    //
+    // Measured against the Chemclaw3 checkout: `grep -rn HandoffEvent src/` finds the class and its
+    // membership in `ChemclawStreamEvent` and nothing else — no `yield`, no construction, no
+    // caller. The specialist team that raised it was deleted (`D-2026-08-15`), `record_handoff`
+    // went with the attribution nobody could write
+    // (`D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution`), and
+    // `api/graph_stream.py` says so in its own comment: "the handoff pair was the reader that
+    // *could* be right ... so no name reaches this stream at all."
+    //
+    // This repo carried the whole consumer chain regardless — the union member, the `normalizeEvent`
+    // branch, a `TraceEntry` kind, a step counted in the turn summary and a "Handed to X" row in the
+    // trace panel. None of it could ever render. It is deleted, and this pins the deletion: whoever
+    // mirrors the event again must bring the producer with it, or a reader learns the shape of a
+    // delegation this system does not do.
+    expect(normalizeEvent({ type: 'handoff', to: 'safety', reason: 'hazard check' })).toBeNull();
+  });
+
+  it('leaves no consumer of a handoff anywhere in the app', () => {
+    // The gate above is `EVENT_TYPES`, and a leftover renderer would not trip it — the chain died
+    // one layer further in (a `TraceKind`, a store branch, a step counted in the turn summary, a
+    // "Handed to X" row), so this reads the layers the gate cannot see.
+    //
+    // Matched on the CODE rather than on the word: `HandoffEvent`, the quoted discriminator, and
+    // the `handoff` property a `TraceEntry` used to carry. Forbidding the word itself would fail
+    // on the paragraph in `shared/events.ts` that records why this was mirrored and why it is
+    // gone — deleting the history is not the same as deleting the feature — and on two unrelated
+    // comments about losing a turn to a Wi-Fi handoff.
+    for (const file of [
+      'shared/events.ts',
+      'src/state/types.ts',
+      'src/state/chatStore.ts',
+      'src/state/turnActivity.ts',
+      'src/components/TracePanel.tsx',
+    ]) {
+      const text = readFileSync(file, 'utf8');
+      for (const dead of ['HandoffEvent', "'handoff'", 'handoff?:', 'entry.handoff']) {
+        expect(text, `${file} still consumes a handoff (${dead})`).not.toContain(dead);
+      }
+    }
   });
 
   it('does not invent a chunk count from a frame that carries none', () => {
@@ -148,7 +185,6 @@ const full: Array<[string, Record<string, unknown>]> = [
     },
   ],
   ['evidence_source', { source: 'graph', chunks: 4, failed: true }],
-  ['handoff', { to: 'safety', reason: 'hazard' }],
   ['question', { question: 'which?', options: ['a'] }],
   ['note_proposed', { note_id: 'n1', reference: 'branch/x' }],
   ['approval_request', { prompt: 'ok?', approval_id: 'a1' }],

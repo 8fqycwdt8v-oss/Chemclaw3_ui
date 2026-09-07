@@ -47,10 +47,12 @@ bearer token.
   refusal and a re-read rather than one of them silently losing their work.
 - **Resolves citations.** A `note-…` chip opens the note with its provenance and its validity
   window, so a citation in an old answer that points at a superseded note says so.
-- **Shows what is waiting on you, across conversations.** `/review` carries both gates. The PR gate
-  is what a proposal would commit, byte for byte, with a decision that needs a reason to reject.
-  Above it is the plan inbox (`GET /plans/pending`): every conversation where the agent has planned
-  work it may not start — including the ones you closed, which is the whole point, since the
+- **Shows what is waiting on you, across conversations.** `/review` is the plan inbox
+  (`GET /plans/pending`) and the held-open questions. It used to carry a third section — the PR
+  gate, showing byte for byte what a proposal would commit — and that gate is deleted upstream
+  (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): knowledge is written directly and
+  corrected rather than pre-approved, so there is nothing left to sign. What remains is every
+  conversation where the agent has planned work it may not start — including the ones you closed, which is the whole point, since the
   decision card otherwise lives only inside a live turn. An empty list says _which_ emptiness it is
   (no gate in this deployment, nothing waiting, or a scan the service bounded), because the section
   this one replaced spent a release rendering a swallowed 404 as "nothing is waiting on you".
@@ -90,7 +92,7 @@ framed (a preview iframe) with `ALLOW_FRAMING=true` — each one a separate deci
 
 ```sh
 # in the Chemclaw3 repo
-uvicorn service.app:create_app --factory --port 8080
+uvicorn chemclaw.api.app:create_app --factory --port 8080
 
 # here
 npm install
@@ -282,7 +284,7 @@ proxies answers) and the reasoning are in Chemclaw3: `deploy/jenkins/README.md` 
 ## Backend requirements
 
 The UI reads more of the service than it used to, and the degradation is deliberately split in two.
-**List** routes — `GET /sessions`, `GET /sessions/{id}/messages`, `GET /proposals`, `GET /jobs`,
+**List** routes — `GET /sessions`, `GET /sessions/{id}/messages`, `GET /jobs`,
 `GET /protocols` — swallow a 404 into an empty result, so an older service yields a smaller app
 rather than a banner. **Fetch** routes — `GET /notes/{id}`,
 `GET /sessions/{id}/tool-results/{ref}`, `GET /protocols/{id}` — do not, because nothing calls them

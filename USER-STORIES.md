@@ -189,13 +189,13 @@ dispatch already exist, so each is a renderer rather than a feature.
 
 ## F — Governance and human-in-the-loop
 
-| #      | Persona and story                                                     | Aim                                                                               | Backend                                                                                                                                                                    | Verdict      |
-| ------ | --------------------------------------------------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| **F1** | ~~Chemist: answer a durable hold~~                                    | ~~An attributable, irreversible sign-off~~                                        | ~~`POST /approvals/{id}/decision`~~ — the mechanism is deleted upstream                                                                                                    | **`GONE`**   |
-| **F2** | Chemist: approve the harness plan before it spends                    | Control what the agent is allowed to execute                                      | `GET /sessions/{id}/plan` + a decision bound to `plan_hash`                                                                                                                | **`SERVED`** |
-| **F3** | Chemist: find every decision waiting on me                            | Nothing stays blocked because someone closed a tab                                | `GET /plans/pending` → `{plans, considered, gated, unread}`                                                                                                                | **`SERVED`** |
-| **F4** | Reviewer: review machine-written knowledge before it enters the graph | See the exact bytes that would land in the tree; approve, or reject with a reason | `GET /proposals` (keyset paginated, state-filtered), `GET /proposals/{id}` (`content` + `dependencies` + `session_id` + `correlation_id`), `POST /proposals/{id}/decision` | **`SERVED`** |
-| **F5** | Non-reviewer: do not offer me buttons that 403                        | Not learn my permissions from an error message                                    | The `roles` claim; `entra_privileged_role_set`                                                                                                                             | **`SERVED`** |
+| #      | Persona and story                                                         | Aim                                                                                   | Backend                                                                                                     | Verdict      |
+| ------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ------------ |
+| **F1** | ~~Chemist: answer a durable hold~~                                        | ~~An attributable, irreversible sign-off~~                                            | ~~`POST /approvals/{id}/decision`~~ — the mechanism is deleted upstream                                     | **`GONE`**   |
+| **F2** | Chemist: approve the harness plan before it spends                        | Control what the agent is allowed to execute                                          | `GET /sessions/{id}/plan` + a decision bound to `plan_hash`                                                 | **`SERVED`** |
+| **F3** | Chemist: find every decision waiting on me                                | Nothing stays blocked because someone closed a tab                                    | `GET /plans/pending` → `{plans, considered, gated, unread}`                                                 | **`SERVED`** |
+| **F4** | ~~Reviewer: review machine-written knowledge before it enters the graph~~ | ~~See the exact bytes that would land in the tree; approve, or reject with a reason~~ | ~~`GET /proposals`, `GET /proposals/{id}`, `POST /proposals/{id}/decision`~~ — the gate is deleted upstream | **`GONE`**   |
+| **F5** | Non-reviewer: do not offer me buttons that 403                            | Not learn my permissions from an error message                                        | The `roles` claim; `entra_privileged_role_set`                                                              | **`SERVED`** |
 
 **F2 is what this frontend is for, and F1 no longer exists.** The plan decision is bound to the
 hash of the plan that was actually rendered, fetched on card mount so the two cannot drift; a 409
@@ -210,19 +210,25 @@ ever open one — see `ISSUES.md`.
 stays blocked because someone closed a tab" is a real story and the plan gate is what blocks work:
 under `plan_only` every state-changing step is refused until a human approves, and until
 `GET /plans/pending` existed that decision was reachable only from inside the turn that raised it.
-**Built**, on `/review`, above the proposals. It deliberately does not decide in place — the
-service would accept it, since a decision is bound to the hash of the plan as displayed, but a plan
-is approved on the strength of the reasoning that produced it, so the row links into the
-conversation instead. What it adds over a bare list is that an empty one is never mute: the service
+**Built**, on `/review`, which is now what that page is for. It deliberately does not decide in
+place — the service would accept it, since a decision is bound to the hash of the plan as
+displayed, but a plan is approved on the strength of the reasoning that produced it, so the row
+links into the conversation instead. What it adds over a bare list is that an empty one is never mute: the service
 returns `gated` and `unread` beside the rows, so "this deployment has no plan gate", "the scan was
 partial" and "nothing is waiting on you" are three different screens rather than one.
 
-**F4 was the largest untouched capability in the system.** **Built.** The queue lists what is
-waiting; opening one shows the literal file content and every file that would land beside it, as
-the file it is rather than as rendered markdown — the front matter, the wikilinks and the
-confidence field are exactly what a reviewer is checking, and rendering would hide all three. The
-Reject control stays disabled until a reason is written, because the service 422s a blank one and
-because a note refused without a stated reason tells the next reviewer, and the agent, nothing.
+**F4 no longer exists, and it is the second story in this table to end that way.** It was built —
+the queue listed what was waiting, and opening one showed the literal file content and every file
+that would land beside it, as the file it is rather than as rendered markdown. Then Chemclaw3
+deleted the PR gate itself (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): knowledge does
+not change what the agent does, so it is written directly and corrected — by provenance on every
+retrieved chunk, by the citations a chemist checks at the point of use, and by contradiction — and
+there is nothing left to approve before it lands. A **skill** is the opposite case, and the service
+refuses outright rather than gating: no agent path writes a `SKILL.md`.
+
+All three routes 404 today. This repo's client half went first; the whitelist rows and this row
+outlived it, which is the same lag F1 had, and is why `tests/contractCheck.test.ts` now checks every
+`SERVED` in this table against the routes the BFF can actually reach.
 
 **F5.** ~~`AuthAccount.roles` is parsed from the token and used nowhere.~~ **Built**, as
 `useIsReviewer`. The role names cannot be hardcoded — they are a deployment's own — so they come
@@ -234,10 +240,10 @@ cannot record. It is not enforcement and says so: the service decides, and will 
 
 ## G — Reports and corrections
 
-| #      | Persona and story                                                 | Aim                                                                                                                   | Backend                                                                                                                                                                | Verdict      |
-| ------ | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| **G1** | Chemist: assemble a submission section from what we actually have | A draft where each paragraph is wikilinked to its source, and an unsupported section is _marked_ rather than invented | `request_development_report` — durable, per-section memory layer (`evidence` / `episodic` / `semantic`), renders only retrieved chunks, opens a PR-gated `report` note | `PROSE-ONLY` |
-| **G2** | Chemist: correct the assistant when it is wrong                   | The correction survives, and contradicts the note that did not hold                                                   | `record_failure` (a `failure-mode` note with a `contradicts` edge), `record_confirmed_answer`                                                                          | `NO-UI`      |
+| #      | Persona and story                                                 | Aim                                                                                                                   | Backend                                                                                                                                                        | Verdict      |
+| ------ | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| **G1** | Chemist: assemble a submission section from what we actually have | A draft where each paragraph is wikilinked to its source, and an unsupported section is _marked_ rather than invented | `request_development_report` — durable, per-section memory layer (`evidence` / `episodic` / `semantic`), renders only retrieved chunks, writes a `report` note | `PROSE-ONLY` |
+| **G2** | Chemist: correct the assistant when it is wrong                   | The correction survives, and contradicts the note that did not hold                                                   | `record_failure` (a `failure-mode` note with a `contradicts` edge), `record_confirmed_answer`                                                                  | `NO-UI`      |
 
 **G1** is one of the service's best-served workflows — the report harness is purpose-built for
 regulatory input, and keeping a _failed_ section visibly distinct from an _empty_ one is a real
@@ -364,7 +370,7 @@ way.
 | `answer.verified_by` surfaced beside the confidence, because a judge's 0.82 is not a citation gate's 0.82                                                                                                                                                                                                                                                                   | A1 (partly)      |
 | `GET /sessions/{id}/tool-results/{ref}` whitelisted; a "See the full result" control on any stored result; typed renderers for the hazard screen, the ICH lookup and the charge table, a generic table for anything record-shaped, raw text otherwise — with the `verdict` always above the data it qualifies                                                               | A3, D1, D2       |
 | `GET /notes/{id}` whitelisted; a citation chip resolves to the note with its provenance, its validity window and its neighbours, and falls back to asking the agent when the reference is not a readable note                                                                                                                                                               | A2               |
-| `GET/POST /proposals[...]` whitelisted; a `/review` screen showing the exact bytes a proposal would commit, its dependency files and its correlation id, with a rejection that cannot go out without a reason                                                                                                                                                               | F4               |
+| ~~`GET/POST /proposals[...]` whitelisted; a `/review` screen showing the exact bytes a proposal would commit, its dependency files and its correlation id, with a rejection that cannot go out without a reason~~ — the PR gate was deleted upstream and the whole section with it; `/review` stays for the plan inbox and the held-open questions                          | F4               |
 | ~~`GET /approvals` given the inbox it always had a client method for, on the same screen~~ — the route was deleted upstream and the whole section with it; what stands in its place is `GET /plans/pending`, a cross-session inbox of undecided plans on `/review`, whose empty state names which emptiness it is                                                           | F3               |
 | `GET/DELETE /jobs[...]` whitelisted; a `/jobs` registry that leads with the recorded rationale rather than the id, searchable over it, with a cancellation that is requested rather than claimed                                                                                                                                                                            | C2, C3           |
 | The `roles` claim finally used, through `useIsReviewer` and a `REVIEWER_ROLES` runtime setting, to hide what would 403 instead of offering it                                                                                                                                                                                                                               | F5               |

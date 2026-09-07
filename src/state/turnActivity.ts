@@ -219,7 +219,6 @@ const STEP_KINDS = new Set([
   'job_completed',
   'job_failed',
   'note_proposed',
-  'handoff',
 ]);
 
 /**

@@ -575,6 +575,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
             // being rebuilt, not a fresh turn — so the pair is the service's "nothing happened".
             challenged: false,
             review_hold_id: null,
+            checks_run: [], // a transcript rebuilt locally had no gate run on it, which is what empty means
           });
           useChatStore.getState().finishTurn(conversationId, messageId, 'done');
           releaseTurn();
@@ -863,6 +864,7 @@ export function resumeInterruptedTurn(
       // rebuilt, not a fresh turn — so the pair is the service's own "nothing happened" values.
       challenged: false,
       review_hold_id: null,
+      checks_run: [], // a transcript rebuilt locally had no gate run on it, which is what empty means
     });
     store.finishTurn(conversationId, messageId, 'done');
     announceStatus(describeAnswer(recovered));

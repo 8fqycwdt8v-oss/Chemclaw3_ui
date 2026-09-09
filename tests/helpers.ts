@@ -30,6 +30,8 @@ export function answerEvent(over: Partial<AnswerEvent> = {}): AnswerEvent {
     text: '',
     confidence: null,
     unsupported_claims: [],
+    // Empty is the ordinary case: both honesty gates ship off, so nothing ran.
+    checks_run: [],
     review_required: false,
     verified_by: null,
     challenged: false,

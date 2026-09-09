@@ -253,6 +253,9 @@ export interface ApprovalRequestEvent {
   approval_id: string;
 }
 
+/** An answer check the core layer can run. Mirrors `agent/verifier.AnswerCheck`. */
+export type AnswerCheck = 'verifier' | 'answer-shape';
+
 export interface AnswerEvent {
   type: 'answer';
   /**
@@ -269,6 +272,25 @@ export interface AnswerEvent {
   /** True exactly when `confidence < verifier_confidence_threshold`. The routing signal for a
    *  "needs expert review" affordance. */
   review_required: boolean;
+  /**
+   * Which answer checks actually ran on this turn. **Empty means none did.**
+   *
+   * This is drift #12, and it is the one that makes the three fields above readable. Both honesty
+   * gates ship *off* (`verifier_enabled`, `answer_shape_gate_enabled`), and measured on the core
+   * side an ungated answer and a checked-and-clean one were **byte-identical on the wire**:
+   * `confidence: null`, `review_required: false`, `unsupported_claims: []` either way. So a
+   * surface that flags on `review_required` shows an unflagged answer in both cases, and cannot
+   * tell "we looked and it was fine" from "nobody looked".
+   *
+   * `runner_answer.build_answer_event`'s docstring claimed every field was either what a check
+   * found or the `null`/`false` that says the check did not run. That was true of the verifier
+   * (`confidence`/`verified_by` are null) and false of the shape gate, which had no field of its
+   * own — so this array is the shape gate's.
+   *
+   * A renderer should treat an empty array as *unverified*, not as *clean*. Anything else repeats
+   * the ambiguity on the screen after the wire stopped carrying it.
+   */
+  checks_run: AnswerCheck[];
   /**
    * Whether a second pass challenged this answer, and the durable hold that pass opened.
    *
@@ -641,6 +663,20 @@ export type KnownTool = (typeof KNOWN_TOOLS)[number];
 
 const asString = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
 const asStringArray = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => String(x)) : []);
+
+/**
+ * The declared answer checks, dropping anything this mirror does not know.
+ *
+ * Narrowed rather than passed through as `string[]`, for the reason every other union on this wire
+ * is narrowed here: an unknown member would reach a renderer as a check that ran, and the whole
+ * point of the field is that its contents are trustworthy enough to say "verified" from. A core
+ * release that adds a third check therefore reads as *that check not having run* until this line
+ * learns it — the safe direction, and the one a type error at the next build makes visible.
+ */
+const asAnswerChecks = (v: unknown): AnswerCheck[] =>
+  Array.isArray(v)
+    ? v.filter((x): x is AnswerCheck => x === 'verifier' || x === 'answer-shape')
+    : [];
 /** Drops non-finite entries rather than passing `NaN`/`Infinity` on: this array feeds numeric
  *  rendering, and one `NaN` in it is a blank cell nobody can explain. */
 const asNumberArray = (v: unknown): number[] =>
@@ -795,6 +831,7 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         confidence: typeof o.confidence === 'number' ? o.confidence : null,
         unsupported_claims: asStringArray(o.unsupported_claims),
         review_required: o.review_required === true,
+        checks_run: asAnswerChecks(o.checks_run),
         challenged: o.challenged === true,
         review_hold_id: typeof o.review_hold_id === 'string' ? o.review_hold_id : null,
         verified_by:

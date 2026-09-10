@@ -46,6 +46,7 @@ function seedAnswer(text: string): string {
     verified_by: null,
     challenged: false,
     review_hold_id: null,
+    checks_run: [],
   });
   useChatStore.getState().finishTurn(cid, mid, 'done');
   return cid;

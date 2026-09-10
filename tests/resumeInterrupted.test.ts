@@ -132,6 +132,7 @@ describe('a turn a reload interrupted', () => {
       // rebuilt, not a fresh turn — so the pair is the service's own "nothing happened" values.
       challenged: false,
       review_hold_id: null,
+      checks_run: [],
     });
     useChatStore.getState().finishTurn(cid, first, 'done');
     const { mid } = (() => {

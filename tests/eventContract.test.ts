@@ -195,6 +195,10 @@ const full: Array<[string, Record<string, unknown>]> = [
       confidence: 0.75,
       unsupported_claims: ['c'],
       review_required: true,
+      // Both members, because the narrowing in `asAnswerChecks` is per-member: a fixture carrying
+      // one would leave the other's spelling unproven, and a mistyped literal there reads as that
+      // check not having run.
+      checks_run: ['verifier', 'answer-shape'],
       // Both permanently at their defaults upstream today, and mirrored anyway: reviving them is a
       // coordinated three-repo cut, and this fixture is what makes the mirror notice it.
       challenged: true,

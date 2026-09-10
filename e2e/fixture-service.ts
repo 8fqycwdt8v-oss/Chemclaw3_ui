@@ -308,6 +308,10 @@ const TURN: readonly Frame[] = [
       review_required: false,
       unsupported_claims: [],
       verified_by: 'citation-gate',
+      // Not empty here, and that is the point of the fixture: this stands in for a turn where the
+      // verifier *did* run and cleared the answer. An empty array beside `confidence: 0.91` would
+      // be the one state the core layer cannot produce.
+      checks_run: ['verifier'],
       challenged: false,
       review_hold_id: null,
     },

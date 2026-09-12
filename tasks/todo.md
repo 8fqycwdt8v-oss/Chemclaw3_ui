@@ -371,7 +371,7 @@ one, because it is counted.
       which decodes once into a `[^/]+` parameter — but that is a property of the _upstream_, and
       `server/routes.ts` stated it as a property of itself, while any ingress doing
       `UNESCAPE_AND_FORWARD` makes it real with this process being the one believed to have stopped
-      it. `refusesTraversal` decides it here; driven through the real `createRequestListener()`, the
+      it. `isTraversal` decides it here; driven through the real `createRequestListener()`, the
       four probes 404 and reach no upstream, and a Löslichkeit slug still passes.
 
 ## Item 5 — the two present-tense claims, and one known flake

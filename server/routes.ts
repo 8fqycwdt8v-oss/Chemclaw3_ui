@@ -38,7 +38,7 @@ const SID = '([0-9a-f]{32})';
  * hop that normalises before the service — an Envoy sidecar with
  * `path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD`, some nginx-ingress configurations —
  * makes that a traversal, and this is the component everyone would believe had prevented it. So
- * `refusesTraversal` below decides it here instead. A *raw* `/` still fails to match the pattern,
+ * `isTraversal` below decides it here instead. A *raw* `/` still fails to match the pattern,
  * because that would change the route's shape rather than its parameter. The closed character set
  * still holds.
  *
@@ -336,7 +336,8 @@ export interface ResolvedRoute {
 const TEMPLATE_GROUPS = ['', '{id}', '{ref}'] as unknown as RegExpMatchArray;
 
 /**
- * Whether a matched segment can be forwarded, whatever route matched it.
+ * Whether a matched segment would traverse if the next hop decoded it — in which case this
+ * resolver refuses it, whatever route matched.
  *
  * `NOTE`, `JOB` and `PENDING` admit `.` and `%` deliberately — their ids embed a model-written
  * slug or a Temporal workflow id — so `..%2F..%2Fmetrics` and `%2e%2e%2f%2e%2e%2fmetrics` both
@@ -349,7 +350,7 @@ const TEMPLATE_GROUPS = ['', '{id}', '{ref}'] as unknown as RegExpMatchArray;
  * The narrow segments (`SID`, `RESULT_REF`, `DESIGN`) cannot fail this and are checked anyway: a
  * rule applied to every capture is one nobody has to remember to apply to the next route.
  */
-function refusesTraversal(segment: string): boolean {
+function isTraversal(segment: string): boolean {
   let decoded: string;
   try {
     decoded = decodeURIComponent(segment);
@@ -365,7 +366,7 @@ export function resolveRoute(method: string, path: string): ResolvedRoute | null
     if (route.method !== method) continue;
     const match = path.match(route.pattern);
     if (match) {
-      if (match.slice(1).some((group) => group !== undefined && refusesTraversal(group))) {
+      if (match.slice(1).some((group) => group !== undefined && isTraversal(group))) {
         return null;
       }
       return {

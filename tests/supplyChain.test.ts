@@ -16,6 +16,7 @@
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { gateSteps } from './gateSteps.ts';
 
 const read = (path: string): string => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
@@ -60,16 +61,32 @@ describe('the updater that keeps those pins from going stale', () => {
 
 describe('the vulnerability gate', () => {
   const ci = read('.github/workflows/ci.yml');
+  const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
+    scripts: Record<string, string>;
+  };
 
   it('audits the production closure, blocking', () => {
-    // Located as a whole step rather than as a substring of the file, so the last two assertions
-    // are about the step and not about the paragraph of comment above it. A gate that cannot fail
-    // is the failure this one exists to avoid being: an advisory that scrolls past in a green run
-    // trains everyone to stop reading it.
-    const audit = ci.split(/^ {6}- /m).filter((step) => /run:\s*npm audit/.test(step));
+    // This used to locate a whole `- run: npm audit` step inside ci.yml. That step no longer
+    // exists there and the audit did not go anywhere: the gate is one definition now
+    // (`scripts/ci.mjs`), which both pipelines call, so the question "does the gate audit" is asked
+    // of the gate. Asking the workflow would have gone on being answerable only for as long as the
+    // workflow was the gate — and would have said "no audit" the moment it stopped being one,
+    // which is the wrong answer in the alarming direction.
+    const audit = gateSteps().filter((step) => /^npm audit\b/.test(pkg.scripts[step.run] ?? ''));
 
-    expect(audit, 'no step in ci.yml runs `npm audit`').toHaveLength(1);
-    expect(audit[0]).toMatch(/npm audit .*--omit=dev/);
-    expect(audit[0]).not.toMatch(/continue-on-error/);
+    expect(audit, 'no step of the gate runs `npm audit`').toHaveLength(1);
+    expect(pkg.scripts[audit[0]?.run ?? '']).toMatch(/npm audit .*--omit=dev/);
+  });
+
+  it('cannot be waved through in the workflow that runs it', () => {
+    // A gate that cannot fail is the failure this one exists to avoid being: an advisory that
+    // scrolls past in a green run trains everyone to stop reading it. `continue-on-error` on the
+    // step that runs the gate would do exactly that to all thirteen steps at once, which is a
+    // larger version of the same defect than the one this assertion originally guarded.
+    const gate = ci
+      .split(/^ {6}- /m)
+      .filter((step) => /run: npm run ci(:container)?\s*$/m.test(step));
+    expect(gate, 'no step in ci.yml runs the gate').toHaveLength(2);
+    for (const step of gate) expect(step).not.toMatch(/continue-on-error/);
   });
 });

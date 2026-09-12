@@ -21,9 +21,17 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "ci": "node scripts/ci.mjs",
+    "ci:container": "node scripts/check-container.mjs",
+    "ci:all": "npm run ci && npm run ci:container",
+    "check:audit": "npm audit --omit=dev --audit-level=high",
     "check:contrast": "node scripts/check-contrast.mjs",
     "check:no-dev-auth": "node scripts/assert-no-dev-auth.mjs",
+    "check:bundle": "node scripts/check-bundle.mjs",
+    "check:standalone": "node scripts/check-standalone-server.mjs",
+    "check:serving": "node scripts/check-serving.mjs",
     "check:openapi": "node --experimental-strip-types scripts/check-openapi.mjs",
+    "check:live": "npm run smoke && npm run check:openapi",
     "test:e2e:full-stack": "playwright test --config playwright.full-stack.config.ts"
   },
   "dependencies": {

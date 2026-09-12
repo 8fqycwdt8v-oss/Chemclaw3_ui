@@ -206,3 +206,95 @@ measured), and the `Intl` cost (50× predicted, 47× measured).
   button, so nothing can loop, and a budget is something the one person on a flaky connection burns
   through — after which the editor is gone for the page's life, which is the defect restored.
 - **Bulk actions**, argued against above and not built.
+
+---
+
+# Wave: one gate, and one rule about path segments
+
+Two items, both structural. Neither is a cleanup — a survey of this repository found 0 TODOs, 0
+`as any`, 0 empty catch blocks and error boundaries at two levels, and there was nothing to harvest.
+
+## Item 1 — the gate was not reproducible, and two gates disagreed
+
+- [x] **Every assertion that was inline shell is a named script.** `.github/workflows/ci.yml` ran
+      four of them inside `run:` blocks — the `/config.js` reference, the MSAL entry-chunk probe
+      with its positive control, `dist/server.js` from a `mktemp -d` with no `node_modules` — plus a
+      whole `container` job of `curl`s. None had a name anybody could type, so in practice they were
+      run by the pipeline and by nobody. They are now `scripts/check-bundle.mjs`,
+      `scripts/check-standalone-server.mjs` and `scripts/check-serving.mjs`, each behind an
+      `npm run check:*`.
+- [x] **One definition, called by both pipelines.** `scripts/ci.mjs` holds the order and the reason
+      for each step; `package.json` holds what each step _is_. `ci.yml`'s `check` job is `npm ci`,
+      a browser install and `npm run ci`. `Jenkinsfile`'s Gate stage is `npm ci`, a browser install
+      and `npm run ci` — it used to list six commands of its own with no `npm audit`, no contrast
+      check and no browser suite, so a Jenkins-only estate was gated to a narrower bar than any
+      document said.
+- [x] **The container half is a named target that skips with a reason.** `npm run ci:container`
+      builds the image and runs the four serving assertions; with no `podman`/`docker` it prints
+      what it did not do and exits 0, and `CI_REQUIRE_CONTAINER=1` — which both pipelines set —
+      turns that skip into a failure. `SKIP_IMAGE_BUILD=1` lets a pipeline build the image its own
+      way (buildx with a layer cache in Actions; buildah/podman/kaniko in Jenkins) and still run the
+      one copy of the assertions. The Jenkins "image serves" stage now calls
+      `scripts/check-serving.mjs` directly against the artifact it is about to publish, which is the
+      _stronger_ check that file already argued for and was making with its own hand-written
+      `curl`s.
+- [x] **`smoke` and `check:openapi` are decided rather than orphaned.** Both need a live Chemclaw3
+      service and both exit non-zero when they cannot reach one, deliberately — `check-openapi.mjs`
+      argues it in its own comments. They stay out of the offline gate and are `npm run check:live`,
+      which is the named home they did not have. `tests/gate.test.ts` asserts both halves: in
+      `check:live`, and not a step of `ci`.
+- [x] **A test that catches the drift rather than describing it.** `tests/gate.test.ts`.
+
+## Item 2 — the path-encoding invariant had six exceptions, not one
+
+- [x] **Every interpolated path segment is encoded.** The finding named one site
+      (`client.ts:538`, the XHR upload). Scanning for the _invariant_ found **eight segments across
+      seven call sites in two files**: the upload, `stopTurn`, `getMessages`, both segments of
+      `getToolResult`, `getPlan`, `decidePlan`, and the job event stream in
+      `src/hooks/useJobStreams.ts`. All eight now go through `encodeURIComponent`.
+- [x] **`tests/pathEncoding.test.ts` holds the rule, not the lines.** It parses every file under
+      `src/` that can build a service URL with the TypeScript compiler and requires every
+      path-segment interpolation to be an `encodeURIComponent` call, plus two behavioural tests that
+      drive the fetch seam and the XHR seam with a hostile id.
+
+---
+
+## Review
+
+Every step of `npm run ci` is green, and `npm run ci:container` asserts a real container. Each new
+check was mutation-tested — the `/config.js` tag removed, `PublicClientApplication` pushed into the
+entry chunk, the probe string made stale, an un-inlined import added to `dist/server.js`, and a
+container started with a `CLIENT_DIR` that does not exist — and each failed for the reason it
+exists. The numbers are in the commit message, which is about a commit; this file is about the
+decisions.
+
+### What the brief got wrong, and the measurement that showed it
+
+The path-encoding item was described as "the **only** call site among eleven that does not
+`encodeURIComponent` its path segment". Eleven is the count of sites that _do_; the count that do
+not was six (eight segments — `getToolResult` has two). Fixing the one named line and pinning it
+would have left an invariant with five other exceptions, which is not an invariant, and a reader
+counting encoded sites could not have told which rule was in force. This is why the test is a scan
+and not a pin.
+
+### What the encoding actually changes
+
+Nothing, for every id this app can legitimately hold: `server/routes.ts` matches a session id as 32
+lowercase hex and a result ref as 64, so `encodeURIComponent` is the identity on both. What it
+changes is the shape of the failure for an id that is not one. Driven with `a/b?c` as the session
+id, the fetch seam requested `/api/sessions/a/b?c/messages` before the fix — a _different route_
+with a query string, which the BFF whitelist forwards or refuses on its own terms — and
+`/api/sessions/a%2Fb%3Fc/messages` after it, which the whitelist simply refuses. The value of the
+rule is that it holds without anyone having to know which ids are safe.
+
+### What is deliberately not done
+
+- **`ci.yml` keeps two jobs.** One would be a single definition end to end, but the container job
+  exists for its own runner and buildx's layer cache. Nothing is duplicated by the split: the
+  `check` job runs `npm run ci`, the `container` job runs `npm run ci:container`, and
+  `tests/gate.test.ts` fails if either grows an assertion of its own.
+- **`npm run ci` does not install a browser.** Provisioning one is an agent concern and differs per
+  pipeline (`--with-deps` needs root; this sandbox has Chromium at a fixed path and must not
+  re-download). Both pipelines install it in the step before the gate.
+- **The full-stack Playwright config stays out of the gate**, for the reason it was already out of
+  it: it needs four repositories running.

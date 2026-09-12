@@ -30,11 +30,17 @@ const SID = '([0-9a-f]{32})';
  * so `note-Pd(OAc)2` arrives literally — a pattern that merely added `%` would still have
  * refused that one. A test pins each case.
  *
- * Widening here is safe in a way it would not be for `SID`: this segment is forwarded
- * still-encoded and the service uses the decoded value purely as a lookup key, never as a
- * filesystem or URL path, so an encoded `/` cannot traverse anything. A *raw* `/` still fails to
- * match, because that would change the route's shape rather than its parameter. The closed
- * character set still holds.
+ * Widening here is safe in a way it would not be for `SID`, and the reason used to be stated as a
+ * property of this file when it was a property of somebody else's: the segment is forwarded
+ * still-encoded, and a direct uvicorn + Starlette upstream decodes it into a path parameter that
+ * `[^/]+` cannot span. That is true and it is **not local**. Driven through the real listener,
+ * `GET /api/notes/..%2F..%2Fmetrics` resolved and was forwarded as `/notes/..%2F..%2Fmetrics`; any
+ * hop that normalises before the service — an Envoy sidecar with
+ * `path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD`, some nginx-ingress configurations —
+ * makes that a traversal, and this is the component everyone would believe had prevented it. So
+ * `refusesTraversal` below decides it here instead. A *raw* `/` still fails to match the pattern,
+ * because that would change the route's shape rather than its parameter. The closed character set
+ * still holds.
  *
  * **The length cap is measured against the ENCODED segment, which is why 128 was too small.** The
  * paragraph above argues for a wide character class precisely so a model-written slug never 404s
@@ -329,12 +335,39 @@ export interface ResolvedRoute {
  */
 const TEMPLATE_GROUPS = ['', '{id}', '{ref}'] as unknown as RegExpMatchArray;
 
+/**
+ * Whether a matched segment can be forwarded, whatever route matched it.
+ *
+ * `NOTE`, `JOB` and `PENDING` admit `.` and `%` deliberately — their ids embed a model-written
+ * slug or a Temporal workflow id — so `..%2F..%2Fmetrics` and `%2e%2e%2f%2e%2e%2fmetrics` both
+ * match. Neither is a legitimate id, and neither costs anything to refuse. Decoding *once* is
+ * what the next hop does, so it is what this asks about: a value that becomes a path separator or
+ * a parent reference when decoded once is refused, and a malformed escape — which
+ * `encodeURIComponent` cannot emit, so no client of this app produces one — is refused with it,
+ * because what a normalising proxy does with `%zz` is its own business.
+ *
+ * The narrow segments (`SID`, `RESULT_REF`, `DESIGN`) cannot fail this and are checked anyway: a
+ * rule applied to every capture is one nobody has to remember to apply to the next route.
+ */
+function refusesTraversal(segment: string): boolean {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(segment);
+  } catch {
+    return true;
+  }
+  return decoded.includes('/') || decoded.includes('\\') || decoded === '..';
+}
+
 /** Resolve a request to an upstream path, or `null` if it is not whitelisted. */
 export function resolveRoute(method: string, path: string): ResolvedRoute | null {
   for (const route of ROUTES) {
     if (route.method !== method) continue;
     const match = path.match(route.pattern);
     if (match) {
+      if (match.slice(1).some((group) => group !== undefined && refusesTraversal(group))) {
+        return null;
+      }
       return {
         path: route.target(match),
         sse: route.sse,

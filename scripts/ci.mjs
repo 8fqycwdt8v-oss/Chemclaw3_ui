@@ -45,10 +45,6 @@ import { argv, exit } from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 /**
- * The gate, in order. `run` is an npm script name, so `package.json` stays the single registry of
- * what each step *is* and this file holds only the order and the environment it needs.
- */
-/**
  * Where the dev-auth client build goes, which is **not** where the production one goes.
  *
  * The browser suite drives the app unauthenticated, so it needs a bundle built with
@@ -60,6 +56,10 @@ import { fileURLToPath } from 'node:url';
  */
 const DEV_AUTH_CLIENT_DIR = 'dist/client-dev-auth';
 
+/**
+ * The gate, in order. `run` is an npm script name, so `package.json` stays the single registry of
+ * what each step *is* and this file holds only the order and the environment it needs.
+ */
 export const STEPS = [
   {
     name: 'audit',

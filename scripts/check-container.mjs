@@ -37,14 +37,29 @@ const REQUIRED = process.env.CI_REQUIRE_CONTAINER === '1';
 const run = (cmd, args, opts = {}) =>
   spawnSync(cmd, args, { stdio: 'inherit', encoding: 'utf8', ...opts });
 
-/** podman first when both are present: it needs no daemon, and this check needs no daemon either. */
-const runner = ['podman', 'docker'].find(
-  (candidate) => spawnSync(candidate, ['version'], { stdio: 'ignore' }).status === 0,
-);
+/**
+ * Which runtime runs the image.
+ *
+ * Podman first when both are present and this script does the build: it needs no daemon, and
+ * neither does the check. **But under `SKIP_IMAGE_BUILD=1` the image's store was decided by
+ * whoever built it, and autodetect then picks the wrong one.** `ci.yml`'s container job builds
+ * with `docker/build-push-action` and `load: true`, which loads into the *Docker* daemon's store;
+ * `ubuntu-latest` also ships podman, so this resolved to podman, whose store is empty, and
+ * `podman run` treated the local tag as a remote reference and tried to pull it:
+ *
+ *     Trying to pull docker.io/library/chemclaw3-ui:ci...  requested access to the resource is denied
+ *
+ * So the pipeline that built the image says which runtime holds it, and autodetect remains the
+ * default for the path that builds it here.
+ */
+const runner = (
+  process.env.CONTAINER_RUNTIME ? [process.env.CONTAINER_RUNTIME] : ['podman', 'docker']
+).find((candidate) => spawnSync(candidate, ['version'], { stdio: 'ignore' }).status === 0);
 
 if (!runner) {
-  const why =
-    'neither `podman version` nor `docker version` answered — no container runtime is available here';
+  const why = process.env.CONTAINER_RUNTIME
+    ? `CONTAINER_RUNTIME names \`${process.env.CONTAINER_RUNTIME}\`, and \`${process.env.CONTAINER_RUNTIME} version\` did not answer`
+    : 'neither `podman version` nor `docker version` answered — no container runtime is available here';
   if (REQUIRED) {
     console.error(
       `\ncheck-container: ${why}, and CI_REQUIRE_CONTAINER=1 says that is a failure.\n`,
@@ -96,7 +111,9 @@ const started = run(runner, [
   TAG,
 ]);
 if (started.status !== 0) {
-  console.error('\ncheck-container: the image built but would not start.\n');
+  console.error(
+    '\ncheck-container: the image is not in this runtime store, or would not start. When SKIP_IMAGE_BUILD is set the build happened elsewhere, so check that CONTAINER_RUNTIME names the runtime holding it.\n',
+  );
   cleanup();
   process.exit(1);
 }

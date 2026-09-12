@@ -96,6 +96,33 @@ describe('both pipelines call the one definition', () => {
     expect(code(jenkinsfile)).toContain('scripts/check-serving.mjs');
     expect(code(read('scripts/check-container.mjs'))).toContain('scripts/check-serving.mjs');
   });
+
+  it('names the runtime that holds the image when the build happened elsewhere', () => {
+    // CI's container job builds with `docker/build-push-action` + `load: true`, which loads into
+    // the **Docker** daemon's store. `ubuntu-latest` also ships podman, and the script preferred
+    // podman — so under SKIP_IMAGE_BUILD it looked in an empty store and tried to *pull* the local
+    // tag from a registry:
+    //
+    //     Trying to pull docker.io/library/chemclaw3-ui:ci... requested access to the resource is denied
+    //
+    // The autodetect is right for the path that builds the image here and wrong for the path that
+    // does not, so the pipeline that built it says which runtime holds it. This pins both halves,
+    // because either alone leaves the divergence that produced the failure.
+    // Sliced to the `runner` resolution itself rather than grepped over the whole file: the
+    // refusal message names `CONTAINER_RUNTIME` too, so a file-wide `toContain` stays green with
+    // the autodetect put back — an assertion about a diagnostic standing in for one about which
+    // store gets looked in.
+    const script = code(read('scripts/check-container.mjs'));
+    const runnerDecl = script.slice(
+      script.indexOf('const runner ='),
+      script.indexOf('if (!runner)'),
+    );
+    expect(runnerDecl).toContain('CONTAINER_RUNTIME');
+
+    const workflow = read('.github/workflows/ci.yml');
+    const containerStep = workflow.slice(workflow.indexOf('npm run ci:container') - 600);
+    expect(containerStep).toMatch(/CONTAINER_RUNTIME:\s*docker/);
+  });
 });
 
 describe('no pipeline holds an assertion of its own', () => {

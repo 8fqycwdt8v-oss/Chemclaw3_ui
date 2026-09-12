@@ -95,4 +95,8 @@ jobs:
         env:
           CI_REQUIRE_CONTAINER: '1'
           SKIP_IMAGE_BUILD: '1'
+          # buildx loaded the image into the Docker daemon's store, so Docker is the runtime that
+          # holds it. Without this the script autodetects, finds podman (which ubuntu-latest also
+          # ships), looks in an empty store and tries to pull `chemclaw3-ui:ci` from a registry.
+          CONTAINER_RUNTIME: docker
         run: npm run ci:container

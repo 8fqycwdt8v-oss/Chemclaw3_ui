@@ -72,7 +72,10 @@ async function writeSidecar(file, suffix, codec, size) {
   return compressed;
 }
 
-const root = process.argv[2] ?? 'dist/client';
+// `CLIENT_OUT_DIR` for the same reason `vite.config.ts` reads it: the gate builds a second,
+// dev-auth client into its own directory, and the sidecars have to land beside the chunks they
+// compress rather than beside the production build's.
+const root = process.argv[2] ?? process.env.CLIENT_OUT_DIR ?? 'dist/client';
 let raw = 0;
 let gzipped = 0;
 let files = 0;

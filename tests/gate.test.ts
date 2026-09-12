@@ -107,6 +107,33 @@ describe('the gate definition', () => {
   it('gives every step a reason, so --list is readable by somebody who did not write it', () => {
     for (const step of STEPS) expect(step.why.length, step.name).toBeGreaterThan(20);
   });
+
+  it('never builds the dev-auth bundle over the one `npm start` serves, and says so at the end', () => {
+    // Driven before this: a green `npm run ci` left `dist/client/assets/devAuth-*.js` in place,
+    // because `dev-auth-build` wrote over `dist/client` and no later step rebuilt it — and
+    // `npm start` is `node dist/server.js` with `CLIENT_DIR` defaulting to that directory. The
+    // browser suite legitimately needs that bundle; nothing needs it *there*.
+    //
+    // Two halves, because either alone comes back: no build step that opts into dev auth may write
+    // to the production directory, and the gate's own last act is to assert that directory is
+    // clean — which is the step that would have failed the day this was introduced.
+    const builds = STEPS.filter(
+      (step) => step.env?.ALLOW_DEV_AUTH === 'true' && step.run.startsWith('build'),
+    );
+    expect(builds.length).toBeGreaterThan(0);
+    for (const step of builds) {
+      expect(
+        step.env?.CLIENT_OUT_DIR,
+        `${step.name} must build somewhere other than dist/client`,
+      ).toBeDefined();
+      expect(step.env?.CLIENT_OUT_DIR).not.toBe('dist/client');
+    }
+
+    const last = STEPS[STEPS.length - 1];
+    expect(last?.run).toBe('check:no-dev-auth');
+    expect(last?.env?.ALLOW_DEV_AUTH, 'the last step reads the production bundle').toBeUndefined();
+    expect(last?.env?.CLIENT_DIR, 'the last step reads the default client dir').toBeUndefined();
+  });
 });
 
 describe('both pipelines call the one definition', () => {

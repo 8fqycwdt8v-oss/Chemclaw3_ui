@@ -298,3 +298,110 @@ rule is that it holds without anyone having to know which ids are safe.
   re-download). Both pipelines install it in the step before the gate.
 - **The full-stack Playwright config stays out of the gate**, for the reason it was already out of
   it: it needs four repositories running.
+
+---
+
+# Wave: what an adversarial review found in the gate that was just merged
+
+A fresh-context review of `11a2771` drove every claim rather than reading it, and found the
+encoding half complete and correct (19 segments in `src/`, all encoded, no double-encoding, the
+deep-link round trip exact) and **three of the new meta-tests passing with their subject deleted**.
+That is the specific failure this wave is about: a test that cannot fail is worse than an absent
+one, because it is counted.
+
+## Item 1 — three assertions that passed with their subject broken
+
+- [x] **`gate.test.ts` pinned a `console.log`, not a call.** `code()` strips comments, and the fix
+      that introduced it was measured against a comment — but `check-container.mjs:75` _prints_
+      `scripts/check-serving.mjs` in its skip branch, so replacing the real invocation with
+      `{ status: 0 }` left the suite green and deleted the only end-to-end check that the proxy
+      whitelist refuses `/api/metrics`. `tests/scriptInvocations.ts` asks the TypeScript parser
+      which names are _arguments of a call_, skipping `console.*`; the Jenkinsfile half is pinned as
+      a shell command line, since there is no parser to ask there. The docstring that claimed the
+      defect was measured and fixed now says which half of it was.
+- [x] **`delivery.test.ts` read the script's text for four probe strings.** `${base}/healthz`
+      occurs twice in `check-serving.mjs` — once in the readiness loop, once in assertion §1 — so
+      deleting §1 passed, while `/api/metrics`, which occurs once, was caught. No text-presence test
+      can see `if (true)` put in place of `if (res.status === 404)` either. The four promises are
+      driven now: the script runs against a healthy stub server and against four that each break
+      exactly one promise.
+- [x] **Nothing pinned `CI_REQUIRE_CONTAINER: '1'`.** The workflow sets it beside
+      `CONTAINER_RUNTIME: docker`; the test pinned only the second, so deleting the line that _arms_
+      the container job was green while the cosmetic half of the same env block was held.
+
+## Item 2 — two guards that recognised a spelling rather than a shape
+
+- [x] **The inline-assertion rule was a four-item blacklist.** `wget … | tee`, `node --eval "…"`
+      and `test -f … || exit 1` all walked past it, the second being the `node -e` probe the rule
+      names, three characters apart. The workflow's steps are an **allowlist** now — install, or run
+      a named script — because every step there is of one shape. The Jenkinsfile stays a blacklist,
+      widened, and says why in its own docstring: its shell legitimately builds, publishes and
+      deploys, so an allowlist there would be re-approved on every delivery change until it meant
+      nothing. The one allowlist that does carry into both: `node` may only run a file under
+      `scripts/`.
+- [x] **The orphan guard keyed on the `check:`/`check-` prefixes.** An unreachable
+      `"verify:thing": "node scripts/verify-thing.mjs"` was invisible to it. It derives from shape
+      now — an npm script that runs a non-tooling `scripts/*.mjs`, and every `.mjs` in that
+      directory — with the four build/dev helpers named as the exception list, so a new script is an
+      assertion until somebody writes it down.
+
+## Item 3 — the encoding rule was a rule for template literals in two kinds of file
+
+- [x] **String concatenation is scanned too.** `request('/jobs/' + jobId + '/artifacts', …)` is the
+      same construct written the other way and passed the whole rule, with no ESLint error (neither
+      `prefer-template` nor `restrict-plus-operands` is configured here).
+- [x] **A `/api/…` literal is in scope wherever it is written.** `src/env.ts` makes `/api` the
+      _default_ value of `apiBase`, so a new file could reach the service without ever naming the
+      setting the scope predicate keyed on.
+- [x] **A hoisted encode is no longer a false positive.** `const segment = encodeURIComponent(id)`
+      was flagged with a message naming `encodeURIComponent`, so the cheapest way to green was to
+      wrap it twice — and `a%2Fb` → `a%252Fb` reaches the service as a different id. A rule whose
+      shortest fix is a defect manufactures defects.
+
+## Item 4 — two things that were true of the tree rather than of a test
+
+- [x] **`npm run ci` left `dist/client` carrying the dev auth provider.** The dev-auth build
+      overwrote it and nothing rebuilt it — driven after a green gate: `assert-no-dev-auth` named
+      `dist/client/assets/devAuth-BL8vWuWW.js`, and `npm start` serves that directory. The two
+      artifacts have two directories now (`CLIENT_OUT_DIR`), and a final `dist-clean` step asserts
+      the production one is clean. The ordering pre-dated the gate PR; what that PR changed was to
+      make it the advertised one-command local gate, which is what put it in reach.
+- [x] **`..%2F..%2F` reached the upstream still-encoded** through `NOTE`/`JOB`/`PENDING`, whose
+      character class admits `.` and `%`. Harmless against a direct uvicorn + Starlette service,
+      which decodes once into a `[^/]+` parameter — but that is a property of the _upstream_, and
+      `server/routes.ts` stated it as a property of itself, while any ingress doing
+      `UNESCAPE_AND_FORWARD` makes it real with this process being the one believed to have stopped
+      it. `refusesTraversal` decides it here; driven through the real `createRequestListener()`, the
+      four probes 404 and reach no upstream, and a Löslichkeit slug still passes.
+
+## Item 5 — the two present-tense claims, and one known flake
+
+- [x] **`check:live` is recorded as operator-run.** No pipeline calls it and none ever did, so
+      `smoke` and `check:openapi` have a named home and no schedule. README and ISSUES said the
+      orphan was solved; they now say which half. A test fails if either pipeline starts naming
+      `check:live`, so the day it is wired in, the prose has to move with it.
+- [x] **`resultCaps.test.tsx`'s 2,000-row test has a stated timeout.** Measured at 2,271 ms alone
+      against vitest's default 5,000, which is not enough margin under suite contention — the review
+      saw it time out during a concurrent container build. 20,000 ms, with the measurement in the
+      comment, rather than an unnamed flake.
+
+## What is deliberately not done
+
+- **`check:live` is not wired into a scheduled workflow.** It needs a live Chemclaw3 service, which
+  no push runner and no schedule here has; a job that cannot reach one would be permanently red or
+  taught to pass without running, which is what those two scripts exist to refuse. So the decision
+  is recorded in code and prose instead of being described as solved.
+- **The Jenkinsfile's shell is not an allowlist**, for the reason above.
+- **A NUL or a control character in a note id is still forwarded.** `%00` is not traversal, and
+  widening the refusal to a character policy is a different change with a different blast radius
+  than the one this review measured.
+
+---
+
+## Review
+
+Everything above was driven. Each test added or changed was mutation-tested by breaking the
+production code it protects, confirming red, and restoring from a backup kept outside the tree —
+16 mutations in all, including the three from the review that reproduced exactly, and the
+already-passing ones re-run to confirm no regression. The one "mutation" whose correct result is
+green is the hoisted `encodeURIComponent`, which is correct code that used to fail.

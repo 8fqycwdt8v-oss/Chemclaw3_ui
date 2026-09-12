@@ -288,6 +288,10 @@ check:live` together with `check:openapi` — deliberately outside `npm run ci`,
   learn to run past. `tests/gate.test.ts` holds that decision in both directions: they must be in
   `check:live`, and they must not be steps of the offline gate. Before this they were scripts with a
   name, a docstring and no caller at all.
+  **What that did not do is make them run.** `check:live` is operator-run and no pipeline calls it,
+  so these two still execute only when somebody types them against a live stack — which is what
+  this row is about and why it is still open. `tests/gate.test.ts` fails if a pipeline starts
+  naming `check:live`, so the day that changes, this paragraph has to change with it.
 - **The structure sketcher has no accessible path, and will not get one here.** The canvas is
   Ketcher — a third-party WASM editor driven by a pointer. Radix's Dialog wraps the _chrome_ in a
   focus trap, an Escape handler and `aria-modal`; it does not make the drawing surface navigable by

@@ -247,9 +247,17 @@ There is **one** gate definition, `scripts/ci.mjs`, and neither pipeline is allo
 second edition of it. Assertions that used to be inline shell in `.github/workflows/ci.yml` — the
 `/config.js` reference, the MSAL entry-chunk probe, running `dist/server.js` with no
 `node_modules`, and the container's four `curl`s — are named npm scripts now, so a contributor can
-run them without copy-pasting YAML. `tests/gate.test.ts` fails if an assertion reappears in a
-pipeline, if a step names a script that does not exist, or if a `check:` script is wired into
-nothing.
+run them without copy-pasting YAML. `tests/gate.test.ts` fails if a step names a script that does
+not exist, if a workflow step is anything but an install or a named script, if either pipeline runs
+`node` on anything but a file under `scripts/`, if the Jenkinsfile's shell grows one of the
+assertion spellings, or if any script under `scripts/` is reachable from no composer — that last
+one by shape rather than by the `check:` prefix, so a `verify-*` script is held to it too.
+
+The gate leaves `dist/client` as a **production** bundle. The browser suite needs one built with
+`ALLOW_DEV_AUTH=true`, and that build goes to `dist/client-dev-auth`: it used to be written over
+`dist/client` with nothing rebuilding it, so `npm run ci && npm start` served a bundle that can
+hand out unauthenticated sessions. The gate's last step asserts the production directory is clean,
+which is the half that stops it coming back.
 
 The individual steps, for when you want one:
 
@@ -270,6 +278,11 @@ npm run test:e2e        # Playwright — layout, focus, keyboard, theme, mobile 
 Chemclaw3 service and both exit non-zero when they cannot reach one, which is the honest behaviour
 for a check whose whole argument is that reporting a pass it did not perform is worse than nothing.
 They are `npm run check:live`, which is where to run them once a service is up.
+
+**`check:live` is operator-run, and no pipeline calls it.** That is the whole of its status: it
+gives the two scripts a name a person can type, and it does not put them on any schedule — a push
+runner has no service to point them at. `tests/gate.test.ts` asserts both halves, the second by
+failing if either pipeline starts naming it, so wiring it in means coming back to this paragraph.
 
 `check:contrast` converts OKLCH to sRGB rather than comparing lightness values: OKLCH's `L` is
 perceptual and WCAG is defined on sRGB relative luminance, so two tokens that look far apart can
@@ -308,8 +321,9 @@ Two checks there are deliberately _not_ copies of the GitHub job, because they r
   GitHub container job runs: how an image is _built_ legitimately differs per pipeline, what it
   must serve does not.
 
-`npm run smoke` and `npm run check:openapi` remain the two checks that need a live service; see
-Testing above for why they are out of the gate and where they live instead.
+`npm run smoke` and `npm run check:openapi` remain the two checks that need a live service, run by
+an operator rather than by either pipeline; see Testing above for why they are out of the gate and
+what `check:live` is and is not.
 
 This repository ships no chart, so a rollout is `oc set image` against a Deployment an operator
 created. The four-repository release, its ordering (the UI last — it is useless before the API it

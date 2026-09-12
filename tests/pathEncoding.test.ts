@@ -58,16 +58,31 @@ function sources(dir = '', out: string[] = []): string[] {
 
 const read = (path: string): string => readFileSync(join(SRC, path), 'utf8');
 
-/** Files that can build a URL against the service. */
+/**
+ * Files that can build a URL against the service **by naming its base**.
+ *
+ * Necessary and not sufficient, which is the escape this predicate had on its own: `src/env.ts`
+ * makes `/api` the *default* value of `apiBase`, so a same-origin absolute literal reaches the BFF
+ * without the file ever mentioning `apiBase`. Measured — a new
+ * `fetch(\`/api/jobs/${jobId}/artifacts\`)` in a hook passed. So the file-level scope below is
+ * joined by a *segment*-level one: a template or concatenation whose leading literal begins with
+ * `/api/` is a service URL wherever it is written.
+ */
 const inScope = sources().filter(
   (path) => path.startsWith('api/') || read(path).includes('apiBase'),
 );
+const inScopeFiles = new Set(inScope);
+
+/** The prefix that makes a URL this app's service URL regardless of which file wrote it. */
+const SAME_ORIGIN_SERVICE = '/api/';
 
 interface Segment {
   file: string;
   line: number;
   text: string;
   encoded: boolean;
+  /** True when this segment is a service URL's — either by its file or by its own `/api/` head. */
+  service: boolean;
 }
 
 /**
@@ -76,6 +91,13 @@ interface Segment {
  * The TypeScript parser rather than a regex: `encodeURIComponent(a ? b : c)` and a nested template
  * both defeat text matching, and the point of the rule is that it cannot be satisfied by looking
  * right.
+ *
+ * **Two shapes, because a rule about template literals is a rule about template literals.**
+ * `segments()` visited only `ts.isTemplateExpression`, so — measured, and ESLint-clean, since
+ * neither `prefer-template` nor `restrict-plus-operands` is configured here —
+ * `request('/jobs/' + jobId + '/artifacts', …)` passed the whole rule. A `+` chain whose left side
+ * is a string literal ending in `/` is the same construct written the other way, and is scanned
+ * the same way.
  */
 function segments(file: string): Segment[] {
   const source = ts.createSourceFile(
@@ -87,27 +109,76 @@ function segments(file: string): Segment[] {
   );
   const found: Segment[] = [];
 
+  /**
+   * Names bound to an `encodeURIComponent(…)` call in this file.
+   *
+   * Hoisting the encode one line — `const segment = encodeURIComponent(jobId)` — is correct code,
+   * and the scan used to flag it with a message naming `encodeURIComponent`, so the shortest route
+   * to green was to wrap it a second time. Double-encoding is silent and wrong: `a%2Fb` becomes
+   * `a%252Fb`, which reaches the service as a different id. A rule whose cheapest fix is a defect
+   * is a rule that manufactures defects.
+   */
+  const encodedNames = new Set<string>();
+  const collectEncodedNames = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      isEncodeCall(node.initializer)
+    ) {
+      encodedNames.add(node.name.text);
+    }
+    ts.forEachChild(node, collectEncodedNames);
+  };
+  collectEncodedNames(source);
+
+  const isEncoded = (expression: ts.Expression): boolean =>
+    isEncodeCall(expression) || (ts.isIdentifier(expression) && encodedNames.has(expression.text));
+
+  const record = (
+    expression: ts.Expression,
+    before: string,
+    service: boolean,
+    text: string,
+  ): void => {
+    found.push({
+      file,
+      line: source.getLineAndCharacterOfPosition(expression.getStart(source)).line + 1,
+      text,
+      encoded: isEncoded(expression),
+      service: service || before.startsWith(SAME_ORIGIN_SERVICE),
+    });
+  };
+
   const visit = (node: ts.Node): void => {
     if (ts.isTemplateExpression(node)) {
-      let before = node.head.text;
+      const head = node.head.text;
+      let before = head;
       let seenQuery = before.includes('?');
       for (const span of node.templateSpans) {
         const isSegment = !seenQuery && /^[^\s?]*\/$/.test(before);
         if (isSegment) {
-          const call = span.expression;
-          const encoded =
-            ts.isCallExpression(call) &&
-            ts.isIdentifier(call.expression) &&
-            call.expression.text === 'encodeURIComponent';
-          found.push({
-            file,
-            line: source.getLineAndCharacterOfPosition(span.getStart(source)).line + 1,
-            text: `${before}\${${span.expression.getText(source)}}`,
-            encoded,
-          });
+          record(
+            span.expression,
+            before,
+            head.startsWith(SAME_ORIGIN_SERVICE),
+            `${before}\${${span.expression.getText(source)}}`,
+          );
         }
         before = span.literal.text;
         seenQuery ||= before.includes('?');
+      }
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+      const before = literalEnding(node.left);
+      if (before !== null && /^[^\s?]*\/$/.test(before)) {
+        const head = chainHead(node);
+        record(
+          node.right,
+          before,
+          head !== null && head.startsWith(SAME_ORIGIN_SERVICE),
+          `${before}' + ${node.right.getText(source)}`,
+        );
       }
     }
     ts.forEachChild(node, visit);
@@ -117,7 +188,53 @@ function segments(file: string): Segment[] {
   return found;
 }
 
-const all = inScope.flatMap(segments);
+/** `encodeURIComponent(x)`, the only call this rule accepts. */
+function isEncodeCall(expression: ts.Expression): boolean {
+  return (
+    ts.isCallExpression(expression) &&
+    ts.isIdentifier(expression.expression) &&
+    expression.expression.text === 'encodeURIComponent'
+  );
+}
+
+/** The string literal a `+` chain's left side ends with, if it ends with one. */
+function literalEnding(expression: ts.Expression): string | null {
+  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+    return expression.text;
+  }
+  if (
+    ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    return literalEnding(expression.right);
+  }
+  return null;
+}
+
+/** The leftmost string literal of a `+` chain — the URL's head, when there is one. */
+function chainHead(expression: ts.Expression): string | null {
+  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+    return expression.text;
+  }
+  if (
+    ts.isBinaryExpression(expression) &&
+    expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    return chainHead(expression.left);
+  }
+  return null;
+}
+
+/**
+ * Every path segment this rule covers.
+ *
+ * Scanned over **all** of `src/`, then narrowed: in a file that names the service's base, every
+ * path segment counts; in any other file, only one whose URL starts with `/api/`. The second half
+ * is what makes the rule hold for a call site written without `apiBase` at all.
+ */
+const all = sources()
+  .flatMap(segments)
+  .filter((segment) => inScopeFiles.has(segment.file) || segment.service);
 
 describe('service URL path segments', () => {
   it('finds path segments to check at all', () => {
@@ -131,7 +248,9 @@ describe('service URL path segments', () => {
     const raw = all.filter((segment) => !segment.encoded);
     expect(
       raw.map((segment) => `src/${segment.file}:${segment.line}  ${segment.text}`),
-      'an interpolated path segment must go through encodeURIComponent — see this file’s docstring',
+      'an interpolated path segment must reach the service encoded: wrap it in encodeURIComponent, ' +
+        'or bind it to a name that already is (`const id = encodeURIComponent(raw)`). Do not wrap ' +
+        'a value that is already encoded — see this file’s docstring',
     ).toEqual([]);
   });
 });

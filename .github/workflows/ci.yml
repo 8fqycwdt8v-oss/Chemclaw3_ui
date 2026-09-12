@@ -32,6 +32,15 @@ permissions:
   contents: read
 
 jobs:
+  # One assertion step, because the gate is `scripts/ci.mjs` and this file no longer describes it.
+  # Everything that used to be inline shell here — the `/config.js` reference, the MSAL entry-chunk
+  # probe and its positive control, the standalone-bundle run — is a named npm script a contributor
+  # can type, and `npm run ci` is the order they run in. `npm run ci -- --list` prints the list with
+  # the reason for each. The steps around it are checkout, install and provisioning, which are this
+  # runner's business and nobody's assertions.
+  #
+  # The rule this encodes: a pipeline may decide *where* a step runs. It may not decide *what* the
+  # step asserts. `tests/gate.test.ts` fails if an assertion reappears in this file.
   check:
     runs-on: ubuntu-latest
     steps:
@@ -43,135 +52,13 @@ jobs:
 
       - run: npm ci
 
-      # A vulnerability gate scoped to the closure that actually ships, and the scope is the whole
-      # design of it. `npm audit` over the full tree finds two advisories today — one critical
-      # (happy-dom, the vitest DOM) and one high (nanoid, reached through vite → postcss) — and
-      # neither is reachable by anything a browser loads: both are devDependencies of the build and
-      # test toolchain. A gate that is red on the day it is added for code that never leaves CI is
-      # the gate a team learns to rerun past, and an ignored gate is worse than no gate, because it
-      # also reports a control that does not exist.
-      #
-      # So: `--omit=dev` narrows it to the production closure — which is where the interesting
-      # surface is anyway (Ketcher and its Indigo WASM, RDKit's WASM, @azure/msal-browser), all of
-      # it downloaded and executed in a chemist's browser — and `--audit-level=high` fails on high
-      # and critical only. That closure is at 0 vulnerabilities, so this step starts green and any
-      # red it goes is news.
-      #
-      # Dev advisories are deliberately not gated *here* rather than unwatched: GitHub's Dependabot
-      # alerts see the whole tree, and its security updates open the bump PR regardless of the
-      # grouping in `.github/dependabot.yml` — which is the half that decides how long the window
-      # between "we know" and "it is fixed" is.
-      - name: Audit the production dependency closure
-        run: npm audit --omit=dev --audit-level=high
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      # exhaustive-deps above all: a stale closure in an effect fails intermittently, which is the
-      # worst way for a bug to fail and the hardest to catch in review.
-      - name: Lint
-        run: npm run lint
-
-      - name: Format
-        run: npm run format:check
-
-      - name: Unit tests
-        run: npm test
-
-      # Cheap, and the failure mode it catches (a token pair that reads fine and measures 2:1)
-      # is invisible in review.
-      - name: Contrast
-        run: npm run check:contrast
-
-      - name: Build
-        run: npm run build
-
-      # The three checks below guard properties no unit test can see, because they are facts about
-      # the *bundle* rather than about any module.
-
-      - name: The runtime config script survives bundling
-        run: |
-          # Vite warns rather than fails when it cannot bundle a non-module script, so a refactor
-          # could silently drop this tag — and the app would then read its MSAL settings from
-          # nothing, in production only.
-          grep -q 'src="/config.js"' dist/client/index.html \
-            || { echo "::error::index.html no longer loads /config.js"; exit 1; }
-          echo "ok: /config.js is still referenced"
-
-      - name: MSAL stays out of the entry chunk
-        run: |
-          # Auth is a seam with two implementations, and the dev path must not pay for the one it
-          # never uses. A static import would quietly pull ~230 kB of MSAL into every first load.
-          #
-          # The probe is `PublicClientApplication`, a class from @azure/msal-browser. Grepping for
-          # "msal" would false-positive on this app's own `authMode === 'msal'` comparisons and on
-          # the lazy chunk's filename, both of which legitimately appear in the entry.
-          entry=$(node -e "
-            const fs=require('fs');
-            const html=fs.readFileSync('dist/client/index.html','utf8');
-            const m=html.match(/src=\"(\/assets\/index-[^\"]+\.js)\"/);
-            if(!m){console.error('could not find the entry chunk in index.html');process.exit(1)}
-            process.stdout.write('dist/client'+m[1]);
-          ")
-          echo "entry chunk: $entry"
-
-          if grep -q 'PublicClientApplication' "$entry"; then
-            echo "::error::MSAL is inlined into the entry chunk — it must stay dynamically imported"
-            exit 1
-          fi
-
-          # Positive control: if MSAL is in no chunk at all, the probe string has gone stale and the
-          # check above would be passing for the wrong reason.
-          if ! grep -lq 'PublicClientApplication' dist/client/assets/*.js 2>/dev/null; then
-            echo "::error::MSAL was not found in any chunk — this check has stopped testing anything"
-            exit 1
-          fi
-          echo "ok: MSAL is present, and only in a lazily-loaded chunk"
-
-      - name: The server bundle runs with no node_modules
-        run: |
-          # The container's runtime stage copies dist/ and nothing else — esbuild is expected to
-          # have inlined sirv. Anything it failed to inline would surface only as a crash on
-          # deploy, so prove it here by running the bundle from a temp directory with no
-          # node_modules anywhere above it. (A temp copy rather than deleting node_modules in
-          # place, so this step stays order-independent.)
-          workdir=$(mktemp -d)
-          cp -r dist "$workdir/dist"
-          cd "$workdir"
-
-          PORT=8788 BIND_HOST=127.0.0.1 CLIENT_DIR=dist/client \
-            CHEMCLAW_API_URL=http://127.0.0.1:9 LOG_LEVEL=error \
-            node dist/server.js &
-          server=$!
-          trap 'kill $server 2>/dev/null || true' EXIT
-
-          for i in $(seq 1 20); do
-            curl -sf http://127.0.0.1:8788/healthz >/dev/null && break || sleep 0.5
-          done
-
-          curl -sf http://127.0.0.1:8788/healthz | grep -q '"ok"' \
-            || { echo "::error::the standalone server bundle did not answer /healthz"; exit 1; }
-          echo "ok: server bundle runs with no node_modules"
-
-      - name: No dev auth provider in a default production bundle
-        run: npm run check:no-dev-auth
-
+      # Provisioning a browser is an agent concern, not an assertion, so it stays in the pipeline:
+      # the e2e step inside the gate runs `playwright test` and expects one to be here already.
       - name: Install Playwright browser
         run: npx playwright install --with-deps chromium
 
-      # The e2e suite drives a production build unauthenticated, so it needs a bundle that was
-      # built to permit the dev provider — which is the opt-in path, and therefore the other
-      # direction of the check above. Asserting it here means neither direction can rot: a
-      # define that stopped working fails the step before this one, and a marker string that
-      # went stale fails this one.
-      - name: Rebuild the client with dev auth permitted, for the browser suite
-        run: ALLOW_DEV_AUTH=true npm run build:client
-
-      - name: The opt-in build really does carry it
-        run: ALLOW_DEV_AUTH=true npm run check:no-dev-auth
-
-      - name: Browser tests
-        run: npm run test:e2e
+      - name: The gate
+        run: npm run ci
 
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -181,10 +68,13 @@ jobs:
           retention-days: 7
 
   container:
-    # The whole point of this repo is co-deployment, so a Dockerfile that no longer builds is a real
-    # break even when every test above passes. Nothing else in this workflow exercises the image:
-    # the `check` job runs the bundle directly, which proves esbuild inlined sirv but not that the
-    # multi-stage build still produces a dist/ worth copying.
+    # The other half of the gate definition, on its own runner for the parallelism and for buildx's
+    # layer cache. The image is built here — how an image is built legitimately differs per pipeline
+    # — and then `npm run ci:container` asserts what it serves, which does not differ: those four
+    # assertions are `scripts/check-serving.mjs`, the same file the Jenkins pipeline runs against
+    # the image it is about to publish.
+    #
+    # CI_REQUIRE_CONTAINER=1 because absent Docker is a skip locally and a broken agent here.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -201,29 +91,12 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: The container serves the SPA and its runtime config
-        run: |
-          # ALLOW_INSECURE_AUTH because the container binds 0.0.0.0 in dev auth mode, which the BFF
-          # now refuses to serve unless the exposure is declared. The image itself is built with
-          # the default ALLOW_DEV_AUTH=false, so its bundle carries no dev provider — the SPA would
-          # refuse to start a session. That is fine and deliberate here: every assertion below is
-          # about the server, and the one about the SPA is that the fallback serves its HTML.
-          docker run -d --name ui -p 8080:8080 \
-            -e AUTH_MODE=dev -e ALLOW_INSECURE_AUTH=true \
-            -e CHEMCLAW_API_URL=http://127.0.0.1:9 chemclaw3-ui:ci
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8080/healthz >/dev/null && break || sleep 1
-          done
-          curl -sf http://127.0.0.1:8080/healthz | grep -q '"ok"' \
-            || { echo "::error::/healthz did not answer"; docker logs ui; exit 1; }
-          # One image, any tenant: config comes from the environment at request time.
-          curl -sf http://127.0.0.1:8080/config.js | grep -q '__CHEMCLAW_CONFIG__' \
-            || { echo "::error::/config.js did not render"; docker logs ui; exit 1; }
-          # SPA fallback, so a deep link, a /c/:id route or the MSAL redirect URI resolves.
-          curl -sf -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/auth/callback | grep -q 200 \
-            || { echo "::error::SPA fallback is broken"; docker logs ui; exit 1; }
-          # The proxy whitelist must refuse a service route the UI never calls.
-          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/metrics)
-          [ "$code" = "404" ] || { echo "::error::/api/metrics was not blocked (got $code)"; exit 1; }
-          docker rm -f ui
-          echo "ok: container serves the app, its config, the SPA fallback, and blocks un-whitelisted routes"
+      - name: The container serves the SPA, its runtime config, and nothing it should not
+        env:
+          CI_REQUIRE_CONTAINER: '1'
+          SKIP_IMAGE_BUILD: '1'
+          # buildx loaded the image into the Docker daemon's store, so Docker is the runtime that
+          # holds it. Without this the script autodetects, finds podman (which ubuntu-latest also
+          # ships), looks in an empty store and tries to pull `chemclaw3-ui:ci` from a registry.
+          CONTAINER_RUNTIME: docker
+        run: npm run ci:container

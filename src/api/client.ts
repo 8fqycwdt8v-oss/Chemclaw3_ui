@@ -535,7 +535,7 @@ function upload(
 
   return new Promise<AttachmentSummary>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${config.apiBase}/sessions/${sessionId}/attachments`);
+    xhr.open('POST', `${config.apiBase}/sessions/${encodeURIComponent(sessionId)}/attachments`);
     xhr.responseType = 'json';
     xhr.setRequestHeader('accept', 'application/json');
     if (token) xhr.setRequestHeader('authorization', `Bearer ${token}`);
@@ -683,10 +683,14 @@ export const api = {
     options: { keepalive?: boolean } = {},
   ): Promise<boolean> {
     try {
-      await request<{ stopped: boolean }>(`/sessions/${sessionId}/turn/stop`, getToken, {
-        method: 'POST',
-        ...(options.keepalive ? { keepalive: true } : {}),
-      });
+      await request<{ stopped: boolean }>(
+        `/sessions/${encodeURIComponent(sessionId)}/turn/stop`,
+        getToken,
+        {
+          method: 'POST',
+          ...(options.keepalive ? { keepalive: true } : {}),
+        },
+      );
       return true;
     } catch (err) {
       if (err instanceof ApiError && err.kind === 'session_not_found') return false;
@@ -698,7 +702,7 @@ export const api = {
    *  route, or a session whose history is gone, yields an empty transcript rather than an error. */
   getMessages(sessionId: string, getToken: TokenGetter): Promise<TranscriptMessage[]> {
     return orEmpty('/sessions/{id}/messages', () =>
-      request<TranscriptMessage[]>(`/sessions/${sessionId}/messages`, getToken),
+      request<TranscriptMessage[]>(`/sessions/${encodeURIComponent(sessionId)}/messages`, getToken),
     );
   },
 
@@ -740,7 +744,7 @@ export const api = {
    */
   getToolResult(sessionId: string, ref: string, getToken: TokenGetter): Promise<StoredToolResult> {
     return contentAddressed<StoredToolResult>(
-      `/sessions/${sessionId}/tool-results/${ref}`,
+      `/sessions/${encodeURIComponent(sessionId)}/tool-results/${encodeURIComponent(ref)}`,
       getToken,
     );
   },
@@ -897,7 +901,7 @@ export const api = {
 
   /** The plan a session is proposing, read for the hash that binds a decision to it. */
   getPlan(sessionId: string, getToken: TokenGetter): Promise<PlanStatus> {
-    return request<PlanStatus>(`/sessions/${sessionId}/plan`, getToken);
+    return request<PlanStatus>(`/sessions/${encodeURIComponent(sessionId)}/plan`, getToken);
   },
 
   /**
@@ -938,7 +942,7 @@ export const api = {
     // below from being a staleness window on the one action that invalidates it.
     pendingPlansCache = null;
     try {
-      await request<void>(`/sessions/${sessionId}/plan/decision`, getToken, {
+      await request<void>(`/sessions/${encodeURIComponent(sessionId)}/plan/decision`, getToken, {
         method: 'POST',
         body: JSON.stringify({ approved, plan_hash: planHash }),
       });

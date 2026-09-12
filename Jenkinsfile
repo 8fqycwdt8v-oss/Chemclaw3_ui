@@ -1,9 +1,13 @@
 // Delivery for the ChemClaw3 frontend: build the image, prove it serves, publish it by digest,
 // and roll it out.
 //
-// `.github/workflows/ci.yml` is the gate and stays the gate — typecheck, lint, format, unit tests,
-// contrast, the bundle-shape checks, Playwright, and a container job that builds the image and
-// exercises it. What it cannot do is push anywhere or reach a cluster. That is this file.
+// `npm run ci` is the gate and stays the gate, and `.github/workflows/ci.yml` is where it runs on
+// every push. What a pipeline cannot do is push anywhere or reach a cluster. That is this file.
+//
+// Neither file describes the gate any more. Both call `scripts/ci.mjs`, which is the single
+// definition, and the serving assertions below are `scripts/check-serving.mjs` — also called from
+// the GitHub container job. `tests/gate.test.ts` fails if either pipeline grows an assertion of
+// its own again.
 //
 // One thing here is *stronger* than the GitHub job rather than a copy of it: the dev-auth assertion
 // runs against the **published image's** bundle rather than the workspace's `dist/`. Those are
@@ -61,15 +65,21 @@ pipeline {
       }
     }
 
+    // `npm run ci` is the whole gate — the same one `.github/workflows/ci.yml` runs, because it is
+    // the same file (`scripts/ci.mjs`). This stage used to list six commands of its own and was
+    // therefore a second, narrower gate: no `npm audit`, no contrast check, no browser suite. Two
+    // gates over one repository drift, and the quieter one silently becomes what the bar is.
+    //
+    // Still off by default: GitHub Actions is the gate, and this pipeline's job is to build,
+    // verify and ship the image. What changed is that turning it on now runs the real thing.
     stage('Gate') {
       when { expression { params.RUN_GATE } }
       steps {
         sh 'npm ci'
-        sh 'npm run typecheck'
-        sh 'npm run lint'
-        sh 'npm run format:check'
-        sh 'npm test'
-        sh 'npm run build'
+        // Provisioning a browser is an agent concern, not an assertion — the same split
+        // `.github/workflows/ci.yml` makes. Without `--with-deps`, which needs root.
+        sh 'npx playwright install chromium'
+        sh 'npm run ci'
       }
     }
 
@@ -128,11 +138,16 @@ pipeline {
       }
     }
 
-    // The container serves the SPA, its runtime config and nothing it should not. Same four
-    // assertions the GitHub container job makes, made here of the artifact that is about to be
-    // published — the proxy whitelist one especially, since it is the only thing standing between
-    // the browser and every backend route the BFF could otherwise forward. Same kaniko carve-out
-    // as the stage above, for the same reason.
+    // The container serves the SPA, its runtime config and nothing it should not. Literally the
+    // same four assertions the GitHub container job makes — `scripts/check-serving.mjs`, one file,
+    // called from both — made here of the artifact that is about to be published. They used to be
+    // a hand-written copy of that job's `curl`s, which is two assertions rather than one, and the
+    // proxy-whitelist one especially is worth not having a second edition of: it is the only thing
+    // standing between the browser and every backend route the BFF could otherwise forward.
+    //
+    // How the image got here still differs and should — buildah, podman or kaniko, possibly pulled
+    // back out of a registry. What it must serve does not. Same kaniko carve-out as the stage
+    // above, for the same reason.
     stage('The image serves') {
       when { expression { params.IMAGE_BUILDER != 'kaniko' || (!params.DRY_RUN && params.IMAGE_REGISTRY) } }
       steps {
@@ -147,17 +162,7 @@ pipeline {
             -e CHEMCLAW_API_URL=http://127.0.0.1:9 "${IMAGE_REF}")"
           trap '"${runner}" logs "${cid}"; "${runner}" rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
 
-          for _ in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8080/healthz >/dev/null && break || sleep 1
-          done
-          curl -sf http://127.0.0.1:8080/healthz | grep -q '"ok"'
-          # One image, any tenant: config is rendered from the environment at request time.
-          curl -sf http://127.0.0.1:8080/config.js | grep -q '__CHEMCLAW_CONFIG__'
-          # SPA fallback, so a deep link or the MSAL redirect URI resolves.
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/auth/callback)" = 200
-          # The proxy whitelist must refuse a service route the UI never calls.
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/metrics)" = 404
-          echo "the image serves the app, its config, the SPA fallback, and blocks un-whitelisted routes"
+          node scripts/check-serving.mjs http://127.0.0.1:8080
         '''
       }
     }

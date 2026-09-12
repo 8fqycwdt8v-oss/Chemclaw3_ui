@@ -231,14 +231,17 @@ async function openStream(
   while (!controller.signal.aborted) {
     try {
       const token = await auth.getAccessToken();
-      const res = await fetch(`${config.apiBase}/sessions/${sessionId}/events`, {
-        signal: controller.signal,
-        cache: 'no-store',
-        headers: {
-          accept: 'text/event-stream',
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
+      const res = await fetch(
+        `${config.apiBase}/sessions/${encodeURIComponent(sessionId)}/events`,
+        {
+          signal: controller.signal,
+          cache: 'no-store',
+          headers: {
+            accept: 'text/event-stream',
+            ...(token ? { authorization: `Bearer ${token}` } : {}),
+          },
         },
-      });
+      );
 
       // Over the per-user stream cap (`service_max_event_streams_per_user`, default 5, shared
       // across this account's tabs). Backing off hard is necessary but not sufficient: a silent

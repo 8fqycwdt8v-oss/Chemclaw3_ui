@@ -156,7 +156,7 @@ src/        the SPA — api/ auth/ state/ components/
   results/          the tool-result renderers, keyed on payload shape, and their registry
 shared/     the contracts mirrored by hand from the service — events.ts (the SSE union,
             from api/events.py) and protocols.ts (the experiment-design schemas)
-scripts/    dev launcher, server bundler, smoke test, contrast gate
+scripts/    the gate (ci.mjs) and its checks, dev launcher, server bundler, smoke test
 e2e/        Playwright specs and the SSE fixture service
 public/     theme boot script, favicon — served as-is by the BFF
 docs/       concept studies — what the chemistry surface is for, and what it still is not
@@ -236,12 +236,40 @@ probe or a load balancer at `/readyz`.
 ## Testing
 
 ```sh
-npm test               # vitest — store, stream parsing, route whitelist, component contracts
-npm run typecheck
-npm run lint           # eslint — react-hooks/exhaustive-deps above all, plus jsx-a11y
-npm run check:contrast # WCAG ratios for every token pair the UI composes, both themes
-npm run test:e2e       # Playwright — layout, focus, keyboard, theme, mobile drawer
+npm run ci             # the whole gate, in order — what both pipelines run
+npm run ci -- --list   # the steps, and why each one is there
+npm run ci -- bundle   # one step by name
+npm run ci:container   # build the image and assert it serves (skips without Docker)
+npm run ci:all         # both halves, locally
 ```
+
+There is **one** gate definition, `scripts/ci.mjs`, and neither pipeline is allowed to hold a
+second edition of it. Assertions that used to be inline shell in `.github/workflows/ci.yml` — the
+`/config.js` reference, the MSAL entry-chunk probe, running `dist/server.js` with no
+`node_modules`, and the container's four `curl`s — are named npm scripts now, so a contributor can
+run them without copy-pasting YAML. `tests/gate.test.ts` fails if an assertion reappears in a
+pipeline, if a step names a script that does not exist, or if a `check:` script is wired into
+nothing.
+
+The individual steps, for when you want one:
+
+```sh
+npm test                # vitest — store, stream parsing, route whitelist, component contracts
+npm run typecheck
+npm run lint            # eslint — react-hooks/exhaustive-deps above all, plus jsx-a11y
+npm run check:audit     # npm audit over the production closure only — see the workflow comment
+npm run check:contrast  # WCAG ratios for every token pair the UI composes, both themes
+npm run check:bundle    # /config.js survives bundling; MSAL stays out of the entry chunk
+npm run check:standalone# dist/server.js runs with no node_modules, as the image expects
+npm run check:no-dev-auth
+npm run check:serving   # the four promises a running UI makes, against any base URL
+npm run test:e2e        # Playwright — layout, focus, keyboard, theme, mobile drawer
+```
+
+`npm run smoke` and `npm run check:openapi` are deliberately **not** in the gate: both need a live
+Chemclaw3 service and both exit non-zero when they cannot reach one, which is the honest behaviour
+for a check whose whole argument is that reporting a pass it did not perform is worse than nothing.
+They are `npm run check:live`, which is where to run them once a service is up.
 
 `check:contrast` converts OKLCH to sRGB rather than comparing lightness values: OKLCH's `L` is
 perceptual and WCAG is defined on sRGB relative luminance, so two tokens that look far apart can
@@ -260,10 +288,12 @@ Everything else is verified against the real service.
 
 ## Delivery
 
-GitHub Actions is the gate — typecheck, lint, format, unit tests, contrast, the three bundle-shape
-checks, Playwright, and a container job. `Jenkinsfile` is the half it cannot do: publish the image
-to a registry and roll it out. It does not re-run the gate (`RUN_GATE` is an opt-in for a
-Jenkins-only estate), and it publishes **by digest** — a tag is a pointer, and a rollback that
+GitHub Actions is where the gate runs on every push; `npm run ci` is what it runs. `Jenkinsfile` is
+the half Actions cannot do: publish the image to a registry and roll it out. It does not re-run the
+gate by default (`RUN_GATE` is an opt-in for a Jenkins-only estate) — but when it does, it runs the
+same `npm run ci`, which it did not before: that stage used to list six commands of its own, with no
+`npm audit`, no contrast check and no browser suite, so a Jenkins-only estate was gated to a
+narrower bar than anybody said. It publishes **by digest** — a tag is a pointer, and a rollback that
 follows one fetches bytes nobody reviewed.
 
 Two checks there are deliberately _not_ copies of the GitHub job, because they run against the
@@ -274,7 +304,12 @@ Two checks there are deliberately _not_ copies of the GitHub job, because they r
   `npm run check:no-dev-auth` reads locally, and it is the one served to a chemist;
 - **the container serves** `/healthz`, `/config.js`, the SPA fallback, and refuses `/api/metrics` —
   the proxy whitelist being the only thing between the browser and every route the BFF could
-  otherwise forward.
+  otherwise forward. Those four assertions are `scripts/check-serving.mjs`, the same file the
+  GitHub container job runs: how an image is _built_ legitimately differs per pipeline, what it
+  must serve does not.
+
+`npm run smoke` and `npm run check:openapi` remain the two checks that need a live service; see
+Testing above for why they are out of the gate and where they live instead.
 
 This repository ships no chart, so a rollout is `oc set image` against a Deployment an operator
 created. The four-repository release, its ordering (the UI last — it is useless before the API it

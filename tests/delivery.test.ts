@@ -39,8 +39,15 @@ describe('the Jenkins pipeline', () => {
   });
 
   it('proves the published image serves, rather than trusting the build', () => {
+    // The four probes used to be `curl`s written out in this pipeline, and a second copy of them
+    // was written out in `.github/workflows/ci.yml`. They are one file now, called from both, so
+    // this follows the indirection rather than re-stating it — and asserts the file it lands in
+    // really does make all four, because "the pipeline calls a script" is a shape assertion until
+    // somebody checks what the script asks for.
+    expect(pipeline).toContain('scripts/check-serving.mjs');
+    const serving = readFileSync('scripts/check-serving.mjs', 'utf8');
     for (const probe of ['/healthz', '/config.js', '/auth/callback', '/api/metrics']) {
-      expect(pipeline, `the image is never asked for ${probe}`).toContain(probe);
+      expect(serving, `the image is never asked for ${probe}`).toContain(`\${base}${probe}\``);
     }
   });
 

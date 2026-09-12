@@ -282,7 +282,12 @@ registry; profile selection; tool calls surviving a reload.
   they structurally cannot run on the callback path. The e2e suite runs in `dev` auth mode and
   cannot prove any of it.
 - **`npm run smoke` against a real service.** The e2e fixture emits real time-gapped SSE frames
-  through the real BFF, which is not the same thing as a real backend.
+  through the real BFF, which is not the same thing as a real backend. It is now `npm run
+check:live` together with `check:openapi` — deliberately outside `npm run ci`, because both exit
+  non-zero when they cannot reach a service and a gate that is red on a laptop is a gate people
+  learn to run past. `tests/gate.test.ts` holds that decision in both directions: they must be in
+  `check:live`, and they must not be steps of the offline gate. Before this they were scripts with a
+  name, a docstring and no caller at all.
 - **The structure sketcher has no accessible path, and will not get one here.** The canvas is
   Ketcher — a third-party WASM editor driven by a pointer. Radix's Dialog wraps the _chrome_ in a
   focus trap, an Escape handler and `aria-modal`; it does not make the drawing surface navigable by

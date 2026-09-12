@@ -12,12 +12,33 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer, type Server } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { existsSync } from 'node:fs';
+import type { AddressInfo } from 'node:net';
 
 const pipeline = readFileSync('Jenkinsfile', 'utf8');
 const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
+
+/**
+ * Resolve a Groovy GString to the text bash is actually handed.
+ *
+ * `${...}` is interpolated by Jenkins before the shell sees anything, while `\${...}` and `\$(...)`
+ * reach it verbatim — that escape is how a pipeline writes a shell variable inside an interpolated
+ * string, and getting it backwards is the most common way one of these files breaks.
+ */
+const asShellReceivesIt = (block: string): string =>
+  block
+    .replace(/(?<!\\)\$\{[^}]*\}/g, 'PLACEHOLDER')
+    .replaceAll('\\$', '$')
+    .replaceAll('\\\\', '\\');
+
+/** Every shell block the pipeline runs, as bash receives it. */
+const shellBlocks = [
+  ...[...pipeline.matchAll(/"""([\s\S]*?)"""/g)].map((m) => asShellReceivesIt(m[1] ?? '')),
+  ...[...pipeline.matchAll(/sh '''([\s\S]*?)'''/g)].map((m) => m[1] ?? ''),
+];
 
 describe('the Jenkins pipeline', () => {
   it('invokes only npm scripts that exist', () => {
@@ -41,14 +62,19 @@ describe('the Jenkins pipeline', () => {
   it('proves the published image serves, rather than trusting the build', () => {
     // The four probes used to be `curl`s written out in this pipeline, and a second copy of them
     // was written out in `.github/workflows/ci.yml`. They are one file now, called from both, so
-    // this follows the indirection rather than re-stating it — and asserts the file it lands in
-    // really does make all four, because "the pipeline calls a script" is a shape assertion until
-    // somebody checks what the script asks for.
-    expect(pipeline).toContain('scripts/check-serving.mjs');
-    const serving = readFileSync('scripts/check-serving.mjs', 'utf8');
-    for (const probe of ['/healthz', '/config.js', '/auth/callback', '/api/metrics']) {
-      expect(serving, `the image is never asked for ${probe}`).toContain(`\${base}${probe}\``);
-    }
+    // this follows the indirection rather than re-stating it.
+    //
+    // A **run** line, not a mention: this pipeline's own comments name that script twice (lines 8
+    // and 142), so `toContain` over the raw file was satisfied by the prose. Measured on
+    // `11a2771` — deleting the real invocation left this file green, and only `gate.test.ts`
+    // caught it, in a PR whose thesis is that a second edition of an assertion is the defect.
+    expect(
+      shellBlocks.some((block) =>
+        /^\s*(?:\w+=\S+\s+)*node scripts\/check-serving\.mjs\b/m.test(block),
+      ),
+      'no shell block of the pipeline runs `node scripts/check-serving.mjs`',
+    ).toBe(true);
+    expect(existsSync('scripts/check-serving.mjs')).toBe(true);
   });
 
   it('refuses to deploy anything but the digest the registry assigned', () => {
@@ -62,22 +88,7 @@ describe('the Jenkins pipeline', () => {
 });
 
 describe('the pipeline shell', () => {
-  /**
-   * Resolve a Groovy GString to the text bash is actually handed: `${...}` is interpolated by
-   * Jenkins before the shell sees anything, while `\${...}` and `\$(...)` reach it verbatim —
-   * that escape is how a pipeline writes a shell variable inside an interpolated string, and
-   * getting it backwards is the most common way one of these files breaks.
-   */
-  const asShellReceivesIt = (block: string): string =>
-    block
-      .replace(/(?<!\\)\$\{[^}]*\}/g, 'PLACEHOLDER')
-      .replaceAll('\\$', '$')
-      .replaceAll('\\\\', '\\');
-
-  const blocks = [
-    ...[...pipeline.matchAll(/"""([\s\S]*?)"""/g)].map((m) => asShellReceivesIt(m[1] ?? '')),
-    ...[...pipeline.matchAll(/sh '''([\s\S]*?)'''/g)].map((m) => m[1] ?? ''),
-  ];
+  const blocks = shellBlocks;
 
   it('has blocks to check', () => {
     // Guard the guard: a regex that matched nothing would pass every assertion below.
@@ -89,5 +100,89 @@ describe('the pipeline shell', () => {
     const result = spawnSync('bash', ['-n'], { input: block as string, encoding: 'utf8' });
     expect(result.stderr, `shell block does not parse: ${result.stderr}`).toBe('');
     expect(result.status).toBe(0);
+  });
+});
+
+/**
+ * What `scripts/check-serving.mjs` asserts, driven rather than read.
+ *
+ * "The pipeline calls a script" is a shape assertion until somebody checks what the script asks
+ * for — and the check that used to stand here read the script's *text* for `${base}/healthz` and
+ * three siblings, which is a weaker thing than it looks in two measured ways. `${base}/healthz`
+ * occurs twice in that file: once in the wait-for-it-to-come-up loop and once in assertion §1, so
+ * deleting §1 outright left this file green (`/api/metrics`, which occurs once, was caught — which
+ * is what identifies the mechanism). And no text-presence test can see a *neutered* assertion:
+ * turning `if (res.status === 404)` into `if (true)` keeps every string in place.
+ *
+ * So the script is run against a server that answers correctly, and then against four servers each
+ * of which breaks exactly one of the four promises. A deleted or neutered assertion shows up as
+ * the run that should have failed and did not.
+ */
+describe('the four promises, driven against scripts/check-serving.mjs', () => {
+  /** A server answering every probe the way a healthy UI does, with one promise overridden. */
+  const serveWith = async (
+    broken: Record<string, { status?: number; body?: string }> = {},
+  ): Promise<{ status: number | null; output: string }> => {
+    const healthy: Record<string, { status: number; body: string }> = {
+      '/healthz': { status: 200, body: '{"status":"ok"}' },
+      '/config.js': { status: 200, body: 'window.__CHEMCLAW_CONFIG__ = {};' },
+      '/auth/callback': { status: 200, body: '<!doctype html><title>ChemClaw3</title>' },
+      '/api/metrics': { status: 404, body: 'not found' },
+    };
+
+    const server: Server = createServer((req, res) => {
+      const path = (req.url ?? '').split('?')[0] ?? '';
+      const answer = { ...(healthy[path] ?? { status: 404, body: 'not found' }), ...broken[path] };
+      res.writeHead(answer.status ?? 200, { 'content-type': 'text/plain' });
+      res.end(answer.body ?? '');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    try {
+      // `spawn`, deliberately not `spawnSync`: the server being probed is in *this* process, and a
+      // synchronous spawn blocks the event loop that would have to answer it. That is not a style
+      // preference — driven first with `spawnSync`, every probe timed out against a server that
+      // was listening and could not be reached.
+      return await new Promise((resolve) => {
+        const child = spawn(
+          process.execPath,
+          ['scripts/check-serving.mjs', `http://127.0.0.1:${port}`],
+          {
+            env: { ...process.env, READY_TIMEOUT_MS: '5000' },
+          },
+        );
+        let output = '';
+        child.stdout.on('data', (chunk) => (output += String(chunk)));
+        child.stderr.on('data', (chunk) => (output += String(chunk)));
+        child.on('close', (status) => resolve({ status, output }));
+      });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  };
+
+  it('passes against a server that keeps all four', async () => {
+    // Guard the guard: if this failed, every assertion below would pass for the wrong reason.
+    const { status, output } = await serveWith();
+    expect(status, output).toBe(0);
+  });
+
+  it.each([
+    // `/healthz` answers 200 — so the readiness loop is satisfied — with a body that does not say
+    // ok. This is the case the text-presence check could not see, because the string it matched
+    // lives in the loop as well as in the assertion.
+    ['/healthz', { '/healthz': { body: '{"status":"broken"}' } }],
+    ['/config.js', { '/config.js': { body: 'window.SOMETHING_ELSE = {};' } }],
+    ['SPA fallback', { '/auth/callback': { status: 404, body: 'not found' } }],
+    ['the proxy whitelist', { '/api/metrics': { status: 200, body: '# HELP anything' } }],
+  ])('fails when the image stops keeping %s', async (label, broken) => {
+    const { status, output } = await serveWith(
+      broken as Record<string, { status?: number; body?: string }>,
+    );
+    expect(
+      status,
+      `check-serving.mjs passed a server that does not keep ${label}:\n${output}`,
+    ).toBe(1);
+    expect(output).toContain('✗');
   });
 });

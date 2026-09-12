@@ -14,11 +14,15 @@
  *
  * 1. **A step that names nothing.** A renamed npm script would leave the gate green by skipping.
  * 2. **A pipeline growing its own assertion again.** Inline `curl`/`grep`/`node -e` in a YAML or
- *    Groovy file is the exact shape that was removed, and it is recognisable as text.
+ *    Groovy file is the exact shape that was removed. For the workflow that is an allowlist of
+ *    what a step may be; for the Jenkinsfile, whose shell legitimately builds and deploys, it is a
+ *    blacklist of spellings plus one allowlist — `node` may only run a file under `scripts/`.
  * 3. **An orphaned check.** `npm run smoke` and `npm run check:openapi` existed for months wired
  *    into nothing at all — scripts with a name, a docstring and no caller, which is a control that
  *    reads as one and is not. Every assertion script must be reachable from a composer, and one
- *    that is deliberately out of the offline gate must be out *in code*, not in prose.
+ *    that is deliberately out of the offline gate must be out *in code*, not in prose. What
+ *    reachability from `check:live` does and does not mean is written at `OPERATOR_COMPOSERS`:
+ *    it is a named home a person can type, not a schedule anything runs on.
  *
  * The steps are read by asking `scripts/ci.mjs` (`--json`) rather than by regexing its source: a
  * basis that is re-derived rather than observed agrees with itself forever.
@@ -27,6 +31,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { gateSteps } from './gateSteps.ts';
+import { invokedScripts } from './scriptInvocations.ts';
 
 const root = new URL('../', import.meta.url);
 const read = (path: string): string => readFileSync(new URL(path, root), 'utf8');
@@ -40,6 +45,15 @@ const read = (path: string): string => readFileSync(new URL(path, root), 'utf8')
  * they call. Matching the raw text would let a comment stand in for a call, which is the failure
  * this whole file is about one level down. Measured: with comments left in, deleting
  * `check-container.mjs`'s actual invocation of `check-serving.mjs` still passed.
+ *
+ * **Stripping comments was not enough, and the sentence above used to be written as though it
+ * were.** A string literal is not a comment: `check-container.mjs` *prints* the name of the script
+ * it calls in its skip branch, so the same deletion still passed on `11a2771` with this helper
+ * applied. Comment-stripping is therefore the right treatment for the two **pipelines** — YAML and
+ * Groovy, where the thing that runs is a command line and there is no parser here to ask — and it
+ * is *not* the treatment for a JavaScript file. Those go through `invokedScripts`
+ * (`tests/scriptInvocations.ts`), which asks the TypeScript parser which names are arguments of a
+ * call rather than which names are present.
  */
 const code = (source: string): string =>
   source
@@ -64,6 +78,21 @@ const jenkinsfile = read('Jenkinsfile');
  * `npm run check:live` instead — a named home, which is what they did not have.
  */
 const NEEDS_A_LIVE_SERVICE = ['smoke', 'check:openapi'];
+
+/** The composers a pipeline runs. Everything in the gate is reachable from one of these. */
+const GATE_COMPOSERS = ['ci', 'ci:container'];
+
+/**
+ * The composers an **operator** runs, by hand, against a live service.
+ *
+ * `check:live` is the only one, and it is deliberately called by no pipeline: a push runner has no
+ * Chemclaw3 service to point it at, and the two scripts inside it exit non-zero rather than report
+ * a pass they did not perform. So reachability from here means *"has a named home a person can
+ * type"* and nothing more — it does not mean the script runs on any schedule, and the test below
+ * pins that difference rather than leaving it to prose, because prose about it was written in the
+ * present tense as though the wiring question were closed.
+ */
+const OPERATOR_COMPOSERS = ['check:live'];
 
 describe('the gate definition', () => {
   it('names an npm script that exists, for every step', () => {
@@ -93,8 +122,25 @@ describe('both pipelines call the one definition', () => {
   it('has the Jenkins image stage run the same serving assertions the container job runs', () => {
     // Not a copy of them: the one file, called from both. How the image was *built* legitimately
     // differs per pipeline; what it must serve does not.
-    expect(code(jenkinsfile)).toContain('scripts/check-serving.mjs');
-    expect(code(read('scripts/check-container.mjs'))).toContain('scripts/check-serving.mjs');
+    //
+    // Both halves pin an **invocation** rather than a mention, and the two have to be asked
+    // differently. The Jenkinsfile's is a shell line, so it is pinned as one — a command whose
+    // head is `node` running that file, which neither a comment nor an `echo` naming it can
+    // satisfy. The script's is JavaScript, so the parser is asked: measured on `11a2771`, a
+    // `toContain` over this file stayed green with the real
+    // `run(process.execPath, ['scripts/check-serving.mjs', …])` replaced by `{ status: 0 }`,
+    // because the skip branch *prints* the name.
+    expect(code(jenkinsfile)).toMatch(/^\s*(?:\w+=\S+\s+)*node scripts\/check-serving\.mjs\b/m);
+    expect([...invokedScripts(read('scripts/check-container.mjs'))]).toContain('check-serving.mjs');
+  });
+
+  it('tells a print of a script name apart from a call of it', () => {
+    // Guard the guard. The assertion above is worth exactly as much as this distinction, and the
+    // helper it replaced could not make it.
+    expect([...invokedScripts("run(process.execPath, ['scripts/x.mjs', url]);")]).toEqual([
+      'x.mjs',
+    ]);
+    expect([...invokedScripts("console.log('by calling scripts/x.mjs');")]).toEqual([]);
   });
 
   it('names the runtime that holds the image when the build happened elsewhere', () => {
@@ -122,17 +168,92 @@ describe('both pipelines call the one definition', () => {
     const workflow = read('.github/workflows/ci.yml');
     const containerStep = workflow.slice(workflow.indexOf('npm run ci:container') - 600);
     expect(containerStep).toMatch(/CONTAINER_RUNTIME:\s*docker/);
+
+    // And the variable in the same env block that *arms* the job, which is the one that decides
+    // whether anything is asserted at all: without it, a runner whose container runtime does not
+    // answer skips the whole step and exits 0. Measured on `11a2771` — deleting this line from the
+    // workflow left every meta-test green, while this test pinned the cosmetic half of the block
+    // beside it, which made the omission read as deliberate.
+    expect(containerStep).toMatch(/CI_REQUIRE_CONTAINER:\s*'1'/);
   });
 });
 
 describe('no pipeline holds an assertion of its own', () => {
   /**
-   * The shell an inline assertion is written in. `curl` and `grep` are how every removed one was
-   * spelled; `node -e` is how the MSAL entry-chunk probe was; `mktemp` is how the standalone
-   * server run was. A pipeline may still decide *where* a step runs — which is why `npm`, `npx`
-   * and a container build are not on this list.
+   * What a step of `.github/workflows/ci.yml` is allowed to be.
+   *
+   * An allowlist, not a list of forbidden spellings, and that is the whole change: every step in
+   * this file is of one shape — install something, or run a named script — so the permitted set
+   * can be written down, and anything else is red until somebody argues for it here. A blacklist
+   * fails *open* on the spelling nobody thought of, and this one did. Measured against the four it
+   * knew (`curl`, `grep`, `node -e`, `mktemp`): `wget -qO- … | tee`, `node --eval "…"` and
+   * `test -f dist/client/index.html || exit 1` all passed. `node --eval` is the same mechanism as
+   * the `node -e` MSAL probe the rule was written for, three characters apart.
    */
-  const ASSERTION_SHELL = [/\bcurl\b/, /\bgrep\b/, /node -e/, /\bmktemp\b/];
+  const PERMITTED_GITHUB_STEP = [/^npm\s/, /^npx\s/, /^node scripts\/[\w.-]+\.mjs\b/];
+
+  /**
+   * Every command line a `run:` step hands to the shell, block scalars included.
+   *
+   * The block form matters even though nothing uses it today: `run: |` is exactly where a
+   * multi-line assertion would go, and a reader of single-line `run:` values would not see it.
+   */
+  const githubRunCommands = (): string[] => {
+    const lines = workflow.split('\n');
+    const commands: string[] = [];
+    for (const [index, line] of lines.entries()) {
+      const match = /^(\s*)(?:- )?run:\s*(.*)$/.exec(line);
+      if (!match) continue;
+      const indent = (match[1] ?? '').length;
+      const value = (match[2] ?? '').trim();
+      if (!/^[|>]/.test(value)) {
+        if (value) commands.push(value);
+        continue;
+      }
+      for (const next of lines.slice(index + 1)) {
+        if (next.trim() === '') continue;
+        if (next.search(/\S/) <= indent) break;
+        commands.push(next.trim());
+      }
+    }
+    return commands;
+  };
+
+  it('lets a GitHub step install something or run a named script, and nothing else', () => {
+    const commands = githubRunCommands();
+    // Guard the guard: a parser that found nothing would pass for ever.
+    expect(commands.length).toBeGreaterThanOrEqual(4);
+    for (const command of commands) {
+      expect(
+        PERMITTED_GITHUB_STEP.some((shape) => shape.test(command)),
+        `.github/workflows/ci.yml runs \`${command}\` — a step may install or run a named script; an assertion belongs in scripts/`,
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * The shell an inline assertion is written in, for the file where an allowlist is not available.
+   *
+   * The Jenkinsfile's shell legitimately builds an image, logs into a registry, copies a bundle
+   * out of a container and rolls out a Deployment — there is no small set of permitted command
+   * heads there, and writing one would mean re-approving the list on every delivery change, which
+   * is how an allowlist becomes a rubber stamp. So this half stays a blacklist, and stays honest
+   * about what that means: **it catches spellings, not intent.** `curl` and `grep` are how every
+   * removed assertion was spelled, `mktemp` is how the standalone-server run was, and `wget` and
+   * the file tests are the two spellings measured as walking past the original four.
+   *
+   * The one allowlist that does carry into both files is the `node` rule below, because the
+   * interpreter this repository actually uses is the one an assertion would most naturally be
+   * smuggled through.
+   */
+  const ASSERTION_SHELL = [
+    /\bcurl\b/,
+    /\bwget\b/,
+    /\bgrep\b/,
+    /\bmktemp\b/,
+    /\btest\s+-[a-z]\b/,
+    /\[\s+-[a-z]\s/,
+  ];
 
   for (const [file, source] of [
     ['.github/workflows/ci.yml', workflow],
@@ -148,8 +269,35 @@ describe('no pipeline holds an assertion of its own', () => {
         ).not.toMatch(shape);
       }
     });
+
+    it(`lets ${file} run node only as \`node scripts/<file>.mjs\``, () => {
+      // `node -e`, `node --eval` and `node -p` are one flag apart from each other and from the
+      // legitimate form, so the target is pinned rather than the flags enumerated. A pipeline that
+      // needs a new script writes the script.
+      const runs = [...code(source).matchAll(/(?:^|[\s;&|(])node\s+(\S+)/g)];
+      for (const run of runs) {
+        expect(run[1], `${file} runs \`node ${run[1]}\``).toMatch(/^scripts\/[\w.-]+\.mjs$/);
+      }
+    });
   }
 });
+
+/**
+ * The scripts under `scripts/` that are tooling rather than assertions.
+ *
+ * Named as an exception list rather than derived from a naming convention, so that the rule below
+ * fails *toward* catching: a new `scripts/*.mjs` is an assertion until somebody writes it in here,
+ * and writing it in here is a line in a diff a reviewer sees. The guard this replaced keyed on the
+ * `check-`/`assert-`/`smoke` prefixes and on the `check:` npm-script prefix, so — measured —
+ * an unreachable `"verify:thing": "node scripts/verify-thing.mjs"` was invisible to it while an
+ * unreachable `check:`-prefixed one was caught. An author naming the next assertion `verify-*` got
+ * no guard at all.
+ */
+const TOOLING = new Set(['ci.mjs', 'dev.mjs', 'build-server.mjs', 'compress-assets.mjs']);
+
+/** Every `scripts/*.mjs` an npm script's command line names. */
+const scriptsNamedBy = (command: string): string[] =>
+  [...command.matchAll(/scripts\/([\w.-]+\.mjs)/g)].map((m) => m[1] as string);
 
 describe('no assertion is orphaned', () => {
   /**
@@ -167,7 +315,7 @@ describe('no assertion is orphaned', () => {
       for (const m of command.matchAll(/scripts\/([\w.-]+\.mjs)/g)) direct.add(m[1] as string);
       if (name === 'ci') for (const step of STEPS) visit(step.run);
     };
-    for (const composer of ['ci', 'ci:container', 'check:live']) visit(composer);
+    for (const composer of [...GATE_COMPOSERS, ...OPERATOR_COMPOSERS]) visit(composer);
 
     // One hop further, and only one hop of a particular kind: a file that a *reachable file*
     // invokes by path. `check-container.mjs` runs `check-serving.mjs` that way, because it has to
@@ -184,9 +332,7 @@ describe('no assertion is orphaned', () => {
     // counted, that same `"check:orphan"` passed again.
     const indirect = new Set(
       [...direct].flatMap((file) =>
-        [...code(read(`scripts/${file}`)).matchAll(/scripts\/([\w.-]+\.mjs)/g)]
-          .map((m) => m[1] as string)
-          .filter((named) => named !== file),
+        [...invokedScripts(read(`scripts/${file}`), file)].filter((named) => named !== file),
       ),
     );
     for (const [name, command] of Object.entries(pkg.scripts)) {
@@ -195,10 +341,17 @@ describe('no assertion is orphaned', () => {
     return seen;
   };
 
-  it('reaches every check: script from a composer', () => {
+  it('reaches every assertion script from a composer', () => {
     const reachable = reachableScripts();
+    // The union of the two ways an npm script can be an assertion: it is named like one, or it
+    // runs a file under `scripts/` that is not tooling. The second arm is what makes this a rule
+    // about shape rather than about the `check:` prefix — `npm run check:audit` is only in the set
+    // by the first, and an unreachable `verify:thing` is only caught by the second.
     const checks = Object.keys(pkg.scripts).filter(
-      (name) => name.startsWith('check:') || name === 'smoke',
+      (name) =>
+        name.startsWith('check:') ||
+        name === 'smoke' ||
+        scriptsNamedBy(pkg.scripts[name] ?? '').some((file) => !TOOLING.has(file)),
     );
     expect(checks.length).toBeGreaterThan(4);
     for (const name of checks) {
@@ -209,22 +362,20 @@ describe('no assertion is orphaned', () => {
     }
   });
 
-  it('keeps every assertion script under scripts/ named by some npm script', () => {
+  it('keeps every script under scripts/ named by some npm script', () => {
     const commands = Object.values(pkg.scripts).join('\n');
-    const files = Object.values(pkg.scripts)
-      .flatMap((command) => [...command.matchAll(/scripts\/([\w.-]+\.mjs)/g)])
-      .map((m) => m[1] as string);
+    const files = Object.values(pkg.scripts).flatMap((command) => scriptsNamedBy(command));
     const referenced = new Set([
       ...files,
-      // Followed one hop, same as above.
-      ...files.flatMap((file) =>
-        [...code(read(`scripts/${file}`)).matchAll(/scripts\/([\w.-]+\.mjs)/g)].map(
-          (m) => m[1] as string,
-        ),
-      ),
+      // Followed one hop, same as above — and by invocation rather than by mention, so a file that
+      // is merely *printed* by a reachable script does not count as named.
+      ...files.flatMap((file) => [...invokedScripts(read(`scripts/${file}`), file)]),
     ]);
+    // Every `.mjs` in the directory, with no prefix convention in the way: a file nobody can run
+    // by name is a file that can only be run by somebody who already knows it exists, and that is
+    // as true of `verify-thing.mjs` as of `check-thing.mjs`.
     const assertions = readdirSync(new URL('scripts/', root)).filter((name) =>
-      /^(check-|assert-|smoke)/.test(name),
+      name.endsWith('.mjs'),
     );
     expect(assertions.length).toBeGreaterThan(4);
     for (const file of assertions) {
@@ -232,6 +383,24 @@ describe('no assertion is orphaned', () => {
         referenced.has(file) || commands.includes(`scripts/${file}`),
         `scripts/${file} has no npm script — it can only be run by somebody who already knows it exists`,
       ).toBe(true);
+    }
+  });
+
+  it('keeps the operator composers out of both pipelines, which is what makes them operator-run', () => {
+    // The claim "check:live is where these live" is worth only what it costs to check. If somebody
+    // wires it into a pipeline, this fails and points at the sentence in README.md and ISSUES.md
+    // that would have to change with it — the two places that describe the orphan as solved.
+    for (const composer of OPERATOR_COMPOSERS) {
+      expect(pkg.scripts, composer).toHaveProperty(composer);
+      for (const [file, source] of [
+        ['.github/workflows/ci.yml', workflow],
+        ['Jenkinsfile', jenkinsfile],
+      ] as const) {
+        expect(
+          code(source).includes(`npm run ${composer}`),
+          `${file} runs npm run ${composer} — it is documented as operator-run and is not part of any gate`,
+        ).toBe(false);
+      }
     }
   });
 

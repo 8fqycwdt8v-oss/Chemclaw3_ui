@@ -171,6 +171,45 @@ describe('proxy route whitelist', () => {
       },
     );
 
+    it('refuses an ENCODED separator and a parent reference, not only a raw one', () => {
+      // The wide segments (`NOTE`, `JOB`, `PENDING`) admit `.` and `%` on purpose, so every one of
+      // these matched the pattern and was forwarded still-encoded. Driven through the real
+      // `createRequestListener()` before this: `GET /api/notes/..%2F..%2Fmetrics` answered 200 and
+      // the upstream was asked for `/notes/..%2F..%2Fmetrics`.
+      //
+      // Against a direct uvicorn + Starlette service that is harmless — it decodes once and
+      // `/notes/{id}` compiles to `[^/]+`, which cannot span the decoded slashes — but that is a
+      // property of the upstream, and `server/routes.ts` stated it as a property of itself. An
+      // ingress or sidecar that unescapes before forwarding turns it into a traversal, with this
+      // process being the one everybody would believe had refused it.
+      for (const bad of [
+        '..%2F..%2Fmetrics',
+        '..%2f..%2fmetrics',
+        '%2e%2e%2f%2e%2e%2fmetrics',
+        '..%5C..%5Cmetrics',
+        'note-a%2Fb',
+        '..',
+        '%2e%2e',
+        'note-100%zz', // a malformed escape: encodeURIComponent cannot emit one
+      ]) {
+        expect(resolveRoute('GET', `/api/notes/${bad}`), bad).toBeNull();
+        expect(resolveRoute('GET', `/api/jobs/${bad}`), bad).toBeNull();
+        expect(resolveRoute('POST', `/api/pending/${bad}/answer`), bad).toBeNull();
+      }
+    });
+
+    it('still passes an encoded id that is merely unusual, which is why the set is wide', () => {
+      // The refusal above must not become "refuse anything with a % in it": a note id is
+      // `note-{slug}` where the slug is a name the model wrote, and the whole argument for the
+      // wide character class is that such an id must not 404 at the BFF.
+      for (const id of ['note-Löslichkeit', 'note-Pd(OAc)2', 'note-a b', 'note-50%-yield']) {
+        const encoded = encodeURIComponent(id);
+        expect(resolveRoute('GET', `/api/notes/${encoded}`), id).toMatchObject({
+          path: `/notes/${encoded}`,
+        });
+      }
+    });
+
     it('refuses a raw separator, an over-long id, and the wrong verb', () => {
       expect(resolveRoute('GET', '/api/notes/note-a/b')).toBeNull();
       expect(resolveRoute('GET', `/api/notes/${'n'.repeat(513)}`)).toBeNull();

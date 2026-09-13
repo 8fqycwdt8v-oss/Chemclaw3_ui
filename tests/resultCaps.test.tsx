@@ -98,20 +98,37 @@ describe('the full view of a long table', () => {
     expect(screen.getByText(/not\s+dropped/)).toBeTruthy();
   });
 
-  it('draws the next hundred when asked, and all of them when asked for that', async () => {
-    open('run_python', records(2000));
-    await screen.findByText('run');
+  /**
+   * The one slow test here, and the timeout is stated rather than defaulted.
+   *
+   * It renders 2,000 table rows into happy-dom twice over — 100, then 200, then all of them —
+   * which is the behaviour under test and not something to make cheaper by shrinking the fixture:
+   * "all of them" is the cap being lifted. Measured on an unloaded box it takes **2,271 ms**
+   * against vitest's default 5,000, and that margin is not enough under suite contention: a full
+   * run sharing the machine with a container build timed it out at 5,000 ms while every other test
+   * passed. A flake in a cap test teaches people to re-run rather than to look, so the budget is
+   * written down with what it was measured against.
+   */
+  const DRAWS_EVERYTHING_TIMEOUT_MS = 20_000;
 
-    fireEvent.click(screen.getByRole('button', { name: 'Show 100 more' }));
-    await waitFor(() => expect(bodyRows()).toBe(200));
-    expect(screen.getByText(/200 of 2000 rows drawn/)).toBeTruthy();
+  it(
+    'draws the next hundred when asked, and all of them when asked for that',
+    async () => {
+      open('run_python', records(2000));
+      await screen.findByText('run');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Show all 2000' }));
-    await waitFor(() => expect(bodyRows()).toBe(2000));
-    // Nothing left to say once everything is on screen.
-    expect(screen.queryByText(/rows drawn/)).toBeNull();
-    expect(screen.queryByRole('button', { name: /Show/ })).toBeNull();
-  });
+      fireEvent.click(screen.getByRole('button', { name: 'Show 100 more' }));
+      await waitFor(() => expect(bodyRows()).toBe(200));
+      expect(screen.getByText(/200 of 2000 rows drawn/)).toBeTruthy();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Show all 2000' }));
+      await waitFor(() => expect(bodyRows()).toBe(2000));
+      // Nothing left to say once everything is on screen.
+      expect(screen.queryByText(/rows drawn/)).toBeNull();
+      expect(screen.queryByRole('button', { name: /Show/ })).toBeNull();
+    },
+    DRAWS_EVERYTHING_TIMEOUT_MS,
+  );
 
   it('leaves a result that fits alone, with no sentence and no control', async () => {
     open('run_python', records(12));

@@ -17,6 +17,17 @@ import { defineConfig, devices } from '@playwright/test';
 const PORT = 4321;
 const FIXTURE_PORT = 4322;
 
+/**
+ * Which client build the BFF serves here.
+ *
+ * `dist/client-dev-auth` by default, not `dist/client`: this suite runs unauthenticated, so it
+ * needs the bundle built with `ALLOW_DEV_AUTH=true` — and that bundle must never be the one
+ * `npm start` serves, which is what it was when both builds shared an output directory. The gate
+ * (`scripts/ci.mjs`) builds it and passes this through; run it by hand with
+ * `ALLOW_DEV_AUTH=true CLIENT_OUT_DIR=dist/client-dev-auth npm run build:client` first.
+ */
+const CLIENT_DIR = process.env.CLIENT_DIR ?? 'dist/client-dev-auth';
+
 export default defineConfig({
   testDir: './e2e',
   // **The exact complement of `playwright.full-stack.config.ts`'s `testMatch`.** That config selects
@@ -56,7 +67,7 @@ export default defineConfig({
     // a non-loopback bind, and this suite runs unauthenticated. Binding loopback is the honest way
     // to satisfy that — the server really is only reachable from this machine — rather than
     // setting ALLOW_INSECURE_AUTH and teaching the test harness to wave the check through.
-    command: `node --experimental-strip-types e2e/fixture-service.ts ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 CLIENT_DIR=dist/client node dist/server.js`,
+    command: `node --experimental-strip-types e2e/fixture-service.ts ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
     url: `http://127.0.0.1:${PORT}/api/healthz`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,

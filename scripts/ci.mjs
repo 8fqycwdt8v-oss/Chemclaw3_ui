@@ -45,6 +45,18 @@ import { argv, exit } from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 /**
+ * Where the dev-auth client build goes, which is **not** where the production one goes.
+ *
+ * The browser suite drives the app unauthenticated, so it needs a bundle built with
+ * `ALLOW_DEV_AUTH=true`. That build used to be written over `dist/client` and nothing rebuilt it,
+ * so a green gate left the no-token dev auth provider in the directory `npm start` serves — driven
+ * after a full run: `assert-no-dev-auth` named `dist/client/assets/devAuth-*.js`. Two artifacts
+ * with two directories is the fix; the `dist-clean` step at the end of the list is what stops it
+ * coming back by some other route.
+ */
+const DEV_AUTH_CLIENT_DIR = 'dist/client-dev-auth';
+
+/**
  * The gate, in order. `run` is an npm script name, so `package.json` stays the single registry of
  * what each step *is* and this file holds only the order and the environment it needs.
  */
@@ -94,19 +106,25 @@ export const STEPS = [
   {
     name: 'dev-auth-build',
     run: 'build:client',
-    env: { ALLOW_DEV_AUTH: 'true' },
+    env: { ALLOW_DEV_AUTH: 'true', CLIENT_OUT_DIR: DEV_AUTH_CLIENT_DIR },
     why: 'the browser suite drives a production build unauthenticated, so it needs the opt-in one',
   },
   {
     name: 'dev-auth-present',
     run: 'check:no-dev-auth',
-    env: { ALLOW_DEV_AUTH: 'true' },
+    env: { ALLOW_DEV_AUTH: 'true', CLIENT_DIR: DEV_AUTH_CLIENT_DIR },
     why: 'the other direction: a marker string that went stale fails here rather than passing quietly',
   },
   {
     name: 'e2e',
     run: 'test:e2e',
+    env: { CLIENT_DIR: DEV_AUTH_CLIENT_DIR },
     why: 'the browser suite, against the bundle the two steps above just built',
+  },
+  {
+    name: 'dist-clean',
+    run: 'check:no-dev-auth',
+    why: 'the gate leaves dist/client production-clean — `npm start` serves that directory',
   },
 ];
 

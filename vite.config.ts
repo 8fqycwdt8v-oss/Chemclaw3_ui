@@ -15,6 +15,18 @@ const BFF_PORT = Number(process.env.BFF_PORT ?? 8787);
  */
 const ALLOW_DEV_AUTH = process.env.ALLOW_DEV_AUTH === 'true';
 
+/**
+ * Where the client build lands.
+ *
+ * `dist/client` unless something asks otherwise, and the one thing that asks is the gate: its
+ * `dev-auth-build` step builds the opt-in bundle the browser suite needs, and that build used to
+ * overwrite `dist/client` with it. Nothing rebuilt it afterwards, so `npm run ci && npm start`
+ * served a bundle carrying the no-token dev auth provider — driven: `node
+ * scripts/assert-no-dev-auth.mjs` after a green gate named `dist/client/assets/devAuth-*.js`.
+ * Two artifacts, two directories: the production one is never the one with dev auth in it.
+ */
+const CLIENT_OUT_DIR = process.env.CLIENT_OUT_DIR ?? 'dist/client';
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   define: {
@@ -28,7 +40,7 @@ export default defineConfig({
     alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) },
   },
   build: {
-    outDir: 'dist/client',
+    outDir: CLIENT_OUT_DIR,
     /**
      * Never inline a font into the stylesheet.
      *

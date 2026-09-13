@@ -1,5 +1,5 @@
 /**
- * Two properties of the emitted bundle that no unit test can see, because they are facts about
+ * Three properties of the emitted bundle that no unit test can see, because they are facts about
  * the *build output* rather than about any module.
  *
  *   node scripts/check-bundle.mjs [clientDir]     # default dist/client
@@ -82,6 +82,40 @@ if (!entryMatch) {
     );
   } else {
     ok(`MSAL is present in ${carrying.length} lazily-loaded chunk(s)`);
+  }
+}
+
+/* ── the RDKit worker is emitted, and something loads it ──────────────────── */
+
+// `src/chem/rdkit.client.ts` writes `new Worker(new URL('./rdkit.worker.ts', import.meta.url))`,
+// which is the ONE spelling Vite compiles into an emitted chunk. Any other — a string path, a
+// variable, a `new URL` built in two steps — is left exactly as written, so the build succeeds,
+// the chunk is never emitted, and the worker 404s in the browser while every unit test stays green
+// (happy-dom has no `Worker` at all, so the suite exercises the in-process fallback).
+//
+// Both directions, because either alone passes for the wrong reason: a chunk nobody references is
+// dead weight, and a reference to a chunk that does not exist is the 404.
+{
+  const assets = join(CLIENT_DIR, 'assets');
+  const names = readdirSync(assets);
+  const workerChunk = names.find((name) => /^rdkit\.worker-.*\.js$/.test(name));
+  const chunks = names.filter((name) => name.endsWith('.js'));
+  const referring = workerChunk
+    ? chunks.filter(
+        (name) =>
+          name !== workerChunk && readFileSync(join(assets, name), 'utf8').includes(workerChunk),
+      )
+    : [];
+
+  if (!workerChunk) {
+    bad('no rdkit.worker-*.js chunk was emitted', 'the toolkit would run on the main thread');
+  } else if (referring.length === 0) {
+    bad(
+      `${workerChunk} is emitted but no chunk references it`,
+      'nothing would ever construct the worker',
+    );
+  } else {
+    ok(`the RDKit worker is emitted and referenced by ${referring.length} chunk(s)`);
   }
 }
 

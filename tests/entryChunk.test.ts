@@ -44,7 +44,7 @@ describe('the entry bundle', () => {
   it('found the source tree it is checking', () => {
     // A traversal that silently found nothing would pass every assertion below.
     expect(files.length).toBeGreaterThan(40);
-    expect(files).toContain('chem/rdkit.ts');
+    expect(files).toContain('chem/rdkit.engine.ts');
     expect(files).toContain('chem/sketcher.ketcher.tsx');
   });
 
@@ -53,7 +53,9 @@ describe('the entry bundle', () => {
       expect(staticallyImports(read(file), /@rdkit\/rdkit.*/), file).toBe(false);
     }
     // And the dynamic one is still there, so this is not passing because the import moved away.
-    expect(read('chem/rdkit.ts')).toMatch(/import\('@rdkit\/rdkit'\)/);
+    // It lives in the engine rather than the seam since W28.7 put the toolkit on a worker thread;
+    // the property this test is about — nothing static — is unchanged by where the loader sits.
+    expect(read('chem/rdkit.engine.ts')).toMatch(/import\('@rdkit\/rdkit'\)/);
   });
 
   it('reaches Ketcher only from the adapter, which is itself only reached dynamically', () => {

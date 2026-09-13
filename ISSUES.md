@@ -261,6 +261,59 @@ The half that stays a poll is deliberate and is not this issue: `GET /pending` i
 
 ---
 
+## Issue 10: the CSP forbids what RDKit needs, so no container has ever drawn a structure
+
+**Found by measurement, not by report** — W28.7 moved the toolkit to a worker, went to prove in a
+real browser that a structure was drawn there, and found none is drawn anywhere.
+
+`server/config.ts` sends `script-src 'self' 'wasm-unsafe-eval'`. That token permits WebAssembly
+compilation and nothing else, which is exactly what its own comment says and exactly why it was
+chosen. `@rdkit/rdkit` needs more: Embind builds every JS invoker for the C++ surface with
+`Function(...)` — `craftInvokerFunction`, on the ordinary path rather than on a fallback — and
+`'unsafe-eval'` is what permits that.
+
+**Driven against the built bundle behind the real BFF**, loading the emitted RDKit chunk by hand:
+
+```
+EvalError: Refused to evaluate a string as JavaScript because 'unsafe-eval' is not an allowed
+source of script in the following Content Security Policy directive:
+"script-src 'self' 'wasm-unsafe-eval'".
+    at Function (<anonymous>)
+    at …/assets/RDKit_minimal-DP2qLPJt.js
+```
+
+and, driving the worker in its own protocol from the page: `toolkitLoads` → `false`, `drawSvg` →
+`null`. **It predates the worker** — the identical probe fails the same way against the pre-W28.7
+tree, on the page.
+
+**What a chemist sees.** Every `<Molecule>` renders its SMILES as text with "The structure toolkit
+could not be loaded, so nothing on this page can be drawn" beside it; the structure panel says the
+same; the entity rail cannot key a compound, because `canonicalSmiles` answers `null`. The copy is
+correct — the distinction `rdkitAvailable()` exists to keep is working exactly as designed — which
+is why this reads as a deployment quirk rather than as a break.
+
+**Why nobody saw it.** The Vite dev server serves `index.html` itself and never sends this header,
+so `npm run dev` draws structures perfectly. `server/config.ts`'s own comment said to verify
+against `http://localhost:3000` rather than `:5173`; nothing did, and the sentence beside it
+asserted in the present tense that the directive was what RDKit needs. Both are corrected in place.
+
+**Two ways out, and neither is taken here because both are posture rather than a typo.**
+
+- **Add `'unsafe-eval'` to `script-src`.** One line, and it re-opens `eval` and `new Function` for
+  the whole document — the origin that holds the bearer token, renders model output and injects
+  RDKit's SVG with `dangerouslySetInnerHTML`.
+- **Scope it to the worker.** A dedicated worker's policy is the document's in Chromium, so this
+  is not a header on the chunk — it means serving `src/chem/rdkit.worker.ts` from a `blob:` built
+  on this origin, or giving the worker its own document. More work, and it confines the
+  relaxation to a thread with no DOM and no markup path. W28.7 is what makes it available at all:
+  before it, the toolkit ran on the page and there was nothing to confine.
+
+**Who decides:** whoever owns this app's CSP. Until then `rdkit.client.ts`'s fallback is doing its
+job — the app degrades to text and says so — and `e2e/worker.spec.ts` asserts the worker thread is
+started and answers, which is the most this repository can assert today.
+
+---
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.

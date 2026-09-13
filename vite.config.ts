@@ -34,6 +34,18 @@ export default defineConfig({
     // than merely unreachable at runtime.
     __ALLOW_DEV_AUTH__: JSON.stringify(ALLOW_DEV_AUTH),
   },
+  /**
+   * The RDKit worker is an ES module, because that is how it is constructed.
+   *
+   * `rdkit.client.ts` writes `new Worker(new URL('./rdkit.worker.ts', import.meta.url), { type:
+   * 'module' })` — the only form Vite compiles into an emitted chunk. Vite's default `worker.format`
+   * is `iife`, which it emits **regardless** of that `type`, and the two disagreeing is quiet rather
+   * than loud: an IIFE bundle happens to be valid module syntax, so the browser runs it, and what a
+   * reader sees is a module-typed worker whose bundle is not one. Measured on this tree, the iife
+   * build also inlined the whole 74 kB RDKit loader into the worker chunk rather than sharing the
+   * dynamic one, because an IIFE has no import to split on.
+   */
+  worker: { format: 'es' },
   // `@/…` is what the vendored shadcn components import by. Mirrored in tsconfig.json and — the
   // one that gets forgotten — vitest.config.ts, which is a separate config with its own resolver.
   resolve: {

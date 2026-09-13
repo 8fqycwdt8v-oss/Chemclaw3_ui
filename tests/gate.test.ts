@@ -320,7 +320,17 @@ describe('no pipeline holds an assertion of its own', () => {
  * unreachable `check:`-prefixed one was caught. An author naming the next assertion `verify-*` got
  * no guard at all.
  */
-const TOOLING = new Set(['ci.mjs', 'dev.mjs', 'build-server.mjs', 'compress-assets.mjs']);
+const TOOLING = new Set([
+  'ci.mjs',
+  'dev.mjs',
+  'build-server.mjs',
+  'compress-assets.mjs',
+  // Measurement, not assertion: it prints a table and exits 0 whatever the numbers are. It is in
+  // this list rather than in the gate for the reason `check:live` is outside it — it needs a real
+  // Chromium and a dev server and takes minutes — and it is an npm script at all so that the
+  // figures W28.7 published can be re-run by somebody who does not already know it exists.
+  'measure-rdkit-placement.mjs',
+]);
 
 /** Every `scripts/*.mjs` an npm script's command line names. */
 const scriptsNamedBy = (command: string): string[] =>

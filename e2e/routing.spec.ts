@@ -47,14 +47,14 @@ test('an unknown conversation says so rather than redirecting', async ({ page })
 });
 
 test('a shared session link adopts the session and pulls its transcript', async ({ page }) => {
-  await page.goto(`/s/${SHARED_SID}`);
+  await page.goto(`/open/${SHARED_SID}`);
 
   await expect(page).toHaveURL(/\/c\/[0-9a-f-]+$/);
   await expect(page.getByText('BrettPhos, at 1.2 equiv base.')).toBeVisible();
 });
 
 test('a malformed share link is explained, not redirected', async ({ page }) => {
-  await page.goto('/s/nonsense');
+  await page.goto('/open/nonsense');
   await expect(page.getByText(/32-character session id/)).toBeVisible();
 });
 

@@ -8,8 +8,8 @@ import { expect, test } from '@playwright/test';
  * none, and `scripts/check-bundle.mjs` proves the chunk is emitted and referenced. Neither can see
  * whether a browser *starts* it — a `worker-src` that went missing, a chunk the BFF will not
  * serve, a module worker a browser refuses. All three leave the app working, because
- * `rdkit.client.ts` falls back to the page on purpose, and silently give back the 552 ms of
- * blocked main thread the whole change is about.
+ * `rdkit.client.ts` falls back to the page on purpose, and silently give back the 587 ms of
+ * blocked main thread the whole change is about (`scripts/measure-rdkit-placement.mjs`).
  *
  * **What this deliberately does not assert is that a structure is drawn, and the reason is a
  * defect this row measured rather than a gap in the test.** Under the CSP the BFF serves, RDKit

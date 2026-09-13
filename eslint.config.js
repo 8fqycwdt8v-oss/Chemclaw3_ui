@@ -94,10 +94,13 @@ export default tseslint.config(
     languageOptions: { globals: globals.browser, sourceType: 'script' },
   },
 
-  // Scripts and the fixture service are plain Node ESM, not typed application code.
+  // Scripts and the fixture service are plain Node ESM, not typed application code. Node *and*
+  // browser globals, because a script that drives Playwright carries `page.evaluate` bodies that
+  // really do run in a browser — `globals.node` alone reported `requestAnimationFrame` as undefined
+  // in the one place where it is the whole point.
   {
     files: ['scripts/**/*.mjs', 'e2e/**/*.mjs'],
-    languageOptions: { globals: globals.node },
+    languageOptions: { globals: { ...globals.node, ...globals.browser } },
     rules: { 'no-console': 'off' },
   },
 );

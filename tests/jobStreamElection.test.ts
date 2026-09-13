@@ -635,3 +635,117 @@ describe('two tabs watching different conversations', () => {
     }
   }, 15_000);
 });
+
+/* ── the warning, which a follower cannot see for itself ───────────────────── */
+
+describe('the stream health a follower holds no streams to observe', () => {
+  it('is relayed, so a chemist is not shown a working app while notifications are failing', async () => {
+    const leader = openPeer('0000-leader');
+    leader.keepAlive();
+
+    const { unmount } = renderHook(() => useJobStreams());
+    try {
+      await wait(AFTER_ELECTION_MS);
+      expect(useChatStore.getState().jobStreamsFailing).toEqual([]);
+
+      leader.note({ kind: 'health', failing: [SID], throttled: true });
+      await vi.waitFor(() => expect(useChatStore.getState().jobStreamsFailing).toEqual([SID]));
+      // The throttle travels too. It is the one flag that only ever moves one way, so a tab that
+      // is told the account is over the cap does not un-tell itself.
+      expect(useChatStore.getState().jobStreamsThrottled).toBe(true);
+
+      leader.note({ kind: 'health', failing: [], throttled: false });
+      await vi.waitFor(() => expect(useChatStore.getState().jobStreamsFailing).toEqual([]));
+      expect(useChatStore.getState().jobStreamsThrottled).toBe(true);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('does not outlive the leader that reported it', async () => {
+    // A failure warning describes streams the departed tab was holding. The ones this tab is about
+    // to open have not failed at anything — so a takeover that kept the warning would pin a red
+    // indicator on a healthy account until somebody reloaded the page, and the chemist would be
+    // told notifications were broken while they were arriving.
+    const leader = openPeer('0000-leader');
+    leader.keepAlive();
+
+    const { unmount } = renderHook(() => useJobStreams());
+    try {
+      await wait(AFTER_ELECTION_MS);
+      leader.note({ kind: 'health', failing: [SID], throttled: false });
+      await vi.waitFor(() => expect(useChatStore.getState().jobStreamsFailing).toEqual([SID]));
+
+      leader.received.length = 0;
+      leader.goSilent();
+      leader.resign();
+
+      await vi.waitFor(() => expect(useChatStore.getState().jobStreamsFailing).toEqual([]), {
+        timeout: TAKEOVER_DEADLINE_MS,
+        interval: 50,
+      });
+      // And it says so, rather than clearing it privately: a third tab is carrying the same stale
+      // warning and has no other way to hear that it is over.
+      expect(leader.received).toContainEqual({
+        type: 'note',
+        from: expect.any(String),
+        note: { kind: 'health', failing: [], throttled: false },
+      });
+    } finally {
+      unmount();
+    }
+  }, 15_000);
+});
+
+/* ── the path a completion actually takes to the other window ──────────────── */
+
+describe('a job finishing on the leader’s stream', () => {
+  it('is broadcast, not merely applied here, or the other window never hears it', async () => {
+    // The wiring the whole feature rests on, and the one place where "the store changed" is not
+    // enough: the leader holds the account's only stream, so a completion that stopped at its own
+    // `pushJobFinished` would reach one window and be lost to every other — which is what the old
+    // behaviour did per tab, and is the loss the election is supposed to have removed.
+    const watcher = openPeer('￿-watching-only');
+    const frame = {
+      type: 'job_completed',
+      job_id: 'job-broadcast',
+      summary: {},
+    };
+    globalThis.fetch = (() => {
+      connects += 1;
+      return Promise.resolve(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`,
+                ),
+              );
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        ),
+      );
+    }) as typeof fetch;
+
+    const { unmount } = renderHook(() => useJobStreams());
+    try {
+      await vi.waitFor(
+        () =>
+          expect(watcher.received).toContainEqual({
+            type: 'note',
+            from: expect.any(String),
+            note: { kind: 'job', event: frame, sessionId: SID },
+          }),
+        { timeout: TAKEOVER_DEADLINE_MS, interval: 50 },
+      );
+      // And it landed here too, through the same one path rather than a second reducer.
+      expect(useChatStore.getState().jobFeed.map((item) => item.event.job_id)).toEqual([
+        'job-broadcast',
+      ]);
+    } finally {
+      unmount();
+    }
+  }, 15_000);
+});

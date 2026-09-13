@@ -8,8 +8,9 @@
  * toolkit.
  *
  * **The heap lives here now.** RDKit's 6.9 MB WASM is instantiated inside this worker, not on the
- * page, so the two costs W28.7 measured — 129 ms to canonicalise and 558 ms to draw a legal
- * 600-character chain — are spent where no frame is waiting on them. A trap that kills the runtime
+ * page, so the cost W28.7 measured — 587 ms to draw a legal 600-character chain, 97 ms for a
+ * 200-character one (`scripts/measure-rdkit-placement.mjs`) — is spent where no frame is waiting
+ * on it. A trap that kills the runtime
  * (see `MAX_PARSED_SMILES_CHARS`) kills it *here*, and the page keeps its own main thread either
  * way.
  *

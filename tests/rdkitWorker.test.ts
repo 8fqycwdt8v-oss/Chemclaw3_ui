@@ -1,11 +1,13 @@
 /**
  * W28.7 — the RDKit toolkit runs off the main thread, and every way that can fail answers anyway.
  *
- * The measurement that forced this is in `src/chem/rdkit.ts`: through the app's own module in real
- * Chromium, a legal 600-character chain cost 552 ms to draw and 111 ms to canonicalise, each one a
- * single `longtask` with the frame loop stopped for its whole duration. After the move: **zero**
- * long tasks for the draw, and the largest gap between animation frames is 16.9 ms — the frame
- * cadence itself.
+ * The measurement that forced this is `scripts/measure-rdkit-placement.mjs`, and the table it
+ * produces is in `src/chem/rdkit.ts`: through the app's own module in real Chromium, a legal
+ * 600-character chain cost **587 ms of blocked main thread** to draw, a single `longtask` with the
+ * frame loop stopped for its whole duration. After the move: **zero** long tasks, zero blocked
+ * main thread, and the widest gap between animation frames is 19.1 ms — the frame cadence itself.
+ * The figure is not transcribed here twice over, because it shipped that way once and the two
+ * copies disagreed.
  *
  * What this file drives is the *wiring*, because the placement is the whole feature and none of it
  * is visible in an answer. It runs the **real** `rdkit.client.ts` against a fake `Worker` whose

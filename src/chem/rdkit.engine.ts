@@ -3,8 +3,10 @@
  *
  * **This is the half that runs off the main thread.** It was all one file until W28.7 measured
  * what a legal 600-character chain costs where it used to run — in real Chromium, through the
- * app's own module, 129 ms to canonicalise and 558 ms to draw, each of them a single
- * `longtask` with the frame loop stopped for its whole duration. The 600-character cap above
+ * app's own module, **587 ms of blocked main thread to draw one**, a single `longtask` with the
+ * frame loop stopped for its whole duration. Run it rather than reading it:
+ * `node scripts/measure-rdkit-placement.mjs`, which is where every figure in this change comes
+ * from and the reason none of them is transcribed twice. The 600-character cap above
  * bounds the *unrecoverable* failure (`MAX_PARSED_SMILES_CHARS`) and could never bound that one,
  * because the cost is not a bug to be fixed — parsing and depicting a 300-bond chain is work.
  * Work that blocks a chemist's tab is a placement problem, so the work moved.

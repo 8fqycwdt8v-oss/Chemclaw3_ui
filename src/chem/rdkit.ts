@@ -55,12 +55,36 @@
  * plus the one thing that must stay on this thread — the drawing cache, where a hit has to cost
  * nothing at all rather than a round trip.
  *
- * **The number that forced it.** The 600-character cap (`MAX_PARSED_SMILES_CHARS`, in the engine)
- * bounds the *unrecoverable* failure and was never able to bound the slow one: measured in real
- * Chromium through this module, a legal 600-character chain cost 129 ms to canonicalise and 558 ms
- * to draw, each one a single `longtask` with the frame loop stopped for its whole duration. That
- * is not a bug to be fixed — parsing and depicting a 300-bond chain is work — so the work moved
- * instead. Re-measured the same way afterwards: 1.6 ms and 4.4 ms on the main thread.
+ * **The number that forced it, and it is one script rather than a sentence.** The 600-character
+ * cap (`MAX_PARSED_SMILES_CHARS`, in the engine) bounds the *unrecoverable* failure and was never
+ * able to bound the slow one. `scripts/measure-rdkit-placement.mjs` drives this seam in real
+ * Chromium and reports the **main thread** rather than the wall clock, because a worker makes the
+ * second bigger and the first zero and only the first stops a frame painting. Run against the
+ * commit before W28.7 and against this one:
+ *
+ * | chain | call | blocked main thread | long tasks | widest frame |
+ * | --- | --- | --- | --- | --- |
+ * | 200 | canonicalSmiles | 72 ms → **0 ms** | 1 → 0 | 72.6 ms → 16.7 ms |
+ * | 200 | moleculeSvg | 97 ms → **0 ms** | 1 → 0 | 97.5 ms → 17.6 ms |
+ * | 600 | moleculeSvg | 587 ms → **0 ms** | 1 → 0 | 587 ms → 19.1 ms |
+ *
+ * The wall clock of that last one barely moved — 586.8 ms to 585.8 ms — which is the whole point:
+ * parsing and depicting a 300-bond chain is work, and it is not a bug to be fixed. It moved.
+ *
+ * **These figures shipped twice, from two runs, and disagreed** — `129 ms / 558 ms` in three
+ * source files against `111 ms / 552 ms` in three others, a claim about somebody's afternoon
+ * rather than about a commit. Neither pair reproduced. Every site now names the script instead,
+ * and a number here that the script contradicts is the number that is wrong.
+ *
+ * **The draw is the win; canonicalisation above ~400 characters is not, and the record said it
+ * was.** The worker's call stack is smaller than the page's, RDKit's canonical ranking recurses,
+ * and `rdkit.client.ts` answers a `RangeError` by re-running the call *here* — so the block comes
+ * straight back. Measured across 300–600 characters on this commit: `moleculeSvg` is **0 ms
+ * blocked at every length**, while `canonicalSmiles` is 0 ms at 300 and **59, 72, 94, 88, 103, 107
+ * and 118 ms, one long task each**, at 400, 450, 480, 500, 520, 560 and 600. So the boundary is
+ * between 300 and 400 characters, not "500 up" as this change recorded, and above it the wall
+ * clock is *worse* than before — the worker attempt is paid before the page does the work anyway.
+ * `ISSUES.md` Issue 11 has it, including the part that is not deterministic.
  *
  * **The CSP has to allow it, and today's does not.** Instantiating WASM needs `script-src
  * 'wasm-unsafe-eval'` (`server/config.ts`) — and that is necessary rather than sufficient, which

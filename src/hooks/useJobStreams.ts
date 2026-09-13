@@ -14,8 +14,10 @@
  *    an explicit client-side budget, and it only ever adjusts DOWNWARD. **The budget is now per
  *    account rather than per tab**: `src/state/jobStreamLeader.ts` elects one tab to hold the
  *    streams and relays what it sees to the rest, so two windows ask for three streams between
- *    them instead of six. That file carries the election's failure modes; this one only has to
- *    know that a follower opens nothing and is told everything.
+ *    them instead of six. That file carries the election's failure modes; this one has to know
+ *    two things — a follower opens nothing and is told everything, and **what a tab wants watched
+ *    is not what it opens**, so the two are separate effects here. A follower that only opened
+ *    nothing, without also *asking*, would be a window whose own conversation nobody watches.
  *  - Its claim is destructive and scoped to three kinds in SQL. We are one of two consumers
  *    racing for those rows, so a missed event is expected and must never be treated as an error.
  *    More streams do not multiply delivery; they multiply racers.
@@ -217,6 +219,16 @@ export function useJobStreams(): void {
   // below tears the surplus streams down — and rebuilds them when the tab comes back, which is the
   // half `jobStreamsThrottled` cannot express.
   const watchKey = useChatStore((s) => watchedSessionKey(s, backgrounded));
+  /**
+   * How many streams the *account* may hold, which is not how many this tab wants.
+   *
+   * `watchKey` above is already trimmed by `backgrounded`, and that trimming is about this window:
+   * a hidden tab should stop asking for three conversations. It must not also shrink what the
+   * account holds, or a backgrounded leader would cut the chemist's *visible* window to one stream.
+   * `jobStreamsThrottled` is the opposite — it is evidence that the account is over the pod's cap —
+   * so that one does belong here.
+   */
+  const budget = useChatStore((s) => (s.jobStreamsThrottled ? 1 : MAX_JOB_STREAMS));
 
   /**
    * This tab's membership of the election, for as long as the hook is mounted.
@@ -240,50 +252,71 @@ export function useJobStreams(): void {
     [],
   );
 
+  // **Asking is not opening.** Every tab says what it wants watched; only the leader opens
+  // anything. Separating the two effects is what lets a follower's conversation be watched at all:
+  // its interest has to reach the leader even though its own answer to "what do I open" is nothing.
   useEffect(() => {
-    if (!ready || !watchKey) return;
-    const sessionIds = watchKey.split(',').filter(Boolean);
+    if (!ready) return;
+    tab().declare(watchKey ? watchKey.split(',').filter(Boolean) : [], budget);
+  }, [watchKey, budget, ready]);
+
+  useEffect(() => {
+    if (!ready) return;
     const joined = tab();
-    let controllers: AbortController[] = [];
+    /** The stream this tab holds for each session, so a change to the set moves only what moved. */
+    const open = new Map<string, AbortController>();
+    let held = false;
+
+    const drop = (sessionId: string): void => {
+      open.get(sessionId)?.abort();
+      open.delete(sessionId);
+      // A stream nobody is watching cannot be failing. Without this, dropping a conversation out
+      // of the watch set — or losing the election — would leave its indicator up for the life of
+      // the page.
+      useChatStore.getState().setJobStreamFailing(sessionId, false);
+    };
 
     /**
-     * Hold the streams iff this tab leads.
+     * Hold exactly the streams the election says this tab holds.
      *
      * Driven by the election rather than by React state, deliberately. Leadership is not something
      * this component renders, and routing it through `useState` would put `AppShell` — the top
      * bar, the composer, the entity rail, the sidebar — on yet another render path, which is the
      * exact hazard the `watchKey` projection above exists to avoid.
+     *
+     * A diff rather than a teardown, because the set now moves for reasons that are not this tab's:
+     * another window opening a conversation re-merges the account's watch set, and restarting every
+     * stream each time would spend connects against the very cap this feature exists to stay under.
      */
     const sync = (): void => {
-      const wanted = joined.isLeader();
-      if (wanted === controllers.length > 0) return;
-      if (!wanted) {
-        stop();
-        return;
+      const wanted = joined.watched();
+      if (joined.isLeader() && !held) {
+        // Taking over. Every failure warning on this page was relayed by the leader that has just
+        // gone, and it described streams that no longer exist; the ones about to open have not
+        // failed at anything yet. Left alone, a takeover would pin a red indicator on a healthy
+        // account until the page was reloaded.
+        for (const sessionId of [...useChatStore.getState().jobStreamsFailing]) {
+          useChatStore.getState().setJobStreamFailing(sessionId, false);
+        }
+        publishHealth(joined);
       }
-      controllers = sessionIds.map((sessionId) => {
+      held = joined.isLeader();
+      for (const sessionId of [...open.keys()]) if (!wanted.includes(sessionId)) drop(sessionId);
+      for (const sessionId of wanted) {
+        if (open.has(sessionId)) continue;
         const controller = new AbortController();
+        open.set(sessionId, controller);
         void openStream(sessionId, auth, controller, joined);
-        return controller;
-      });
-    };
-
-    const stop = (): void => {
-      controllers.forEach((c) => c.abort());
-      controllers = [];
-      // A stream nobody is watching cannot be failing. Without this, dropping a conversation out
-      // of the watch set — or losing the election — would leave its indicator up for the life of
-      // the page.
-      sessionIds.forEach((id) => useChatStore.getState().setJobStreamFailing(id, false));
+      }
     };
 
     const unsubscribe = joined.subscribe(sync);
     sync();
     return () => {
       unsubscribe();
-      stop();
+      for (const sessionId of [...open.keys()]) drop(sessionId);
     };
-  }, [watchKey, auth, ready]);
+  }, [auth, ready]);
 }
 
 async function openStream(

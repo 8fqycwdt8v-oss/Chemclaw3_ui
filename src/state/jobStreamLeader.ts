@@ -46,6 +46,23 @@
  * path handles it. A feature that degraded to "nobody watches" would be the one unacceptable
  * outcome.
  *
+ * ## What is watched, which is not what the leader wants
+ *
+ * Electing a leader is only half a design, and the missing half loses notifications quietly enough
+ * that it would have shipped. `watchedSessionKey` reads *this* tab's `conversations` and *this*
+ * tab's `activeId`; neither is shared, because the store is hydrated per tab and an active
+ * conversation is by definition per window. So a leader that simply held its own three streams
+ * would leave the other window's conversation watched by nobody in the account — the exact loss
+ * this file exists to prevent, arriving from the direction the election does not look in. Driven
+ * before this existed: the account held one stream, for the leader's own session, and the
+ * follower's conversation was watched by nothing.
+ *
+ * So every tab `declare`s what it wants and the leader watches the **merge**, round-robin by rank
+ * (`mergeWatchSets`), capped at the account's budget rather than at any tab's. A follower's
+ * periodic message *is* its interest — one message per second per role — and an interest expires on
+ * the same `LEASE_MS` as leadership, so a crashed tab stops holding a slot for a window nobody is
+ * looking at.
+ *
  * ## What is relayed
  *
  * The leader `publish`es what its streams saw and the followers apply it. Two properties make that
@@ -103,7 +120,43 @@ type Message =
   | { type: 'claim'; from: string }
   | { type: 'heartbeat'; from: string }
   | { type: 'resign'; from: string }
+  | { type: 'interest'; from: string; sessions: readonly string[] }
   | { type: 'note'; from: string; note: Note };
+
+/**
+ * The account's watch set, out of what each tab asked for.
+ *
+ * **Round-robin by rank, not concatenation**, and that is the whole of it. Every tab's list arrives
+ * already in its own priority order (its active conversation first — see `watchedSessionKey`), so
+ * taking rank 0 from every tab before rank 1 from any of them gives each window the conversation
+ * it is actually looking at, for as many windows as the budget has room for. Concatenating would
+ * spend the entire budget on the leader's own list and leave every other window watching nothing,
+ * which is the failure this whole file exists to prevent, arriving from the other direction.
+ *
+ * `mine` goes first at each rank so the tab holding the streams breaks its own ties, which makes
+ * the result a function of the inputs rather than of message arrival order.
+ *
+ * Exported for `tests/jobStreamElection.test.ts`, which drives the ordering directly: the wiring
+ * tests can only see the first three of a six-way merge.
+ */
+export function mergeWatchSets(
+  mine: readonly string[],
+  peers: readonly (readonly string[])[],
+  budget: number,
+): string[] {
+  const lists = [mine, ...peers];
+  const merged: string[] = [];
+  const depth = Math.max(...lists.map((list) => list.length));
+  for (let rank = 0; rank < depth && merged.length < budget; rank += 1) {
+    for (const list of lists) {
+      const sessionId = list[rank];
+      if (sessionId === undefined || merged.includes(sessionId)) continue;
+      merged.push(sessionId);
+      if (merged.length >= budget) break;
+    }
+  }
+  return merged;
+}
 
 /** One tab's membership of the election. */
 export interface StreamLeader {
@@ -112,7 +165,20 @@ export interface StreamLeader {
   readonly id: string;
   /** Does this tab hold the streams? */
   isLeader(): boolean;
-  /** Called whenever that answer changes, so a React hook can re-render. Returns an unsubscribe. */
+  /**
+   * What this tab wants watched, in its own priority order, and how many the account may hold.
+   *
+   * Told to every tab rather than only to the leader, because the leader can change without any
+   * tab's interest changing, and a takeover that had to ask would watch nothing until it did.
+   */
+  declare(sessions: readonly string[], budget: number): void;
+  /**
+   * What this tab must actually open. Empty for a follower; for a leader, the merge of every live
+   * tab's `declare`, capped at the leader's own budget.
+   */
+  watched(): readonly string[];
+  /** Called whenever either answer changes, so a React hook can re-render. Returns an
+   *  unsubscribe. */
   subscribe(listener: () => void): () => void;
   /** Apply a note here and send it to the other tabs. Only the leader has anything to publish. */
   publish(note: Note): void;
@@ -139,6 +205,13 @@ function isMessage(data: unknown): data is Message {
   if (typeof data !== 'object' || data === null) return false;
   const { type, from } = data as { type?: unknown; from?: unknown };
   if (typeof from !== 'string') return false;
+  if (type === 'interest') {
+    // The one payload a tab acts on structurally — it decides which streams get opened — so the
+    // array is checked rather than trusted. A note is handed to the caller as-is, because the only
+    // sender is another copy of this app and the store's own handlers already normalise.
+    const { sessions } = data as { sessions?: unknown };
+    return Array.isArray(sessions) && sessions.every((s) => typeof s === 'string');
+  }
   return type === 'claim' || type === 'heartbeat' || type === 'resign' || type === 'note';
 }
 
@@ -157,6 +230,12 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   let closed = false;
   /** The most recent health note, replayed to a tab that joins later. */
   let health: Note | null = null;
+  /** What this tab asked for, and the account budget it believes applies. */
+  let mine: readonly string[] = [];
+  let budget = 0;
+  const notify = (): void => {
+    for (const listener of listeners) listener();
+  };
 
   const channel = openChannel();
   // No channel, no election: every tab leads, which is what this app did before there was an
@@ -167,6 +246,15 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
     return {
       id,
       isLeader: () => true,
+      declare: (sessions, nextBudget) => {
+        mine = sessions;
+        budget = nextBudget;
+        notify();
+      },
+      // Its own, capped by its own budget. There are no peers to merge, which is the same answer
+      // `mergeWatchSets` gives for an empty peer list — written through it anyway, so a tab with no
+      // `BroadcastChannel` and a tab that is simply alone cannot drift apart.
+      watched: () => mergeWatchSets(mine, [], budget),
       subscribe: (listener) => {
         listeners.add(listener);
         return () => listeners.delete(listener);
@@ -181,14 +269,47 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   let rivals: string[] = [];
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let lastHeard = 0;
+  /**
+   * What the other tabs asked for, and when they last said so.
+   *
+   * Expiry is the same `LEASE_MS` as leadership, for the same reason and against the same clock: a
+   * follower re-announces on every watchdog tick, so a claim on a stream survives three missed
+   * announcements and no more. Without it a crashed tab's interest would outlive the tab — the
+   * leader holding a stream for a window nobody is looking at, inside a budget of three, which at
+   * the limit is the live window watching nothing. A follower that *closes* is covered sooner by
+   * nothing at all: there is no `leave` message, deliberately, because the expiry already handles
+   * the case that cannot send one and a second mechanism for the case that can is a second thing
+   * to get wrong.
+   */
+  const asked = new Map<string, { sessions: readonly string[]; at: number }>();
+  let watched: readonly string[] = [];
 
   const now = (): number => Date.now();
 
-  const setLeader = (next: boolean): void => {
-    if (leader === next) return;
-    leader = next;
-    for (const listener of listeners) listener();
+  /** Recompute the watch set, dropping tabs that have gone quiet. Returns whether it moved. */
+  const rebuild = (): boolean => {
+    let next: readonly string[] = [];
+    if (leader) {
+      const cutoff = now() - LEASE_MS;
+      for (const [peer, interest] of asked) if (interest.at <= cutoff) asked.delete(peer);
+      const peers = [...asked.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([, interest]) => interest.sessions);
+      next = mergeWatchSets(mine, peers, budget);
+    }
+    if (next.length === watched.length && next.every((s, i) => s === watched[i])) return false;
+    watched = next;
+    return true;
   };
+
+  const setLeader = (nextLeader: boolean): void => {
+    if (leader === nextLeader) return;
+    leader = nextLeader;
+    rebuild();
+    notify();
+  };
+
+  const announce = (): void => send({ type: 'interest', from: id, sessions: mine });
 
   const send = (message: Message): void => {
     try {
@@ -230,6 +351,10 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
     if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
     heartbeatTimer = null;
     setLeader(false);
+    // Say what this tab wants on the way down. The tab that deposed it has never heard from this
+    // one — it was leading, and a leader announces nothing — so without this the conversation in
+    // *this* window goes unwatched until the next watchdog tick.
+    announce();
   };
 
   channel.addEventListener('message', (event) => {
@@ -244,6 +369,11 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
           // the heartbeat interval, so a leader that waited would let it win and make two.
           beat();
           if (health) send({ type: 'note', from: id, note: health });
+        } else {
+          // Somebody may be about to start holding the streams. Every leadership change begins
+          // with a claim, so answering one is what makes a takeover inherit the account's whole
+          // watch set instead of rebuilding it a tick at a time.
+          announce();
         }
         break;
       case 'heartbeat':
@@ -262,7 +392,13 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
       case 'resign':
         // Do not wait out the lease for a departure we were told about.
         lastHeard = 0;
+        // Whatever it was holding for this tab, it is not holding any more.
+        asked.delete(message.from);
         stand();
+        break;
+      case 'interest':
+        asked.set(message.from, { sessions: message.sessions, at: now() });
+        if (leader && rebuild()) notify();
         break;
       case 'note':
         deliver(message.note);
@@ -274,7 +410,16 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   // frozen and thawed resumes checking on the same schedule instead of firing a pile of expired
   // timeouts at once.
   const watchdog = setInterval(() => {
-    if (closed || leader) return;
+    if (closed) return;
+    if (leader) {
+      // The leader's own tick does the expiring: a tab that has stopped announcing stops being
+      // counted, and the slot it held goes to somebody who is still here.
+      if (rebuild()) notify();
+      return;
+    }
+    // A follower's periodic message *is* its interest, which is why there is no separate keepalive:
+    // one message per second per role, and the thing it carries is the thing the leader needs.
+    announce();
     if (now() - lastHeard > LEASE_MS) stand();
   }, HEARTBEAT_MS);
 
@@ -292,6 +437,21 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   return {
     id,
     isLeader: () => leader,
+    declare: (sessions, nextBudget) => {
+      if (closed) return;
+      const moved = nextBudget !== budget || sessions.join(',') !== mine.join(',');
+      mine = sessions;
+      budget = nextBudget;
+      if (!moved) return;
+      // A leader consumes its own interest; a follower has to send it, and at once rather than on
+      // the next tick — the conversation a chemist just opened is the one they are watching now.
+      if (leader) {
+        if (rebuild()) notify();
+      } else {
+        announce();
+      }
+    },
+    watched: () => watched,
     subscribe: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);

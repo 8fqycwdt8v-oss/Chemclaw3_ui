@@ -28,6 +28,7 @@ import { renderHook } from '@testing-library/react';
 import {
   CHANNEL,
   createStreamLeader,
+  mergeWatchSets,
   type Note,
   type StreamLeader,
 } from '../src/state/jobStreamLeader.ts';
@@ -91,6 +92,7 @@ function openPeer(id: string): {
   goSilent: () => void;
   resign: () => void;
   claim: () => void;
+  keepDeclaring: (sessions: string[]) => void;
   note: (note: Note) => void;
   received: unknown[];
 } {
@@ -117,6 +119,14 @@ function openPeer(id: string): {
     goSilent,
     resign: () => channel.postMessage({ type: 'resign', from: id }),
     claim: () => channel.postMessage({ type: 'claim', from: id }),
+    // A live follower, which repeats what it wants watched rather than saying it once. Saying it
+    // once is what a *dead* follower looks like, and the module treats the two differently on
+    // purpose — so a harness that announced once could not tell them apart either.
+    keepDeclaring: (sessions) => {
+      const say = (): void => channel.postMessage({ type: 'interest', from: id, sessions });
+      say();
+      timer ??= setInterval(say, 200);
+    },
     note: (note) => channel.postMessage({ type: 'note', from: id, note }),
     received,
   };
@@ -331,13 +341,29 @@ vi.mock('../src/auth/AuthContext.tsx', () => ({
 }));
 
 let connects = 0;
+/**
+ * The sessions this realm is holding a stream for **right now**, in the order they were opened.
+ *
+ * Not a log of connects: the set moves for reasons that are not this tab's — another window opening
+ * a conversation re-merges the account's watch set — so a cumulative list answers "what did it ever
+ * try" where the question is "what does the account hold", which is the one the pod's cap is about.
+ * Aborts are read off the signal the hook really passes, so a stream that was dropped leaves.
+ */
+let live: string[] = [];
 let restoreFetch: (() => void) | null = null;
 
 beforeEach(() => {
   connects = 0;
+  live = [];
   const original = globalThis.fetch;
-  globalThis.fetch = (() => {
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     connects += 1;
+    const sessionId = String(input).replace(/^.*\/sessions\/([^/]+)\/events.*$/, '$1');
+    live.push(sessionId);
+    init?.signal?.addEventListener('abort', () => {
+      const at = live.indexOf(sessionId);
+      if (at !== -1) live.splice(at, 1);
+    });
     // A stream that opens and stays silent, which is what a healthy one does between completions.
     return Promise.resolve(new Response(new ReadableStream(), { status: 200 }));
   }) as typeof fetch;
@@ -423,4 +449,189 @@ describe('a tab that lost the election', () => {
       unmount();
     }
   });
+});
+
+/* ── what the leader watches, which is not the same as what it wants ───────── */
+
+/**
+ * Two tabs on one account do not watch the same conversations.
+ *
+ * `watchedSessionKey` reads this tab's own `conversations` and its own `activeId`, and neither is
+ * shared: the store is hydrated per tab and `activeId` is by definition per window. So "one tab
+ * holds the streams" is only half a design — the half that elects. The other half is that the
+ * leader must hold the streams the *other* tabs wanted, or the feature loses exactly the
+ * notifications it was built to stop losing, and loses them silently, for the conversation the
+ * other chemist's window is actually looking at.
+ *
+ * Measured against the election before the interest protocol existed: the account held one stream,
+ * for the leader's own `SID`, and the follower's conversation was watched by nobody.
+ */
+const SID2 = 'b'.repeat(32);
+const SID3 = 'c'.repeat(32);
+const SID4 = 'd'.repeat(32);
+const SID5 = 'e'.repeat(32);
+const SID6 = 'f'.repeat(32);
+
+function seedConversations(ids: readonly string[]): void {
+  const conversations: Record<string, unknown> = {};
+  ids.forEach((sessionId, index) => {
+    conversations[`c${index}`] = {
+      id: `c${index}`,
+      sessionId,
+      title: 'x',
+      messages: [{ id: `m${index}`, role: 'user', text: 'hi' }],
+      updatedAt: ids.length - index,
+    };
+  });
+  useChatStore.setState({
+    conversations: conversations as never,
+    activeId: 'c0',
+    jobStreamsThrottled: false,
+    jobStreamsFailing: [],
+    jobFeed: [],
+  });
+}
+
+/** Wait for the account's held set to settle on exactly these sessions, in any order. */
+async function holds(sessions: readonly string[]): Promise<void> {
+  await vi.waitFor(() => expect([...live].sort()).toEqual([...sessions].sort()), {
+    timeout: TAKEOVER_DEADLINE_MS,
+    interval: 50,
+  });
+}
+
+describe('merging what every tab asked for', () => {
+  it('takes each tab’s first choice before any tab’s second', () => {
+    // Three tabs, each wanting three, against a budget of three. Concatenation would answer
+    // ['a1','a2','a3'] and leave two windows watching nothing at all.
+    expect(
+      mergeWatchSets(
+        ['a1', 'a2', 'a3'],
+        [
+          ['b1', 'b2'],
+          ['c1', 'c2'],
+        ],
+        3,
+      ),
+    ).toEqual(['a1', 'b1', 'c1']);
+  });
+
+  it('fills the budget from whoever is left once a tab runs out of conversations', () => {
+    expect(mergeWatchSets(['a1', 'a2', 'a3'], [['b1']], 3)).toEqual(['a1', 'b1', 'a2']);
+  });
+
+  it('counts a conversation two tabs both want once', () => {
+    // Two windows on the same conversation is the ordinary case, not the exotic one, and it must
+    // cost one stream rather than two — the budget is the account's.
+    expect(mergeWatchSets(['a1', 'a2'], [['a1', 'b2']], 3)).toEqual(['a1', 'a2', 'b2']);
+  });
+
+  it('never exceeds the budget, whatever it is handed', () => {
+    expect(mergeWatchSets(['a1', 'a2', 'a3'], [['b1', 'b2', 'b3']], 1)).toEqual(['a1']);
+    expect(mergeWatchSets(['a1'], [['b1']], 0)).toEqual([]);
+  });
+});
+
+describe('two tabs watching different conversations', () => {
+  it('watches what the follower asked for, not only what the leader wanted', async () => {
+    const follower = openPeer('zzzz-follower');
+    follower.keepDeclaring([SID2]);
+
+    const { unmount } = renderHook(() => useJobStreams());
+    try {
+      // Both, in one account, from one tab. The follower opens nothing and is still watched.
+      await holds([SID, SID2]);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('gives every tab its first choice when the union is over the budget', async () => {
+    seedConversations([SID, SID2, SID3]);
+    const follower = openPeer('zzzz-follower');
+    // The follower's own top three, none of which the leader wanted.
+    follower.keepDeclaring([SID4, SID5, SID6]);
+
+    const { unmount } = renderHook(() => useJobStreams());
+    try {
+      // Three, not six: the budget is the account's, which is the whole arithmetic this feature
+      // exists for. And the two heads are in it — the leader's `SID` and the follower's `SID4` —
+      // so neither window is left watching nothing.
+      await holds([SID, SID4, SID2]);
+    } finally {
+      unmount();
+    }
+  });
+
+  it('reclaims the slot when the tab that asked for it stops saying so', async () => {
+    seedConversations([SID, SID2, SID3]);
+    const follower = openPeer('zzzz-follower');
+    follower.keepDeclaring([SID4]);
+
+    const { unmount } = renderHook(() => useJobStreams());
+    try {
+      await holds([SID, SID4, SID2]);
+
+      // The follower crashes — no resignation, nothing announced, which is the only shape a crash
+      // has from here. Without an expiry its claim on a stream would outlive the tab that made it,
+      // and the leader would hold one of three streams for a window nobody is looking at.
+      follower.goSilent();
+      await holds([SID, SID2, SID3]);
+    } finally {
+      unmount();
+    }
+  }, 15_000);
+
+  it('watches the follower’s conversation even while the leader is backgrounded', async () => {
+    // `backgrounded` trims what *this window* asks for, down to one. It must not trim what the
+    // account holds, or a chemist's visible window would be cut to a single stream by a tab they
+    // are not even looking at — which is the old per-tab budget coming back wearing the election's
+    // clothes.
+    //
+    // Fake timers before anything is created, so the election's campaign, the watchdog, the peer's
+    // announcements and `HIDDEN_GRACE_MS` (30 s) are all on the clock being advanced. Advancing is
+    // the only way to reach the grace period at all; a real-clock version of this case would be a
+    // thirty-second test.
+    vi.useFakeTimers();
+    try {
+      seedConversations([SID, SID2, SID3]);
+      Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+      const follower = openPeer('zzzz-follower');
+      follower.keepDeclaring([SID4, SID5]);
+
+      const { unmount } = renderHook(() => useJobStreams());
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+
+        // One of the leader's own — it is hidden and asks for one — and both of the follower's.
+        // Three streams, not one, and not four.
+        expect([...live].sort()).toEqual([SID, SID4, SID5].sort());
+      } finally {
+        unmount();
+      }
+    } finally {
+      Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it('holds one stream for the whole account once a 429 says it is over the cap', async () => {
+    // The backstop the election does not replace. `jobStreamsThrottled` is evidence about the
+    // *account* rather than about this window, so it has to cut the merged set and not merely this
+    // tab's share — otherwise the leader would answer a 429 by dropping its own conversation and
+    // keeping three streams open for everybody else's.
+    seedConversations([SID, SID2, SID3]);
+    useChatStore.setState({ jobStreamsThrottled: true });
+    const follower = openPeer('zzzz-follower');
+    follower.keepDeclaring([SID4, SID5]);
+
+    const { unmount } = renderHook(() => useJobStreams());
+    try {
+      await holds([SID]);
+      await wait(300);
+      expect(live).toEqual([SID]);
+    } finally {
+      unmount();
+    }
+  }, 15_000);
 });

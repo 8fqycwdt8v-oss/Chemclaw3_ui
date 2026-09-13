@@ -122,7 +122,10 @@ async function watch(): Promise<typeof import('../src/state/chatStore.ts').useCh
     awaiting: [],
   });
   unmountHook = renderHook(() => useJobStreams()).unmount;
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  // 400 ms rather than one macrotask: `useJobStreams` holds streams only while this tab leads the
+  // `BroadcastChannel` election, and a lone tab still campaigns for `ELECTION_MS` (250 ms) before
+  // it can know it is alone. Nothing else here waits on a clock, so this is the whole of it.
+  await new Promise((resolve) => setTimeout(resolve, 400));
   return useChatStore;
 }
 

@@ -118,8 +118,11 @@ describe('a 429 that carries Retry-After', () => {
 describe('a 429 that keeps carrying Retry-After', () => {
   it('is counted and escalated rather than retried in silence for ever', async () => {
     stubRateLimited({ 'retry-after': '1' });
-    const { unmount } = watchOneSession();
+    // Fake timers BEFORE the mount, so the `BroadcastChannel` election's own timer is one of the
+    // ones being advanced. `useJobStreams` opens nothing until this tab wins it, and a campaign
+    // left on the real clock never fires inside a test that advances 120 s in 12 ms.
     vi.useFakeTimers();
+    const { unmount } = watchOneSession();
     try {
       await vi.advanceTimersByTimeAsync(120_000);
 
@@ -163,8 +166,9 @@ describe('a 429 whose Retry-After cannot be read', () => {
     // parses only for the number; this is the same split, in the file whose docstring already
     // claimed to be doing it.
     stubRateLimited({ 'retry-after': 'Wed, 09 Sep 2026 00:00:00 GMT' });
-    const { unmount } = watchOneSession();
+    // Before the mount, for the election — see the test above.
     vi.useFakeTimers();
+    const { unmount } = watchOneSession();
     try {
       // Long enough for several rounds at the backoff's own pace — the wait comes from there when
       // the header carries no readable number, rather than from a `sleep(0)` spin.

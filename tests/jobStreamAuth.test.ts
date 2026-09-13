@@ -111,14 +111,43 @@ function stub(): void {
  */
 async function watch(): Promise<void> {
   await mount();
-  // One macrotask is enough for the stream's first request and its synchronous follow-up; a
-  // backoff would not have elapsed, which is the point of counting requests rather than waiting.
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await settle();
+}
+
+/**
+ * Long enough for this tab to win its election and for the stream's first request.
+ *
+ * It used to be one macrotask (20 ms), which was enough when mounting the hook opened a stream
+ * immediately. It does not any more: `useJobStreams` holds streams only while this tab leads the
+ * `BroadcastChannel` election, and a lone tab still has to campaign for `ELECTION_MS` (250 ms)
+ * before it can know it is alone. A backoff still would not have elapsed, which is what keeps the
+ * request count the assertion rather than the wait.
+ */
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 400));
 }
 
 /** The same, without the wait, for a test that drives the clock itself. Returns the store the
  *  hook is actually reading — see the note above on `vi.resetModules()`. */
 async function mount(): Promise<typeof import('../src/state/chatStore.ts').useChatStore> {
+  const { useJobStreams, useChatStore } = await load();
+  render(useJobStreams);
+  return useChatStore;
+}
+
+/**
+ * The fresh module graph and the seeded store, without rendering anything.
+ *
+ * Split out of `mount` for the one test that drives the clock: a real `setTimeout` created before
+ * `vi.useFakeTimers()` never fires afterwards, and `useJobStreams` now creates one at mount for
+ * the `BroadcastChannel` election. So that test has to import first, switch the clock, and *then*
+ * render — an import still does not settle under fake timers, which is why the split is here and
+ * not a single call ordered differently.
+ */
+async function load(): Promise<{
+  useJobStreams: typeof import('../src/hooks/useJobStreams.ts').useJobStreams;
+  useChatStore: typeof import('../src/state/chatStore.ts').useChatStore;
+}> {
   const { useJobStreams } = await import('../src/hooks/useJobStreams.ts');
   const { useChatStore } = await import('../src/state/chatStore.ts');
   useChatStore.setState({
@@ -136,8 +165,11 @@ async function mount(): Promise<typeof import('../src/state/chatStore.ts').useCh
     jobStreamsFailing: [],
     jobFeed: [],
   });
+  return { useJobStreams, useChatStore };
+}
+
+function render(useJobStreams: typeof import('../src/hooks/useJobStreams.ts').useJobStreams): void {
   mounted = renderHook(() => useJobStreams()).unmount;
-  return useChatStore;
 }
 
 beforeEach(() => {
@@ -195,7 +227,7 @@ describe('a 401 on the push-back stream', () => {
    */
   it('says the stream is down when it gives up, rather than dying quietly', async () => {
     const store = await mount();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await settle();
 
     expect(requests).toHaveLength(1);
     expect(store.getState().jobStreamsFailing).toEqual([SID]);
@@ -223,12 +255,15 @@ describe('a second token expiry, an hour after the first', () => {
     // 401, then a working stream, then 401 for ever.
     statuses = [401, 401, 401];
     deliverOn = 2;
-    const store = await mount();
+    const { useJobStreams, useChatStore: store } = await load();
 
-    // Fake timers AFTER the dynamic imports: an import does not settle under them. Sixty seconds
-    // covers the single 1–2 s backoff the closing body earns between the two expiries.
+    // Fake timers AFTER the dynamic imports and BEFORE the render: an import does not settle under
+    // them, and a real timer created before them never fires under them — which is both halves of
+    // why this is three statements rather than one. Sixty seconds covers the election and the
+    // single 1–2 s backoff the closing body earns between the two expiries.
     vi.useFakeTimers();
     try {
+      render(useJobStreams);
       await vi.advanceTimersByTimeAsync(60_000);
     } finally {
       vi.useRealTimers();

@@ -545,7 +545,11 @@ and the difference is recorded rather than tolerated: the old spelling is an ent
 this reader admits _before_ the service declares it). Both are held to the same discipline — a
 non-empty reason, a phrase naming this row, and a date by which somebody re-takes the decision —
 and an entry whose `ISSUES.md` row is deleted, or whose date has passed, fails. That is the expiry;
-the old edition had none but a `console.log`.
+the old edition had none but a `console.log`. An `AHEAD_OF_BACKEND` entry has a second one, in the
+lanes that have a checkout: it fails as soon as the service declares the name, because that
+end-state is written in the declaration this check already reads and the remedy is deleting an
+entry that by then exempts a name needing no exemption. `RETAINED_FOR_ROLLOUT` keeps only the
+notice, because its end-state is a deployment nothing here can observe.
 
 **It does not fail the gate, and that is now true rather than intended.** The first edition argued
 only the _new_ name, so the day the service renamed, the retained old name failed this file with a

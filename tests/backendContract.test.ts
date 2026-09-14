@@ -164,11 +164,18 @@ const ARGUED = new Map<string, Argued>([...AHEAD_OF_BACKEND, ...RETAINED_FOR_ROL
 /**
  * The names in an argued map that the checked-out service *does* declare.
  *
- * A function, and called from a describe body rather than from inside an `it`, because the
- * consequence is a notice and a notice placed after an assertion is not one: the first edition put
- * the "step 3 is unblocked" line after `expect(unsent).toEqual([])` in the same test, so on the
- * day the service renamed — the only day the line had anything to say — the assertion threw and it
- * never printed. Observed, not reasoned about.
+ * The two maps do different things with that answer, and the difference is what unblocks the
+ * removal. For `RETAINED_FOR_ROLLOUT` it is a **notice**, printed from the describe body rather
+ * than from inside an `it`, because a notice placed after an assertion is not one: the first
+ * edition put the "step 3 is unblocked" line after `expect(unsent).toEqual([])` in the same test,
+ * so on the day the service renamed — the only day the line had anything to say — the assertion
+ * threw and it never printed. Observed, not reasoned about.
+ *
+ * For `AHEAD_OF_BACKEND` it is an **assertion**, because that map's end-state is mechanical: the
+ * service declaring the name is the whole of it, it is written in the declaration this file
+ * already reads, and the remedy is deleting an entry that by then exempts a name needing no
+ * exemption. Nothing has to roll out first, so leaving that to the `review` date meant an expired
+ * entry could stand for up to a whole window with only a `console.log` noticing.
  */
 function stillDeclared(map: Map<string, Argued>, sent: ReadonlySet<string>): string[] {
   return [...map.keys()].filter((type) => sent.has(type));
@@ -401,14 +408,6 @@ if (root === null) {
     // Both notices are built here, in the describe body, where no assertion can run first. The
     // edition before this one put the second of them after the `expect` two tests below, which is
     // why it printed on every run except the one it was written for.
-    const landed = stillDeclared(AHEAD_OF_BACKEND, sent);
-    if (landed.length > 0) {
-      console.log(
-        `\n  ${landed.length} name(s) in AHEAD_OF_BACKEND the service now declares — each is an` +
-          ` ordinary name and its entry is bookkeeping that has expired:\n` +
-          landed.map((type) => `      ${type}`).join('\n'),
-      );
-    }
     const unrenamed = stillDeclared(RETAINED_FOR_ROLLOUT, sent);
     if (unrenamed.length > 0) {
       console.log(
@@ -418,6 +417,19 @@ if (root === null) {
           unrenamed.map((type) => `      ${type}`).join('\n'),
       );
     }
+
+    it('holds no AHEAD_OF_BACKEND entry for a name the service has since declared', () => {
+      // The other map gets a notice for this and this one gets an assertion, because the two
+      // end-states are not alike: `RETAINED_FOR_ROLLOUT` ends when a *deployment* has reloaded
+      // every browser, which nothing here can observe, while this map ends when the service
+      // declares the name — which is in the file this test just read. By then the entry exempts a
+      // name that needs no exemption, and removing it is a deletion with nothing to coordinate.
+      expect(
+        stillDeclared(AHEAD_OF_BACKEND, sent),
+        'the service now declares these, so the AHEAD_OF_BACKEND entry is expired bookkeeping: ' +
+          'delete it, the name is ordinary now',
+      ).toEqual([]);
+    });
 
     it('is admitted in full by normalizeEvent', () => {
       const dropped = events

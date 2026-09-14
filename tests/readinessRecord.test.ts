@@ -23,9 +23,9 @@
  *    There is no quantity there to have: the set of clauses a looser rule *would* have admitted is
  *    not the set it did admit, and that one was empty.) **Enforced** and **Bounded** claim a
  *    refusal or a ceiling, and only a test can drive one, so those two must name a path under
- *    `tests/` or `e2e/` that is itself a `*.test.ts(x)` or `*.spec.ts(x)`. **Measured** is deliberately not held to that: a measurement is a number
- *    somebody ran, and the thing that ran it is a script — two shipped clauses cite
- *    `scripts/measure-*.mjs` and are right to.
+ *    `tests/` or `e2e/` that is itself a `*.test.ts(x)` or `*.spec.ts(x)`. **Measured** is
+ *    deliberately not held to that: a measurement is a number somebody ran, and the thing that
+ *    ran it is a script — two shipped clauses cite `scripts/measure-*.mjs` and are right to.
  *  - **A citation that has gone stale.** A renamed or deleted test leaves the sentence reading
  *    exactly as it did, which is worse than having no sentence: `tests/decision_log`-style rot,
  *    where the record outlives the thing it records. Every path cited anywhere in the document

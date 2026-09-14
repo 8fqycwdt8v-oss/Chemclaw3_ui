@@ -56,11 +56,15 @@ pipeline {
           env.IMAGE_REF = "${params.IMAGE_REGISTRY ? params.IMAGE_REGISTRY + '/' : ''}${params.IMAGE_NAME}:${env.REVISION.take(12)}"
           echo "revision ${env.REVISION}\nimage    ${env.IMAGE_REF}"
         }
-        // Four sparse paths, and only the first is for the build. The other three are what
-        // `tests/backendContract.test.ts` reads out of this checkout when the Gate stage below
-        // runs it: `api/` for the routes, the SSE models and `ErrorCode`, `core/` for
-        // `RefusalReason` and `agent/` for `AnswerCheck`. Directories rather than the three files,
-        // because `git clone --sparse` initialises **cone** mode and cone mode refuses a file path
+        // Only the first sparse path is for the build. The rest are what this repository's
+        // cross-repository readers open out of this checkout when the Gate stage below runs them:
+        // `api/` for the routes, the SSE models and `ErrorCode`, `core/` for `RefusalReason`,
+        // `agent/` for `AnswerCheck` and `protocols/` for the design-lifecycle table
+        // `shared/protocols.ts` mirrors. No count in this comment, and the list is not authored
+        // here either — `tests/delivery.test.ts` derives it from the readers themselves and fails
+        // when this line omits one, which is how `protocols/` was found missing after that reader
+        // had been fetching nothing for a whole wave. Directories rather than files, because
+        // `git clone --sparse` initialises **cone** mode and cone mode refuses a file path
         // outright ("is not a directory; to treat it as a directory anyway, rerun with
         // --skip-checks") — driven against a real clone before this was written.
         sh """
@@ -68,7 +72,7 @@ pipeline {
           git clone --depth 1 --branch '${params.CHEMCLAW3_BRANCH}' --filter=blob:none --sparse \
             '${params.CHEMCLAW3_REPO}' .jenkins-lib
           cd .jenkins-lib && git sparse-checkout set deploy/jenkins/lib \
-            src/chemclaw/api src/chemclaw/core src/chemclaw/agent
+            src/chemclaw/api src/chemclaw/core src/chemclaw/agent src/chemclaw/protocols
         """
       }
     }

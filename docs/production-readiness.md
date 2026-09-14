@@ -78,6 +78,13 @@ indistinguishable from one that does not work — and this repository has produc
 - **Enforced.** Every member of the event union survives `normalizeEvent` carrying every field,
   checked by round-tripping a frame of each rather than by reading the list — the list is the thing
   that has been wrong six times (`tests/eventContract.test.ts`).
+- **Enforced.** The runtime gate and the interface union are held to being **one** vocabulary,
+  which this clause used to describe them as while only one of them was read. `EVENT_TYPES` is what
+  admits an event; the fixture above is checked against the `ChemclawEvent` interfaces; a name in
+  the first with no interface and no branch was invisible to every assertion in the file — measured
+  at zero failures. A name in the gate must now normalise onto a declared member, and the one
+  legitimate exception, an alias carrying a second wire spelling through a two-repository rename,
+  is pinned by name rather than counted (`tests/eventContract.test.ts`).
 - **Enforced.** A wire name this client admits and the service does not declare fails, unless it is
   argued — and an argument is a reason of at least 40 characters, a phrase naming the `ISSUES.md`
   row whose deletion retires it, and a review date that is a failure once it has passed. Two maps,

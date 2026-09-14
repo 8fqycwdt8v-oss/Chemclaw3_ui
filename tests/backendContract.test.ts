@@ -26,8 +26,10 @@
  *     which are asserted in both directions.
  *  2. **Every event the service declares must survive `normalizeEvent`.** This is the direction
  *     that has failed six times. The other direction — a name this client admits and the service
- *     does not send — is dead code, and fails too *unless* it is argued in `AHEAD_OF_BACKEND`,
- *     which is what a deliberate two-repo rename needs to be able to land on this side first.
+ *     does not send — is dead code, and fails too *unless* it is argued, which a two-repository
+ *     rename needs at *both* ends of its skew window: `AHEAD_OF_BACKEND` for a reader that landed
+ *     first, `RETAINED_FOR_ROLLOUT` for an old spelling kept until deployed browsers have
+ *     reloaded. An entry costs a reason, an `ISSUES.md` row whose deletion retires it, and a date.
  *  3. **Every field `normalizeEvent` reads must be declared on the model that sends it.** A
  *     renamed field is the drift no name-level check can see: the client goes on reading the old
  *     key, `asString` fills in `''`, and a chemist reads a confident blank. The other direction —

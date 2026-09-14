@@ -484,7 +484,8 @@ said, flatly, that "the gap during a takeover is a delay, not a loss … a row n
 still there when the next stream opens". The first half is the important one and it is true. The
 sentence's scope was not.
 
-The service's claim is destructive by design (`chemclaw/agent/session_events.py`): one
+The service's claim is destructive by design (`chemclaw/agent/session_events.py`, read at
+`Chemclaw3` `1c2988fe`; that file itself last moved in `0bf7ff39`): one
 `UPDATE … FOR UPDATE SKIP LOCKED … RETURNING`, documented as at-most-once, with `restore_unconsumed`
 un-claiming a row whose _yield_ did not complete — which shrinks the loss window "to the transport
 itself", in that module's own words. So a `job_completed` frame that has been written to a tab's

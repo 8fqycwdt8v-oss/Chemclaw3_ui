@@ -465,3 +465,41 @@ means checking out a second private repository in the gate job, which is a crede
 rather than a test change (`ISSUES.md` Issue 14). The path-encoding escapes are recorded rather
 than closed — one needs dataflow analysis, the other a character policy with a different blast
 radius than the traversal fix that was measured (`ISSUES.md` Issue 15).
+
+---
+
+## W30 review follow-up — what a fresh-context review of the merged wave found
+
+Five things, each reproduced before it was changed and each mutation verified applied with
+`git diff --numstat` before its result was believed.
+
+- [x] **The contract check was red against today's backend, and the design said it could not be.**
+      Chemclaw3 shipped Issue 13's step 2, so the _old_ wire name — the one step 3 deliberately
+      retains until deployed browsers reload — became "dead code" by this file's own message, and
+      the only mechanical remedy it offered was step 3 performed before the rollout: the ordering
+      that loses the event. `RETAINED_FOR_ROLLOUT` makes a retained name a state rather than an
+      error, beside `AHEAD_OF_BACKEND`, which holds the mirror-image one. The "step 3 is unblocked"
+      notice was _unreachable in the only case it was written for_ — it sat after the throwing
+      assertion in the same `it` — and now prints from the describe body.
+- [x] **An argued entry cost nothing.** `['fake_event', '']` satisfied "argued", and the only
+      expiry in the design was that unreachable notice. An entry now costs a reason of at least 40
+      characters, a phrase that must occur in `ISSUES.md` (so closing the row retires the entry),
+      and a review date that fails once it has passed. The validator is a pure function driven over
+      a deliberately-wrong map, because the maps' normal state is empty and a loop over an empty
+      map checks nothing.
+- [x] **Three ways a claiming clause satisfied the readiness record's rule without naming a test.**
+      Any `src/`/`server/`/`docs/` path counted; a clause indented under another was absorbed into
+      it and never parsed; `§n` was a shape that never resolved. All three closed, and the
+      shipped document needed no rewriting — measured first: every Enforced and Bounded clause
+      already cites a test, and every `§n` already resolves.
+- [x] **`tests/eventContract.test.ts` read the interface union while `shared/events.ts` says
+      `EVENT_TYPES` is the gate.** Two lists described as one: a name in the gate with no interface
+      and no branch produced zero failures. The two are now held to being one vocabulary, with an
+      alias — a second wire spelling for an existing event — permitted and **pinned** by name.
+- [x] **Not in the brief: a fall-through `case` was read as a branch that reads nothing.** So the
+      run printed two fields of `note_recorded` as ones this client ignores (false), and axis 3 —
+      the renamed-field drift — had nothing to compare for the one event a rename is in flight on.
+
+**What this leaves open.** Nothing new. The review's other findings were driven and hold; the
+`ISSUES.md` Issue 14 items (no CI lane checks the backend out, response shapes unchecked) are
+unchanged.

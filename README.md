@@ -284,6 +284,17 @@ gives the two scripts a name a person can type, and it does not put them on any 
 runner has no service to point them at. `tests/gate.test.ts` asserts both halves, the second by
 failing if either pipeline starts naming it, so wiring it in means coming back to this paragraph.
 
+**The wire contract is checked against the backend's source, in the gate.**
+`tests/backendContract.test.ts` reads a `Chemclaw3` checkout — `CHEMCLAW3_DIR`, or `../Chemclaw3` —
+and compares five things this repo consumes against what that repo declares: the BFF's route
+whitelist, every path and JSON body `src/api/` sends, every event `normalizeEvent` admits, every
+field it reads off one, and the three closed sets it mirrors (`ErrorCode`, `RefusalReason`,
+`AnswerCheck`). It needs no service, no port and no credential, which is the whole point: the check
+that needed a running one has never been run by a pipeline. **With no checkout it checks nothing and
+says so** — a warning naming what this run is therefore not evidence about, and `CHEMCLAW3_REQUIRED=1`
+turns that into a failure. What it cannot see is what a _deployment_ renders rather than declares,
+and the response shapes this client reads back; both are recorded in `ISSUES.md` rather than implied.
+
 `check:contrast` converts OKLCH to sRGB rather than comparing lightness values: OKLCH's `L` is
 perceptual and WCAG is defined on sRGB relative luminance, so two tokens that look far apart can
 still fail. That gap is exactly how white-on-accent survived in dark mode at roughly 2:1.

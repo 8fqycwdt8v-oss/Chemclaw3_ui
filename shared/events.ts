@@ -810,9 +810,6 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         type: 'tool_failed',
         tool: asString(o.tool, 'unknown'),
         message: asString(o.message, 'The tool call failed.'),
-        // A closed set upstream, so an unrecognised value normalises to `null` rather than passing
-        // through: "a reason this build does not know" must read as an ordinary failure, never as
-        // a refusal it cannot render.
         // A closed set upstream, so an unrecognised value normalises to `null` rather than
         // passing through: "a reason this build does not know" must read as an ordinary failure,
         // never as a refusal it cannot render. Derived from `REFUSAL_REASONS` rather than written

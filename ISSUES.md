@@ -576,6 +576,15 @@ everything next to it.
   `Preflight` stage already makes. **In GitHub Actions it is still a warning**, and that is the
   lane that runs on every push.
 
+  **And the Jenkins lane it now runs in is opt-in, which this entry read as a gate.**
+  `RUN_GATE` defaults to `false`, so that stage runs only when somebody ticks the box on a run —
+  meaning no lane of either pipeline gates this check by default, and the two sentences above are
+  about where it _can_ run rather than where it does. Turning the parameter on is the decision
+  below in miniature, taken by the same owner: it buys the check in the lane that ships the image,
+  and it costs a build that can red on a rename made in another repository. `tests/delivery.test.ts`
+  holds this paragraph and `docs/production-readiness.md` §2 to the default the pipeline declares,
+  so flipping it fails the suite until both are rewritten.
+
   **The blocker this entry used to state was a credential, and it was wrong in both lanes.** The
   `Jenkinsfile` beside it falsified half of that on its own: `Preflight` clones `Chemclaw3`
   unconditionally on every run for the shared build library, so that lane had whatever credential
@@ -595,6 +604,18 @@ everything next to it.
   to take deliberately — it is what a contract check is _for_, and it is also a build queue nobody
   here controls. **Who decides:** whoever owns this repository's CI. It is not a credential
   question, and this entry should not have said it was.
+
+  **That coupling is not the push lane's alone, and it grew while this entry named it only
+  there.** The argued maps used to fail on a name the service does **not** declare; one of them
+  now also fails on a name it **does** — an `AHEAD_OF_BACKEND` entry the service has caught up
+  with is expired bookkeeping, and deleting it is the remedy — so a change made upstream can red a
+  lane here in _both_ directions, a rename away and a rename toward. Every lane holding a checkout
+  inherits that: a developer's terminal, the four-repository full-stack lane, and the Jenkins
+  `Gate` stage on a run that ticks `RUN_GATE`. What differs between those lanes is only what a red
+  stops. In the push gate it stops a review of a pull request that changed nothing, which is the
+  cost weighed above; in the Jenkins lane it stops a _release_, and that is why the parameter's
+  default stays the conservative one rather than being an oversight. Same trade, same owner, and
+  the lane that ships is the one where a red is most expensive.
 
 - **Response shapes are not checked.** The interfaces this client declares for what it reads back
   are not compared to the models the handlers return. The mapping is not mechanical — `GET

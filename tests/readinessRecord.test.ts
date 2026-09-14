@@ -23,9 +23,9 @@
  *    There is no quantity there to have: the set of clauses a looser rule *would* have admitted is
  *    not the set it did admit, and that one was empty.) **Enforced** and **Bounded** claim a
  *    refusal or a ceiling, and only a test can drive one, so those two must name a path under
- *    `tests/` or `e2e/` that is itself a `*.test.ts(x)` or `*.spec.ts(x)`. **Measured** is deliberately not held to that: a measurement is a number
- *    somebody ran, and the thing that ran it is a script — two shipped clauses cite
- *    `scripts/measure-*.mjs` and are right to.
+ *    `tests/` or `e2e/` that is itself a `*.test.ts(x)` or `*.spec.ts(x)`. **Measured** is
+ *    deliberately not held to that: a measurement is a number somebody ran, and the thing that
+ *    ran it is a script — two shipped clauses cite `scripts/measure-*.mjs` and are right to.
  *  - **A citation that has gone stale.** A renamed or deleted test leaves the sentence reading
  *    exactly as it did, which is worse than having no sentence: `tests/decision_log`-style rot,
  *    where the record outlives the thing it records. Every path cited anywhere in the document
@@ -158,6 +158,32 @@ describe('the production-readiness record', () => {
       'an Enforced/Bounded clause naming no test — a file under src/ or server/ is the thing ' +
         'being claimed about, not the thing that holds it. Cite a test, or make it Measured/Accepted',
     ).toEqual([]);
+  });
+
+  it('counts only a test file as a test, driven over the shapes the loose rule admitted', () => {
+    // The rule above is `testCitations`, and in this document nothing exercises it: every
+    // Enforced and Bounded clause already cites a real test, so the filter's subject set is
+    // empty and the assertion passes on the clauses rather than on the predicate. Driven,
+    // before this: reverting the suffix rule to the `tests/`-prefix rule it replaced left this
+    // file reading 8 passed. A tightening no input can distinguish from the rule it replaced is
+    // held by nothing.
+    //
+    // So the predicate gets its own inputs — a literal body carrying each shape the prefix rule
+    // admitted, and a second carrying the two that must survive.
+    expect(
+      testCitations(
+        '- **Enforced.** a helper (`tests/helpers.ts`), a stub directory (`tests/stubs`), a ' +
+          'module (`src/lib/utils.ts`), a script (`scripts/check-serving.mjs`) and a server ' +
+          'file (`server/routes.ts`)',
+      ),
+      'none of these drives an assertion, and the first two are what the prefix rule admitted',
+    ).toEqual([]);
+    expect(
+      testCitations(
+        '- **Bounded.** (`tests/gate.test.ts`), (`e2e/shell.spec.ts`) and (`tests/x.test.tsx`)',
+      ),
+      'a test under tests/ or e2e/, in either suffix and either extension, is what holds a claim',
+    ).toEqual(['tests/gate.test.ts', 'e2e/shell.spec.ts', 'tests/x.test.tsx']);
   });
 
   it('parses a nested clause as a clause, rather than absorbing it into its neighbour', () => {

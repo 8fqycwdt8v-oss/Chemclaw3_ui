@@ -41,16 +41,42 @@ const shellBlocks = [
 ];
 
 /**
- * Every `src/chemclaw/<dir>` the cross-repository contract reader opens in a Chemclaw3 checkout.
+ * The readers, as text: every file in this suite that opens a Chemclaw3 checkout.
  *
- * Read off the reader rather than written down here, because the pipeline's sparse checkout has to
- * follow it and the failure of a transcribed list is silent in the direction that matters: a new
- * read, a path that is not fetched, and a lane that goes back to warning instead of checking.
+ * Three rather than two, and the third was outside this derivation and outside the pipeline's
+ * sparse list: `tests/protocolStatusTransitions.test.ts` reads
+ * `src/chemclaw/protocols/store.py`, so the Gate stage fetched a checkout that reader's
+ * directory was not in. A second cross-repository reader is exactly what a derived list is for.
  */
-const contractSourceDirs = (): string[] => {
-  const sources = ['tests/backendContract.ts', 'tests/backendContract.test.ts']
+const contractReader = (): string =>
+  [
+    'tests/backendContract.ts',
+    'tests/backendContract.test.ts',
+    'tests/protocolStatusTransitions.test.ts',
+  ]
     .map((file) => readFileSync(file, 'utf8'))
     .join('\n');
+
+/**
+ * Every `src/chemclaw/<dir>` a cross-repository reader in this suite opens in a Chemclaw3 checkout.
+ *
+ * Read off the readers rather than written down here, because the pipeline's sparse checkout has to
+ * follow it and the failure of a transcribed list is silent in the direction that matters: a new
+ * read, a path that is not fetched, and a lane that goes back to warning instead of checking.
+ *
+ * Three shapes, because the readers write three: a relative path handed to `readPy`/`literal`, an
+ * explicit `join(root, 'src', 'chemclaw', …)`, and a `…/src/chemclaw/<dir>/…` path built into a
+ * URL. Takes its sources as an argument so the derivation can be driven over text written to
+ * contain each of them — the second loop's answer is a *subset* of the first's today (`api`, which
+ * `readPy` already reaches), so deleting it leaves this file green while removing the only thing
+ * that sees a `join()` read of a directory nothing else opens.
+ *
+ * The boundary, stated because a derivation that looks exhaustive is read as one: all three shapes
+ * match a *literal* first path segment. A reader that builds the directory name — holding it in a
+ * constant, or joining a variable — is invisible here exactly as it is to the path-encoding rule,
+ * and the remedy is the same one: write the read in a shape this can see.
+ */
+const contractSourceDirs = (sources: string = contractReader()): string[] => {
   const dirs = new Set<string>();
   for (const match of sources.matchAll(/(?:readPy\(root, |literal\()'([a-z_]+)\//g)) {
     if (match[1]) dirs.add(match[1]);
@@ -58,8 +84,20 @@ const contractSourceDirs = (): string[] => {
   for (const match of sources.matchAll(/'src', 'chemclaw', '([a-z_]+)'/g)) {
     if (match[1]) dirs.add(match[1]);
   }
+  for (const match of sources.matchAll(/\/src\/chemclaw\/([a-z_]+)\//g)) {
+    if (match[1]) dirs.add(match[1]);
+  }
   return [...dirs].sort();
 };
+
+/**
+ * Whether the `Gate` stage runs unless somebody asks for it, read off the pipeline.
+ *
+ * `null` when the parameter is gone, which is a failure below rather than a quietly skipped
+ * assertion — a regex that stops matching is the way a check of this shape dies.
+ */
+const runGateDefault = (): string | null =>
+  /booleanParam\(name: 'RUN_GATE', defaultValue: (true|false)/.exec(pipeline)?.[1] ?? null;
 
 describe('the Jenkins pipeline', () => {
   it('invokes only npm scripts that exist', () => {
@@ -127,6 +165,45 @@ describe('the Jenkins pipeline', () => {
     // And the gate stage has to say where it went, and refuse to pass when it is not there.
     expect(pipeline).toContain('CHEMCLAW3_DIR = "${env.WORKSPACE}/.jenkins-lib"');
     expect(pipeline).toContain("CHEMCLAW3_REQUIRED = '1'");
+  });
+
+  it('derives a source directory from either shape the reader opens one with', () => {
+    // Driven, before this: deleting the `join(root, 'src', 'chemclaw', …)` loop is a 0/3 diff and
+    // leaves this file green, which reads as "the loop is dead". It is not — it is subsumed. Each
+    // loop sees a shape the other cannot, and the reader writes both, so a new read in the shape
+    // only one of them sees is exactly the silent failure this derivation exists to prevent.
+    expect(contractSourceDirs("readPy(root, 'kg/notes.py')")).toEqual(['kg']);
+    expect(contractSourceDirs("literal('memory/tiers.py')")).toEqual(['memory']);
+    expect(contractSourceDirs("join(root, 'src', 'chemclaw', 'durable', 'retention.py')")).toEqual([
+      'durable',
+    ]);
+    expect(
+      contractSourceDirs('new URL(`${checkout}/src/chemclaw/publish/sinks.py`, ROOT)'),
+    ).toEqual(['publish']);
+    // And it derives nothing from text that opens nothing, so the assertion above is about the
+    // shapes rather than about the regexes matching anything they are handed.
+    expect(contractSourceDirs('this text opens no file at all')).toEqual([]);
+  });
+
+  it('is described by the record with the RUN_GATE default it actually declares', () => {
+    // The stage above is the only lane with a Chemclaw3 checkout, so it is the only lane where the
+    // cross-repository contract check can gate — and it is behind `RUN_GATE`, which ships off. Two
+    // documents described that stage as a gate for a day, which is the failure mode this whole
+    // record exists to end: a control that is believed because it was written down. Rather than
+    // asking each document for a phrase, both are held to the parameter's own value, so flipping
+    // the default is a decision that cannot be taken in the pipeline alone.
+    const declared = runGateDefault();
+    expect(declared, 'the Jenkinsfile no longer declares a RUN_GATE boolean parameter').not.toBe(
+      null,
+    );
+    const claim = `\`RUN_GATE\` defaults to \`${declared}\``;
+    for (const doc of ['docs/production-readiness.md', 'ISSUES.md']) {
+      expect(
+        readFileSync(doc, 'utf8').includes(claim),
+        `${doc} does not say ${claim}, which is what the pipeline declares — the two lanes this ` +
+          'check runs in are what those documents are about, so a flipped default rewrites them',
+      ).toBe(true);
+    }
   });
 });
 

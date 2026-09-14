@@ -12,15 +12,23 @@
  * Where those two are checked against a **running** service, this one is checked against the
  * service's **source**, because a transition table is not on the wire: `require_movable` refuses a
  * move and never publishes the set it refused from. So this reads
- * `src/chemclaw/protocols/store.py` out of a sibling checkout — `CHEMCLAW_REPO`, defaulting to
- * `../Chemclaw3`, the same convention `docker-compose.yml` uses — and fails on any difference in
+ * `src/chemclaw/protocols/store.py` out of a sibling checkout and fails on any difference in
  * either direction.
  *
- * **When there is no checkout, this file says so and does not pretend.** CI has one repository, so
- * the cross-repo half is skipped there and reported as skipped, exactly as `check-openapi.mjs`
- * prints its gap rather than a pass: a check that reports success it did not perform is worse than
- * no check. What still runs everywhere is the half that needs no service — that the table is total,
- * closed, and consistent with the filter the panel actually calls.
+ * **Where that checkout is, is one question with one answer.** `CHEMCLAW3_DIR` first, because that
+ * is what a lane sets — `tests/backendContract.ts` reads it and the Jenkins `Gate` stage exports
+ * it — then `CHEMCLAW_REPO`, which `docker-compose.yml` and this file's own first edition use,
+ * then `../Chemclaw3`. Reading only the second was not a preference: driven with the Gate stage's
+ * exact environment (`CHEMCLAW3_DIR` set, `CHEMCLAW3_REQUIRED=1`, no sibling at the default path),
+ * this file reported 4 passed and 3 skipped and the lane stayed green with the drift check off.
+ *
+ * **When there is no checkout, this file says so and does not pretend.** The cross-repo half is
+ * skipped and reported as skipped, exactly as `check-openapi.mjs` prints its gap rather than a
+ * pass: a check that reports success it did not perform is worse than no check — and
+ * `CHEMCLAW3_REQUIRED=1` turns that skip into a failure, which is the same promise the other
+ * cross-repository reader makes to the same lane. What still runs everywhere is the half that
+ * needs no service — that the table is total, closed, and consistent with the filter the panel
+ * actually calls.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -33,18 +41,16 @@ import {
   type DesignStatus,
 } from '../shared/protocols.ts';
 
-/** Resolved against the repository ROOT, which is what `CHEMCLAW_REPO`'s default is relative to. */
+/** Resolved against the repository ROOT, which is what a relative checkout path is relative to. */
 const ROOT = new URL('../', import.meta.url);
-const STORE = new URL(
-  `${(process.env.CHEMCLAW_REPO ?? '../Chemclaw3').replace(/\/$/, '')}/src/chemclaw/protocols/store.py`,
-  ROOT,
-);
+const CHECKOUT = process.env.CHEMCLAW3_DIR ?? process.env.CHEMCLAW_REPO ?? '../Chemclaw3';
+const STORE = new URL(`${CHECKOUT.replace(/\/$/, '')}/src/chemclaw/protocols/store.py`, ROOT);
 const HAVE_SERVICE = existsSync(STORE);
 
 if (!HAVE_SERVICE) {
   console.warn(
     `[protocol transitions] NOT CHECKED against the service: no ${STORE.pathname}. ` +
-      'Set CHEMCLAW_REPO to a Chemclaw3 checkout to run the drift check.',
+      'Set CHEMCLAW3_DIR (or CHEMCLAW_REPO) to a Chemclaw3 checkout to run the drift check.',
   );
 }
 
@@ -109,6 +115,17 @@ describe('the design lifecycle this repository draws buttons from', () => {
       expect(legalStatusMoves(from, 'protocol')).not.toContain('requested');
       expect(legalStatusMoves(from, 'request')).not.toContain('requested');
     }
+  });
+
+  it('is a failure rather than a skip in a lane that says it has the checkout', () => {
+    // `CHEMCLAW3_REQUIRED=1` is how a lane says the sibling tree is there and a skip would be a
+    // control it claims and does not have. The other cross-repository reader in this suite has
+    // honoured it since the lane was wired; this one did not, so the Gate stage ran green with
+    // this drift check off — measured with that stage's exact environment.
+    expect(
+      HAVE_SERVICE || process.env.CHEMCLAW3_REQUIRED !== '1',
+      `CHEMCLAW3_REQUIRED=1, and there is no Chemclaw3 checkout at ${STORE.pathname}`,
+    ).toBe(true);
   });
 
   describe.skipIf(!HAVE_SERVICE)('against the service that enforces it', () => {

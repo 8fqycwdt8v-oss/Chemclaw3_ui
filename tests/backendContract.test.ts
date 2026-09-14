@@ -281,7 +281,15 @@ describe('a name this client admits and the service does not is argued, not mere
     // row failed the test above, correctly, **and** this one, with a 7-versus-5 diff about a
     // fixture. On the one day the control fires, the second red is noise pointing at the wrong
     // file. A probe of the validator supplies its own inputs; only the run above reads the tree.
+    //
+    // All four of them, which took a second pass: the first edition wrote its own document and
+    // then handed the validator the live `admitted` set and the real clock. Driven — dropping
+    // `queued` from `EVENT_TYPES` reds this probe with a 6-versus-5 diff, on top of the two
+    // failures that are the point, and the same would happen to any run on 2099-01-02. Neither
+    // has anything to do with the validator.
     const probeIssues = '## Issue 0: a row this probe points at, and nothing else reads\n';
+    const probeAdmitted = new Set(['queued', 'answer']);
+    const probeToday = '2026-06-01';
     expect(
       problems(
         'PROBE',
@@ -298,8 +306,8 @@ describe('a name this client admits and the service does not is argued, not mere
           ['not_an_event', { reason: 'x'.repeat(MIN_REASON), issue: 'Issue 0', review: 'soon' }],
         ]),
         probeIssues,
-        today,
-        admitted,
+        probeToday,
+        probeAdmitted,
       ),
     ).toEqual([
       "PROBE['queued']: the reason is 0 characters — argue it",
@@ -311,6 +319,36 @@ describe('a name this client admits and the service does not is argued, not mere
       "PROBE['not_an_event']: this client does not admit 'not_an_event' at all, so the entry is" +
         ' bookkeeping',
     ]);
+  });
+
+  it('names an argued entry the service has caught up with, and only that entry', () => {
+    // `stillDeclared` is the predicate behind the one assertion in this file that fails an
+    // `AHEAD_OF_BACKEND` entry the service has since declared — and both argued maps are normally
+    // empty, so that assertion answers `[]` whatever the predicate does. Driven, before this:
+    // replacing the body with `return []` left the file reading 16 passed. It is the same defect
+    // `inBoth` below was hoisted out of its assertion for, one `it` later.
+    //
+    // Both inputs are literals: the map is built to be stale, and the set of names the service
+    // declares is written here rather than read out of a checkout, so this runs in every lane and
+    // nothing about the sibling repository can move it.
+    const entry: Argued = {
+      reason: 'x'.repeat(MIN_REASON),
+      issue: 'Issue 13',
+      review: '2099-01-01',
+    };
+    const declared: ReadonlySet<string> = new Set(['answer', 'queued']);
+    expect(
+      stillDeclared(
+        new Map<string, Argued>([
+          ['answer', entry],
+          ['not_an_event', entry],
+        ]),
+        declared,
+      ),
+      'the service declares `answer`, so that entry is expired bookkeeping; it declares no ' +
+        '`not_an_event`, so that one is still doing its job',
+    ).toEqual(['answer']);
+    expect(stillDeclared(new Map<string, Argued>([['not_an_event', entry]]), declared)).toEqual([]);
   });
 
   it('keeps the two maps disjoint, because a name cannot be both not-yet and no-longer', () => {

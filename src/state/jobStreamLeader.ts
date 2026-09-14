@@ -62,8 +62,9 @@
  * time once there are more interested tabs than the budget has room for, because rank 0 alone
  * leaves the tabs past position `budget - 1` watched by nobody in the account, deterministically
  * and for ever. A follower's periodic message *is* its interest — one message per second per role
- * — and an interest expires on the same `LEASE_MS` as leadership, so a crashed tab stops holding a slot
- * for a window nobody is looking at.
+ * — and an interest expires on `INTEREST_LEASE_MS`, which is deliberately far longer than the
+ * leadership lease, so that a backgrounded window whose timers the browser has clamped to once a
+ * minute keeps the slot it is the whole point of this feature to give it.
  *
  * ## What is relayed
  *
@@ -111,6 +112,34 @@ const HEARTBEAT_MS = 1_000;
  * on the side of electing.
  */
 const LEASE_MS = 3 * HEARTBEAT_MS;
+
+/**
+ * Silence that means a tab has stopped wanting what it asked for.
+ *
+ * **A different lifetime from `LEASE_MS`, and the reason is that the two expire against different
+ * clocks.** Leadership *should* expire when a tab's timers stop: a leader that is not running is a
+ * leader holding streams nobody is reading, and the three cases above — closed, crashed,
+ * backgrounded — are all meant to end in a takeover. An interest is the opposite. A backgrounded
+ * window is precisely the one whose job notifications matter, and a browser clamps a hidden tab's
+ * timers hard: ≥1 s everywhere, and Chrome's *intensive throttling* drops a hidden tab to **one
+ * timer callback a minute** after about five minutes. A follower re-announces from the 1 Hz
+ * watchdog, so at that clamp a three-second expiry means its interest is dead for 57 seconds of
+ * every 60. Driven before this constant existed, with a peer announcing once a minute and the
+ * leader sampled every 500 ms over three minutes: **342 of 360 samples had the follower's
+ * conversation watched by nobody**, and every recovery cost a fresh connect, spent against the very
+ * cap this file exists to respect.
+ *
+ * Five minutes, which is four missed announcements at the clamped rate and 300 at the unclamped
+ * one. What it costs is a tab that died holding a slot for up to five minutes instead of three
+ * seconds, and two things pay for that: a tab that leaves *politely* says so on the way out (see
+ * `onHide` and `close`, which announce an empty interest), and a stale slot no longer starves
+ * anybody outright now that `mergeWatchSets` rotates — it wastes one of the account's streams for
+ * one lease rather than making a live window dark for ever.
+ *
+ * Exported for the same reason as `ROTATION_MS`: a test that advances its own transcription of
+ * this number goes green if the number changes underneath it.
+ */
+export const INTEREST_LEASE_MS = 5 * 60 * 1_000;
 
 /** What a leader tells the other tabs. Everything here is structured-clone safe. */
 export type Note =
@@ -320,14 +349,15 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   /**
    * What the other tabs asked for, and when they last said so.
    *
-   * Expiry is the same `LEASE_MS` as leadership, for the same reason and against the same clock: a
-   * follower re-announces on every watchdog tick, so a claim on a stream survives three missed
-   * announcements and no more. Without it a crashed tab's interest would outlive the tab — the
-   * leader holding a stream for a window nobody is looking at, inside a budget of three, which at
-   * the limit is the live window watching nothing. A follower that *closes* is covered sooner by
-   * nothing at all: there is no `leave` message, deliberately, because the expiry already handles
-   * the case that cannot send one and a second mechanism for the case that can is a second thing
-   * to get wrong.
+   * Expiry is `INTEREST_LEASE_MS`, which is deliberately not the leadership lease: see that
+   * constant for the measurement. Without any expiry a crashed tab's interest would outlive the
+   * tab — the leader holding a stream for a window nobody is looking at, inside a budget of three.
+   *
+   * A follower that *closes* does not wait it out. There is still no `leave` message, because the
+   * message that says a tab wants nothing is the one that already says what a tab wants: an
+   * `interest` carrying no sessions, which replaces what that tab asked for before and so frees
+   * its slot on the next rebuild. That is what makes a five-minute expiry affordable — the expiry
+   * now covers only the tab that *cannot* speak, which is the case it was always for.
    */
   const asked = new Map<string, { sessions: readonly string[]; at: number }>();
   let watched: readonly string[] = [];
@@ -338,7 +368,7 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   const rebuild = (): boolean => {
     let next: readonly string[] = [];
     if (leader) {
-      const cutoff = now() - LEASE_MS;
+      const cutoff = now() - INTEREST_LEASE_MS;
       for (const [peer, interest] of asked) if (interest.at <= cutoff) asked.delete(peer);
       const peers = [...asked.entries()]
         .sort(([a], [b]) => (a < b ? -1 : 1))
@@ -448,6 +478,12 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
         stand();
         break;
       case 'interest':
+        // An interest carrying nothing is a tab saying it wants nothing — a window with no
+        // conversation yet, or one on its way out — and it is stored as one rather than special-
+        // cased, because what makes it free the slot is that it *replaces* what that tab asked for
+        // before. `mergeWatchSets` drops an empty list, so a deletion here would be a second
+        // mechanism for an effect that already has one, indistinguishable from this in every
+        // observable way: driven both ways, the same tests pass.
         asked.set(message.from, { sessions: message.sessions, at: now() });
         if (leader && rebuild()) notify();
         break;
@@ -480,6 +516,10 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   // the cache is an ordinary follower whose watchdog will take over if nobody else did.
   const onHide = (): void => {
     if (leader) send({ type: 'resign', from: id });
+    // A follower has nothing to resign and, since `INTEREST_LEASE_MS` is five minutes, everything
+    // to say: without this its slot is held for a window that is gone. `resign` is not the message
+    // for it — that one means "the streams are unheld" and starts an election in every tab.
+    else send({ type: 'interest', from: id, sessions: [] });
   };
   if (typeof addEventListener === 'function') addEventListener('pagehide', onHide);
 
@@ -515,7 +555,12 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
     close: (options) => {
       if (closed) return;
       closed = true;
-      if (options?.announce !== false && leader) send({ type: 'resign', from: id });
+      if (options?.announce !== false) {
+        // Same two cases as `onHide`, for the tab that is torn down rather than navigated away
+        // from: a leader says the streams are free, a follower says its slot is.
+        if (leader) send({ type: 'resign', from: id });
+        else send({ type: 'interest', from: id, sessions: [] });
+      }
       if (campaign !== null) clearTimeout(campaign);
       if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
       clearInterval(watchdog);

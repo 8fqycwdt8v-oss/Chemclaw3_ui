@@ -27,6 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import {
   CHANNEL,
+  INTEREST_LEASE_MS,
   ROTATION_MS,
   createStreamLeader,
   mergeWatchSets,
@@ -52,6 +53,8 @@ const WELL_INSIDE_LEASE_MS = 1_000;
 const TAKEOVER_DEADLINE_MS = 8_000;
 
 const SID = 'a'.repeat(32);
+/** One watchdog tick plus room: what the leader needs to notice a change it was told about. */
+const HEARTBEAT_TICK_MS = 1_200;
 
 const jobNote = (jobId: string): Note => ({
   kind: 'job',
@@ -93,7 +96,7 @@ function openPeer(id: string): {
   goSilent: () => void;
   resign: () => void;
   claim: () => void;
-  keepDeclaring: (sessions: string[]) => void;
+  keepDeclaring: (sessions: string[], everyMs?: number) => void;
   note: (note: Note) => void;
   received: unknown[];
 } {
@@ -123,10 +126,15 @@ function openPeer(id: string): {
     // A live follower, which repeats what it wants watched rather than saying it once. Saying it
     // once is what a *dead* follower looks like, and the module treats the two differently on
     // purpose — so a harness that announced once could not tell them apart either.
-    keepDeclaring: (sessions) => {
+    //
+    // `everyMs` is how a *throttled* follower is driven. A hidden tab is alive and its watchdog is
+    // clamped — ≥1 s everywhere, one callback a minute under Chrome's intensive throttling — which
+    // is a third thing, distinct from both the live follower and the dead one, and the shipped
+    // interest lease has to tell it from the second.
+    keepDeclaring: (sessions, everyMs = 200) => {
       const say = (): void => channel.postMessage({ type: 'interest', from: id, sessions });
       say();
-      timer ??= setInterval(say, 200);
+      timer ??= setInterval(say, everyMs);
     },
     note: (note) => channel.postMessage({ type: 'note', from: id, note }),
     received,
@@ -655,24 +663,150 @@ describe('two tabs watching different conversations', () => {
     }
   });
 
-  it('reclaims the slot when the tab that asked for it stops saying so', async () => {
-    seedConversations([SID, SID2, SID3]);
-    const follower = openPeer('zzzz-follower');
-    follower.keepDeclaring([SID4]);
-
-    const { unmount } = renderHook(() => useJobStreams());
+  it('reclaims the slot when the tab that asked for it stops saying so — but not before', async () => {
+    // Both halves of `INTEREST_LEASE_MS`, because either one alone is satisfied by a wrong number.
+    // A lease that is too short passes the reclaim and loses a live hidden window's notifications;
+    // no lease at all passes the first assertion and holds a dead tab's stream for ever.
+    //
+    // On a clock: the lease is five minutes, which is not a wait a real-timer test can afford.
+    vi.useFakeTimers();
     try {
-      await holds([SID, SID4, SID2]);
+      seedConversations([SID, SID2, SID3]);
+      const follower = openPeer('zzzz-follower');
+      follower.keepDeclaring([SID4]);
 
-      // The follower crashes — no resignation, nothing announced, which is the only shape a crash
-      // has from here. Without an expiry its claim on a stream would outlive the tab that made it,
-      // and the leader would hold one of three streams for a window nobody is looking at.
-      follower.goSilent();
-      await holds([SID, SID2, SID3]);
+      const { unmount } = renderHook(() => useJobStreams());
+      try {
+        await vi.advanceTimersByTimeAsync(AFTER_ELECTION_MS);
+        expect([...live].sort()).toEqual([SID, SID4, SID2].sort());
+
+        // The follower crashes — no resignation, nothing announced, which is the only shape a
+        // crash has from here, and the same shape a tab the browser froze has.
+        follower.goSilent();
+
+        // Well inside the lease, its slot is still its own. This is the half the leadership lease
+        // got wrong: three seconds is shorter than the interval a browser clamps a hidden tab's
+        // timers to, so the window whose notifications matter most lost its slot every cycle.
+        await vi.advanceTimersByTimeAsync(INTEREST_LEASE_MS / 2);
+        expect([...live].sort()).toEqual([SID, SID4, SID2].sort());
+
+        // Past it, the slot goes to somebody who is still here. Without any expiry the leader
+        // would hold one of three streams for a window nobody is looking at.
+        await vi.advanceTimersByTimeAsync(INTEREST_LEASE_MS);
+        expect([...live].sort()).toEqual([SID, SID2, SID3].sort());
+      } finally {
+        unmount();
+      }
     } finally {
-      unmount();
+      vi.useRealTimers();
     }
   }, 15_000);
+
+  it('keeps a backgrounded window’s slot while the browser clamps its timers to once a minute', async () => {
+    // The case the interest lease exists for, driven at the rate Chrome's intensive throttling
+    // imposes on a tab hidden for about five minutes. The tab is *alive* — a chemist has it open
+    // in another window and a conformer search running in it — and the only thing wrong with it is
+    // that its announcements arrive a minute apart.
+    //
+    // Measured against the three-second lease this replaced, sampling every 500 ms over three
+    // minutes: 342 of 360 samples had this window's conversation watched by nobody, and each
+    // recovery opened a fresh stream.
+    vi.useFakeTimers();
+    try {
+      const leader = openTab();
+      leader.leader.declare([SID], 3);
+      openPeer('zzzz-hidden').keepDeclaring([SID2], 60_000);
+      await vi.advanceTimersByTimeAsync(AFTER_ELECTION_MS);
+      expect(leader.leader.isLeader()).toBe(true);
+
+      let dark = 0;
+      for (let elapsed = 0; elapsed < 3 * 60_000; elapsed += 5_000) {
+        await vi.advanceTimersByTimeAsync(5_000);
+        if (!leader.leader.watched().includes(SID2)) dark += 1;
+      }
+      expect(dark).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it('hands a follower’s slot back the moment its window goes away', async () => {
+    // What makes a five-minute expiry affordable. A follower has no leadership to resign, so
+    // before this it simply stopped announcing and the leader held its stream for the rest of the
+    // lease — five minutes of one of three slots spent on a window that is gone.
+    //
+    // The message is an `interest` carrying nothing rather than a new kind: `resign` means "the
+    // streams are unheld" and starts an election in every tab, which a follower leaving must not.
+    const leaderPeer = openPeer('0000-leader');
+    leaderPeer.keepAlive();
+    const leaving = openTab();
+    await wait(AFTER_ELECTION_MS);
+    expect(leaving.leader.isLeader()).toBe(false);
+    leaving.leader.declare([SID2], 3);
+    await wait(50);
+    expect(leaderPeer.received).toContainEqual({
+      type: 'interest',
+      from: leaving.leader.id,
+      sessions: [SID2],
+    });
+    leaderPeer.received.length = 0;
+
+    dispatchEvent(new Event('pagehide'));
+    await wait(50);
+
+    expect(leaderPeer.received).toContainEqual({
+      type: 'interest',
+      from: leaving.leader.id,
+      sessions: [],
+    });
+    // And not a resignation: nobody else's streams changed hands.
+    expect(leaderPeer.received).not.toContainEqual({ type: 'resign', from: leaving.leader.id });
+  });
+
+  it('says the same thing when the membership is torn down rather than navigated away from', async () => {
+    // `close()` is the path a React unmount takes and `pagehide` is the path a browser takes; they
+    // are two branches with one argument, and a test of either alone leaves the other deletable.
+    const leaderPeer = openPeer('0000-leader');
+    leaderPeer.keepAlive();
+    const leaving = openTab();
+    await wait(AFTER_ELECTION_MS);
+    expect(leaving.leader.isLeader()).toBe(false);
+    leaving.leader.declare([SID2], 3);
+    await wait(50);
+    leaderPeer.received.length = 0;
+
+    leaving.leader.close();
+    await wait(50);
+
+    expect(leaderPeer.received).toContainEqual({
+      type: 'interest',
+      from: leaving.leader.id,
+      sessions: [],
+    });
+  });
+
+  it('acts on an interest that says nothing, rather than keeping what that tab last wanted', async () => {
+    // The leader's half of the same message, and the half that makes the departure cheap: a tab's
+    // newest interest replaces its previous one, so a `[]` frees the slot now instead of at the
+    // end of a five-minute lease. Ignoring an empty interest as "nothing to record" reads as
+    // harmless and is exactly what leaves the stream open.
+    const leader = openTab();
+    leader.leader.declare([SID], 3);
+    const peer = openPeer('zzzz-follower');
+    peer.keepDeclaring([SID2]);
+    await wait(AFTER_ELECTION_MS);
+    expect(leader.leader.watched()).toContain(SID2);
+
+    peer.goSilent();
+    new BroadcastChannel(CHANNEL).postMessage({
+      type: 'interest',
+      from: 'zzzz-follower',
+      sessions: [],
+    });
+    await wait(HEARTBEAT_TICK_MS);
+
+    expect(leader.leader.watched()).not.toContain(SID2);
+  });
 
   it('watches the follower’s conversation even while the leader is backgrounded', async () => {
     // `backgrounded` trims what *this window* asks for, down to one. It must not trim what the

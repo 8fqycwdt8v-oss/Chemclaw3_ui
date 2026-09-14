@@ -405,3 +405,32 @@ production code it protects, confirming red, and restoring from a backup kept ou
 16 mutations in all, including the three from the review that reproduced exactly, and the
 already-passing ones re-run to confirm no regression. The one "mutation" whose correct result is
 green is the hoisted `encodeURIComponent`, which is correct code that used to fail.
+
+# Wave 30 — the UI's share: a contract nobody checked, a name in two repositories, a record
+
+## W30.1 — nothing checks the client half of the wire contract
+
+- [ ] **Read the backend, do not run it.** A check that needs a live service is a check that does
+      not run (`check:openapi` has never once run in a pipeline). The sibling checkout is on disk;
+      parse it. Resolved by `CHEMCLAW3_DIR`, else `../Chemclaw3`.
+- [ ] **Four axes**, each failing in the direction that costs a chemist something:
+      the BFF whitelist against the routes the service registers; every event the backend declares
+      against what `normalizeEvent` admits; every *field* `normalizeEvent` reads against the fields
+      the backend's model declares; every closed set the client mirrors (`ErrorCode`,
+      `RefusalReason`, `AnswerCheck`) against the Python `Literal` it mirrors.
+- [ ] **What the client sends**, not only what it reads: every POST body in `src/api/` against the
+      Pydantic request model of the route it posts to — six of which are `extra="forbid"`, so a
+      stale key there is a 422 rather than a silent drop.
+- [ ] **Drive it.** Introduce a renamed field, a removed route and a renamed event; each goes red
+      for its own reason, and the mutation is verified to have applied.
+- [ ] **Say what it cannot check**, in the test, in the readiness record and in `ISSUES.md`.
+
+## W30.2 — `note_proposed` is not a proposal, and the name is a two-repo contract
+
+- [ ] Accept both wire names, old and new, with a test for each. Do **not** remove the old one.
+- [ ] Say in the commit, in `ISSUES.md` and in the contract check what the remaining step is.
+
+## W30.8 — the production-readiness record
+
+- [ ] One document, every clause naming the test that holds it; a clause with no test is rewritten
+      as an accepted risk or deleted. Every remaining open item into `ISSUES.md` with an anchor.

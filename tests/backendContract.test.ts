@@ -313,6 +313,36 @@ describe('a name this client admits and the service does not is argued, not mere
     ]);
   });
 
+  it('names an argued entry the service has caught up with, and only that entry', () => {
+    // `stillDeclared` is the predicate behind the one assertion in this file that fails an
+    // `AHEAD_OF_BACKEND` entry the service has since declared — and both argued maps are normally
+    // empty, so that assertion answers `[]` whatever the predicate does. Driven, before this:
+    // replacing the body with `return []` left the file reading 16 passed. It is the same defect
+    // `inBoth` below was hoisted out of its assertion for, one `it` later.
+    //
+    // Both inputs are literals: the map is built to be stale, and the set of names the service
+    // declares is written here rather than read out of a checkout, so this runs in every lane and
+    // nothing about the sibling repository can move it.
+    const entry: Argued = {
+      reason: 'x'.repeat(MIN_REASON),
+      issue: 'Issue 13',
+      review: '2099-01-01',
+    };
+    const declared: ReadonlySet<string> = new Set(['answer', 'queued']);
+    expect(
+      stillDeclared(
+        new Map<string, Argued>([
+          ['answer', entry],
+          ['not_an_event', entry],
+        ]),
+        declared,
+      ),
+      'the service declares `answer`, so that entry is expired bookkeeping; it declares no ' +
+        '`not_an_event`, so that one is still doing its job',
+    ).toEqual(['answer']);
+    expect(stillDeclared(new Map<string, Argued>([['not_an_event', entry]]), declared)).toEqual([]);
+  });
+
   it('keeps the two maps disjoint, because a name cannot be both not-yet and no-longer', () => {
     expect(
       inBoth(AHEAD_OF_BACKEND, RETAINED_FOR_ROLLOUT),

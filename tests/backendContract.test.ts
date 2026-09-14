@@ -89,7 +89,17 @@ const root = backendCheckout();
  * Empty is the normal state. An entry here is a promise that the *other* repository has a row for
  * the step that removes it; see `ISSUES.md`.
  */
-const AHEAD_OF_BACKEND = new Map<string, string>();
+const AHEAD_OF_BACKEND = new Map<string, string>([
+  [
+    'note_recorded',
+    'W30.2. The service emits `note_proposed` for an event that is not a proposal and says so in ' +
+      'its own model docstring. The reader goes first — this client accepts both names — so that ' +
+      'the emitter can switch without any deployed browser dropping the event. Removing the old ' +
+      'name here is the step after that, and it is this repository\'s: see ISSUES.md, "the note ' +
+      'event is renamed in two repositories". The emit side is Chemclaw3\'s, tracked in its own ' +
+      'BACKLOG beside `NoteProposedEvent`.',
+  ],
+]);
 
 if (root === null) {
   describe('the backend contract', () => {

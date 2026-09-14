@@ -427,8 +427,8 @@ green is the hoisted `encodeURIComponent`, which is correct code that used to fa
 
 ## W30.2 — `note_proposed` is not a proposal, and the name is a two-repo contract
 
-- [ ] Accept both wire names, old and new, with a test for each. Do **not** remove the old one.
-- [ ] Say in the commit, in `ISSUES.md` and in the contract check what the remaining step is.
+- [x] Accept both wire names, old and new, with a test for each. Do **not** remove the old one.
+- [x] Say in the commit, in `ISSUES.md` and in the contract check what the remaining step is.
 
 ## W30.8 — the production-readiness record
 

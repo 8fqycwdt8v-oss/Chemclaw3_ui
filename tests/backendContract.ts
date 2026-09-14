@@ -377,7 +377,12 @@ export function clientEventTypes(): string[] {
   const source = readLocal('shared/events.ts');
   const set = /const EVENT_TYPES = new Set<string>\(\[([\s\S]*?)\]\)/.exec(source);
   if (!set) throw new Error('shared/events.ts no longer declares EVENT_TYPES as a Set literal');
-  return [...(set[1] as string).matchAll(/'([^']+)'/g)].map((m) => m[1] as string);
+  // Comments first, for the reason the Python side strips them: one apostrophe in a `//` line
+  // inside this literal ("the emitter's switch") opens a quote, and the scan then enrols four
+  // words of prose as members of the wire contract. Measured — that is exactly what the first
+  // run of the tolerant-reader change reported.
+  const members = (set[1] as string).replace(/\/\/[^\n]*/g, '');
+  return [...members.matchAll(/'([^']+)'/g)].map((m) => m[1] as string);
 }
 
 /**

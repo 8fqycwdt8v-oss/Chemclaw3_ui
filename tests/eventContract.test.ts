@@ -430,3 +430,49 @@ describe('the error-code union and its runtime set are one vocabulary', () => {
     }
   });
 });
+
+/**
+ * The note event under both of its names — the reader half of a two-repository rename.
+ *
+ * The service emits `note_proposed` for an event that is not a proposal, and says so in its own
+ * model docstring: nothing reviews a note any more, so the accurate name is `note_recorded`. An
+ * SSE discriminator is a contract two repositories switch on, and there is exactly one ordering
+ * with no broken state — the reader accepts both names first, the emitter changes afterwards.
+ * Done the other way round, every browser that has not been redeployed drops the event silently,
+ * which is the failure this file exists to end.
+ *
+ * Both directions are driven here because "accepts both" is two claims, and the old one is the
+ * one a careless rename would take away: every browser in the field speaks it today.
+ */
+describe('the note event is read under both of its wire names', () => {
+  const body = { note_id: 'note-suzuki-42', reference: 'agent/notes/suzuki-42' };
+
+  it('reads the name the service sends today', () => {
+    const event = normalizeEvent({ type: 'note_proposed', ...body });
+    expect(event, 'the name in production was dropped').not.toBeNull();
+    expect(event).toEqual({ type: 'note_proposed', ...body });
+  });
+
+  it('reads the name the service is moving to, as the same event', () => {
+    const event = normalizeEvent({ type: 'note_recorded', ...body });
+    expect(event, 'a `note_recorded` frame is dropped, so the rename would lose it').not.toBeNull();
+    // Normalised onto the internal name, so no surface has to learn the second spelling and none
+    // can miss it: the trace row, the entity rail and the turn summary all key on `note_proposed`.
+    expect(event).toEqual({ type: 'note_proposed', ...body });
+  });
+
+  it('reads the new name off the SSE event line when the payload carries no type', () => {
+    // The service sets both the `event:` name and the JSON `type`; this is the half that survives
+    // a frame whose body was written by something older, and it is the path `src/lib/sse.ts` uses
+    // as its fallback. A tolerance that only covered the JSON field would be half a tolerance.
+    const event = normalizeEvent(body, 'note_recorded');
+    expect(event).toEqual({ type: 'note_proposed', ...body });
+  });
+
+  it('still refuses a name neither side has ever sent', () => {
+    // The point of the two names is tolerance of one specific, argued rename — not of anything
+    // that looks like it. Without this, "accepts both" and "accepts everything" are the same test.
+    expect(normalizeEvent({ type: 'note_recorded_v2', ...body })).toBeNull();
+    expect(normalizeEvent({ type: 'note_written', ...body })).toBeNull();
+  });
+});

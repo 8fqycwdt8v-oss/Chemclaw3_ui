@@ -228,6 +228,27 @@ export interface QuestionEvent {
   options: string[];
 }
 
+/**
+ * A note was written into the knowledge graph.
+ *
+ * **The wire carries two names for this and the reader takes both.** `note_proposed` is what the
+ * service sends today and the event is not a proposal: nothing reviews a note any more
+ * (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` upstream), so the accurate name is
+ * `note_recorded` and the backend's own model says so in a docstring while still emitting the old
+ * literal. Renaming an SSE discriminator is a two-repository deploy with a skew window, and the
+ * only ordering that has no broken state is **reader first**: this client accepts both names now,
+ * the service switches to the new one whenever it likes, and no deployed frontend drops an event
+ * in between. The reverse order — service first — silently drops the event in every browser that
+ * has not been redeployed, which is the exact failure `EVENT_TYPES` has cost six times.
+ *
+ * `type` stays `'note_proposed'` inside this app on purpose: the internal name is a local rename
+ * that can happen any day, and doing it in the same step would put a second change in the skew
+ * window for no gain. What is *not* done here is removing the old wire name — that is the third
+ * step, after the service has shipped the second, and it is recorded in `ISSUES.md` with who does
+ * it. `tests/backendContract.test.ts` holds the promise from the other end: `note_recorded` is in
+ * its `AHEAD_OF_BACKEND` map with this reason, and the run reports the day the service declares
+ * it, which is the day step three is unblocked.
+ */
 export interface NoteProposedEvent {
   type: 'note_proposed';
   note_id: string;
@@ -581,6 +602,10 @@ const EVENT_TYPES = new Set<string>([
   'evidence_source',
   'question',
   'note_proposed',
+  // The same event under the name the service is moving to. See `NoteProposedEvent`: the reader
+  // goes first so that the emitter's switch breaks nothing, and this line is what makes the
+  // tolerance real — the interface union above changes nothing at runtime, the gate is this set.
+  'note_recorded',
   'approval_request',
   'answer',
   'error',
@@ -812,6 +837,10 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         question: asString(o.question),
         options: asStringArray(o.options),
       };
+    // Both wire names, one internal event. The fall-through is the whole of the tolerance: a
+    // frame named `note_recorded` is normalised to exactly what every surface already renders,
+    // so no consumer of this union has to learn the second name and none can miss it.
+    case 'note_recorded':
     case 'note_proposed':
       return {
         type: 'note_proposed',

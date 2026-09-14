@@ -511,6 +511,40 @@ the loss itself is a known, bounded, upstream-shaped hole.
 
 ---
 
+## Issue 13: the note event is renamed in two repositories, and only this half has moved
+
+**Status: this side is done; the next step is Chemclaw3's, and the one after that is this
+repository's again.** The service sends `note_proposed` for an event that is not a proposal —
+nothing reviews a note any more (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), and its
+own model docstring says the accurate name is `note_recorded` while still emitting the old literal,
+because "renaming it is a coordinated two-repo deploy with a skew window in which one side silently
+drops the event".
+
+An SSE discriminator is a contract two repositories switch on, and there is exactly one ordering
+with no broken state:
+
+1. **The reader accepts both names.** Done — `shared/events.ts` admits `note_recorded` in
+   `EVENT_TYPES` and normalises it onto the internal `note_proposed`, so no surface has to learn
+   the second spelling and none can miss it. Held by four tests in `tests/eventContract.test.ts`
+   (old name, new name, the SSE `event:` line with no `type` in the body, and a near-miss name that
+   must still be refused) and one on the real wire path in `tests/streamTurn.test.ts`.
+2. **The service emits the new name.** **Not this repository's step.** It is tracked in Chemclaw3's
+   own `docs/planning/BACKLOG.md` beside `NoteProposedEvent`; nothing here can do it, and nothing
+   here should, since a UI that emitted its own opinion about the wire name would be inventing the
+   contract rather than reading it.
+3. **This repository removes the old name** — the `note_proposed` entry in `EVENT_TYPES`, the
+   fall-through case, and at the same time renames the internal type. **Deliberately not done
+   now**: every browser in the field speaks the old name today, so removing it before step 2 has
+   shipped _and_ rolled out is the rename done in the order that loses events.
+
+**How anybody finds out step 2 has happened.** `tests/backendContract.test.ts` holds
+`note_recorded` in its `AHEAD_OF_BACKEND` map with this reason, reads the service's declaration out
+of a sibling checkout, and prints a line naming every argued name the service now declares. The day
+the backend ships step 2, the run says that step 3 is unblocked. It does not fail the gate: a green
+suite on this side is not the trigger, a rolled-out deployment is.
+
+---
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.

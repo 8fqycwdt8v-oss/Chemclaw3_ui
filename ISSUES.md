@@ -126,10 +126,19 @@ exist. The route is now `/open/:sessionId` and the copy says "Conversation from 
 
 Three things about the shape of that decision, since the cheaper-looking options were both worse:
 
-- **The old path is not kept as a redirect.** Preserving `/s/` would preserve exactly the string
-  the decision is about. Nothing in the UI ever offered the link for copying — its only entry
-  points are two buttons in `/review` — and a stale one lands on this app's own "That conversation
-  isn't on this device", which is the honest message anyway.
+- **The old path is not kept as a redirect, and it is not left to the catch-all either.**
+  Preserving `/s/` would preserve exactly the string the decision is about. Nothing in the UI ever
+  offered the link for copying — its only entry points are two buttons in `/review`.
+  **This row used to end by saying a stale one "lands on this app's own 'That conversation isn't on
+  this device', which is the honest message anyway", and that was false.** `/s/` had no route at
+  all, so it fell through `<Route path="*">` to `/`, which mints a fresh conversation: driven
+  through the real `AppRoutes`, an old bookmark ended at `/c/<a new id>` with no error, nothing
+  adopted and no mention of the link. A reader sees an empty conversation and reads "mine was
+  lost" — worse than a 404, not better, and against the rule the e2e suite asserts by name ("an
+  unknown conversation says so rather than redirecting"). `/s/:sessionId` now renders an
+  explanation and goes nowhere, which is what the argument above needed in order to be true.
+  `tests/routing.test.tsx` drives it: the message, the path it names, that the URL does not move,
+  and that no conversation is minted.
 - **Cross-person sharing is declined here, not deferred quietly.** It is not a client change: the
   404 is an _authorization_ decision, so a stable server-side conversation id would still be
   refused without an explicit grant beside it. That is a backend feature with a data model and a

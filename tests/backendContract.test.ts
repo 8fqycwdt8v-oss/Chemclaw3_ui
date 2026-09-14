@@ -227,6 +227,19 @@ function problems(
 }
 
 /**
+ * The names two argued maps hold in common.
+ *
+ * Hoisted out of its assertion for the same reason `problems()` is, and it is the same defect: the
+ * check shipped as a filter written inline over `AHEAD_OF_BACKEND`, which is empty, so its whole
+ * body could be replaced by `const both: string[] = []` with the file still reading 15 passed —
+ * driven, before this. A filter over an empty map answers `[]` whatever the predicate does, so the
+ * predicate is driven over a pair built to overlap and a pair built not to.
+ */
+function inBoth(a: Map<string, Argued>, b: Map<string, Argued>): string[] {
+  return [...a.keys()].filter((name) => b.has(name));
+}
+
+/**
  * The argued maps hold the one thing that can turn this file's strictest failure into a pass, so
  * what an entry costs to write is the whole of their integrity — and it cost nothing.
  *
@@ -286,8 +299,29 @@ describe('a name this client admits and the service does not is argued, not mere
   });
 
   it('keeps the two maps disjoint, because a name cannot be both not-yet and no-longer', () => {
-    const both = [...AHEAD_OF_BACKEND.keys()].filter((name) => RETAINED_FOR_ROLLOUT.has(name));
-    expect(both, 'in both argued maps — the two states are mutually exclusive in time').toEqual([]);
+    expect(
+      inBoth(AHEAD_OF_BACKEND, RETAINED_FOR_ROLLOUT),
+      'in both argued maps — the two states are mutually exclusive in time',
+    ).toEqual([]);
+
+    // The maps are normally empty, so the line above is `[]` for reasons that have nothing to do
+    // with the predicate. These two are what make it an assertion about overlap.
+    const entry: Argued = {
+      reason: 'x'.repeat(MIN_REASON),
+      issue: 'Issue 13',
+      review: '2099-01-01',
+    };
+    const ahead = new Map<string, Argued>([['queued', entry]]);
+    expect(
+      inBoth(
+        ahead,
+        new Map([
+          ['queued', entry],
+          ['answer', entry],
+        ]),
+      ),
+    ).toEqual(['queued']);
+    expect(inBoth(ahead, new Map([['answer', entry]]))).toEqual([]);
   });
 });
 

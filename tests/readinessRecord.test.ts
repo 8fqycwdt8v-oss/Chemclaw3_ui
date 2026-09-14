@@ -97,9 +97,15 @@ function citations(body: string): string[] {
  * `scripts/` is deliberately not one: a script runs a measurement and produces a number, which is
  * what **Measured** claims, and holding it to the same rule would force two honest clauses to cite
  * a test that does not exist.
+ *
+ * The suffix is checked, not just the directory. `tests/` is where this repository's *test
+ * helpers* live too — `backendContract.ts`, `gateSteps.ts`, `helpers.ts`, `scriptInvocations.ts`
+ * and the `stubs/` directory, none of which drives an assertion — so a prefix admitted an Enforced
+ * clause citing a module nothing runs, and a directory name at that. Driven before this was
+ * tightened: `(\`tests/stubs\`)` and `(\`tests/helpers.ts\`)` each passed the whole file.
  */
 const testCitations = (body: string): string[] =>
-  citations(body).filter((path) => /^(?:tests|e2e)\//.test(path));
+  citations(body).filter((path) => /^(?:tests|e2e)\/.*\.(?:test|spec)\.tsx?$/.test(path));
 
 /** The section numbers this document actually has, off its own `## n.` headings. */
 const sections = (): Set<number> =>

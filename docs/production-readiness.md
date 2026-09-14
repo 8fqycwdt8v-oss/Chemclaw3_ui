@@ -6,8 +6,17 @@ The record for `Chemclaw3_ui`: the browser client and the Node BFF in front of i
 with no test is not softened into "we are careful about X" — it is rewritten as an accepted risk,
 with who decides and what would change the answer, or it is deleted. That rule is itself checked:
 `tests/readinessRecord.test.ts` fails if an **Enforced**, **Bounded** or **Measured** clause cites
-no file, or if any file cited anywhere in this document does not exist. A rename cannot retire a
-citation here in silence.
+no file; if an **Enforced** or **Bounded** clause names no file under `tests/` or `e2e/`, since
+only a test can drive a refusal or a ceiling; if any file cited anywhere in this document does not
+exist; or if a `§n` anywhere in it names a section this document does not have. A rename cannot
+retire a citation here in silence, and a sub-bullet cannot hide from the rule by being indented.
+
+**Three of those were added after the check was measured rather than read.** It said "names the
+test" and accepted any file, so an **Enforced** clause citing `src/lib/utils.ts` passed; it started
+a clause only at column 0, so a nested `  - **Enforced.** …` with no citation was absorbed into its
+neighbour and never existed; and `§n` was a shape rather than a reference, so a section number
+this document does not have anchored an accepted risk and read as filed. (That last sentence
+cannot name the number it was driven with — the check now refuses it, which is the check working.) Each was driven, and each passed.
 
 The four words mean different things and the difference is the point:
 

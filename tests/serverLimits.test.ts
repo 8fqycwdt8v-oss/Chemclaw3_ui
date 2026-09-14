@@ -255,6 +255,18 @@ describe('the header phase and the connection count', () => {
       }, waitMs).unref?.();
     });
 
+  /** The status codes of every response in a raw HTTP/1.1 byte stream, read from the status lines.
+   *
+   * Scanning the whole response for a code is what these assertions used to do, and the response
+   * carries a header this server generates: `x-chemclaw-correlation-id` is 32 random hex characters,
+   * which is 30 three-character windows at one chance in 4,096 each. Measured over 200,000 ids that
+   * is **0.71%** per response and **1.46%** for the keep-alive case's two — so `.not.toContain('408')`
+   * failed a correct server roughly one CI run in seventy, and `.toContain('408')` would credit a
+   * code the server never sent at the same rate. Neither direction is about a status code.
+   */
+  const statuses = (response: string): number[] =>
+    [...response.matchAll(/^HTTP\/1\.1 (\d{3})\b/gm)].map((match) => Number(match[1]));
+
   it('cuts a request whose headers never arrive, long before the request timeout', async () => {
     // A request line and then silence — sixteen bytes, and under the old pin it held a connection
     // for 125 s. Now it is bounded by the header timeout plus one sweep, and the sweep is derived
@@ -262,7 +274,7 @@ describe('the header phase and the connection count', () => {
     const outcome = await raw((s) => s.write('GET /healthz HTTP/1.1\r\n'), 5_000);
 
     expect(outcome.ms).toBeLessThan(REQUEST_TIMEOUT_MS_LOOSE / 4);
-    expect(outcome.response).toContain('408');
+    expect(statuses(outcome.response)).toContain(408);
   }, 20_000);
 
   it('still serves a keep-alive connection idled far past the header timeout', async () => {
@@ -285,9 +297,7 @@ describe('the header phase and the connection count', () => {
       HEADERS_TIMEOUT_MS * 3 + 1_500,
     );
 
-    const served = outcome.response.split('HTTP/1.1 200 OK').length - 1;
-    expect(served).toBe(2);
-    expect(outcome.response).not.toContain('408');
+    expect(statuses(outcome.response)).toEqual([200, 200]);
   }, 20_000);
 
   it('sheds a connection over the ceiling instead of holding it', async () => {
@@ -326,6 +336,6 @@ describe('the header phase and the connection count', () => {
       (s) => s.write('GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n'),
       2_000,
     );
-    expect(after.response).toContain('200 OK');
+    expect(statuses(after.response)).toContain(200);
   }, 20_000);
 });

@@ -402,6 +402,15 @@ asserted in the present tense that the directive was what RDKit needs. Both are 
   relaxation to a thread with no DOM and no markup path. W28.7 is what makes it available at all:
   before it, the toolkit ran on the page and there was nothing to confine.
 
+**What it costs beyond the drawing, which is the part that outranks the rest of W28.7's record.**
+That wave's headline is a 600-character draw going from 587 ms of blocked main thread to 0, and
+`scripts/measure-rdkit-placement.mjs` measures it through the **Vite dev server** — which serves
+`index.html` itself and sends none of these headers. Behind the BFF nothing is drawn, so there is no
+main-thread cost to have saved: the work W28.7 did is sound and **no container-served deployment can
+observe any of it**. That is not an argument against the wave; it is the order the two should be
+read in, and `src/chem/rdkit.ts` now says so beside the table rather than eleven paragraphs below
+it. It also means this row, not the worker, is what stands between a chemist and a drawn structure.
+
 **Who decides:** whoever owns this app's CSP. Until then `rdkit.client.ts`'s fallback is doing its
 job — the app degrades to text and says so — and `e2e/worker.spec.ts` asserts the worker thread is
 started and answers, which is the most this repository can assert today.
@@ -445,6 +454,16 @@ was delivered:
   the unambiguous win; canonicalisation of a long chain was never moved off the main thread.
 - "The seam now answers identically at 200–600 characters in both placements" is true and is not
   reassuring: what it answers identically can be `null`.
+
+**What it does not cost, traced rather than assumed.** A `null` here is an _omission_, never a
+second identity: every consumer of `canonicalSmiles` drops the molecule rather than admitting it
+under its raw spelling — `src/chem/entities.ts` at the tool-call path (`if (!canonical) continue`)
+and at `ingestUserStructure` (`return null`), and `src/chem/structure.ts` likewise — so no cache
+key, no dedupe key and no citation is ever minted from an uncanonicalised string, and a later
+success merges on the same canonical key as every earlier one. The cost is what the paragraph above
+says and no more: an intermittent gap in the rail, and an intermittent "not a recognised structure"
+for a structure that is one. `tests/rdkitUnavailable.test.tsx` now pins that bound — driven by
+making either drop site fall back to the raw string, it fails.
 
 **Options, none taken here because each is a real decision:** lower `MAX_PARSED_SMILES_CHARS` to
 something the ranking survives with margin (it would have to be measured, and it refuses structures

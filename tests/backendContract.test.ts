@@ -172,6 +172,123 @@ function stillDeclared(map: Map<string, Argued>, sent: ReadonlySet<string>): str
   return [...map.keys()].filter((type) => sent.has(type));
 }
 
+/**
+ * The shortest thing that can be called an argument for admitting a name.
+ *
+ * A number rather than "non-empty" because non-empty is what the first edition effectively had:
+ * the map took a bare string and `['fake_event', '']` satisfied it. A word is not an argument;
+ * this is the length of a sentence that names what and why.
+ */
+const MIN_REASON = 40;
+
+/**
+ * Everything wrong with an argued map, as a list of strings — one line per defect.
+ *
+ * A pure function rather than assertions written inline, and the reason is the state these maps
+ * are normally in: **empty**. A loop over an empty map passes without checking anything, which is
+ * the shape of every test this repository has caught passing with its subject broken. So the
+ * validator is driven twice below — over the real maps, where the answer must be nothing, and over
+ * a map built to be wrong in every way it can be, where the answer must name each defect. The
+ * second run is what makes the first one mean something on the day both maps are empty.
+ */
+function problems(
+  label: string,
+  map: Map<string, Argued>,
+  issues: string,
+  today: string,
+  admitted: ReadonlySet<string>,
+): string[] {
+  const out: string[] = [];
+  for (const [name, entry] of map) {
+    const where = `${label}['${name}']`;
+    if (entry.reason.trim().length < MIN_REASON) {
+      out.push(`${where}: the reason is ${entry.reason.trim().length} characters — argue it`);
+    }
+    if (entry.issue.trim() === '' || !issues.includes(entry.issue)) {
+      out.push(`${where}: no row in ISSUES.md contains "${entry.issue}", so nothing expires this`);
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(entry.review)) {
+      out.push(`${where}: review "${entry.review}" is not a YYYY-MM-DD date`);
+    } else if (entry.review < today) {
+      out.push(
+        `${where}: review date ${entry.review} has passed — remove the name because the window is` +
+          ' over, or move the date and say why in the reason',
+      );
+    }
+    if (!admitted.has(name)) {
+      out.push(
+        `${where}: this client does not admit '${name}' at all, so the entry is bookkeeping`,
+      );
+    }
+  }
+  return out;
+}
+
+/**
+ * The argued maps hold the one thing that can turn this file's strictest failure into a pass, so
+ * what an entry costs to write is the whole of their integrity — and it cost nothing.
+ *
+ * Driven, before this: adding `'fake_event'` to `EVENT_TYPES` and `['fake_event', '']` to the map
+ * made the suite green. An empty string satisfied "argued", no entry named anything that could
+ * retire it, and the only expiry in the design was a `console.log` that could not be reached.
+ *
+ * This describe needs no sibling checkout — the maps and their discipline are this repository's —
+ * so it runs in every CI lane, which is the half of this file that is a gate rather than a
+ * warning.
+ */
+describe('a name this client admits and the service does not is argued, not merely listed', () => {
+  const issues = readFileSync(join(process.cwd(), 'ISSUES.md'), 'utf8');
+  const today = new Date().toISOString().slice(0, 10);
+  const admitted = new Set(clientEventTypes());
+
+  it('holds every entry to a reason, a row that can retire it, and a date', () => {
+    expect([
+      ...problems('AHEAD_OF_BACKEND', AHEAD_OF_BACKEND, issues, today, admitted),
+      ...problems('RETAINED_FOR_ROLLOUT', RETAINED_FOR_ROLLOUT, issues, today, admitted),
+    ]).toEqual([]);
+  });
+
+  it('refuses an empty reason, a dangling row, a passed date and a name nobody admits', () => {
+    // The real maps are empty most of the time, so this is what proves the rule above is a rule.
+    // Exact equality rather than a count: each line is a different defect, and a check that fired
+    // four times for one reason would pass a count and be worthless.
+    expect(
+      problems(
+        'PROBE',
+        new Map<string, Argued>([
+          ['queued', { reason: '', issue: 'the note event is renamed', review: '2099-01-01' }],
+          [
+            'answer',
+            {
+              reason: 'x'.repeat(MIN_REASON),
+              issue: 'a row nobody ever wrote into ISSUES.md',
+              review: '2020-01-01',
+            },
+          ],
+          ['not_an_event', { reason: 'x'.repeat(MIN_REASON), issue: 'Issue 13', review: 'soon' }],
+        ]),
+        issues,
+        today,
+        admitted,
+      ),
+    ).toEqual([
+      "PROBE['queued']: the reason is 0 characters — argue it",
+      'PROBE[\'answer\']: no row in ISSUES.md contains "a row nobody ever wrote into ISSUES.md", so' +
+        ' nothing expires this',
+      "PROBE['answer']: review date 2020-01-01 has passed — remove the name because the window is" +
+        ' over, or move the date and say why in the reason',
+      'PROBE[\'not_an_event\']: review "soon" is not a YYYY-MM-DD date',
+      "PROBE['not_an_event']: this client does not admit 'not_an_event' at all, so the entry is" +
+        ' bookkeeping',
+    ]);
+  });
+
+  it('keeps the two maps disjoint, because a name cannot be both not-yet and no-longer', () => {
+    const both = [...AHEAD_OF_BACKEND.keys()].filter((name) => RETAINED_FOR_ROLLOUT.has(name));
+    expect(both, 'in both argued maps — the two states are mutually exclusive in time').toEqual([]);
+  });
+});
+
 if (root === null) {
   describe('the backend contract', () => {
     it('is not checked here, and this run is not evidence about it', () => {

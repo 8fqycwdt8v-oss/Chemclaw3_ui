@@ -69,6 +69,15 @@ indistinguishable from one that does not work — and this repository has produc
 - **Enforced.** Every member of the event union survives `normalizeEvent` carrying every field,
   checked by round-tripping a frame of each rather than by reading the list — the list is the thing
   that has been wrong six times (`tests/eventContract.test.ts`).
+- **Enforced.** A wire name this client admits and the service does not declare fails, unless it is
+  argued — and an argument is a reason of at least 40 characters, a phrase naming the `ISSUES.md`
+  row whose deletion retires it, and a review date that is a failure once it has passed. Two maps,
+  because "not yet declared" and "no longer declared" are the same absence to a checker and
+  different promises to a reader: `AHEAD_OF_BACKEND` is a reader that landed first,
+  `RETAINED_FOR_ROLLOUT` is an old spelling kept until deployed browsers have reloaded. The
+  validator is driven over a map built to be wrong in every one of those ways, because both maps
+  are normally empty and a loop over an empty map checks nothing (`tests/backendContract.test.ts`).
+  This part needs no sibling checkout, so unlike the clause above it runs in every lane.
 - **Accepted.** With no sibling checkout the contract check verifies **nothing** and says so: a
   warning naming what the run is therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns the
   skip into a failure. No CI runner here checks the backend out today, so in GitHub Actions and in

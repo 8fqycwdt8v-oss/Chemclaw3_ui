@@ -511,6 +511,104 @@ the loss itself is a known, bounded, upstream-shaped hole.
 
 ---
 
+## Issue 13: the note event is renamed in two repositories, and only this half has moved
+
+**Status: this side is done; the next step is Chemclaw3's, and the one after that is this
+repository's again.** The service sends `note_proposed` for an event that is not a proposal —
+nothing reviews a note any more (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), and its
+own model docstring says the accurate name is `note_recorded` while still emitting the old literal,
+because "renaming it is a coordinated two-repo deploy with a skew window in which one side silently
+drops the event".
+
+An SSE discriminator is a contract two repositories switch on, and there is exactly one ordering
+with no broken state:
+
+1. **The reader accepts both names.** Done — `shared/events.ts` admits `note_recorded` in
+   `EVENT_TYPES` and normalises it onto the internal `note_proposed`, so no surface has to learn
+   the second spelling and none can miss it. Held by four tests in `tests/eventContract.test.ts`
+   (old name, new name, the SSE `event:` line with no `type` in the body, and a near-miss name that
+   must still be refused) and one on the real wire path in `tests/streamTurn.test.ts`.
+2. **The service emits the new name.** **Not this repository's step.** It is tracked in Chemclaw3's
+   own `docs/planning/BACKLOG.md` beside `NoteProposedEvent`; nothing here can do it, and nothing
+   here should, since a UI that emitted its own opinion about the wire name would be inventing the
+   contract rather than reading it.
+3. **This repository removes the old name** — the `note_proposed` entry in `EVENT_TYPES`, the
+   fall-through case, and at the same time renames the internal type. **Deliberately not done
+   now**: every browser in the field speaks the old name today, so removing it before step 2 has
+   shipped _and_ rolled out is the rename done in the order that loses events.
+
+**How anybody finds out step 2 has happened.** `tests/backendContract.test.ts` holds
+`note_recorded` in its `AHEAD_OF_BACKEND` map with this reason, reads the service's declaration out
+of a sibling checkout, and prints a line naming every argued name the service now declares. The day
+the backend ships step 2, the run says that step 3 is unblocked. It does not fail the gate: a green
+suite on this side is not the trigger, a rolled-out deployment is.
+
+---
+
+## Issue 14: the contract check reads a declaration, and three things are outside it
+
+`tests/backendContract.test.ts` (W30.1) is the first thing in this repository that compares what
+this client sends and expects to what Chemclaw3 declares. What it covers is in
+[`docs/production-readiness.md`](docs/production-readiness.md) §2. This entry is the other half —
+what it does **not** cover — because a check whose boundary is unwritten gets read as covering
+everything next to it.
+
+- **No sibling checkout means no check at all.** It resolves `CHEMCLAW3_DIR`, else `../Chemclaw3`,
+  and where neither exists it verifies nothing: the run prints a warning naming what it is
+  therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns that into a failure. **No CI
+  runner here checks the backend out**, so in GitHub Actions and in Jenkins this is a warning
+  rather than a gate today; it runs for a developer and for an agent with both trees, and in the
+  four-repository full-stack lane. Wiring it into a pipeline means checking out a second private
+  repository in the gate job — a credential decision, not a test change, and nobody has asked for
+  one. **Who decides:** whoever owns this repository's CI credentials.
+- **Response shapes are not checked.** The interfaces this client declares for what it reads back
+  are not compared to the models the handlers return. The mapping is not mechanical — `GET
+/sessions` returns `list[SessionSummaryOut]` where the client reads a page plus an
+  `X-Next-Cursor` header — and a check that guessed at the pairing would produce confident findings
+  about a relationship it invented, which is worse than the gap. What exists instead is
+  `tests/contractDrift.test.tsx`, which drives the three fields this has actually cost
+  (`title`, `updated_at`, `result_ref`). **What would close it:** the handlers' return models being
+  readable route-by-route, which is a shape the backend does not owe anybody today.
+- **It reads what the service declares, not what a deployment serves.** A service serving something
+  other than its source says is exactly the difference between this check and
+  `npm run check:openapi`, which asks a live service and is operator-run (see "Known gaps" below).
+  Neither replaces the other and both docstrings now say which is which.
+
+Also outside it, and smaller: query parameters (dropped from every template on both sides), and
+the BFF's own routes — `POST /api/client-events` has no upstream at all, so `src/lib/logger.ts` is
+out of the reader's scope by name rather than by accident.
+
+---
+
+## Issue 15: two shapes the path-encoding rule does not see, and one it deliberately allows
+
+`tests/pathEncoding.test.ts` holds the rule that every interpolated path segment reaches the
+service encoded, as an invariant over the tree rather than as a list of call sites. Both escapes
+below were **driven on 2026-09-14** rather than reasoned about, and both are accepted rather than
+fixed — the reasoning is in [`docs/production-readiness.md`](docs/production-readiness.md) §3.
+
+- **A path assembled off a named constant is invisible to it.** `const PROBE_BASE = '/api/jobs/';
+fetch(PROBE_BASE + jobId)` in `src/hooks/useOffline.ts` passed the whole rule, while
+  ``fetch(`/api/jobs/${jobId}`)`` in the same file failed it. The scan recognises a concatenation
+  whose **left operand is a string literal** ending in `/`; an identifier holding that same literal
+  is a shape it does not follow. Widening it means chasing an identifier to its binding, which is a
+  dataflow analysis rather than a syntactic rule.
+- **Encoding is not a character policy.** `/api/notes/note-a%00b` resolves and is forwarded
+  verbatim; so does `%0A`; so does `/api/jobs/qm%00-1`. Traversal is refused — `isTraversal`
+  decides it, not the character class, and `tests/routes.test.ts` drives both directions. The wide
+  `NOTE`/`JOB`/`PENDING` classes exist because those ids embed a slug a model wrote or a Temporal
+  workflow id, so narrowing them is a different change with a different blast radius than the
+  traversal one that was measured. What makes a NUL harmless today is the upstream decoding it into
+  a `[^/]+` path parameter — a property of somebody else's component, which is the reason this is
+  written down rather than assumed.
+
+**Who decides:** whoever owns `server/routes.ts`. **What would change the answer:** an ingress in
+front of this process that normalises before the service (an Envoy with
+`path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD`, some nginx-ingress configurations) makes
+the second one worth a character policy rather than a length cap.
+
+---
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.
@@ -523,6 +621,17 @@ path routing with a working Back button; conversation search; upload progress an
 registry; profile selection; tool calls surviving a reload.
 
 **Still not done:**
+
+- **One intermittent browser test, seen once and not reproduced.**
+  `e2e/protocols.spec.ts:55` (`an edit becomes a new revision and comes back on the next read`)
+  failed on the **mobile** project in one `npm run ci` on 2026-09-14 — `locator.fill` timing out at
+  30 s waiting for `getByLabel(/^Temperature/)` after the Edit button had been clicked — and passed
+  on the re-run of the same suite (91 passed, 5 skipped) and in isolation (12 of 12 in that spec,
+  both projects). It is recorded rather than fixed because one occurrence does not say which of the
+  two candidates it is: a lazily-loaded editor chunk under four parallel workers on a loaded
+  machine, or the mobile sheet's open animation. **What would settle it:** the next occurrence, with
+  the trace kept — `test-results/` holds an `error-context.md` per failure, and both runs above
+  cleared it before anybody read it.
 
 - **Screenshot baselines.** The axe pass covers the mechanical half of the visual contract; nothing
   guards a layout regression that is still accessible.

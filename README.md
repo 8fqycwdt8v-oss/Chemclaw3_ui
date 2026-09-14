@@ -159,7 +159,8 @@ shared/     the contracts mirrored by hand from the service — events.ts (the S
 scripts/    the gate (ci.mjs) and its checks, dev launcher, server bundler, smoke test
 e2e/        Playwright specs and the SSE fixture service
 public/     theme boot script, favicon — served as-is by the BFF
-docs/       concept studies — what the chemistry surface is for, and what it still is not
+docs/       the production-readiness record, and concept studies — what the chemistry
+            surface is for, and what it still is not
 ```
 
 Three files carry most of the difficulty and are commented accordingly:
@@ -283,6 +284,23 @@ They are `npm run check:live`, which is where to run them once a service is up.
 gives the two scripts a name a person can type, and it does not put them on any schedule — a push
 runner has no service to point them at. `tests/gate.test.ts` asserts both halves, the second by
 failing if either pipeline starts naming it, so wiring it in means coming back to this paragraph.
+
+**The wire contract is checked against the backend's source, in the gate.**
+`tests/backendContract.test.ts` reads a `Chemclaw3` checkout — `CHEMCLAW3_DIR`, or `../Chemclaw3` —
+and compares five things this repo consumes against what that repo declares: the BFF's route
+whitelist, every path and JSON body `src/api/` sends, every event `normalizeEvent` admits, every
+field it reads off one, and the three closed sets it mirrors (`ErrorCode`, `RefusalReason`,
+`AnswerCheck`). It needs no service, no port and no credential, which is the whole point: the check
+that needed a running one has never been run by a pipeline. **With no checkout it checks nothing and
+says so** — a warning naming what this run is therefore not evidence about, and `CHEMCLAW3_REQUIRED=1`
+turns that into a failure. What it cannot see is what a _deployment_ renders rather than declares,
+and the response shapes this client reads back; both are recorded in `ISSUES.md` rather than implied.
+
+**What is enforced, bounded, measured and accepted is written down in one place.**
+[`docs/production-readiness.md`](docs/production-readiness.md) is the record: every clause names the
+test that holds it, and a clause with no test is rewritten as an accepted risk with who decides and
+what would change the answer, or deleted. `tests/readinessRecord.test.ts` holds that rule — a clause
+that claims something and cites nothing fails, and so does a citation whose file has gone away.
 
 `check:contrast` converts OKLCH to sRGB rather than comparing lightness values: OKLCH's `L` is
 perceptual and WCAG is defined on sRGB relative luminance, so two tokens that look far apart can

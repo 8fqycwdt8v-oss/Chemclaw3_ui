@@ -405,3 +405,63 @@ production code it protects, confirming red, and restoring from a backup kept ou
 16 mutations in all, including the three from the review that reproduced exactly, and the
 already-passing ones re-run to confirm no regression. The one "mutation" whose correct result is
 green is the hoisted `encodeURIComponent`, which is correct code that used to fail.
+
+# Wave 30 — the UI's share: a contract nobody checked, a name in two repositories, a record
+
+## W30.1 — nothing checks the client half of the wire contract
+
+- [x] **Read the backend, do not run it.** A check that needs a live service is a check that does
+      not run (`check:openapi` has never once run in a pipeline). The sibling checkout is on disk;
+      parse it. Resolved by `CHEMCLAW3_DIR`, else `../Chemclaw3`.
+- [x] **Four axes**, each failing in the direction that costs a chemist something:
+      the BFF whitelist against the routes the service registers; every event the backend declares
+      against what `normalizeEvent` admits; every _field_ `normalizeEvent` reads against the fields
+      the backend's model declares; every closed set the client mirrors (`ErrorCode`,
+      `RefusalReason`, `AnswerCheck`) against the Python `Literal` it mirrors.
+- [x] **What the client sends**, not only what it reads: every POST body in `src/api/` against the
+      Pydantic request model of the route it posts to — six of which are `extra="forbid"`, so a
+      stale key there is a 422 rather than a silent drop.
+- [x] **Drive it.** Introduce a renamed field, a removed route and a renamed event; each goes red
+      for its own reason, and the mutation is verified to have applied.
+- [x] **Say what it cannot check**, in the test, in the readiness record and in `ISSUES.md`.
+
+## W30.2 — `note_proposed` is not a proposal, and the name is a two-repo contract
+
+- [x] Accept both wire names, old and new, with a test for each. Do **not** remove the old one.
+- [x] Say in the commit, in `ISSUES.md` and in the contract check what the remaining step is.
+
+## W30.8 — the production-readiness record
+
+- [x] One document, every clause naming the test that holds it; a clause with no test is rewritten
+      as an accepted risk or deleted. Every remaining open item into `ISSUES.md` with an anchor.
+
+## Review — Wave 30, the UI's share
+
+**W30.1.** `tests/backendContract.test.ts` + `tests/backendContract.ts`. Five axes, each failing in
+one direction; eight mutations driven, each verified applied, each red for its own reason. The
+backend checkout is read and never written: every upstream mutation was made against a copy under
+the scratchpad and reached with `CHEMCLAW3_DIR`, which is also what proved that variable works.
+What it cannot check is in `ISSUES.md` Issue 14 rather than implied.
+
+**Two things the work found that were not in the brief.** Adding a 126th test file made two
+`sendMessage` tests time out — they spun on an unbounded `while (!ready()) await sleep(5)` inside
+vitest's default 5,000 ms and run in 6 ms alone, so they reported the stop path as broken whenever
+the machine was busy; they are bounded now and carry the stated timeout four of their neighbours
+already carry. And the contract reader's own `EVENT_TYPES` scan enrolled four words of prose as
+event names, because an apostrophe in a `//` comment opened a quoted string — the same defect the
+Python side of the same reader had already needed fixing for.
+
+**W30.2.** The tolerant reader ships, the old name stays, and the remaining steps are written down
+with who does each (`ISSUES.md` Issue 13). `AHEAD_OF_BACKEND` in the contract check is what reports
+the day the service ships its half.
+
+**W30.8.** `docs/production-readiness.md`, held by `tests/readinessRecord.test.ts`: a clause that
+claims something and cites no file fails, a citation whose file has gone away fails, and an
+accepted risk with nowhere to read the rest of it fails. Four mutations driven. The record is
+linked from `README.md`, which the same test asserts.
+
+**What was deliberately not done.** The contract check is not wired into either pipeline: that
+means checking out a second private repository in the gate job, which is a credential decision
+rather than a test change (`ISSUES.md` Issue 14). The path-encoding escapes are recorded rather
+than closed — one needs dataflow analysis, the other a character policy with a different blast
+radius than the traversal fix that was measured (`ISSUES.md` Issue 15).

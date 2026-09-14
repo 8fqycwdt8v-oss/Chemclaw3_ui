@@ -545,6 +545,70 @@ suite on this side is not the trigger, a rolled-out deployment is.
 
 ---
 
+## Issue 14: the contract check reads a declaration, and three things are outside it
+
+`tests/backendContract.test.ts` (W30.1) is the first thing in this repository that compares what
+this client sends and expects to what Chemclaw3 declares. What it covers is in
+[`docs/production-readiness.md`](docs/production-readiness.md) §2. This entry is the other half —
+what it does **not** cover — because a check whose boundary is unwritten gets read as covering
+everything next to it.
+
+- **No sibling checkout means no check at all.** It resolves `CHEMCLAW3_DIR`, else `../Chemclaw3`,
+  and where neither exists it verifies nothing: the run prints a warning naming what it is
+  therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns that into a failure. **No CI
+  runner here checks the backend out**, so in GitHub Actions and in Jenkins this is a warning
+  rather than a gate today; it runs for a developer and for an agent with both trees, and in the
+  four-repository full-stack lane. Wiring it into a pipeline means checking out a second private
+  repository in the gate job — a credential decision, not a test change, and nobody has asked for
+  one. **Who decides:** whoever owns this repository's CI credentials.
+- **Response shapes are not checked.** The interfaces this client declares for what it reads back
+  are not compared to the models the handlers return. The mapping is not mechanical — `GET
+/sessions` returns `list[SessionSummaryOut]` where the client reads a page plus an
+  `X-Next-Cursor` header — and a check that guessed at the pairing would produce confident findings
+  about a relationship it invented, which is worse than the gap. What exists instead is
+  `tests/contractDrift.test.tsx`, which drives the three fields this has actually cost
+  (`title`, `updated_at`, `result_ref`). **What would close it:** the handlers' return models being
+  readable route-by-route, which is a shape the backend does not owe anybody today.
+- **It reads what the service declares, not what a deployment serves.** A service serving something
+  other than its source says is exactly the difference between this check and
+  `npm run check:openapi`, which asks a live service and is operator-run (see "Known gaps" below).
+  Neither replaces the other and both docstrings now say which is which.
+
+Also outside it, and smaller: query parameters (dropped from every template on both sides), and
+the BFF's own routes — `POST /api/client-events` has no upstream at all, so `src/lib/logger.ts` is
+out of the reader's scope by name rather than by accident.
+
+---
+
+## Issue 15: two shapes the path-encoding rule does not see, and one it deliberately allows
+
+`tests/pathEncoding.test.ts` holds the rule that every interpolated path segment reaches the
+service encoded, as an invariant over the tree rather than as a list of call sites. Both escapes
+below were **driven on 2026-09-14** rather than reasoned about, and both are accepted rather than
+fixed — the reasoning is in [`docs/production-readiness.md`](docs/production-readiness.md) §3.
+
+- **A path assembled off a named constant is invisible to it.** `const PROBE_BASE = '/api/jobs/';
+fetch(PROBE_BASE + jobId)` in `src/hooks/useOffline.ts` passed the whole rule, while
+  ``fetch(`/api/jobs/${jobId}`)`` in the same file failed it. The scan recognises a concatenation
+  whose **left operand is a string literal** ending in `/`; an identifier holding that same literal
+  is a shape it does not follow. Widening it means chasing an identifier to its binding, which is a
+  dataflow analysis rather than a syntactic rule.
+- **Encoding is not a character policy.** `/api/notes/note-a%00b` resolves and is forwarded
+  verbatim; so does `%0A`; so does `/api/jobs/qm%00-1`. Traversal is refused — `isTraversal`
+  decides it, not the character class, and `tests/routes.test.ts` drives both directions. The wide
+  `NOTE`/`JOB`/`PENDING` classes exist because those ids embed a slug a model wrote or a Temporal
+  workflow id, so narrowing them is a different change with a different blast radius than the
+  traversal one that was measured. What makes a NUL harmless today is the upstream decoding it into
+  a `[^/]+` path parameter — a property of somebody else's component, which is the reason this is
+  written down rather than assumed.
+
+**Who decides:** whoever owns `server/routes.ts`. **What would change the answer:** an ingress in
+front of this process that normalises before the service (an Envoy with
+`path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD`, some nginx-ingress configurations) makes
+the second one worth a character policy rather than a length cap.
+
+---
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.

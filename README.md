@@ -159,7 +159,8 @@ shared/     the contracts mirrored by hand from the service — events.ts (the S
 scripts/    the gate (ci.mjs) and its checks, dev launcher, server bundler, smoke test
 e2e/        Playwright specs and the SSE fixture service
 public/     theme boot script, favicon — served as-is by the BFF
-docs/       concept studies — what the chemistry surface is for, and what it still is not
+docs/       the production-readiness record, and concept studies — what the chemistry
+            surface is for, and what it still is not
 ```
 
 Three files carry most of the difficulty and are commented accordingly:
@@ -294,6 +295,12 @@ that needed a running one has never been run by a pipeline. **With no checkout i
 says so** — a warning naming what this run is therefore not evidence about, and `CHEMCLAW3_REQUIRED=1`
 turns that into a failure. What it cannot see is what a _deployment_ renders rather than declares,
 and the response shapes this client reads back; both are recorded in `ISSUES.md` rather than implied.
+
+**What is enforced, bounded, measured and accepted is written down in one place.**
+[`docs/production-readiness.md`](docs/production-readiness.md) is the record: every clause names the
+test that holds it, and a clause with no test is rewritten as an accepted risk with who decides and
+what would change the answer, or deleted. `tests/readinessRecord.test.ts` holds that rule — a clause
+that claims something and cites nothing fails, and so does a citation whose file has gone away.
 
 `check:contrast` converts OKLCH to sRGB rather than comparing lightness values: OKLCH's `L` is
 perceptual and WCAG is defined on sRGB relative luminance, so two tokens that look far apart can

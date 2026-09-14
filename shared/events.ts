@@ -231,23 +231,28 @@ export interface QuestionEvent {
 /**
  * A note was written into the knowledge graph.
  *
- * **The wire carries two names for this and the reader takes both.** `note_proposed` is what the
- * service sends today and the event is not a proposal: nothing reviews a note any more
- * (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge` upstream), so the accurate name is
- * `note_recorded` and the backend's own model says so in a docstring while still emitting the old
- * literal. Renaming an SSE discriminator is a two-repository deploy with a skew window, and the
- * only ordering that has no broken state is **reader first**: this client accepts both names now,
- * the service switches to the new one whenever it likes, and no deployed frontend drops an event
- * in between. The reverse order — service first — silently drops the event in every browser that
- * has not been redeployed, which is the exact failure `EVENT_TYPES` has cost six times.
+ * **The wire carries two names for this and the reader takes both.** The event is not a proposal:
+ * nothing reviews a note any more (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
+ * upstream), so the accurate name is `note_recorded`. Renaming an SSE discriminator is a
+ * two-repository deploy with a skew window, and the only ordering that has no broken state is
+ * **reader first**: this client accepted both names, the service switched to the new one, and no
+ * deployed frontend dropped an event in between. The reverse order — service first — silently
+ * drops the event in every browser that has not been redeployed, which is the exact failure
+ * `EVENT_TYPES` has cost six times.
+ *
+ * **The service has now shipped its half**, so `note_proposed` is the *old* name rather than the
+ * current one: `src/chemclaw/api/events.py` declares `type: Literal["note_recorded"]` and no
+ * longer declares the old spelling at all. This reader keeps it because every browser already
+ * loaded speaks it; dropping it before that rollout is done is the same event loss with the
+ * repositories swapped.
  *
  * `type` stays `'note_proposed'` inside this app on purpose: the internal name is a local rename
  * that can happen any day, and doing it in the same step would put a second change in the skew
- * window for no gain. What is *not* done here is removing the old wire name — that is the third
- * step, after the service has shipped the second, and it is recorded in `ISSUES.md` with who does
- * it. `tests/backendContract.test.ts` holds the promise from the other end: `note_recorded` is in
- * its `AHEAD_OF_BACKEND` map with this reason, and the run reports the day the service declares
- * it, which is the day step three is unblocked.
+ * window for no gain. Removing the old wire name is the third step, it is this repository's, and
+ * it is recorded in `ISSUES.md` with what unblocks it. `tests/backendContract.test.ts` holds the
+ * promise from the other end: `note_proposed` is in its `RETAINED_FOR_ROLLOUT` map with this
+ * reason, an `ISSUES.md` row whose deletion expires the entry, and a date by which somebody
+ * re-takes the decision.
  */
 export interface NoteProposedEvent {
   type: 'note_proposed';
@@ -601,10 +606,13 @@ const EVENT_TYPES = new Set<string>([
   'tool_result',
   'evidence_source',
   'question',
+  // The name the service used to send, retained until every loaded browser has reloaded. See
+  // `NoteProposedEvent`: the reader went first so that the emitter's switch broke nothing, and
+  // this line is the half that is still doing work — the interface union above changes nothing at
+  // runtime, the gate is this set. Its removal is Issue 13's third step and is argued in
+  // `tests/backendContract.test.ts`'s RETAINED_FOR_ROLLOUT rather than left looking like dead code.
   'note_proposed',
-  // The same event under the name the service is moving to. See `NoteProposedEvent`: the reader
-  // goes first so that the emitter's switch breaks nothing, and this line is what makes the
-  // tolerance real — the interface union above changes nothing at runtime, the gate is this set.
+  // The name the service sends.
   'note_recorded',
   'approval_request',
   'answer',

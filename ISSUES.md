@@ -511,14 +511,13 @@ the loss itself is a known, bounded, upstream-shaped hole.
 
 ---
 
-## Issue 13: the note event is renamed in two repositories, and only this half has moved
+## Issue 13: the note event is renamed in two repositories, and the last step waits on a rollout
 
-**Status: this side is done; the next step is Chemclaw3's, and the one after that is this
-repository's again.** The service sends `note_proposed` for an event that is not a proposal —
-nothing reviews a note any more (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), and its
-own model docstring says the accurate name is `note_recorded` while still emitting the old literal,
-because "renaming it is a coordinated two-repo deploy with a skew window in which one side silently
-drops the event".
+**Status: steps 1 and 2 are done. Step 3 is this repository's and is deliberately waiting — not on
+a commit, on a rollout.** The event is not a proposal — nothing reviews a note any more
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`) — so the accurate name is `note_recorded`,
+and renaming an SSE discriminator is "a coordinated two-repo deploy with a skew window in which one
+side silently drops the event".
 
 An SSE discriminator is a contract two repositories switch on, and there is exactly one ordering
 with no broken state:
@@ -528,20 +527,32 @@ with no broken state:
    the second spelling and none can miss it. Held by four tests in `tests/eventContract.test.ts`
    (old name, new name, the SSE `event:` line with no `type` in the body, and a near-miss name that
    must still be refused) and one on the real wire path in `tests/streamTurn.test.ts`.
-2. **The service emits the new name.** **Not this repository's step.** It is tracked in Chemclaw3's
-   own `docs/planning/BACKLOG.md` beside `NoteProposedEvent`; nothing here can do it, and nothing
-   here should, since a UI that emitted its own opinion about the wire name would be inventing the
-   contract rather than reading it.
+2. **The service emits the new name.** **Done, and not this repository's step.**
+   `src/chemclaw/api/events.py` upstream declares `type: Literal["note_recorded"] = "note_recorded"`
+   and no longer declares the old spelling at all; its own model docstring records the ordering and
+   says the third step "is theirs and happens after this ships".
 3. **This repository removes the old name** — the `note_proposed` entry in `EVENT_TYPES`, the
    fall-through case, and at the same time renames the internal type. **Deliberately not done
-   now**: every browser in the field speaks the old name today, so removing it before step 2 has
-   shipped _and_ rolled out is the rename done in the order that loses events.
+   now**: every browser already loaded speaks the old name, so removing it before step 2 has
+   _rolled out_ is the rename done in the order that loses events. The trigger is a deployment,
+   which nothing in this repository can observe.
 
-**How anybody finds out step 2 has happened.** `tests/backendContract.test.ts` holds
-`note_recorded` in its `AHEAD_OF_BACKEND` map with this reason, reads the service's declaration out
-of a sibling checkout, and prints a line naming every argued name the service now declares. The day
-the backend ships step 2, the run says that step 3 is unblocked. It does not fail the gate: a green
-suite on this side is not the trigger, a rolled-out deployment is.
+**How the contract check holds a step that waits on a rollout.** `tests/backendContract.test.ts`
+compares the names this client admits against the names the service declares, and a name it admits
+and the service does not is dead code — which `note_proposed` now looks exactly like. It is not,
+and the difference is recorded rather than tolerated: the old spelling is an entry in that file's
+`RETAINED_FOR_ROLLOUT` map, beside `AHEAD_OF_BACKEND`, which holds the mirror-image state (a name
+this reader admits _before_ the service declares it). Both are held to the same discipline — a
+non-empty reason, a phrase naming this row, and a date by which somebody re-takes the decision —
+and an entry whose `ISSUES.md` row is deleted, or whose date has passed, fails. That is the expiry;
+the old edition had none but a `console.log`.
+
+**It does not fail the gate, and that is now true rather than intended.** The first edition argued
+only the _new_ name, so the day the service renamed, the retained old name failed this file with a
+message calling it dead code — the only mechanical remedy being step 3, performed before the
+rollout, which is the event-losing order this whole entry exists to prevent. Measured against the
+sibling checkout on 2026-09-14: one failed test, and the "step 3 is unblocked" notice it was
+supposed to print never printed, because it sat after the throwing assertion in the same test.
 
 ---
 

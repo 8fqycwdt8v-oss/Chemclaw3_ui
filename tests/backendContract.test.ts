@@ -83,23 +83,94 @@ import { join } from 'node:path';
 const root = backendCheckout();
 
 /**
- * Wire names this client accepts that the service does not declare — each with the reason, and
- * each a deliberate step in a two-repository rename that has to land on the reader first.
+ * A wire name this client admits that the checked-out service does not declare, with its argument.
  *
- * Empty is the normal state. An entry here is a promise that the *other* repository has a row for
- * the step that removes it; see `ISSUES.md`.
+ * Two maps below hold names in exactly that state, and no check can tell them apart: a name the
+ * service has *not yet* declared and one it *no longer* declares are the same absence. What
+ * differs is what ends the entry, and that is the whole reason there are two — an entry waiting on
+ * somebody else's deploy is a different promise from one waiting on this repository's own users.
  */
-const AHEAD_OF_BACKEND = new Map<string, string>([
+interface Argued {
+  /**
+   * Why this client admits a name the service does not declare.
+   *
+   * Never empty, and that is asserted below. An entry is the one thing that turns this file's
+   * strictest failure into a pass, so a map whose entries need no argument is a map in which this
+   * client may admit anything it likes — which it was: `['fake_event', '']` satisfied "argued".
+   */
+  reason: string;
+  /**
+   * A phrase that occurs in `ISSUES.md`, naming the row that tracks the step which removes this.
+   *
+   * The expiry that is not a date. Closing an issue in this repository means deleting its row, so
+   * the row going away fails the entry that pointed at it — a reason on its own expires only when
+   * somebody happens to re-read it.
+   */
+  issue: string;
+  /**
+   * The date by which somebody re-takes this decision, `YYYY-MM-DD`.
+   *
+   * Past is a **failure**, not a warning, and deliberately: the harm an entry of this kind does is
+   * that it is quiet, and a backwards-compatibility window nobody has re-taken in a quarter is the
+   * shape this repository keeps finding written down and believed. The failure names both ways
+   * out — remove the name because the window is over, or move the date and say why.
+   */
+  review: string;
+}
+
+/**
+ * Names this client admits *before* the service declares them — the reader landing first.
+ *
+ * Empty is the normal state, and it is empty: `note_recorded` sat here for W30.2 and the service
+ * has since shipped it (`src/chemclaw/api/events.py` declares
+ * `type: Literal["note_recorded"]`), so it is an ordinary name now and needs no argument.
+ */
+const AHEAD_OF_BACKEND = new Map<string, Argued>([]);
+
+/**
+ * Names this client admits *after* the service has stopped declaring them — the old spelling, kept
+ * until every browser in the field has been redeployed.
+ *
+ * This state had nowhere to be recorded, and that was a defect rather than an omission. The moment
+ * the service shipped the rename, the old name became "dead code" by this file's own failure
+ * message, and the only mechanical remedy that message offered was to delete it — which is Issue
+ * 13's step 3 performed before step 2 has rolled out, the ordering that repository says loses the
+ * event in every tab that has not reloaded. A retained name is a first-class state here, held to
+ * the same argued-entry discipline as one that is ahead.
+ */
+const RETAINED_FOR_ROLLOUT = new Map<string, Argued>([
   [
-    'note_recorded',
-    'W30.2. The service emits `note_proposed` for an event that is not a proposal and says so in ' +
-      'its own model docstring. The reader goes first — this client accepts both names — so that ' +
-      'the emitter can switch without any deployed browser dropping the event. Removing the old ' +
-      'name here is the step after that, and it is this repository\'s: see ISSUES.md, "the note ' +
-      'event is renamed in two repositories". The emit side is Chemclaw3\'s, tracked in its own ' +
-      'BACKLOG beside `NoteProposedEvent`.',
+    'note_proposed',
+    {
+      reason:
+        'Issue 13 step 3. The service renamed this event to `note_recorded` and no longer ' +
+        'declares the old spelling; its own model docstring says the step that drops the old ' +
+        'name from this reader "is theirs and happens after this ships". Every browser already ' +
+        'loaded speaks the old name, so this client keeps reading it until that rollout is done. ' +
+        'Removal takes the `note_proposed` entry in `EVENT_TYPES`, the fall-through case in ' +
+        '`normalizeEvent`, and the internal rename with it.',
+      issue: 'the note event is renamed in two repositories',
+      review: '2026-12-31',
+    },
   ],
 ]);
+
+/** Both maps as one lookup: the filter below cannot tell "not yet" from "no longer", and the
+ *  distinction is about who unblocks the removal, not about what this client accepts. */
+const ARGUED = new Map<string, Argued>([...AHEAD_OF_BACKEND, ...RETAINED_FOR_ROLLOUT]);
+
+/**
+ * The names in an argued map that the checked-out service *does* declare.
+ *
+ * A function, and called from a describe body rather than from inside an `it`, because the
+ * consequence is a notice and a notice placed after an assertion is not one: the first edition put
+ * the "step 3 is unblocked" line after `expect(unsent).toEqual([])` in the same test, so on the
+ * day the service renamed — the only day the line had anything to say — the assertion threw and it
+ * never printed. Observed, not reasoned about.
+ */
+function stillDeclared(map: Map<string, Argued>, sent: ReadonlySet<string>): string[] {
+  return [...map.keys()].filter((type) => sent.has(type));
+}
 
 if (root === null) {
   describe('the backend contract', () => {
@@ -164,6 +235,28 @@ if (root === null) {
 
   describe('the SSE event union', () => {
     const events = backendEvents(root);
+    const sent = new Set(events.map((event) => event.wire));
+
+    // Both notices are built here, in the describe body, where no assertion can run first. The
+    // edition before this one put the second of them after the `expect` two tests below, which is
+    // why it printed on every run except the one it was written for.
+    const landed = stillDeclared(AHEAD_OF_BACKEND, sent);
+    if (landed.length > 0) {
+      console.log(
+        `\n  ${landed.length} name(s) in AHEAD_OF_BACKEND the service now declares — each is an` +
+          ` ordinary name and its entry is bookkeeping that has expired:\n` +
+          landed.map((type) => `      ${type}`).join('\n'),
+      );
+    }
+    const unrenamed = stillDeclared(RETAINED_FOR_ROLLOUT, sent);
+    if (unrenamed.length > 0) {
+      console.log(
+        `\n  ${unrenamed.length} name(s) in RETAINED_FOR_ROLLOUT the service still declares — the` +
+          ` rename they are retained across has not happened upstream yet, so the retention is` +
+          ` not doing anything and its removal is not unblocked:\n` +
+          unrenamed.map((type) => `      ${type}`).join('\n'),
+      );
+    }
 
     it('is admitted in full by normalizeEvent', () => {
       const dropped = events
@@ -176,25 +269,13 @@ if (root === null) {
     });
 
     it('admits nothing the service does not send, unless it is argued', () => {
-      const sent = new Set(events.map((event) => event.wire));
-      const unsent = clientEventTypes().filter(
-        (type) => !sent.has(type) && !AHEAD_OF_BACKEND.has(type),
-      );
+      const unsent = clientEventTypes().filter((type) => !sent.has(type) && !ARGUED.has(type));
       expect(
         unsent,
-        'mirrored here, declared nowhere upstream: either dead code, or an argued entry in AHEAD_OF_BACKEND',
+        'mirrored here, declared nowhere upstream: dead code, unless it is an argued entry in ' +
+          'AHEAD_OF_BACKEND (the service has not declared it yet) or in RETAINED_FOR_ROLLOUT (the ' +
+          'service has stopped declaring it and deployed browsers still speak it)',
       ).toEqual([]);
-
-      // The other end of the same promise: an argued name the service has since shipped is no
-      // longer ahead of anything, and the step that removes the old spelling is now unblocked.
-      const landed = [...AHEAD_OF_BACKEND.keys()].filter((type) => sent.has(type));
-      if (landed.length > 0) {
-        console.log(
-          `\n  ${landed.length} name(s) in AHEAD_OF_BACKEND the service now declares — the` +
-            ` removal step they were waiting on is unblocked:\n` +
-            landed.map((type) => `      ${type}`).join('\n'),
-        );
-      }
     });
 
     it('is read field by field off the fields the service declares', () => {

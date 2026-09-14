@@ -58,10 +58,13 @@
  * follower's conversation was watched by nothing.
  *
  * So every tab `declare`s what it wants and the leader watches the **merge**, round-robin by rank
- * (`mergeWatchSets`), capped at the account's budget rather than at any tab's. A follower's
- * periodic message *is* its interest — one message per second per role — and an interest expires on
- * the same `LEASE_MS` as leadership, so a crashed tab stops holding a slot for a window nobody is
- * looking at.
+ * (`mergeWatchSets`), capped at the account's budget rather than at any tab's — and rotated over
+ * time once there are more interested tabs than the budget has room for, because rank 0 alone
+ * leaves the tabs past position `budget - 1` watched by nobody in the account, deterministically
+ * and for ever. A follower's periodic message *is* its interest — one message per second per role
+ * — and an interest expires on `INTEREST_LEASE_MS`, which is deliberately far longer than the
+ * leadership lease, so that a backgrounded window whose timers the browser has clamped to once a
+ * minute keeps the slot it is the whole point of this feature to give it.
  *
  * ## What is relayed
  *
@@ -72,9 +75,19 @@
  * follower holds no streams and would otherwise show a chemist no warning while notifications were
  * in fact failing. A tab that joins later gets that health replayed when its claim is answered.
  *
- * **The gap during a takeover is a delay, not a loss.** The service writes job endings into
- * `session_events` and a reader claims them; a row nobody has claimed is still there when the next
- * stream opens. So what a takeover costs is the seconds until somebody reconnects.
+ * **The gap during a takeover is a delay for every row nobody has claimed, and a loss for the one
+ * already in flight.** The service writes job endings into `session_events` and a reader claims
+ * them, so a row nobody has claimed is still there when the next stream opens: that is what makes a
+ * takeover — and the rotation above — cost seconds rather than a notification.
+ *
+ * The claim is destructive, though, and it bounds the promise rather than fulfilling it. Upstream's
+ * `claim_unconsumed` is one `UPDATE … FOR UPDATE SKIP LOCKED … RETURNING`, at-most-once by design,
+ * with `restore_unconsumed` un-claiming only a row whose *yield* never completed — so a row already
+ * written to the departing tab's socket is gone from the mailbox. A tab that dies between reading
+ * that frame and `publish`ing it loses it for every window on the account, and no reconnect brings
+ * it back. Nothing on this side can close that: the fix is an acknowledgement upstream, and
+ * `ISSUES.md` Issue 12 records it. This paragraph read "a delay, not a loss" flatly, which made the
+ * one case this file cannot cover the one case it claimed to.
  */
 
 import type { AwaitingAnswerEvent, JobTerminalEvent } from '../../shared/events.ts';
@@ -110,6 +123,34 @@ const HEARTBEAT_MS = 1_000;
  */
 const LEASE_MS = 3 * HEARTBEAT_MS;
 
+/**
+ * Silence that means a tab has stopped wanting what it asked for.
+ *
+ * **A different lifetime from `LEASE_MS`, and the reason is that the two expire against different
+ * clocks.** Leadership *should* expire when a tab's timers stop: a leader that is not running is a
+ * leader holding streams nobody is reading, and the three cases above — closed, crashed,
+ * backgrounded — are all meant to end in a takeover. An interest is the opposite. A backgrounded
+ * window is precisely the one whose job notifications matter, and a browser clamps a hidden tab's
+ * timers hard: ≥1 s everywhere, and Chrome's *intensive throttling* drops a hidden tab to **one
+ * timer callback a minute** after about five minutes. A follower re-announces from the 1 Hz
+ * watchdog, so at that clamp a three-second expiry means its interest is dead for 57 seconds of
+ * every 60. Driven before this constant existed, with a peer announcing once a minute and the
+ * leader sampled every 500 ms over three minutes: **342 of 360 samples had the follower's
+ * conversation watched by nobody**, and every recovery cost a fresh connect, spent against the very
+ * cap this file exists to respect.
+ *
+ * Five minutes, which is four missed announcements at the clamped rate and 300 at the unclamped
+ * one. What it costs is a tab that died holding a slot for up to five minutes instead of three
+ * seconds, and two things pay for that: a tab that leaves *politely* says so on the way out (see
+ * `onHide` and `close`, which announce an empty interest), and a stale slot no longer starves
+ * anybody outright now that `mergeWatchSets` rotates — it wastes one of the account's streams for
+ * one lease rather than making a live window dark for ever.
+ *
+ * Exported for the same reason as `ROTATION_MS`: a test that advances its own transcription of
+ * this number goes green if the number changes underneath it.
+ */
+export const INTEREST_LEASE_MS = 5 * 60 * 1_000;
+
 /** What a leader tells the other tabs. Everything here is structured-clone safe. */
 export type Note =
   | { kind: 'job'; event: JobTerminalEvent; sessionId: string }
@@ -124,17 +165,59 @@ type Message =
   | { type: 'note'; from: string; note: Note };
 
 /**
+ * How long one arrangement of the account's watch set stands before the merge rotates it.
+ *
+ * Only reached when there are more interested tabs than the budget has room for — see
+ * `mergeWatchSets` — so in the ordinary one- and two-window case this constant changes nothing and
+ * costs no connect. Past that it is the period at which a dark window becomes a watched one.
+ *
+ * A minute, from the two costs it sits between. Rotating faster spends connects against the very
+ * per-principal cap this whole file exists to respect (each step closes one stream and opens
+ * another). Rotating slower leaves a window dark for longer — and that wait is the *whole* cost,
+ * because it is a delay rather than a loss: the service writes job endings into `session_events`
+ * and a reader claims them, so the rows a window missed while it was dark are still there when its
+ * turn comes round. That is the same property the takeover paragraph above rests on, used here for
+ * the same reason. Against a durable run that takes minutes to hours, a minute of latency on its
+ * completion card is not a failure a chemist can measure; being dark for ever is.
+ *
+ * Exported so `tests/jobStreamElection.test.ts` can advance a clock by it rather than transcribe
+ * it — a test that hardcoded 60_000 would go quietly green if this were raised to an hour.
+ */
+export const ROTATION_MS = 60_000;
+
+/**
  * The account's watch set, out of what each tab asked for.
  *
- * **Round-robin by rank, not concatenation**, and that is the whole of it. Every tab's list arrives
+ * **Round-robin by rank, not concatenation**, and that is most of it. Every tab's list arrives
  * already in its own priority order (its active conversation first — see `watchedSessionKey`), so
  * taking rank 0 from every tab before rank 1 from any of them gives each window the conversation
  * it is actually looking at, for as many windows as the budget has room for. Concatenating would
  * spend the entire budget on the leader's own list and leave every other window watching nothing,
  * which is the failure this whole file exists to prevent, arriving from the other direction.
  *
- * `mine` goes first at each rank so the tab holding the streams breaks its own ties, which makes
- * the result a function of the inputs rather than of message arrival order.
+ * **And rank 0 is not enough on its own, which is what `turn` is for.** Round-robin by rank is
+ * round-robin *within one merge*; with more interested tabs than the budget, the tabs past
+ * rank-0 position `budget - 1` appear at no rank at all, and since the peer order is a sort on a
+ * stable random id, it is the *same* tabs every time, for the life of the page. Driven at budget 3
+ * with six interested tabs, the same three sessions came back at t=0.5 s and at t=6 min and the
+ * other three were watched by nobody in the account — which is precisely the "nobody watches"
+ * outcome the module docstring names as the one unacceptable one, and it is worse than what this
+ * file replaced (a fourth window used to 429 and still watch its own conversation). So when the
+ * interested tabs outnumber the budget the whole order is rotated by `turn`, and every window's
+ * first choice is watched for its share of the time instead of never.
+ *
+ * **Only then.** Where everybody's first choice fits, `turn` changes nothing: rotating a set that
+ * is not starved would move sessions in and out of the watch set — a connect and a disconnect per
+ * step — to fix a starvation that is not happening. Two windows at a budget of three keep exactly
+ * the set they had before this parameter existed.
+ *
+ * `mine` goes first at each rank (at `turn` 0, and at every `turn` while nothing is starved) so the
+ * tab holding the streams breaks its own ties, which makes the result a function of the inputs
+ * rather than of message arrival order.
+ *
+ * An empty list is a tab that wants nothing — a window with no conversation yet, or one that said
+ * so on its way out. It contributes at no rank, so it is dropped before the rotation rather than
+ * being given a step of its own.
  *
  * Exported for `tests/jobStreamElection.test.ts`, which drives the ordering directly: the wiring
  * tests can only see the first three of a six-way merge.
@@ -143,12 +226,16 @@ export function mergeWatchSets(
   mine: readonly string[],
   peers: readonly (readonly string[])[],
   budget: number,
+  turn = 0,
 ): string[] {
-  const lists = [mine, ...peers];
+  const lists = [mine, ...peers].filter((list) => list.length > 0);
+  const start =
+    lists.length > budget ? ((Math.trunc(turn) % lists.length) + lists.length) % lists.length : 0;
+  const order = start === 0 ? lists : [...lists.slice(start), ...lists.slice(0, start)];
   const merged: string[] = [];
-  const depth = Math.max(...lists.map((list) => list.length));
+  const depth = Math.max(0, ...order.map((list) => list.length));
   for (let rank = 0; rank < depth && merged.length < budget; rank += 1) {
-    for (const list of lists) {
+    for (const list of order) {
       const sessionId = list[rank];
       if (sessionId === undefined || merged.includes(sessionId)) continue;
       merged.push(sessionId);
@@ -272,14 +359,15 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   /**
    * What the other tabs asked for, and when they last said so.
    *
-   * Expiry is the same `LEASE_MS` as leadership, for the same reason and against the same clock: a
-   * follower re-announces on every watchdog tick, so a claim on a stream survives three missed
-   * announcements and no more. Without it a crashed tab's interest would outlive the tab — the
-   * leader holding a stream for a window nobody is looking at, inside a budget of three, which at
-   * the limit is the live window watching nothing. A follower that *closes* is covered sooner by
-   * nothing at all: there is no `leave` message, deliberately, because the expiry already handles
-   * the case that cannot send one and a second mechanism for the case that can is a second thing
-   * to get wrong.
+   * Expiry is `INTEREST_LEASE_MS`, which is deliberately not the leadership lease: see that
+   * constant for the measurement. Without any expiry a crashed tab's interest would outlive the
+   * tab — the leader holding a stream for a window nobody is looking at, inside a budget of three.
+   *
+   * A follower that *closes* does not wait it out. There is still no `leave` message, because the
+   * message that says a tab wants nothing is the one that already says what a tab wants: an
+   * `interest` carrying no sessions, which replaces what that tab asked for before and so frees
+   * its slot on the next rebuild. That is what makes a five-minute expiry affordable — the expiry
+   * now covers only the tab that *cannot* speak, which is the case it was always for.
    */
   const asked = new Map<string, { sessions: readonly string[]; at: number }>();
   let watched: readonly string[] = [];
@@ -290,12 +378,15 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   const rebuild = (): boolean => {
     let next: readonly string[] = [];
     if (leader) {
-      const cutoff = now() - LEASE_MS;
+      const cutoff = now() - INTEREST_LEASE_MS;
       for (const [peer, interest] of asked) if (interest.at <= cutoff) asked.delete(peer);
       const peers = [...asked.entries()]
         .sort(([a], [b]) => (a < b ? -1 : 1))
         .map(([, interest]) => interest.sessions);
-      next = mergeWatchSets(mine, peers, budget);
+      // The rotation step comes off the clock rather than off a counter, so it advances once a
+      // minute however often `rebuild` runs — it runs on every watchdog tick and on every interest
+      // message, and a per-call counter would rotate the account's streams several times a second.
+      next = mergeWatchSets(mine, peers, budget, Math.floor(now() / ROTATION_MS));
     }
     if (next.length === watched.length && next.every((s, i) => s === watched[i])) return false;
     watched = next;
@@ -397,6 +488,12 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
         stand();
         break;
       case 'interest':
+        // An interest carrying nothing is a tab saying it wants nothing — a window with no
+        // conversation yet, or one on its way out — and it is stored as one rather than special-
+        // cased, because what makes it free the slot is that it *replaces* what that tab asked for
+        // before. `mergeWatchSets` drops an empty list, so a deletion here would be a second
+        // mechanism for an effect that already has one, indistinguishable from this in every
+        // observable way: driven both ways, the same tests pass.
         asked.set(message.from, { sessions: message.sessions, at: now() });
         if (leader && rebuild()) notify();
         break;
@@ -429,6 +526,10 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   // the cache is an ordinary follower whose watchdog will take over if nobody else did.
   const onHide = (): void => {
     if (leader) send({ type: 'resign', from: id });
+    // A follower has nothing to resign and, since `INTEREST_LEASE_MS` is five minutes, everything
+    // to say: without this its slot is held for a window that is gone. `resign` is not the message
+    // for it — that one means "the streams are unheld" and starts an election in every tab.
+    else send({ type: 'interest', from: id, sessions: [] });
   };
   if (typeof addEventListener === 'function') addEventListener('pagehide', onHide);
 
@@ -464,7 +565,12 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
     close: (options) => {
       if (closed) return;
       closed = true;
-      if (options?.announce !== false && leader) send({ type: 'resign', from: id });
+      if (options?.announce !== false) {
+        // Same two cases as `onHide`, for the tab that is torn down rather than navigated away
+        // from: a leader says the streams are free, a follower says its slot is.
+        if (leader) send({ type: 'resign', from: id });
+        else send({ type: 'interest', from: id, sessions: [] });
+      }
       if (campaign !== null) clearTimeout(campaign);
       if (heartbeatTimer !== null) clearInterval(heartbeatTimer);
       clearInterval(watchdog);

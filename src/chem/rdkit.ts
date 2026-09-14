@@ -71,6 +71,15 @@
  * The wall clock of that last one barely moved — 586.8 ms to 585.8 ms — which is the whole point:
  * parsing and depicting a 300-bond chain is work, and it is not a bug to be fixed. It moved.
  *
+ * **Read that table with the CSP paragraph below, because it was measured where the CSP is not.**
+ * The script drives this seam through the Vite dev server, which serves `index.html` itself and
+ * sends none of the BFF's headers; behind the BFF the toolkit does not instantiate at all, so the
+ * 587 ms it reports as saved is main-thread time no container-served deployment ever spends —
+ * nothing is drawn there to spend it on. The improvement is real, it is in the right units, and it
+ * is **unobservable in every shipped deployment** until `ISSUES.md` Issue 10 is decided. A measured
+ * win no deployment can see is not yet a win, and the table said nothing about which of the two it
+ * was.
+ *
  * **These figures shipped twice, from two runs, and disagreed** — `129 ms / 558 ms` in three
  * source files against `111 ms / 552 ms` in three others, a claim about somebody's afternoon
  * rather than about a commit. Neither pair reproduced. Every site now names the script instead,

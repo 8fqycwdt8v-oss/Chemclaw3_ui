@@ -126,10 +126,19 @@ exist. The route is now `/open/:sessionId` and the copy says "Conversation from 
 
 Three things about the shape of that decision, since the cheaper-looking options were both worse:
 
-- **The old path is not kept as a redirect.** Preserving `/s/` would preserve exactly the string
-  the decision is about. Nothing in the UI ever offered the link for copying — its only entry
-  points are two buttons in `/review` — and a stale one lands on this app's own "That conversation
-  isn't on this device", which is the honest message anyway.
+- **The old path is not kept as a redirect, and it is not left to the catch-all either.**
+  Preserving `/s/` would preserve exactly the string the decision is about. Nothing in the UI ever
+  offered the link for copying — its only entry points are two buttons in `/review`.
+  **This row used to end by saying a stale one "lands on this app's own 'That conversation isn't on
+  this device', which is the honest message anyway", and that was false.** `/s/` had no route at
+  all, so it fell through `<Route path="*">` to `/`, which mints a fresh conversation: driven
+  through the real `AppRoutes`, an old bookmark ended at `/c/<a new id>` with no error, nothing
+  adopted and no mention of the link. A reader sees an empty conversation and reads "mine was
+  lost" — worse than a 404, not better, and against the rule the e2e suite asserts by name ("an
+  unknown conversation says so rather than redirecting"). `/s/:sessionId` now renders an
+  explanation and goes nowhere, which is what the argument above needed in order to be true.
+  `tests/routing.test.tsx` drives it: the message, the path it names, that the URL does not move,
+  and that no conversation is minted.
 - **Cross-person sharing is declined here, not deferred quietly.** It is not a client change: the
   404 is an _authorization_ decision, so a stable server-side conversation id would still be
   refused without an explicit grant beside it. That is a backend feature with a data model and a
@@ -393,6 +402,15 @@ asserted in the present tense that the directive was what RDKit needs. Both are 
   relaxation to a thread with no DOM and no markup path. W28.7 is what makes it available at all:
   before it, the toolkit ran on the page and there was nothing to confine.
 
+**What it costs beyond the drawing, which is the part that outranks the rest of W28.7's record.**
+That wave's headline is a 600-character draw going from 587 ms of blocked main thread to 0, and
+`scripts/measure-rdkit-placement.mjs` measures it through the **Vite dev server** — which serves
+`index.html` itself and sends none of these headers. Behind the BFF nothing is drawn, so there is no
+main-thread cost to have saved: the work W28.7 did is sound and **no container-served deployment can
+observe any of it**. That is not an argument against the wave; it is the order the two should be
+read in, and `src/chem/rdkit.ts` now says so beside the table rather than eleven paragraphs below
+it. It also means this row, not the worker, is what stands between a chemist and a drawn structure.
+
 **Who decides:** whoever owns this app's CSP. Until then `rdkit.client.ts`'s fallback is doing its
 job — the app degrades to text and says so — and `e2e/worker.spec.ts` asserts the worker thread is
 started and answers, which is the most this repository can assert today.
@@ -437,6 +455,16 @@ was delivered:
 - "The seam now answers identically at 200–600 characters in both placements" is true and is not
   reassuring: what it answers identically can be `null`.
 
+**What it does not cost, traced rather than assumed.** A `null` here is an _omission_, never a
+second identity: every consumer of `canonicalSmiles` drops the molecule rather than admitting it
+under its raw spelling — `src/chem/entities.ts` at the tool-call path (`if (!canonical) continue`)
+and at `ingestUserStructure` (`return null`), and `src/chem/structure.ts` likewise — so no cache
+key, no dedupe key and no citation is ever minted from an uncanonicalised string, and a later
+success merges on the same canonical key as every earlier one. The cost is what the paragraph above
+says and no more: an intermittent gap in the rail, and an intermittent "not a recognised structure"
+for a structure that is one. `tests/rdkitUnavailable.test.tsx` now pins that bound — driven by
+making either drop site fall back to the raw string, it fails.
+
 **Options, none taken here because each is a real decision:** lower `MAX_PARSED_SMILES_CHARS` to
 something the ranking survives with margin (it would have to be measured, and it refuses structures
 that draw fine); distinguish a `RangeError` from a chemical negative at the seam, so the surfaces
@@ -446,6 +474,40 @@ raise the worker's stack, which is not configurable from here.
 
 **Who decides:** whoever owns `src/chem/`. Until then the cap is a number that does not bound what
 it claims to.
+
+---
+
+## Issue 12: a job ending read off a stream and not yet relayed dies with the tab that read it
+
+**Found by re-reading the docstring against the service, not by report.** `src/state/jobStreamLeader.ts`
+said, flatly, that "the gap during a takeover is a delay, not a loss … a row nobody has claimed is
+still there when the next stream opens". The first half is the important one and it is true. The
+sentence's scope was not.
+
+The service's claim is destructive by design (`chemclaw/agent/session_events.py`, read at
+`Chemclaw3` `1c2988fe`; that file itself last moved in `0bf7ff39`): one
+`UPDATE … FOR UPDATE SKIP LOCKED … RETURNING`, documented as at-most-once, with `restore_unconsumed`
+un-claiming a row whose _yield_ did not complete — which shrinks the loss window "to the transport
+itself", in that module's own words. So a `job_completed` frame that has been written to a tab's
+socket is already gone from the mailbox. If that tab dies between reading the frame and
+`tab.publish`ing it, the completion reaches no window on the account, and no takeover, reconnect or
+reload brings it back: the row is consumed and the job feed never held it.
+
+**How big it is.** Small, and not zero. The window is the browser-side gap between the frame
+arriving and `publish` running — the leader publishes synchronously inside the read loop, so for a
+tab that is merely _closed_ it is microseconds. It widens for a tab the OS kills, a renderer crash,
+or a laptop lid closing mid-frame. A durable run's ending arrives exactly once, which is the whole
+reason this stream exists, so the cost of hitting it is a chemist never being told.
+
+**Why it is not fixed here.** Every client-side arrangement loses the same frame: the row is gone
+before the browser has it, so relaying earlier, retrying, or persisting sooner all start after the
+only irreversible step. The fix is upstream — an acknowledgement before the claim, or a restore
+keyed on _delivery_ rather than on yield completing. That is a service change with a protocol
+attached, and nobody has asked for one.
+
+**What was done instead:** the docstring now says which half of the promise it can keep. A file that
+claimed "not a loss" about the one case it cannot cover is the thing worth removing immediately;
+the loss itself is a known, bounded, upstream-shaped hole.
 
 ---
 

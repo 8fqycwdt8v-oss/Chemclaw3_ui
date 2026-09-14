@@ -22,7 +22,10 @@
  * called it a "Shared conversation" in the sidebar, promised "A shared link ends in a 32-character
  * session id" when one was mistyped, and said "Opening the shared conversation…" while it worked:
  * three user-visible claims of a capability the service refuses by design. `ISSUES.md` Issue 5 has
- * the decision and what cross-person sharing would actually take.
+ * the decision and what cross-person sharing would actually take. `/s/:sessionId` still has a
+ * route, because the alternative turned out not to be the 404 the decision assumed: without one
+ * it fell through the catch-all to `/`, and an old bookmark opened a brand-new empty
+ * conversation. It explains and goes nowhere — a redirect is what the decision refused.
  *
  * `/auth/callback` is reserved by MSAL's `redirectUri` and is already SPA-fallbacked by `sirv`
  * (`server/index.ts`). Its element writes no URL — and the URL-sync effects live INSIDE the
@@ -378,6 +381,33 @@ export function AppRoutes(): React.JSX.Element {
         }
       />
       <Route path="/auth/callback" element={<AuthCallback />} />
+      {/* The path this app used to mint, kept as an explanation and nothing else.
+
+          Not preserving it as a *redirect* is the decision (`ISSUES.md` Issue 5): `/s/` reads as
+          "share", and this link cannot be shared — every session-scoped route upstream resolves
+          through `_refuse_unless_owner`, which 404s a non-owner indistinguishably from an unknown
+          id. But that decision was argued on the claim that a stale `/s/` link "lands on this
+          app's own 'That conversation isn't on this device', which is the honest message anyway",
+          and it did not: it fell through to the catch-all below, which redirects to `/`, which
+          mints a **fresh empty conversation**. Driven through the real router, an old bookmark
+          ended at `/c/<new id>` with no error, nothing adopted, and no mention of the link — which
+          reads as "my conversation was lost", and is worse than a 404 rather than better. It also
+          contradicts the rule the rest of this file follows and `e2e/routing.spec.ts` asserts by
+          name: an unknown conversation says so rather than redirecting.
+
+          So the argument is made true here rather than restated. This route renders the
+          explanation and goes nowhere. */}
+      <Route
+        path="/s/:sessionId"
+        element={
+          <AppShell>
+            <NotFound
+              title="That link has moved"
+              detail="Conversation links start with /open/ now — the 32-character session id at the end is unchanged. They open a conversation on another of your own devices; the service does not serve one person’s conversation to anybody else."
+            />
+          </AppShell>
+        }
+      />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

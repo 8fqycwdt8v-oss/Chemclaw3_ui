@@ -178,10 +178,14 @@ function applyNote(note: Note): void {
         if (!note.failing.includes(sessionId)) store.setJobStreamFailing(sessionId, false);
       }
       for (const sessionId of note.failing) store.setJobStreamFailing(sessionId, true);
-      // Only the `true` direction travels. `jobStreamsThrottled` means "this tab has been told it
-      // holds more than its share", and it is deliberately irreversible in the tab that set it;
-      // relaying a `false` would be a second tab clearing a decision it did not make.
-      if (note.throttled) store.setJobStreamsThrottled(true);
+      // **Reported, not adopted.** `jobStreamsThrottled` is this tab's own evidence that it holds
+      // more than its share of the cap, and it is deliberately irreversible — which is exactly why
+      // a relay must not write it. Setting it here made one leader's two 429s pin *every* tab on
+      // the account to a single stream for the life of its page, the next leader after a takeover
+      // included, with nothing able to expire it: a per-tab degradation with a per-account blast
+      // radius. The report travels instead, it drives the same indicator, and it follows the
+      // reporter — a `false` clears it, and a takeover publishes its own health at once.
+      store.setJobStreamsThrottledElsewhere(note.throttled);
       return;
     }
   }

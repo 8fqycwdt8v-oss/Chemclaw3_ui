@@ -460,7 +460,10 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
   const navigate = useNavigate();
   const activeId = useChatStore((s) => s.activeId);
   const { health: degraded, more: loadMoreSessions, loadingMore } = useServerSessions();
-  const throttled = useChatStore((s) => s.jobStreamsThrottled);
+  // Either this tab 429'd itself, or the tab holding the account's streams says it did. The
+  // chemist's question is the same one — "am I being told about finished jobs?" — and the second
+  // is the only form a follower can ever see, because a follower holds no streams to 429.
+  const throttled = useChatStore((s) => s.jobStreamsThrottled || s.jobStreamsThrottledElsewhere);
   const streamsFailing = useChatStore((s) => s.jobStreamsFailing.length > 0);
   // A number, not the list: zustand compares with `Object.is`, so subscribing to the array itself
   // would re-render this whole panel on every `syncAwaiting` that changed nothing.

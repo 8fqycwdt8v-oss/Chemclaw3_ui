@@ -143,8 +143,8 @@ describe('the production-readiness record', () => {
       .map((clause) => `${RECORD}:${clause.line} ${clause.body.slice(0, 90)}…`);
     expect(
       sourceOnly,
-      'an Enforced/Bounded clause naming no test — a file under src/ or server/ is the thing being ' +
-        'claimed about, not the thing that holds the claim. Cite the test, or make it Measured/Accepted',
+      'an Enforced/Bounded clause naming no test — a file under src/ or server/ is the thing ' +
+        'being claimed about, not the thing that holds it. Cite a test, or make it Measured/Accepted',
     ).toEqual([]);
   });
 
@@ -158,7 +158,8 @@ describe('the production-readiness record', () => {
       .map((clause) => `${RECORD}:${clause.line} ${clause.body.slice(0, 90)}…`);
     expect(
       swallowed,
-      'a clause body contains another clause — the parser merged them, so the inner one is held to nothing',
+      'a clause body contains another clause — the parser merged them, so the inner one is held ' +
+        'to nothing',
     ).toEqual([]);
   });
 

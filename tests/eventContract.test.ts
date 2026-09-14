@@ -352,8 +352,8 @@ describe('the fixture is checked against the declarations, not trusted', () => {
  * The gate and the union are one vocabulary, and this file was reading only one of them.
  *
  * `shared/events.ts` states the rule as **`EVENT_TYPES` is the gate**, and everything above takes
- * its subject from the *interface union* instead: `declaredMembers()` parses `ChemclawEvent` with the
- * compiler API and the fixture is checked against that. The two lists are not the same list.
+ * its subject from the *interface union* instead: `declaredMembers()` parses `ChemclawEvent` with
+ * the compiler API and the fixture is checked against that. The two lists are not the same list.
  * Measured: `'fake_event'` added to `EVENT_TYPES` — admitted by `normalizeEvent` at runtime, with
  * no interface and no branch — produced **zero** failures in this file.
  *

@@ -403,6 +403,19 @@ if (root === null) {
         // Not a formality: every loop below iterates this entry, so an event with none would pass
         // both directions by having nothing to compare.
         expect(reads.has(event.wire), `normalizeEvent has no branch for ${event.wire}`).toBe(true);
+        // A branch that reads *nothing* while the model carries fields passes both loops below by
+        // having nothing to compare, and that is not hypothetical: a fall-through clause looked
+        // exactly like one until the reader learned that an empty clause reads what it falls
+        // through to. It cost the note event — the one a rename is in flight on — its whole share
+        // of this axis, and printed its two fields as ones this client ignores.
+        if (event.fields.length > 0) {
+          expect(
+            (reads.get(event.wire) ?? []).length,
+            `normalizeEvent's ${event.wire} branch reads no field at all, while the service ` +
+              `declares ${event.fields.length} — either the event renders blank, or this reader ` +
+              'is attributing the branch to the wrong name',
+          ).toBeGreaterThan(0);
+        }
         const declared = new Set(event.fields);
         for (const field of reads.get(event.wire) ?? []) {
           if (!declared.has(field)) wrong.push(`${event.wire}.${field}`);

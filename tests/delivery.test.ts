@@ -40,17 +40,26 @@ const shellBlocks = [
   ...[...pipeline.matchAll(/sh '''([\s\S]*?)'''/g)].map((m) => m[1] ?? ''),
 ];
 
+/** The reader, as text: the two files that open a Chemclaw3 checkout. */
+const contractReader = (): string =>
+  ['tests/backendContract.ts', 'tests/backendContract.test.ts']
+    .map((file) => readFileSync(file, 'utf8'))
+    .join('\n');
+
 /**
  * Every `src/chemclaw/<dir>` the cross-repository contract reader opens in a Chemclaw3 checkout.
  *
  * Read off the reader rather than written down here, because the pipeline's sparse checkout has to
  * follow it and the failure of a transcribed list is silent in the direction that matters: a new
  * read, a path that is not fetched, and a lane that goes back to warning instead of checking.
+ *
+ * Two shapes, because the reader writes two: a relative path handed to `readPy`/`literal`, and an
+ * explicit `join(root, 'src', 'chemclaw', …)`. Takes its sources as an argument so the derivation
+ * can be driven over text written to contain each of them — the second loop's answer is a *subset*
+ * of the first's today (`api`, which `readPy` already reaches), so deleting it leaves this file
+ * green while removing the only thing that sees a `join()` read of a directory nothing else opens.
  */
-const contractSourceDirs = (): string[] => {
-  const sources = ['tests/backendContract.ts', 'tests/backendContract.test.ts']
-    .map((file) => readFileSync(file, 'utf8'))
-    .join('\n');
+const contractSourceDirs = (sources: string = contractReader()): string[] => {
   const dirs = new Set<string>();
   for (const match of sources.matchAll(/(?:readPy\(root, |literal\()'([a-z_]+)\//g)) {
     if (match[1]) dirs.add(match[1]);
@@ -136,6 +145,21 @@ describe('the Jenkins pipeline', () => {
     // And the gate stage has to say where it went, and refuse to pass when it is not there.
     expect(pipeline).toContain('CHEMCLAW3_DIR = "${env.WORKSPACE}/.jenkins-lib"');
     expect(pipeline).toContain("CHEMCLAW3_REQUIRED = '1'");
+  });
+
+  it('derives a source directory from either shape the reader opens one with', () => {
+    // Driven, before this: deleting the `join(root, 'src', 'chemclaw', …)` loop is a 0/3 diff and
+    // leaves this file green, which reads as "the loop is dead". It is not — it is subsumed. Each
+    // loop sees a shape the other cannot, and the reader writes both, so a new read in the shape
+    // only one of them sees is exactly the silent failure this derivation exists to prevent.
+    expect(contractSourceDirs("readPy(root, 'kg/notes.py')")).toEqual(['kg']);
+    expect(contractSourceDirs("literal('memory/tiers.py')")).toEqual(['memory']);
+    expect(contractSourceDirs("join(root, 'src', 'chemclaw', 'durable', 'retention.py')")).toEqual([
+      'durable',
+    ]);
+    // And it derives nothing from text that opens nothing, so the assertion above is about the
+    // shapes rather than about the regexes matching anything they are handed.
+    expect(contractSourceDirs('this text opens no file at all')).toEqual([]);
   });
 
   it('is described by the record with the RUN_GATE default it actually declares', () => {

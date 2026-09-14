@@ -503,3 +503,19 @@ Five things, each reproduced before it was changed and each mutation verified ap
 **What this leaves open.** Nothing new. The review's other findings were driven and hold; the
 `ISSUES.md` Issue 14 items (no CI lane checks the backend out, response shapes unchecked) are
 unchanged.
+
+---
+
+## W30 follow-up 2 review — one claim in the record that was wrong
+
+The round of fixes on top of `d2dc072` reproduced every finding before changing anything. One of
+them is not a code defect and has nowhere else to be corrected, because the claim was made in a
+commit message and a merged message cannot be edited:
+
+- [x] **`git log -S` names where a phrase first appeared, not where it was duplicated.** The
+      dedupe of the `tool_failed` comment in `shared/events.ts` (`052f77a`) attributed the second
+      copy to `0a45516`. Walked every revision of that file, counting the sentence: `0a45516`
+      takes it 0 → 1 and `17e7c09` takes it 1 → 2 — `git show 17e7c09 -- shared/events.ts` adds
+      the second copy and leaves the first. The dedupe itself is sound and stands; only its
+      provenance was wrong, and the rule worth keeping is that `-S` answers a different question
+      from "which commit duplicated this".

@@ -392,6 +392,14 @@ export function clientEventTypes(): string[] {
  * `o.<name>` inside the `case '<type>':` clause, wherever it sits in the expression. A field read
  * here and absent upstream is the renamed-field drift — the client goes on reading a name nobody
  * sends, `asString` fills in `''`, and the surface renders a confident blank.
+ *
+ * **A fall-through clause reads what it falls through to**, and that is not a detail here: the one
+ * place this normaliser uses fall-through is the two wire names of the note event, which is the
+ * event a rename is in flight on. Measured before this: `note_recorded` mapped to `[]`, so the
+ * caller reported both of its fields as "the service sends these and this client ignores them" —
+ * false, it reads both — and the direction that matters, a field read here and renamed upstream,
+ * had nothing to compare for that event at all. An empty clause is not a branch that reads
+ * nothing; it is the same branch as the next one with a body.
  */
 export function normalizeEventReads(): Map<string, string[]> {
   const file = parse('shared/events.ts');
@@ -401,21 +409,35 @@ export function normalizeEventReads(): Map<string, string[]> {
       ts.isFunctionDeclaration(s) && s.name?.text === 'normalizeEvent',
   );
   if (!fn) throw new Error('shared/events.ts no longer declares function normalizeEvent');
+  const fieldsIn = (statements: readonly ts.Statement[]): string[] => {
+    const fields = new Set<string>();
+    const collect = (n: ts.Node): void => {
+      if (
+        ts.isPropertyAccessExpression(n) &&
+        ts.isIdentifier(n.expression) &&
+        n.expression.text === 'o'
+      ) {
+        fields.add(n.name.text);
+      }
+      ts.forEachChild(n, collect);
+    };
+    statements.forEach(collect);
+    return [...fields];
+  };
   const visit = (node: ts.Node): void => {
-    if (ts.isCaseClause(node) && ts.isStringLiteral(node.expression)) {
-      const fields = new Set<string>();
-      const collect = (n: ts.Node): void => {
-        if (
-          ts.isPropertyAccessExpression(n) &&
-          ts.isIdentifier(n.expression) &&
-          n.expression.text === 'o'
-        ) {
-          fields.add(n.name.text);
+    if (ts.isCaseBlock(node)) {
+      // Walked as a block rather than clause by clause, because fall-through is a property of the
+      // sequence: an empty clause reads whatever the next clause with a body reads. Backwards, so
+      // "the next one with a body" is the last thing seen.
+      let pending: string[] = [];
+      for (const clause of [...node.clauses].reverse()) {
+        if (!ts.isCaseClause(clause) || !ts.isStringLiteral(clause.expression)) {
+          pending = [];
+          continue;
         }
-        ts.forEachChild(n, collect);
-      };
-      node.statements.forEach(collect);
-      reads.set(node.expression.text, [...fields]);
+        pending = clause.statements.length === 0 ? pending : fieldsIn(clause.statements);
+        reads.set(clause.expression.text, pending);
+      }
       return;
     }
     ts.forEachChild(node, visit);

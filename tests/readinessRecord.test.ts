@@ -7,16 +7,26 @@
  * promises that and is not checked is the thing this repository keeps finding — a control that
  * exists in prose, believed because it was written down.
  *
- * Two failures are possible and this file drives both:
+ * Four failures are possible and this file drives all four:
  *
  *  - **A clause that claims and cites nothing.** "Enforced: the proxy is a whitelist" with no test
  *    beside it is an assertion about somebody's intentions. Accepted clauses are exempt by
  *    definition — an accepted risk is precisely the one with nothing holding it — and they are
  *    held to a different rule instead (see below).
+ *  - **A claiming clause that cites something that is not a test.** The rule says *the test*, and
+ *    the check said *a file*: an **Enforced** clause citing `src/lib/utils.ts` passed, so the
+ *    document's own promise was a third wider than what ran. **Enforced** and **Bounded** claim a
+ *    refusal or a ceiling, and only a test can drive one, so those two must name a path under
+ *    `tests/` or `e2e/`. **Measured** is deliberately not held to that: a measurement is a number
+ *    somebody ran, and the thing that ran it is a script — two shipped clauses cite
+ *    `scripts/measure-*.mjs` and are right to.
  *  - **A citation that has gone stale.** A renamed or deleted test leaves the sentence reading
  *    exactly as it did, which is worse than having no sentence: `tests/decision_log`-style rot,
  *    where the record outlives the thing it records. Every path cited anywhere in the document
  *    must exist on disk.
+ *  - **A cross-reference to a section that does not exist.** `§n` was matched as a regex and never
+ *    resolved, so an accepted risk could be anchored to `§99` in an eleven-section document and
+ *    read as filed. Every `§n` anywhere in the document must name one of its own headings.
  *
  * What this file deliberately does NOT check: that the cited test asserts what the clause says it
  * asserts. Nothing mechanical can, and pretending otherwise would put this file in the same
@@ -38,16 +48,26 @@ const text = readFileSync(resolve(process.cwd(), RECORD), 'utf8');
  * A clause is a `- **Word.** …` bullet plus its indented continuation lines, because prettier
  * wraps prose at 100 characters and every clause in this record is several lines long. Reading
  * line by line would ask each fragment for a citation the clause carries once.
+ *
+ * **At any indent**, and that was a hole rather than a detail: the first edition started a clause
+ * only at column 0 and appended every indented line to the previous clause's body, so a nested
+ * `  - **Enforced.** …` with no citation was absorbed into a parent that had one and never
+ * existed as far as this file was concerned. Driven — it passed. A sub-bullet is the natural way
+ * this document grows, and `found.length > 20` cannot see a clause merged into its neighbour;
+ * `parses a nested clause as a clause` below reads the bodies for a swallowed one, which is the
+ * half that stays true if this parser is ever rewritten.
  */
 function clauses(): { kind: string; body: string; line: number }[] {
   const out: { kind: string; body: string; line: number }[] = [];
   const lines = text.split('\n');
   let current: { kind: string; body: string; line: number } | null = null;
   lines.forEach((line, index) => {
-    const start = /^- \*\*(Enforced|Bounded|Measured|Accepted)\b/.exec(line);
+    const start = /^\s*- \*\*(Enforced|Bounded|Measured|Accepted)\b/.exec(line);
     if (start) {
       if (current) out.push(current);
-      current = { kind: start[1] as string, body: line, line: index + 1 };
+      // Trimmed, so a clause body never *begins* with whitespace — which is what lets the
+      // swallow check below look for a clause start preceded by whitespace and mean it.
+      current = { kind: start[1] as string, body: line.trim(), line: index + 1 };
       return;
     }
     if (current && /^\s+\S/.test(line)) {
@@ -70,6 +90,20 @@ function citations(body: string): string[] {
     (match) => (match[1] as string).replace(/[.,;:]$/, ''),
   );
 }
+
+/**
+ * The cited paths that are tests — the only kind of file that can hold a refusal or a ceiling.
+ *
+ * `scripts/` is deliberately not one: a script runs a measurement and produces a number, which is
+ * what **Measured** claims, and holding it to the same rule would force two honest clauses to cite
+ * a test that does not exist.
+ */
+const testCitations = (body: string): string[] =>
+  citations(body).filter((path) => /^(?:tests|e2e)\//.test(path));
+
+/** The section numbers this document actually has, off its own `## n.` headings. */
+const sections = (): Set<number> =>
+  new Set([...text.matchAll(/^## (\d+)\./gm)].map((match) => Number(match[1])));
 
 describe('the production-readiness record', () => {
   const found = clauses();
@@ -95,6 +129,55 @@ describe('the production-readiness record', () => {
     ).toEqual([]);
   });
 
+  it('names a test for every clause that claims a refusal or a ceiling', () => {
+    // The document's rule is "every clause names **the test** that holds it", and for two of the
+    // four words that is the whole claim: Enforced says something is refused, Bounded says a
+    // ceiling is asserted, and a source file cannot drive either. Measured is exempt on purpose
+    // (see `testCitations`), and Accepted claims nothing.
+    const sourceOnly = found
+      .filter(
+        (clause) =>
+          (clause.kind === 'Enforced' || clause.kind === 'Bounded') &&
+          testCitations(clause.body).length === 0,
+      )
+      .map((clause) => `${RECORD}:${clause.line} ${clause.body.slice(0, 90)}…`);
+    expect(
+      sourceOnly,
+      'an Enforced/Bounded clause naming no test — a file under src/ or server/ is the thing ' +
+        'being claimed about, not the thing that holds it. Cite a test, or make it Measured/Accepted',
+    ).toEqual([]);
+  });
+
+  it('parses a nested clause as a clause, rather than absorbing it into its neighbour', () => {
+    // Independent of the regex above, and that is the point: if the parser is ever rewritten to
+    // start clauses at column 0 again, a nested `  - **Enforced.** …` reappears *inside* a
+    // neighbouring clause's body, where it inherits that clause's citation and is never asked for
+    // one of its own. Driven before the fix: it passed.
+    const swallowed = found
+      .filter((clause) => /\s- \*\*(Enforced|Bounded|Measured|Accepted)\b/.test(clause.body))
+      .map((clause) => `${RECORD}:${clause.line} ${clause.body.slice(0, 90)}…`);
+    expect(
+      swallowed,
+      'a clause body contains another clause — the parser merged them, so the inner one is held ' +
+        'to nothing',
+    ).toEqual([]);
+  });
+
+  it('cross-references only sections it has', () => {
+    // `§n` was matched as a shape and never resolved, so `§99` anchored an accepted risk in an
+    // eleven-section document and read as filed. Over the whole document rather than over Accepted
+    // clauses alone: a stale §n in prose misdirects a reader exactly as far.
+    const have = sections();
+    expect(
+      have.size,
+      'no `## n.` headings parsed, so this check would accept anything',
+    ).toBeGreaterThan(5);
+    const dangling = [...new Set([...text.matchAll(/§(\d+)/g)].map((match) => Number(match[1])))]
+      .filter((number) => !have.has(number))
+      .map((number) => `§${number}`);
+    expect(dangling, `${RECORD} points at sections it does not have`).toEqual([]);
+  });
+
   it('cites no file that has gone away', () => {
     const missing = [...new Set(citations(text))].filter(
       (path) => !existsSync(resolve(process.cwd(), path)),
@@ -111,7 +194,8 @@ describe('the production-readiness record', () => {
       .filter(
         (clause) =>
           clause.kind === 'Accepted' &&
-          !/ISSUES\.md|tasks\/todo\.md|§\d/.test(clause.body) &&
+          !/ISSUES\.md|tasks\/todo\.md/.test(clause.body) &&
+          ![...clause.body.matchAll(/§(\d+)/g)].some((match) => sections().has(Number(match[1]))) &&
           citations(clause.body).length === 0,
       )
       .map((clause) => `${RECORD}:${clause.line} ${clause.body.slice(0, 90)}…`);

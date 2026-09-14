@@ -6,8 +6,17 @@ The record for `Chemclaw3_ui`: the browser client and the Node BFF in front of i
 with no test is not softened into "we are careful about X" — it is rewritten as an accepted risk,
 with who decides and what would change the answer, or it is deleted. That rule is itself checked:
 `tests/readinessRecord.test.ts` fails if an **Enforced**, **Bounded** or **Measured** clause cites
-no file, or if any file cited anywhere in this document does not exist. A rename cannot retire a
-citation here in silence.
+no file; if an **Enforced** or **Bounded** clause names no file under `tests/` or `e2e/`, since
+only a test can drive a refusal or a ceiling; if any file cited anywhere in this document does not
+exist; or if a `§n` anywhere in it names a section this document does not have. A rename cannot
+retire a citation here in silence, and a sub-bullet cannot hide from the rule by being indented.
+
+**Three of those were added after the check was measured rather than read.** It said "names the
+test" and accepted any file, so an **Enforced** clause citing `src/lib/utils.ts` passed; it started
+a clause only at column 0, so a nested `  - **Enforced.** …` with no citation was absorbed into its
+neighbour and never existed; and `§n` was a shape rather than a reference, so a section number
+this document does not have anchored an accepted risk and read as filed. (That last sentence
+cannot name the number it was driven with — the check now refuses it, which is the check working.) Each was driven, and each passed.
 
 The four words mean different things and the difference is the point:
 
@@ -69,6 +78,22 @@ indistinguishable from one that does not work — and this repository has produc
 - **Enforced.** Every member of the event union survives `normalizeEvent` carrying every field,
   checked by round-tripping a frame of each rather than by reading the list — the list is the thing
   that has been wrong six times (`tests/eventContract.test.ts`).
+- **Enforced.** The runtime gate and the interface union are held to being **one** vocabulary,
+  which this clause used to describe them as while only one of them was read. `EVENT_TYPES` is what
+  admits an event; the fixture above is checked against the `ChemclawEvent` interfaces; a name in
+  the first with no interface and no branch was invisible to every assertion in the file — measured
+  at zero failures. A name in the gate must now normalise onto a declared member, and the one
+  legitimate exception, an alias carrying a second wire spelling through a two-repository rename,
+  is pinned by name rather than counted (`tests/eventContract.test.ts`).
+- **Enforced.** A wire name this client admits and the service does not declare fails, unless it is
+  argued — and an argument is a reason of at least 40 characters, a phrase naming the `ISSUES.md`
+  row whose deletion retires it, and a review date that is a failure once it has passed. Two maps,
+  because "not yet declared" and "no longer declared" are the same absence to a checker and
+  different promises to a reader: `AHEAD_OF_BACKEND` is a reader that landed first,
+  `RETAINED_FOR_ROLLOUT` is an old spelling kept until deployed browsers have reloaded. The
+  validator is driven over a map built to be wrong in every one of those ways, because both maps
+  are normally empty and a loop over an empty map checks nothing (`tests/backendContract.test.ts`).
+  This part needs no sibling checkout, so unlike the clause above it runs in every lane.
 - **Accepted.** With no sibling checkout the contract check verifies **nothing** and says so: a
   warning naming what the run is therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns the
   skip into a failure. No CI runner here checks the backend out today, so in GitHub Actions and in

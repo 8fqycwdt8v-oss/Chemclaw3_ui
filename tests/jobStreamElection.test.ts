@@ -27,6 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { renderHook } from '@testing-library/react';
 import {
   CHANNEL,
+  ROTATION_MS,
   createStreamLeader,
   mergeWatchSets,
   type Note,
@@ -530,6 +531,97 @@ describe('merging what every tab asked for', () => {
     expect(mergeWatchSets(['a1', 'a2', 'a3'], [['b1', 'b2', 'b3']], 1)).toEqual(['a1']);
     expect(mergeWatchSets(['a1'], [['b1']], 0)).toEqual([]);
   });
+
+  it('gives every tab its first choice eventually when there are more tabs than budget', () => {
+    // Rank 0 alone answers a *six*-tab account with three sessions and the same three every time,
+    // because the peer order is a sort on a stable random id. So the three windows past the
+    // budget were watched by nobody in the account, for the life of the page — the outcome the
+    // module docstring names as the one unacceptable one. Over one full cycle of `turn`, every
+    // window's first choice is held.
+    const heads = ['a1', 'b1', 'c1', 'd1', 'e1', 'f1'];
+    const seen = new Set<string>();
+    for (let turn = 0; turn < heads.length; turn += 1) {
+      const merged = mergeWatchSets(
+        ['a1', 'a2'],
+        [['b1'], ['c1'], ['d1'], ['e1'], ['f1']],
+        3,
+        turn,
+      );
+      // Still the account's budget, at every step of the rotation.
+      expect(merged).toHaveLength(3);
+      for (const sessionId of merged) seen.add(sessionId);
+    }
+    expect([...seen].sort()).toEqual([...heads].sort());
+  });
+
+  it('does not rotate a set that is not starved, or it would churn connects for nothing', () => {
+    // Two windows at a budget of three: everybody's first choice already fits, so there is no
+    // window to rescue and a rotation would only move `a2` out and `b2` in — one disconnect and
+    // one connect per step, spent against the very cap this file exists to respect.
+    for (let turn = 0; turn < 5; turn += 1) {
+      expect(mergeWatchSets(['a1', 'a2', 'a3'], [['b1', 'b2']], 3, turn)).toEqual([
+        'a1',
+        'b1',
+        'a2',
+      ]);
+    }
+  });
+
+  it('does not let a tab that asked for nothing make the set look starved', () => {
+    // An empty list is a window with no conversation yet — every tab declares one before its
+    // session exists — or one that said so on its way out. It contributes at no rank, so the two
+    // real tabs here fit inside the budget and nothing should rotate. Counted, they make
+    // `lists.length` four against a budget of three, and the set churns: `a2` out and `b2` in at
+    // turn 1, which is a disconnect and a connect to rescue a window that was never dark.
+    for (let turn = 0; turn < 4; turn += 1) {
+      expect(mergeWatchSets(['a1', 'a2', 'a3'], [['b1', 'b2'], [], []], 3, turn)).toEqual([
+        'a1',
+        'b1',
+        'a2',
+      ]);
+    }
+  });
+});
+
+describe('more interested tabs than the account may hold streams for', () => {
+  it('rotates over them, so no window is watched by nobody for the life of the page', async () => {
+    // Driven on real memberships over a real channel, because the defect this covers is not in
+    // `mergeWatchSets`'s arithmetic — it is whether the leader ever *advances* the rotation. A
+    // unit test of the function alone passes with `rebuild` calling it at a fixed turn for ever,
+    // which is exactly what shipped.
+    //
+    // Fake timers so six rotations cost milliseconds rather than six minutes; `Date.now` moves
+    // with them, which is what the rotation step is derived from.
+    vi.useFakeTimers();
+    try {
+      const leader = openTab();
+      leader.leader.declare([SID], 3);
+      // Five other windows, each looking at a different conversation, each saying so once a second
+      // exactly as a live follower does.
+      [SID2, SID3, SID4, SID5, SID6].forEach((sessionId, index) => {
+        openPeer(`peer-${index}`).keepDeclaring([sessionId]);
+      });
+      await vi.advanceTimersByTimeAsync(AFTER_ELECTION_MS);
+      expect(leader.leader.isLeader()).toBe(true);
+
+      const seen = new Set<string>();
+      for (let step = 0; step < 6; step += 1) {
+        await vi.advanceTimersByTimeAsync(ROTATION_MS);
+        const watched = leader.leader.watched();
+        // Never over the account's budget, at any point in the cycle: the rotation is a fairer
+        // three, not a fourth stream.
+        expect(watched).toHaveLength(3);
+        for (const sessionId of watched) seen.add(sessionId);
+      }
+
+      // Driven before the rotation existed, the same three came back at every sample and this set
+      // had three members: the other three windows' conversations were watched by nothing in the
+      // account and never would be.
+      expect([...seen].sort()).toEqual([SID, SID2, SID3, SID4, SID5, SID6].sort());
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
 });
 
 describe('two tabs watching different conversations', () => {
@@ -620,18 +712,42 @@ describe('two tabs watching different conversations', () => {
     // *account* rather than about this window, so it has to cut the merged set and not merely this
     // tab's share — otherwise the leader would answer a 429 by dropping its own conversation and
     // keeping three streams open for everybody else's.
-    seedConversations([SID, SID2, SID3]);
-    useChatStore.setState({ jobStreamsThrottled: true });
-    const follower = openPeer('zzzz-follower');
-    follower.keepDeclaring([SID4, SID5]);
-
-    const { unmount } = renderHook(() => useJobStreams());
+    //
+    // **One stream is not the same as one window**, which is what the rotation changes here and
+    // why this case is on a clock now. A budget of one and two interested windows is the starved
+    // case at its sharpest: whichever window the leader happened to be, the other one used to be
+    // watched by nobody for the life of the page. The cap is still honoured — one stream, never
+    // two, at every point below — and the window it belongs to is what moves.
+    vi.useFakeTimers();
     try {
-      await holds([SID]);
-      await wait(300);
-      expect(live).toEqual([SID]);
+      seedConversations([SID, SID2, SID3]);
+      useChatStore.setState({ jobStreamsThrottled: true });
+      const follower = openPeer('zzzz-follower');
+      follower.keepDeclaring([SID4, SID5]);
+
+      const { unmount } = renderHook(() => useJobStreams());
+      try {
+        await vi.advanceTimersByTimeAsync(AFTER_ELECTION_MS);
+        // One, and one of the two windows' — which one is a function of the clock, because the
+        // rotation step is derived from it rather than from a counter this tab owns. Asserting
+        // which would be asserting the phase the test happened to start in.
+        expect(live).toHaveLength(1);
+
+        const held = new Set<string>();
+        for (let step = 0; step < 3; step += 1) {
+          await vi.advanceTimersByTimeAsync(ROTATION_MS);
+          // The assertion the 429 path is about, and it is checked at every step rather than at
+          // the end: a rotation that opened the next stream before dropping the last would be two
+          // against a cap this account has already been told it is over.
+          expect(live).toHaveLength(1);
+          held.add(live[0] as string);
+        }
+        expect([...held].sort()).toEqual([SID, SID4].sort());
+      } finally {
+        unmount();
+      }
     } finally {
-      unmount();
+      vi.useRealTimers();
     }
   }, 15_000);
 });

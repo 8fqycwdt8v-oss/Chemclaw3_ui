@@ -58,10 +58,12 @@
  * follower's conversation was watched by nothing.
  *
  * So every tab `declare`s what it wants and the leader watches the **merge**, round-robin by rank
- * (`mergeWatchSets`), capped at the account's budget rather than at any tab's. A follower's
- * periodic message *is* its interest — one message per second per role — and an interest expires on
- * the same `LEASE_MS` as leadership, so a crashed tab stops holding a slot for a window nobody is
- * looking at.
+ * (`mergeWatchSets`), capped at the account's budget rather than at any tab's — and rotated over
+ * time once there are more interested tabs than the budget has room for, because rank 0 alone
+ * leaves the tabs past position `budget - 1` watched by nobody in the account, deterministically
+ * and for ever. A follower's periodic message *is* its interest — one message per second per role
+ * — and an interest expires on the same `LEASE_MS` as leadership, so a crashed tab stops holding a slot
+ * for a window nobody is looking at.
  *
  * ## What is relayed
  *
@@ -124,17 +126,59 @@ type Message =
   | { type: 'note'; from: string; note: Note };
 
 /**
+ * How long one arrangement of the account's watch set stands before the merge rotates it.
+ *
+ * Only reached when there are more interested tabs than the budget has room for — see
+ * `mergeWatchSets` — so in the ordinary one- and two-window case this constant changes nothing and
+ * costs no connect. Past that it is the period at which a dark window becomes a watched one.
+ *
+ * A minute, from the two costs it sits between. Rotating faster spends connects against the very
+ * per-principal cap this whole file exists to respect (each step closes one stream and opens
+ * another). Rotating slower leaves a window dark for longer — and that wait is the *whole* cost,
+ * because it is a delay rather than a loss: the service writes job endings into `session_events`
+ * and a reader claims them, so the rows a window missed while it was dark are still there when its
+ * turn comes round. That is the same property the takeover paragraph above rests on, used here for
+ * the same reason. Against a durable run that takes minutes to hours, a minute of latency on its
+ * completion card is not a failure a chemist can measure; being dark for ever is.
+ *
+ * Exported so `tests/jobStreamElection.test.ts` can advance a clock by it rather than transcribe
+ * it — a test that hardcoded 60_000 would go quietly green if this were raised to an hour.
+ */
+export const ROTATION_MS = 60_000;
+
+/**
  * The account's watch set, out of what each tab asked for.
  *
- * **Round-robin by rank, not concatenation**, and that is the whole of it. Every tab's list arrives
+ * **Round-robin by rank, not concatenation**, and that is most of it. Every tab's list arrives
  * already in its own priority order (its active conversation first — see `watchedSessionKey`), so
  * taking rank 0 from every tab before rank 1 from any of them gives each window the conversation
  * it is actually looking at, for as many windows as the budget has room for. Concatenating would
  * spend the entire budget on the leader's own list and leave every other window watching nothing,
  * which is the failure this whole file exists to prevent, arriving from the other direction.
  *
- * `mine` goes first at each rank so the tab holding the streams breaks its own ties, which makes
- * the result a function of the inputs rather than of message arrival order.
+ * **And rank 0 is not enough on its own, which is what `turn` is for.** Round-robin by rank is
+ * round-robin *within one merge*; with more interested tabs than the budget, the tabs past
+ * rank-0 position `budget - 1` appear at no rank at all, and since the peer order is a sort on a
+ * stable random id, it is the *same* tabs every time, for the life of the page. Driven at budget 3
+ * with six interested tabs, the same three sessions came back at t=0.5 s and at t=6 min and the
+ * other three were watched by nobody in the account — which is precisely the "nobody watches"
+ * outcome the module docstring names as the one unacceptable one, and it is worse than what this
+ * file replaced (a fourth window used to 429 and still watch its own conversation). So when the
+ * interested tabs outnumber the budget the whole order is rotated by `turn`, and every window's
+ * first choice is watched for its share of the time instead of never.
+ *
+ * **Only then.** Where everybody's first choice fits, `turn` changes nothing: rotating a set that
+ * is not starved would move sessions in and out of the watch set — a connect and a disconnect per
+ * step — to fix a starvation that is not happening. Two windows at a budget of three keep exactly
+ * the set they had before this parameter existed.
+ *
+ * `mine` goes first at each rank (at `turn` 0, and at every `turn` while nothing is starved) so the
+ * tab holding the streams breaks its own ties, which makes the result a function of the inputs
+ * rather than of message arrival order.
+ *
+ * An empty list is a tab that wants nothing — a window with no conversation yet, or one that said
+ * so on its way out. It contributes at no rank, so it is dropped before the rotation rather than
+ * being given a step of its own.
  *
  * Exported for `tests/jobStreamElection.test.ts`, which drives the ordering directly: the wiring
  * tests can only see the first three of a six-way merge.
@@ -143,12 +187,16 @@ export function mergeWatchSets(
   mine: readonly string[],
   peers: readonly (readonly string[])[],
   budget: number,
+  turn = 0,
 ): string[] {
-  const lists = [mine, ...peers];
+  const lists = [mine, ...peers].filter((list) => list.length > 0);
+  const start =
+    lists.length > budget ? ((Math.trunc(turn) % lists.length) + lists.length) % lists.length : 0;
+  const order = start === 0 ? lists : [...lists.slice(start), ...lists.slice(0, start)];
   const merged: string[] = [];
-  const depth = Math.max(...lists.map((list) => list.length));
+  const depth = Math.max(0, ...order.map((list) => list.length));
   for (let rank = 0; rank < depth && merged.length < budget; rank += 1) {
-    for (const list of lists) {
+    for (const list of order) {
       const sessionId = list[rank];
       if (sessionId === undefined || merged.includes(sessionId)) continue;
       merged.push(sessionId);
@@ -295,7 +343,10 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
       const peers = [...asked.entries()]
         .sort(([a], [b]) => (a < b ? -1 : 1))
         .map(([, interest]) => interest.sessions);
-      next = mergeWatchSets(mine, peers, budget);
+      // The rotation step comes off the clock rather than off a counter, so it advances once a
+      // minute however often `rebuild` runs — it runs on every watchdog tick and on every interest
+      // message, and a per-call counter would rotate the account's streams several times a second.
+      next = mergeWatchSets(mine, peers, budget, Math.floor(now() / ROTATION_MS));
     }
     if (next.length === watched.length && next.every((s, i) => s === watched[i])) return false;
     watched = next;

@@ -281,7 +281,15 @@ describe('a name this client admits and the service does not is argued, not mere
     // row failed the test above, correctly, **and** this one, with a 7-versus-5 diff about a
     // fixture. On the one day the control fires, the second red is noise pointing at the wrong
     // file. A probe of the validator supplies its own inputs; only the run above reads the tree.
+    //
+    // All four of them, which took a second pass: the first edition wrote its own document and
+    // then handed the validator the live `admitted` set and the real clock. Driven — dropping
+    // `queued` from `EVENT_TYPES` reds this probe with a 6-versus-5 diff, on top of the two
+    // failures that are the point, and the same would happen to any run on 2099-01-02. Neither
+    // has anything to do with the validator.
     const probeIssues = '## Issue 0: a row this probe points at, and nothing else reads\n';
+    const probeAdmitted = new Set(['queued', 'answer']);
+    const probeToday = '2026-06-01';
     expect(
       problems(
         'PROBE',
@@ -298,8 +306,8 @@ describe('a name this client admits and the service does not is argued, not mere
           ['not_an_event', { reason: 'x'.repeat(MIN_REASON), issue: 'Issue 0', review: 'soon' }],
         ]),
         probeIssues,
-        today,
-        admitted,
+        probeToday,
+        probeAdmitted,
       ),
     ).toEqual([
       "PROBE['queued']: the reason is 0 characters — argue it",

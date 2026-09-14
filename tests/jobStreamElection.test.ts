@@ -900,13 +900,19 @@ describe('the stream health a follower holds no streams to observe', () => {
 
       leader.note({ kind: 'health', failing: [SID], throttled: true });
       await vi.waitFor(() => expect(useChatStore.getState().jobStreamsFailing).toEqual([SID]));
-      // The throttle travels too. It is the one flag that only ever moves one way, so a tab that
-      // is told the account is over the cap does not un-tell itself.
-      expect(useChatStore.getState().jobStreamsThrottled).toBe(true);
+      // The throttle travels as a *report* — it is what a follower's indicator is drawn from, and
+      // a follower holds no streams to learn it any other way.
+      expect(useChatStore.getState().jobStreamsThrottledElsewhere).toBe(true);
+      // And it is not adopted as this tab's own. `jobStreamsThrottled` is evidence that *this* tab
+      // 429'd twice and it never clears; writing it from a relay made one window's two 429s pin
+      // every page on the account to a single stream for ever.
+      expect(useChatStore.getState().jobStreamsThrottled).toBe(false);
 
+      // It follows the reporter, in both directions, which is the whole difference between a
+      // report and a decision.
       leader.note({ kind: 'health', failing: [], throttled: false });
       await vi.waitFor(() => expect(useChatStore.getState().jobStreamsFailing).toEqual([]));
-      expect(useChatStore.getState().jobStreamsThrottled).toBe(true);
+      expect(useChatStore.getState().jobStreamsThrottledElsewhere).toBe(false);
     } finally {
       unmount();
     }
@@ -950,6 +956,42 @@ describe('the stream health a follower holds no streams to observe', () => {
           note: { kind: 'health', failing: [], throttled: false },
         }),
       );
+    } finally {
+      unmount();
+    }
+  }, 15_000);
+});
+
+describe('the throttle one tab’s 429s taught it', () => {
+  it('does not follow a takeover into the next leader’s budget', async () => {
+    // The blast radius, driven end to end. A follower is told the account is over the cap, the
+    // leader then goes away, and this tab takes over: it must open the account's whole budget and
+    // find out for itself, not start life pinned to one stream by somebody else's two 429s.
+    //
+    // `jobStreamsThrottled` is irreversible by design — a tab that over-subscribed once will do it
+    // again — which is precisely why it may not be handed to a tab that has not. The backstop is
+    // unchanged and is where the recovery lives: if this leader really is over the cap, two 429s
+    // tell it so, and the 429 test above pins that path.
+    seedConversations([SID, SID2, SID3]);
+    const leader = openPeer('0000-leader');
+    leader.keepAlive();
+
+    const { unmount } = renderHook(() => useJobStreams());
+    try {
+      await wait(AFTER_ELECTION_MS);
+      expect(connects).toBe(0);
+
+      leader.note({ kind: 'health', failing: [], throttled: true });
+      await vi.waitFor(() =>
+        expect(useChatStore.getState().jobStreamsThrottledElsewhere).toBe(true),
+      );
+
+      leader.goSilent();
+      leader.resign();
+
+      // Three, which is the account's budget. Relayed into `jobStreamsThrottled` this was one —
+      // for the life of this page, with nothing able to clear it.
+      await holds([SID, SID2, SID3]);
     } finally {
       unmount();
     }

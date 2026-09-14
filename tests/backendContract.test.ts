@@ -267,11 +267,19 @@ describe('a name this client admits and the service does not is argued, not mere
     // The real maps are empty most of the time, so this is what proves the rule above is a rule.
     // Exact equality rather than a count: each line is a different defect, and a check that fired
     // four times for one reason would pass a count and be worthless.
+    //
+    // Against a literal document rather than the real `ISSUES.md`, and that is not tidiness. This
+    // probe used to borrow two phrases from the live Issue 13 row — the row whose deletion is the
+    // *designed* retirement path for the entry in `RETAINED_FOR_ROLLOUT`. Driven: deleting that
+    // row failed the test above, correctly, **and** this one, with a 7-versus-5 diff about a
+    // fixture. On the one day the control fires, the second red is noise pointing at the wrong
+    // file. A probe of the validator supplies its own inputs; only the run above reads the tree.
+    const probeIssues = '## Issue 0: a row this probe points at, and nothing else reads\n';
     expect(
       problems(
         'PROBE',
         new Map<string, Argued>([
-          ['queued', { reason: '', issue: 'the note event is renamed', review: '2099-01-01' }],
+          ['queued', { reason: '', issue: 'a row this probe points at', review: '2099-01-01' }],
           [
             'answer',
             {
@@ -280,9 +288,9 @@ describe('a name this client admits and the service does not is argued, not mere
               review: '2020-01-01',
             },
           ],
-          ['not_an_event', { reason: 'x'.repeat(MIN_REASON), issue: 'Issue 13', review: 'soon' }],
+          ['not_an_event', { reason: 'x'.repeat(MIN_REASON), issue: 'Issue 0', review: 'soon' }],
         ]),
-        issues,
+        probeIssues,
         today,
         admitted,
       ),

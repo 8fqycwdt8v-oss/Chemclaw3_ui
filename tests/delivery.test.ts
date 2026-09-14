@@ -40,6 +40,27 @@ const shellBlocks = [
   ...[...pipeline.matchAll(/sh '''([\s\S]*?)'''/g)].map((m) => m[1] ?? ''),
 ];
 
+/**
+ * Every `src/chemclaw/<dir>` the cross-repository contract reader opens in a Chemclaw3 checkout.
+ *
+ * Read off the reader rather than written down here, because the pipeline's sparse checkout has to
+ * follow it and the failure of a transcribed list is silent in the direction that matters: a new
+ * read, a path that is not fetched, and a lane that goes back to warning instead of checking.
+ */
+const contractSourceDirs = (): string[] => {
+  const sources = ['tests/backendContract.ts', 'tests/backendContract.test.ts']
+    .map((file) => readFileSync(file, 'utf8'))
+    .join('\n');
+  const dirs = new Set<string>();
+  for (const match of sources.matchAll(/(?:readPy\(root, |literal\()'([a-z_]+)\//g)) {
+    if (match[1]) dirs.add(match[1]);
+  }
+  for (const match of sources.matchAll(/'src', 'chemclaw', '([a-z_]+)'/g)) {
+    if (match[1]) dirs.add(match[1]);
+  }
+  return [...dirs].sort();
+};
+
 describe('the Jenkins pipeline', () => {
   it('invokes only npm scripts that exist', () => {
     const invoked = [...pipeline.matchAll(/npm run ([\w:-]+)/g)].map((match) => match[1] ?? '');
@@ -84,6 +105,28 @@ describe('the Jenkins pipeline', () => {
 
   it('defaults DRY_RUN to true, because a first run happens against a real registry', () => {
     expect(pipeline).toContain("booleanParam(name: 'DRY_RUN', defaultValue: true");
+  });
+
+  it('gives its gate the Chemclaw3 checkout the contract reader needs', () => {
+    // `tests/backendContract.test.ts` verifies nothing without a Chemclaw3 checkout, and this is
+    // the one lane that already makes one — Preflight clones that repository on every run for the
+    // build library. The sparse paths are *derived* from what the reader opens rather than
+    // transcribed, so a reader that grows a fourth source directory fails here instead of
+    // silently reducing the gate to a warning in the lane that has the credential.
+    const dirs = contractSourceDirs();
+    expect(dirs.length, 'found no Chemclaw3 source the contract reader opens').toBeGreaterThan(1);
+
+    const sparse = shellBlocks.find((block) => block.includes('git sparse-checkout set')) ?? '';
+    for (const dir of dirs) {
+      expect(
+        sparse,
+        `Preflight's sparse checkout omits src/chemclaw/${dir}, which the contract reader opens`,
+      ).toContain(`src/chemclaw/${dir}`);
+    }
+
+    // And the gate stage has to say where it went, and refuse to pass when it is not there.
+    expect(pipeline).toContain('CHEMCLAW3_DIR = "${env.WORKSPACE}/.jenkins-lib"');
+    expect(pipeline).toContain("CHEMCLAW3_REQUIRED = '1'");
   });
 });
 

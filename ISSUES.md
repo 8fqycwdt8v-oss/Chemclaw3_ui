@@ -566,12 +566,32 @@ everything next to it.
 
 - **No sibling checkout means no check at all.** It resolves `CHEMCLAW3_DIR`, else `../Chemclaw3`,
   and where neither exists it verifies nothing: the run prints a warning naming what it is
-  therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns that into a failure. **No CI
-  runner here checks the backend out**, so in GitHub Actions and in Jenkins this is a warning
-  rather than a gate today; it runs for a developer and for an agent with both trees, and in the
-  four-repository full-stack lane. Wiring it into a pipeline means checking out a second private
-  repository in the gate job — a credential decision, not a test change, and nobody has asked for
-  one. **Who decides:** whoever owns this repository's CI credentials.
+  therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns that into a failure. It runs for a
+  developer and for an agent with both trees, in the four-repository full-stack lane, and in the
+  Jenkins `Gate` stage, which now sets both variables against the `.jenkins-lib` checkout its
+  `Preflight` stage already makes. **In GitHub Actions it is still a warning**, and that is the
+  lane that runs on every push.
+
+  **The blocker this entry used to state was a credential, and it was wrong in both lanes.** The
+  `Jenkinsfile` beside it falsified half of that on its own: `Preflight` clones `Chemclaw3`
+  unconditionally on every run for the shared build library, so that lane had whatever credential
+  it needs all along, and what was missing was the source paths the reader opens plus the two
+  variables naming where they landed. Those paths are now derived from the reader itself by
+  `tests/delivery.test.ts` rather than transcribed, so a reader that opens a directory the pipeline
+  does not fetch fails there instead of quietly demoting the check to a warning; they are
+  directories rather than files because `git clone --sparse` is cone mode, and cone mode refuses a
+  file path outright. The other half is falsified by the repository itself — observed 2026-09-14,
+  `8fqycwdt8v-oss/Chemclaw3` is **public**, so `actions/checkout` reads it with no credential at
+  all and `GITHUB_TOKEN` never comes into it.
+
+  **What is actually open is a coupling decision, and it is a real one.** Checking that repository
+  out in the push gate points this repository's CI at another repository's moving `main`: a rename
+  there reds every pull request here, including one that changed nothing, and the remedy is an
+  argued entry in the maps above rather than anything the author of that PR did. That is the trade
+  to take deliberately — it is what a contract check is _for_, and it is also a build queue nobody
+  here controls. **Who decides:** whoever owns this repository's CI. It is not a credential
+  question, and this entry should not have said it was.
+
 - **Response shapes are not checked.** The interfaces this client declares for what it reads back
   are not compared to the models the handlers return. The mapping is not mechanical — `GET
 /sessions` returns `list[SessionSummaryOut]` where the client reads a page plus an

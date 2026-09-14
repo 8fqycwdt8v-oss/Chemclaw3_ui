@@ -56,11 +56,19 @@ pipeline {
           env.IMAGE_REF = "${params.IMAGE_REGISTRY ? params.IMAGE_REGISTRY + '/' : ''}${params.IMAGE_NAME}:${env.REVISION.take(12)}"
           echo "revision ${env.REVISION}\nimage    ${env.IMAGE_REF}"
         }
+        // Four sparse paths, and only the first is for the build. The other three are what
+        // `tests/backendContract.test.ts` reads out of this checkout when the Gate stage below
+        // runs it: `api/` for the routes, the SSE models and `ErrorCode`, `core/` for
+        // `RefusalReason` and `agent/` for `AnswerCheck`. Directories rather than the three files,
+        // because `git clone --sparse` initialises **cone** mode and cone mode refuses a file path
+        // outright ("is not a directory; to treat it as a directory anyway, rerun with
+        // --skip-checks") — driven against a real clone before this was written.
         sh """
           rm -rf .jenkins-lib
           git clone --depth 1 --branch '${params.CHEMCLAW3_BRANCH}' --filter=blob:none --sparse \
             '${params.CHEMCLAW3_REPO}' .jenkins-lib
-          cd .jenkins-lib && git sparse-checkout set deploy/jenkins/lib
+          cd .jenkins-lib && git sparse-checkout set deploy/jenkins/lib \
+            src/chemclaw/api src/chemclaw/core src/chemclaw/agent
         """
       }
     }
@@ -74,6 +82,16 @@ pipeline {
     // verify and ship the image. What changed is that turning it on now runs the real thing.
     stage('Gate') {
       when { expression { params.RUN_GATE } }
+      // The cross-repository contract check reads a Chemclaw3 checkout, and this lane already has
+      // one: Preflight clones that repository unconditionally, with whatever credential that needs
+      // already in place. So what stood between this gate and the check was a path and a variable,
+      // not a credential decision — `ISSUES.md` Issue 14 said otherwise and was falsified by the
+      // file it sits beside. REQUIRED rather than best-effort, because a check that degrades to a
+      // warning when the checkout moves is a control this stage would claim and not have.
+      environment {
+        CHEMCLAW3_DIR = "${env.WORKSPACE}/.jenkins-lib"
+        CHEMCLAW3_REQUIRED = '1'
+      }
       steps {
         sh 'npm ci'
         // Provisioning a browser is an agent concern, not an assertion — the same split

@@ -124,6 +124,19 @@ function molblockSmiles(input: string): string | null {
   return MOLBLOCK_FORMULAE[formula] ?? null;
 }
 
+/**
+ * The one input whose canonicalisation throws the way a real stack exhaustion does.
+ *
+ * RDKit's canonical ranking recurses over the molecule, so a long enough chain exhausts the JS
+ * call stack and V8 raises a `RangeError` — and how long is "long enough" is a property of the
+ * *thread*, measured in Chromium at ~400 characters on a worker against ~600 on the page
+ * (`src/chem/rdkit.engine.ts`). `withMol` is built around telling that apart from "not a
+ * molecule", so the fake has to be able to produce it. `get_mol` accepts this string; only
+ * `get_smiles` throws, which is where the real recursion lives — the depiction path is measured
+ * not to hit it.
+ */
+export const CANONICALISATION_OVERFLOWS = 'C'.repeat(500);
+
 interface StubMol {
   is_valid(): boolean;
   get_smiles(): string;
@@ -138,7 +151,12 @@ function makeMol(smiles: string): StubMol {
   let deleted = false;
   return {
     is_valid: () => true,
-    get_smiles: () => KNOWN[smiles] ?? smiles,
+    get_smiles: () => {
+      if (smiles === CANONICALISATION_OVERFLOWS) {
+        throw new RangeError('Maximum call stack size exceeded');
+      }
+      return KNOWN[smiles] ?? smiles;
+    },
     normalize_depiction: () => 1,
     straighten_depiction: () => undefined,
     get_svg_with_highlights(details: string) {
@@ -157,7 +175,7 @@ function makeMol(smiles: string): StubMol {
 
 const rdkitModule = {
   get_mol(input: string): StubMol | null {
-    if (input in KNOWN) return makeMol(input);
+    if (input in KNOWN || input === CANONICALISATION_OVERFLOWS) return makeMol(input);
     const fromMolblock = molblockSmiles(input);
     // `''` is a real answer here — a molblock with no atoms — and it must produce a *handle* whose
     // SMILES is empty rather than a null. The caller's `get_smiles() || null` is what turns it into

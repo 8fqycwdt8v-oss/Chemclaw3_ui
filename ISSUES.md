@@ -100,10 +100,10 @@ predates the fields still gets the placeholder rather than a blank row.
 
 ---
 
-## Issue 5: a shared conversation link is a second-device link, not a shared one
+## Closed: the second-device link now says that is what it is (was Issue 5)
 
-`/s/:sessionId` adopts a server session into a local conversation. Two things this note used to say
-were wrong, in opposite directions.
+**Decided, and the decision was smaller than the analysis.** Two things this note used to say were
+wrong in opposite directions, and both still stand as findings.
 
 **Durability is better than assumed.** Under `session_store="postgres"` the session id is a durable
 row in the ownership registry, and `deps._rehydrate_session` rebuilds a live handle over its
@@ -114,35 +114,104 @@ there is no registry and the link lasts one process.
 
 **Shareability is worse than assumed.** Every session-scoped route resolves through
 `_refuse_unless_owner`, which 404s a non-owner indistinguishably from an unknown id, deliberately.
-A link handed to a colleague does not degrade — to them the conversation simply does not exist. So
-`/s/:sessionId` is a second-device link for one person, and the UI must not imply otherwise.
+A link handed to a colleague does not degrade — to them the conversation simply does not exist.
 
-The rotation hazard is real but narrower than written: the client replaces the id in three places
-(`session_not_found` recovery, `resetSession`, a fresh conversation), so a link copied before one
-of those points at a session the sharer has stopped using.
+**What was decided: stop claiming otherwise, and do not build sharing here.** The route was `/s/`,
+which reads as _share_, and three user-visible strings said it outright — the sidebar row read
+"Shared conversation", a mistyped link was answered with "A shared link ends in a 32-character
+session id", and the spinner said "Opening the shared conversation…". None of that is a phrasing
+choice; it is this app advertising a capability the service refuses by design, to the one person
+who will find out by sending the link to a colleague and being told the conversation does not
+exist. The route is now `/open/:sessionId` and the copy says "Conversation from another device".
 
-**Fix, if cross-person sharing is ever wanted:** a stable server-side conversation id distinct from
-the session handle, _with an explicit grant_ — a durable id alone is not enough, because the 404
-above is an authorization decision and would still apply.
+Three things about the shape of that decision, since the cheaper-looking options were both worse:
+
+- **The old path is not kept as a redirect.** Preserving `/s/` would preserve exactly the string
+  the decision is about. Nothing in the UI ever offered the link for copying — its only entry
+  points are two buttons in `/review` — and a stale one lands on this app's own "That conversation
+  isn't on this device", which is the honest message anyway.
+- **Cross-person sharing is declined here, not deferred quietly.** It is not a client change: the
+  404 is an _authorization_ decision, so a stable server-side conversation id would still be
+  refused without an explicit grant beside it. That is a backend feature with a data model and a
+  permission surface, and nobody has asked for it.
+- **The rotation hazard stays, narrower than this note used to claim.** The client replaces the id
+  in three places (`session_not_found` recovery, `resetSession`, a fresh conversation), so a link
+  copied before one of those points at a session the chemist has stopped using. That is a property
+  of the session handle being disposable, which is the same property that makes `/c/<local>` the
+  real URL.
+
+`tests/routing.test.tsx` pins the adopted title and the truncated-link copy against what is
+**rendered**, not against the file: `routes.tsx` quotes all three of the old strings in the
+paragraph explaining why they are gone, so a file-wide `toContain` would have passed with the
+change reverted.
+
+**What would change the answer:** somebody actually asking for cross-person sharing, which then
+starts upstream rather than here.
 
 ---
 
-## Issue 6: the per-user event-stream cap is shared across tabs, and no client can see it
+## Closed: one tab holds the streams and tells the others (was Issue 6)
 
-`service_max_event_streams_per_user` defaults to **5**, enforced per principal per process
-(`routes/streams.py`) beside a per-pod `service_max_event_streams_total`. `useJobStreams` budgets
-3, which fits — for one tab. Two windows on one account ask for six, and the second window's last
-stream 429s.
+`service_max_event_streams_per_user` is **5**, enforced per principal per process, and it has no
+idea what a tab is. `useJobStreams` budgeted 3, which fits one window and not two: a chemist with
+two windows asked for six and the second window's last stream 429'd. The 429 path contained that —
+two in a row drop a tab to a single stream for the life of the page — but handled is not prevented,
+and a chemist with two windows watched fewer conversations than they thought.
 
-Nothing client-side can see the other tab's usage: the count lives in the pod's memory. The 429
-path contains it (two in a row drops that tab to a single stream for the life of the page, which
-brings the pair back under the cap), so the failure is handled rather than silent — but handled is
-not prevented, and a chemist with two windows watches fewer conversations than they think.
+This entry filed it rather than half-building it, and the reason it gave is the reason it took this
+long: **a botched election loses notifications entirely, which is strictly worse than the contained
+degradation.** A durable job runs for minutes to hours and its completion arrives once, on a stream
+that must be open. So the failure modes were the work. `src/state/jobStreamLeader.ts` is the
+election and `tests/jobStreamElection.test.ts` drives every one of them:
 
-**Fix (client):** elect one tab to hold the streams over a `BroadcastChannel` and have the others
-read completions from the shared store. That is a feature with its own failure modes — leader
-crash, heartbeat timeouts — and a botched election loses notifications entirely, which is strictly
-worse than the contained degradation above. Filed rather than half-built.
+- **Two tabs opening in the same millisecond.** A campaign rather than a lock — a claim, 250 ms of
+  listening, and the smallest id wins — so the pair agrees in one round trip instead of both
+  winning and discovering it later. Driven with two real memberships over real `BroadcastChannel`s.
+- **The leader closing.** `pagehide` (not `beforeunload`, which is documented unreliable on exactly
+  the transitions that matter) broadcasts a resignation and every follower campaigns at once, so a
+  handover costs one election window rather than one lease.
+- **The leader crashing with nothing announced.** The lease expires and a follower campaigns. This
+  is why the lease exists at all: a design that depended on `pagehide` would lose every
+  notification after an OOM kill or a force quit. Driven, and driven _negatively_ too — a single
+  missed heartbeat must not depose a busy leader.
+- **The leader suspended or backgrounded.** Identical to a crash from the other side, deliberately:
+  a frozen tab's timers do not run, so the survivor does not have to know which it was.
+- **Two tabs both believing they lead**, which a woken tab produces by itself. Not prevented —
+  converged on: the larger id yields on hearing the other's heartbeat. Both directions of that
+  total order are driven, because getting it symmetrical ("somebody else leads, so I stop") is how
+  an election ends with _zero_ leaders and silent notifications.
+- **No `BroadcastChannel` at all.** Every tab leads, which is exactly what this app did before, and
+  what it did before is safe. A feature that degraded to "nobody watches" would be the one
+  unacceptable outcome.
+
+**The half the election does not cover, and it had to be measured to be seen.** Electing a leader
+says who opens streams; it does not say _which_ streams. `watchedSessionKey` reads this tab's own
+`conversations` and its own `activeId`, and neither is shared — the store is hydrated per tab and an
+active conversation is per window by definition. Driven: two windows, and the account held **one**
+stream, for the leader's own session, with the follower's conversation watched by nobody. That is
+the loss this whole feature exists to prevent, arriving from the direction the election does not
+look in, and it would have shipped.
+
+So every tab declares what it wants and the leader watches the **merge**, round-robin by rank, so
+each window's first choice is taken before any window's second. Three streams for the account
+instead of three per tab, and the two heads are always in it. A follower's periodic message _is_
+its interest, and an interest expires on the same lease as leadership — a crashed tab stops holding
+a slot for a window nobody is looking at.
+
+Two budget cases run in opposite directions and both are asserted: a **backgrounded** leader trims
+what it asks for and must not trim what the account holds, or a hidden tab would cut the chemist's
+visible window to one stream; **`jobStreamsThrottled`** is evidence about the account rather than
+about a window, so it does cut the merged set, which keeps the 429 backstop meaning what it did.
+
+The relay carries stream _health_ as well as completions, because a follower holds no streams and
+would otherwise be shown a working app while notifications were failing. And a takeover clears the
+warnings it inherited: they described streams that no longer exist, and left alone they pinned a
+red indicator on a healthy account until the page was reloaded.
+
+**What is still true:** the 429 path is unchanged and is still the backstop, because two leaders
+during a takeover and a browser with no `BroadcastChannel` both land back in the old shape. What a
+takeover costs is a delay rather than a loss — the service writes job endings into `session_events`
+and a row nobody has claimed is still there when the next stream opens.
 
 ---
 
@@ -158,6 +227,22 @@ changes what a session means in aggregate and a deployment may want it off.
 ---
 
 ## Issue 8: the access token lives in the browser, and its refresh runs on a mechanism browsers are removing
+
+**The posture, in four lines, so nobody re-derives it.** _Accepted:_ the access token stays in the
+browser and MSAL keeps refreshing it through a hidden iframe. _Why:_ the replacement is built and
+sound, and its blockers are operational rather than technical — see below. _What would unblock it:_
+a confidential-client registration in the target tenant (a Web platform, a client secret and
+`<origin>/auth/callback` as a redirect URI) plus two managed secrets with a rotation owner. _Who
+decides:_ the tenant administrator for the registration, and whoever owns this app's operations for
+the secrets — not this repository, and not a code review. Everything below is the evidence for
+those four lines and does not need re-deriving; PR #11 is retained and is reopened rather than
+rebuilt.
+
+**Reviewed again on 2026-09-13 (W30.6) and unchanged.** Nothing in the tenant moved, so nothing
+here moved. What _has_ changed since this was written is only the surface it worries about: this
+origin now also runs RDKit on a worker (W28.7), which is one more thread of third-party code on the
+origin that holds the token, and one more reason the second cost below is the one with a clock on
+it.
 
 **Decided, not merely open.** Moving token custody to the BFF was designed, built and tested on
 `claude/frontend-hardening-stabilization-gqxzko` (PR #11, closed), and deliberately not adopted.
@@ -258,6 +343,109 @@ discarded as "unchanged", which is the one thing that function is for.
 
 The half that stays a poll is deliberate and is not this issue: `GET /pending` is still read on
 `/review` rather than pushed, since the stream carries a notification and not a projection.
+
+---
+
+## Issue 10: the CSP forbids what RDKit needs, so no container has ever drawn a structure
+
+**Found by measurement, not by report** — W28.7 moved the toolkit to a worker, went to prove in a
+real browser that a structure was drawn there, and found none is drawn anywhere.
+
+`server/config.ts` sends `script-src 'self' 'wasm-unsafe-eval'`. That token permits WebAssembly
+compilation and nothing else, which is exactly what its own comment says and exactly why it was
+chosen. `@rdkit/rdkit` needs more: Embind builds every JS invoker for the C++ surface with
+`Function(...)` — `craftInvokerFunction`, on the ordinary path rather than on a fallback — and
+`'unsafe-eval'` is what permits that.
+
+**Driven against the built bundle behind the real BFF**, loading the emitted RDKit chunk by hand:
+
+```
+EvalError: Refused to evaluate a string as JavaScript because 'unsafe-eval' is not an allowed
+source of script in the following Content Security Policy directive:
+"script-src 'self' 'wasm-unsafe-eval'".
+    at Function (<anonymous>)
+    at …/assets/RDKit_minimal-DP2qLPJt.js
+```
+
+and, driving the worker in its own protocol from the page: `toolkitLoads` → `false`, `drawSvg` →
+`null`. **It predates the worker** — the identical probe fails the same way against the pre-W28.7
+tree, on the page.
+
+**What a chemist sees.** Every `<Molecule>` renders its SMILES as text with "The structure toolkit
+could not be loaded, so nothing on this page can be drawn" beside it; the structure panel says the
+same; the entity rail cannot key a compound, because `canonicalSmiles` answers `null`. The copy is
+correct — the distinction `rdkitAvailable()` exists to keep is working exactly as designed — which
+is why this reads as a deployment quirk rather than as a break.
+
+**Why nobody saw it.** The Vite dev server serves `index.html` itself and never sends this header,
+so `npm run dev` draws structures perfectly. `server/config.ts`'s own comment said to verify
+against `http://localhost:3000` rather than `:5173`; nothing did, and the sentence beside it
+asserted in the present tense that the directive was what RDKit needs. Both are corrected in place.
+
+**Two ways out, and neither is taken here because both are posture rather than a typo.**
+
+- **Add `'unsafe-eval'` to `script-src`.** One line, and it re-opens `eval` and `new Function` for
+  the whole document — the origin that holds the bearer token, renders model output and injects
+  RDKit's SVG with `dangerouslySetInnerHTML`.
+- **Scope it to the worker.** A dedicated worker's policy is the document's in Chromium, so this
+  is not a header on the chunk — it means serving `src/chem/rdkit.worker.ts` from a `blob:` built
+  on this origin, or giving the worker its own document. More work, and it confines the
+  relaxation to a thread with no DOM and no markup path. W28.7 is what makes it available at all:
+  before it, the toolkit ran on the page and there was nothing to confine.
+
+**Who decides:** whoever owns this app's CSP. Until then `rdkit.client.ts`'s fallback is doing its
+job — the app degrades to text and says so — and `e2e/worker.spec.ts` asserts the worker thread is
+started and answers, which is the most this repository can assert today.
+
+---
+
+## Issue 11: a 600-character chain is inside the parser cap and `canonicalSmiles` still answers `null`
+
+**Found by re-running W28.7's own measurement, not by report**, and it predates W28.7 — the same
+probe behaves the same way against the tree before it.
+
+`MAX_PARSED_SMILES_CHARS` is 600 and `tooLongToParse` is `length > 600`, so a 600-character chain is
+inside the cap this module declares. That constant's own docstring states the rule it exists to
+protect: a helper answering `null` for such a string "is saying _not a molecule_ about something
+that is one". RDKit's canonical ranking recurses, so on a deep enough chain it raises
+`RangeError: Maximum call stack size exceeded`, and on the main thread `withMol` turns that into the
+module's ordinary negative. The negative is indistinguishable from a chemical verdict.
+
+**Three measurements, all from `scripts/measure-rdkit-placement.mjs`:**
+
+- Sweeping 300 → 600 characters in one page, `canonicalSmiles` **answered at every length** and
+  blocked the main thread for 59–118 ms at 400 and above, one `longtask` each.
+- Calling 200 then 600 in a fresh page, the same 600-character string **answered `null`**.
+- The pre-W28.7 tree does the same: `null` at 600, after 147 ms of blocked main thread.
+
+So it is not a length threshold at all — **it depends on the JavaScript stack at the moment of the
+call**, which is why it has never been reproducible enough to be filed. The same string is a
+molecule or is not, in the same browser, depending on what ran before it.
+
+**What a chemist sees.** A long but legal structure renders as its SMILES with "not a recognised
+structure" beside it, sometimes, and draws correctly the rest of the time — `moleculeSvg` is
+unaffected and answered at every length measured. The entity rail cannot key such a compound,
+because `canonicalSmiles` is what mints the key.
+
+**Two things this also corrects about W28.7's record**, both in the direction of claiming more than
+was delivered:
+
+- The worker's boundary is between **300 and 400** characters, not "500 up". Above it,
+  `rdkit.client.ts` re-runs the call on the page, so the main-thread block comes straight back and
+  the wall clock is _worse_ than before the change — the worker attempt is paid first. The draw is
+  the unambiguous win; canonicalisation of a long chain was never moved off the main thread.
+- "The seam now answers identically at 200–600 characters in both placements" is true and is not
+  reassuring: what it answers identically can be `null`.
+
+**Options, none taken here because each is a real decision:** lower `MAX_PARSED_SMILES_CHARS` to
+something the ranking survives with margin (it would have to be measured, and it refuses structures
+that draw fine); distinguish a `RangeError` from a chemical negative at the seam, so the surfaces
+say "too complex to name" rather than "not a molecule" (the honest minimum, and it needs a third
+value the module deliberately does not thread through today — see `MAX_PARSED_SMILES_CHARS`); or
+raise the worker's stack, which is not configurable from here.
+
+**Who decides:** whoever owns `src/chem/`. Until then the cap is a number that does not bound what
+it claims to.
 
 ---
 

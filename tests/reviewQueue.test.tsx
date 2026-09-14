@@ -134,7 +134,7 @@ afterEach(() => {
 describe('the plan inbox', () => {
   it('names the blocked conversation, shows the work, and links into it', async () => {
     // The session id is the field that makes this screen worth having: it is the one thing a
-    // chemist who closed the tab cannot reconstruct, and `/s/:sessionId` is the only route that
+    // chemist who closed the tab cannot reconstruct, and `/open/:sessionId` is the only route that
     // turns it back into a readable conversation.
     serve();
     renderQueue();
@@ -142,7 +142,7 @@ describe('the plan inbox', () => {
     expect(await screen.findByText('Which solvent for the Suzuki step?')).toBeTruthy();
     expect(screen.getByText('screen the hazards of 2-MeTHF')).toBeTruthy();
     const link = screen.getByRole('link', { name: /Open the conversation/ });
-    expect(link.getAttribute('href')).toBe(`/s/${'b'.repeat(32)}`);
+    expect(link.getAttribute('href')).toBe(`/open/${'b'.repeat(32)}`);
   });
 
   it('offers no decision here, because the reasoning is in the conversation', async () => {

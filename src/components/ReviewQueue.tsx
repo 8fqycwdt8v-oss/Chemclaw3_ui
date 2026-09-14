@@ -196,10 +196,10 @@ function PlanInbox(): React.JSX.Element {
             </ol>
             <div className="mt-3">
               <Button asChild size="sm" variant="outline">
-                {/* `/s/:sessionId` adopts the server session into a local conversation, which is
-                    the only route that can turn an id from this list into something readable. The
-                    decision is answered there, beside the reasoning that produced the plan. */}
-                <Link to={`/s/${pending.session_id}`}>Open the conversation to decide</Link>
+                {/* `/open/:sessionId` adopts the server session into a local conversation, which
+                    is the only route that can turn an id from this list into something readable.
+                    The decision is answered there, beside the reasoning that produced the plan. */}
+                <Link to={`/open/${pending.session_id}`}>Open the conversation to decide</Link>
               </Button>
             </div>
           </li>
@@ -458,7 +458,7 @@ function PendingInbox(): React.JSX.Element {
                   <Button asChild size="sm" variant="ghost">
                     {/* The conversation that raised it, for the context the subject line cannot
                         carry — the same link the plan inbox offers, for the same reason. */}
-                    <Link to={`/s/${request.session_id}`}>Open the conversation</Link>
+                    <Link to={`/open/${request.session_id}`}>Open the conversation</Link>
                   </Button>
                 )}
               </div>

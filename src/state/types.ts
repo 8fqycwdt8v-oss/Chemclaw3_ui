@@ -324,7 +324,7 @@ export interface Conversation {
   /**
    * Where `sessionId` came from.
    *
-   * `'server'` means the session was listed by `GET /sessions` or opened from a shared link, so
+   * `'server'` means the session was listed by `GET /sessions` or opened from an `/open/` link, so
    * there is a transcript on the backend worth reading. `'local'` means this browser minted it —
    * on the first send, or ahead of it by `warmSession` — so there is nothing to read back and
    * asking would be a wasted round-trip that raises a banner if it fails.

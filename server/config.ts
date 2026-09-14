@@ -90,14 +90,23 @@ function buildCsp(mode: AuthMode, allowFraming: boolean): string {
     'default-src': ["'self'"],
     // No inline scripts: /config.js is a real same-origin file precisely so this can stay strict.
     //
-    // `wasm-unsafe-eval` is what lets `WebAssembly.instantiate` run at all, and both chemistry
-    // dependencies need it: RDKit (`src/chem/rdkit.ts`) and Ketcher's Indigo worker
-    // (`src/chem/sketcher.ketcher.tsx`). It permits WASM compilation and nothing else — it does
-    // NOT re-open `eval` or inline script, which is exactly why the narrow token exists.
+    // `wasm-unsafe-eval` is what lets `WebAssembly.instantiate` run at all. It permits WASM
+    // compilation and nothing else — it does NOT re-open `eval` or inline script, which is
+    // exactly why the narrow token exists.
     //
-    // Verify this against the BFF, not against Vite. The dev server serves index.html itself and
-    // never sends this header, so a missing directive here fails ONLY in the container: check
-    // `http://localhost:3000`, not `:5173`.
+    // **It is not sufficient for RDKit, and this comment used to say it was.** Driven against the
+    // built bundle behind this BFF (W28.7): `@rdkit/rdkit`'s Embind glue builds its invokers with
+    // `Function(...)` on the ordinary path, not on a fallback, and this directive refuses it —
+    // `EvalError: Refused to evaluate a string as JavaScript`. So the toolkit has never loaded in
+    // any container-served deployment, on the page or in `src/chem/rdkit.worker.ts`, and every
+    // structure renders as "The structure toolkit could not be loaded". `ISSUES.md` Issue 10
+    // carries the evidence and the two ways out; neither is taken here, because both are a
+    // posture decision rather than a typo.
+    //
+    // The other half of the old sentence stands and is the reason this was invisible: verify
+    // against the BFF, not against Vite. The dev server serves index.html itself and never sends
+    // this header, so a missing directive here fails ONLY in the container — check
+    // `http://localhost:3000`, not `:5173`. Nothing did.
     'script-src': ["'self'", "'wasm-unsafe-eval'"],
     // Ketcher runs Indigo in a Web Worker created from a same-origin module URL. Without this the
     // sketcher dialog mounts and then dies on the first chemistry operation — and `worker-src`

@@ -14,10 +14,16 @@
  *    definition — an accepted risk is precisely the one with nothing holding it — and they are
  *    held to a different rule instead (see below).
  *  - **A claiming clause that cites something that is not a test.** The rule says *the test*, and
- *    the check said *a file*: an **Enforced** clause citing `src/lib/utils.ts` passed, so the
- *    document's own promise was a third wider than what ran. **Enforced** and **Bounded** claim a
+ *    the check said *a file*, then *a file whose path starts with `tests/`*: an **Enforced** clause
+ *    citing `src/lib/utils.ts`, and later one citing `tests/helpers.ts` or the `tests/stubs`
+ *    directory, each passed — so the document promised more than ran. It promised it about nothing:
+ *    measured over the record as it stood before either tightening, every Enforced and Bounded
+ *    clause in it already cited a real test file, so this rule is prophylactic and no clause was
+ *    ever rewritten to satisfy it. (An earlier edition of this paragraph put a fraction on the gap.
+ *    There is no quantity there to have: the set of clauses a looser rule *would* have admitted is
+ *    not the set it did admit, and that one was empty.) **Enforced** and **Bounded** claim a
  *    refusal or a ceiling, and only a test can drive one, so those two must name a path under
- *    `tests/` or `e2e/`. **Measured** is deliberately not held to that: a measurement is a number
+ *    `tests/` or `e2e/` that is itself a `*.test.ts(x)` or `*.spec.ts(x)`. **Measured** is deliberately not held to that: a measurement is a number
  *    somebody ran, and the thing that ran it is a script — two shipped clauses cite
  *    `scripts/measure-*.mjs` and are right to.
  *  - **A citation that has gone stale.** A renamed or deleted test leaves the sentence reading

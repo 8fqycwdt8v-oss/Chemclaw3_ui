@@ -96,12 +96,17 @@ indistinguishable from one that does not work — and this repository has produc
   This part needs no sibling checkout, so unlike the clause above it runs in every lane.
 - **Accepted.** With no sibling checkout the contract check verifies **nothing** and says so: a
   warning naming what the run is therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns the
-  skip into a failure. The Jenkins `Gate` stage sets both variables against the checkout its
-  `Preflight` stage already makes, so it is a gate there; the GitHub Actions runner checks out this
-  repository alone, and that is the lane which runs on every push — so this check is still a
-  warning where it would bite most. What holds it back there is not a credential but the coupling:
-  that lane would then red on a rename made in another repository. Recorded in `ISSUES.md`
-  Issue 14.
+  skip into a failure. **No lane runs it as a gate by default, and this clause used to say one
+  did.** The GitHub Actions runner — the lane that runs on every push — checks out this
+  repository alone, so the check warns there. The Jenkins `Gate` stage does set both variables
+  against the checkout its `Preflight` stage already makes, but that stage is behind a parameter:
+  `RUN_GATE` defaults to `false`, so it is a gate only in a run somebody ticked the box on, and
+  that lane builds and ships an image rather than answering a pull request. So the check gates for
+  a developer or an agent with both trees, and in the four-repository full-stack lane, and nowhere
+  else. What holds it back in the push lane is not a credential but the coupling: that lane would
+  then red on a rename made in another repository. `tests/delivery.test.ts` holds this paragraph to
+  the default the pipeline declares, so flipping the parameter fails here until the record is
+  rewritten. Recorded in `ISSUES.md` Issue 14.
 - **Accepted.** Response shapes are not checked. The client's interfaces for what it reads back are
   not compared to the models the handlers return: the mapping is not mechanical — one handler
   returns `list[SessionSummaryOut]` where the client reads a page plus an `X-Next-Cursor` header —

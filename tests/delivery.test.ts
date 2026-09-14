@@ -61,6 +61,15 @@ const contractSourceDirs = (): string[] => {
   return [...dirs].sort();
 };
 
+/**
+ * Whether the `Gate` stage runs unless somebody asks for it, read off the pipeline.
+ *
+ * `null` when the parameter is gone, which is a failure below rather than a quietly skipped
+ * assertion — a regex that stops matching is the way a check of this shape dies.
+ */
+const runGateDefault = (): string | null =>
+  /booleanParam\(name: 'RUN_GATE', defaultValue: (true|false)/.exec(pipeline)?.[1] ?? null;
+
 describe('the Jenkins pipeline', () => {
   it('invokes only npm scripts that exist', () => {
     const invoked = [...pipeline.matchAll(/npm run ([\w:-]+)/g)].map((match) => match[1] ?? '');
@@ -127,6 +136,27 @@ describe('the Jenkins pipeline', () => {
     // And the gate stage has to say where it went, and refuse to pass when it is not there.
     expect(pipeline).toContain('CHEMCLAW3_DIR = "${env.WORKSPACE}/.jenkins-lib"');
     expect(pipeline).toContain("CHEMCLAW3_REQUIRED = '1'");
+  });
+
+  it('is described by the record with the RUN_GATE default it actually declares', () => {
+    // The stage above is the only lane with a Chemclaw3 checkout, so it is the only lane where the
+    // cross-repository contract check can gate — and it is behind `RUN_GATE`, which ships off. Two
+    // documents described that stage as a gate for a day, which is the failure mode this whole
+    // record exists to end: a control that is believed because it was written down. Rather than
+    // asking each document for a phrase, both are held to the parameter's own value, so flipping
+    // the default is a decision that cannot be taken in the pipeline alone.
+    const declared = runGateDefault();
+    expect(declared, 'the Jenkinsfile no longer declares a RUN_GATE boolean parameter').not.toBe(
+      null,
+    );
+    const claim = `\`RUN_GATE\` defaults to \`${declared}\``;
+    for (const doc of ['docs/production-readiness.md', 'ISSUES.md']) {
+      expect(
+        readFileSync(doc, 'utf8').includes(claim),
+        `${doc} does not say ${claim}, which is what the pipeline declares — the two lanes this ` +
+          'check runs in are what those documents are about, so a flipped default rewrites them',
+      ).toBe(true);
+    }
   });
 });
 

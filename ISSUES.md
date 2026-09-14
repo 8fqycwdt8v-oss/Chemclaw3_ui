@@ -576,6 +576,15 @@ everything next to it.
   `Preflight` stage already makes. **In GitHub Actions it is still a warning**, and that is the
   lane that runs on every push.
 
+  **And the Jenkins lane it now runs in is opt-in, which this entry read as a gate.**
+  `RUN_GATE` defaults to `false`, so that stage runs only when somebody ticks the box on a run —
+  meaning no lane of either pipeline gates this check by default, and the two sentences above are
+  about where it _can_ run rather than where it does. Turning the parameter on is the decision
+  below in miniature, taken by the same owner: it buys the check in the lane that ships the image,
+  and it costs a build that can red on a rename made in another repository. `tests/delivery.test.ts`
+  holds this paragraph and `docs/production-readiness.md` §2 to the default the pipeline declares,
+  so flipping it fails the suite until both are rewritten.
+
   **The blocker this entry used to state was a credential, and it was wrong in both lanes.** The
   `Jenkinsfile` beside it falsified half of that on its own: `Preflight` clones `Chemclaw3`
   unconditionally on every run for the shared build library, so that lane had whatever credential

@@ -258,11 +258,18 @@ describe('the header phase and the connection count', () => {
   /** The status codes of every response in a raw HTTP/1.1 byte stream, read from the status lines.
    *
    * Scanning the whole response for a code is what these assertions used to do, and the response
-   * carries a header this server generates: `x-chemclaw-correlation-id` is 32 random hex characters,
-   * which is 30 three-character windows at one chance in 4,096 each. Measured over 200,000 ids that
-   * is **0.71%** per response and **1.46%** for the keep-alive case's two — so `.not.toContain('408')`
-   * failed a correct server roughly one CI run in seventy, and `.toContain('408')` would credit a
-   * code the server never sent at the same rate. Neither direction is about a status code.
+   * carries a header this server generates: `x-chemclaw-correlation-id` is `mintCorrelationId()`,
+   * which is `randomUUID()` with the dashes taken out. That is a **uuid4**, not 32 uniform hex
+   * characters, and the difference is the mechanism worth carrying away: index 12 is a fixed `4`
+   * — the first character of `408` — so that one three-character window alone runs at 1/256
+   * rather than at the 1/4096 a uniform id would give it. Over the generator's own distribution
+   * the chance a correct response's id contains `408` is **1.07%**, and **2.13%** for the
+   * keep-alive case's two; both are exact for a uuid4 rather than sampled. So
+   * `.not.toContain('408')` failed a correct server about one CI run in forty-seven, and
+   * `.toContain('408')` would credit a code the server never sent at the same rate. Neither
+   * direction is about a status code, and a uniform-hex model of an id this system mints is
+   * wrong for every one of them — it is the model that produced the 0.71% this comment used
+   * to carry.
    */
   const statuses = (response: string): number[] =>
     [...response.matchAll(/^HTTP\/1\.1 (\d{3})\b/gm)].map((match) => Number(match[1]));

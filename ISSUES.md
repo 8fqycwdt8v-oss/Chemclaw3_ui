@@ -622,6 +622,17 @@ registry; profile selection; tool calls surviving a reload.
 
 **Still not done:**
 
+- **One intermittent browser test, seen once and not reproduced.**
+  `e2e/protocols.spec.ts:55` (`an edit becomes a new revision and comes back on the next read`)
+  failed on the **mobile** project in one `npm run ci` on 2026-09-14 — `locator.fill` timing out at
+  30 s waiting for `getByLabel(/^Temperature/)` after the Edit button had been clicked — and passed
+  on the re-run of the same suite (91 passed, 5 skipped) and in isolation (12 of 12 in that spec,
+  both projects). It is recorded rather than fixed because one occurrence does not say which of the
+  two candidates it is: a lazily-loaded editor chunk under four parallel workers on a loaded
+  machine, or the mobile sheet's open animation. **What would settle it:** the next occurrence, with
+  the trace kept — `test-results/` holds an `error-context.md` per failure, and both runs above
+  cleared it before anybody read it.
+
 - **Screenshot baselines.** The axe pass covers the mechanical half of the visual contract; nothing
   guards a layout regression that is still accessible.
 - **A real MSAL redirect has not been exercised against this router.** `/auth/callback` is

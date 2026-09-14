@@ -311,6 +311,42 @@ describe('two tabs that both believe they lead', () => {
   });
 });
 
+describe('a leader that has just been deposed', () => {
+  it('says what its own window still wants, rather than waiting for the next watchdog tick', async () => {
+    // `standDown`'s trailing `announce()`. A leader announces nothing while it leads — it consumes
+    // its own interest — so the tab that deposes it has never heard what this window is looking
+    // at. Without this line the conversation in *this* window is watched by nobody until the next
+    // tick, and nothing asserted it: deleted, the whole suite stayed green.
+    //
+    // On a controlled clock so the assertion window cannot accidentally contain a watchdog tick,
+    // which is the other thing that would announce and would make this pass for the wrong reason.
+    vi.useFakeTimers();
+    try {
+      const survivor = openTab();
+      await vi.advanceTimersByTimeAsync(AFTER_ELECTION_MS);
+      expect(survivor.leader.isLeader()).toBe(true);
+      survivor.leader.declare([SID2], 3);
+
+      // A suspended tab waking up, with an id below this one's, so this one must yield.
+      const woken = openPeer('!smaller-than-any-uuid');
+      woken.received.length = 0;
+      woken.beat();
+      // Well inside `HEARTBEAT_MS`, and the watchdog's first tick is at 1_000 ms from this tab's
+      // creation, which is past the end of this window.
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect(survivor.leader.isLeader()).toBe(false);
+      expect(woken.received).toContainEqual({
+        type: 'interest',
+        from: survivor.leader.id,
+        sessions: [SID2],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('a browser with no BroadcastChannel', () => {
   it('lets every tab lead, which is what this app did before there was an election', async () => {
     vi.stubGlobal('BroadcastChannel', undefined);
@@ -916,6 +952,30 @@ describe('the stream health a follower holds no streams to observe', () => {
     } finally {
       unmount();
     }
+  });
+
+  it('is replayed to a tab that opens after the failures started', async () => {
+    // The claim branch's `if (health) send(...)`, which nothing asserted: the existing relay case
+    // publishes *after* the follower has joined, so it drives the ordinary broadcast and never the
+    // replay. Deleted, the whole 1,120-test suite stayed green — and the consequence is a chemist
+    // opening a second window into a failing account and being shown an app that looks fine, which
+    // is the exact hazard the health note exists for, one tab over.
+    const leader = openTab();
+    await wait(AFTER_ELECTION_MS);
+    expect(leader.leader.isLeader()).toBe(true);
+    leader.leader.publish({ kind: 'health', failing: [SID], throttled: true });
+
+    // A window opened now, after the streams have already started failing. Its first act is a
+    // claim, and the answer to a claim is where the account's state has to reach it.
+    const joining = openPeer('zzzz-joining');
+    joining.claim();
+    await wait(100);
+
+    expect(joining.received).toContainEqual({
+      type: 'note',
+      from: leader.leader.id,
+      note: { kind: 'health', failing: [SID], throttled: true },
+    });
   });
 
   it('does not outlive the leader that reported it', async () => {

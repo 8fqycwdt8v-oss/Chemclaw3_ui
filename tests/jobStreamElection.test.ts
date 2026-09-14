@@ -802,11 +802,20 @@ describe('the stream health a follower holds no streams to observe', () => {
       });
       // And it says so, rather than clearing it privately: a third tab is carrying the same stale
       // warning and has no other way to hear that it is over.
-      expect(leader.received).toContainEqual({
-        type: 'note',
-        from: expect.any(String),
-        note: { kind: 'health', failing: [], throttled: false },
-      });
+      //
+      // Polled rather than read once, because the two facts above it are not the same fact: the
+      // store is cleared *synchronously* inside `sync`, and the broadcast that follows it reaches
+      // another channel in a later task. Reading `received` the instant the store settled asserted
+      // on a postMessage that had not been dispatched yet — measured at `8ccdef2`, before any of
+      // this wave's changes, as 2 failures in 3 runs, with `received` holding only the survivor's
+      // own `claim`.
+      await vi.waitFor(() =>
+        expect(leader.received).toContainEqual({
+          type: 'note',
+          from: expect.any(String),
+          note: { kind: 'health', failing: [], throttled: false },
+        }),
+      );
     } finally {
       unmount();
     }

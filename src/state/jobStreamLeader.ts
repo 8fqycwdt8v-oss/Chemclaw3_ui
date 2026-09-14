@@ -75,9 +75,19 @@
  * follower holds no streams and would otherwise show a chemist no warning while notifications were
  * in fact failing. A tab that joins later gets that health replayed when its claim is answered.
  *
- * **The gap during a takeover is a delay, not a loss.** The service writes job endings into
- * `session_events` and a reader claims them; a row nobody has claimed is still there when the next
- * stream opens. So what a takeover costs is the seconds until somebody reconnects.
+ * **The gap during a takeover is a delay for every row nobody has claimed, and a loss for the one
+ * already in flight.** The service writes job endings into `session_events` and a reader claims
+ * them, so a row nobody has claimed is still there when the next stream opens: that is what makes a
+ * takeover — and the rotation above — cost seconds rather than a notification.
+ *
+ * The claim is destructive, though, and it bounds the promise rather than fulfilling it. Upstream's
+ * `claim_unconsumed` is one `UPDATE … FOR UPDATE SKIP LOCKED … RETURNING`, at-most-once by design,
+ * with `restore_unconsumed` un-claiming only a row whose *yield* never completed — so a row already
+ * written to the departing tab's socket is gone from the mailbox. A tab that dies between reading
+ * that frame and `publish`ing it loses it for every window on the account, and no reconnect brings
+ * it back. Nothing on this side can close that: the fix is an acknowledgement upstream, and
+ * `ISSUES.md` Issue 12 records it. This paragraph read "a delay, not a loss" flatly, which made the
+ * one case this file cannot cover the one case it claimed to.
  */
 
 import type { AwaitingAnswerEvent, JobTerminalEvent } from '../../shared/events.ts';

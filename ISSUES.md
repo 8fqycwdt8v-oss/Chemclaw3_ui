@@ -458,6 +458,39 @@ it claims to.
 
 ---
 
+## Issue 12: a job ending read off a stream and not yet relayed dies with the tab that read it
+
+**Found by re-reading the docstring against the service, not by report.** `src/state/jobStreamLeader.ts`
+said, flatly, that "the gap during a takeover is a delay, not a loss … a row nobody has claimed is
+still there when the next stream opens". The first half is the important one and it is true. The
+sentence's scope was not.
+
+The service's claim is destructive by design (`chemclaw/agent/session_events.py`): one
+`UPDATE … FOR UPDATE SKIP LOCKED … RETURNING`, documented as at-most-once, with `restore_unconsumed`
+un-claiming a row whose _yield_ did not complete — which shrinks the loss window "to the transport
+itself", in that module's own words. So a `job_completed` frame that has been written to a tab's
+socket is already gone from the mailbox. If that tab dies between reading the frame and
+`tab.publish`ing it, the completion reaches no window on the account, and no takeover, reconnect or
+reload brings it back: the row is consumed and the job feed never held it.
+
+**How big it is.** Small, and not zero. The window is the browser-side gap between the frame
+arriving and `publish` running — the leader publishes synchronously inside the read loop, so for a
+tab that is merely _closed_ it is microseconds. It widens for a tab the OS kills, a renderer crash,
+or a laptop lid closing mid-frame. A durable run's ending arrives exactly once, which is the whole
+reason this stream exists, so the cost of hitting it is a chemist never being told.
+
+**Why it is not fixed here.** Every client-side arrangement loses the same frame: the row is gone
+before the browser has it, so relaying earlier, retrying, or persisting sooner all start after the
+only irreversible step. The fix is upstream — an acknowledgement before the claim, or a restore
+keyed on _delivery_ rather than on yield completing. That is a service change with a protocol
+attached, and nobody has asked for one.
+
+**What was done instead:** the docstring now says which half of the promise it can keep. A file that
+claimed "not a loss" about the one case it cannot cover is the thing worth removing immediately;
+the loss itself is a known, bounded, upstream-shaped hole.
+
+---
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.

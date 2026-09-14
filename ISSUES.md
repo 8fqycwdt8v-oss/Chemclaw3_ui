@@ -605,6 +605,18 @@ everything next to it.
   here controls. **Who decides:** whoever owns this repository's CI. It is not a credential
   question, and this entry should not have said it was.
 
+  **That coupling is not the push lane's alone, and it grew while this entry named it only
+  there.** The argued maps used to fail on a name the service does **not** declare; one of them
+  now also fails on a name it **does** — an `AHEAD_OF_BACKEND` entry the service has caught up
+  with is expired bookkeeping, and deleting it is the remedy — so a change made upstream can red a
+  lane here in _both_ directions, a rename away and a rename toward. Every lane holding a checkout
+  inherits that: a developer's terminal, the four-repository full-stack lane, and the Jenkins
+  `Gate` stage on a run that ticks `RUN_GATE`. What differs between those lanes is only what a red
+  stops. In the push gate it stops a review of a pull request that changed nothing, which is the
+  cost weighed above; in the Jenkins lane it stops a _release_, and that is why the parameter's
+  default stays the conservative one rather than being an oversight. Same trade, same owner, and
+  the lane that ships is the one where a red is most expensive.
+
 - **Response shapes are not checked.** The interfaces this client declares for what it reads back
   are not compared to the models the handlers return. The mapping is not mechanical — `GET
 /sessions` returns `list[SessionSummaryOut]` where the client reads a page plus an

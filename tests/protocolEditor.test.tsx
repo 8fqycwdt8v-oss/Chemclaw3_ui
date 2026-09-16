@@ -320,6 +320,39 @@ describe('ProtocolEditor', () => {
     expect(body.document.base.charge[0]?.equivalents).toBe(1.5);
   });
 
+  it('does not freeze the document it was opened with', () => {
+    // `clone` at the top of `ProtocolEditor` looks like leftover defensiveness now that the edits
+    // go through `immer` — `produce` never mutates its base, so the copy cannot be what protects
+    // the draft. It protects the *caller*: measured, `produce(base, …)` leaves `base` itself
+    // unfrozen while deep-freezing every sub-object structurally shared into the result, so a
+    // component seeded straight from `revision.design` would freeze most of the document page's own
+    // state on the first keystroke. Nothing mutates that object today, which is exactly why the
+    // consequence would be found in production and not here.
+    //
+    // Driven on the object the parent passed in, not on a copy of it, because the copy is the thing
+    // under test.
+    serve();
+    const design = JSON.parse(JSON.stringify(DOCUMENT)) as ExperimentDesign;
+    render(
+      <ProtocolEditor
+        designId={DESIGN}
+        revision={{ ...REVISION, design, summary: null, history: [], status_history: [] }}
+        open
+        onOpenChange={() => {}}
+        onSaved={() => {}}
+        onReload={() => {}}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText(/Temperature/), { target: { value: '100' } });
+
+    expect(Object.isFrozen(design.base)).toBe(false);
+    expect(Object.isFrozen(design.base.setpoints)).toBe(false);
+    expect(Object.isFrozen(design.arms)).toBe(false);
+    // And the edit really happened, so this is not passing because nothing was produced.
+    expect(screen.getByLabelText(/Temperature/)).toHaveProperty('value', '100');
+  });
+
   it('reads an emptied field as unset rather than as zero', async () => {
     // An unstated pressure is not one bar and an unstated pH is not neutral, so an empty field has
     // to reach the service as `null` and not as `0`.

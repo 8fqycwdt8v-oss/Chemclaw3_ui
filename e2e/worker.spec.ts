@@ -50,13 +50,22 @@ test('the app asks a worker for its chemistry, not the main thread', async ({ pa
     })
     .toBeGreaterThan(0);
 
-  // And it is running this repository's worker module, asked in its own protocol. A thread that
-  // exists but never executed — a 404, a parse error, a CSP refusal of the script itself — answers
-  // nothing here. The *value* is `false` in this deployment for the CSP reason above; what this
-  // asserts is that the dispatch ran at all.
+  // And it is running this repository's worker module, asked in the protocol it actually speaks.
+  // A thread that exists but never executed — a 404, a parse error, a CSP refusal of the script
+  // itself — answers nothing here. The *value* is `false` in this deployment for the CSP reason
+  // above; what this asserts is that the dispatch ran at all.
+  //
+  // **The frame is Comlink's, hand-written, and that is a coupling worth naming.** The worker used
+  // to answer a first-party `{ id, op, args }` envelope this repository declared in
+  // `rdkit.protocol.ts`; `Comlink.expose(operations)` owns it now, so the probe has to speak
+  // `APPLY` with a wire-valued argument list. There is no way to import Comlink into a scope
+  // Playwright evaluates in, so this is transcribed rather than derived — and it fails *loudly*
+  // rather than quietly if upstream ever changes it: a frame Comlink does not recognise produces no
+  // reply at all, which arrives here as `'no reply'` and names itself in the diff.
   const worker = workers.find((w) => hashed.test(w.url()))!;
+  const PROBE = 'worker-spec-probe';
   const reply = await worker.evaluate(
-    () =>
+    (id) =>
       new Promise((resolve) => {
         const scope = self as unknown as { postMessage: (data: unknown) => void };
         const original = scope.postMessage.bind(self);
@@ -64,7 +73,7 @@ test('the app asks a worker for its chemistry, not the main thread', async ({ pa
         // id and everything else is passed straight through — intercepting the first reply that
         // arrives resolved with the page's `drawSvg` instead of this probe's.
         scope.postMessage = (data: unknown) => {
-          if ((data as { id?: number }).id !== 99) {
+          if ((data as { id?: string }).id !== id) {
             original(data);
             return;
           }
@@ -72,10 +81,18 @@ test('the app asks a worker for its chemistry, not the main thread', async ({ pa
           resolve(data);
         };
         self.dispatchEvent(
-          new MessageEvent('message', { data: { id: 99, op: 'isMolecule', args: ['CCO'] } }),
+          new MessageEvent('message', {
+            data: {
+              id,
+              type: 'APPLY',
+              path: ['isMolecule'],
+              argumentList: [{ type: 'RAW', value: 'CCO' }],
+            },
+          }),
         );
         setTimeout(() => resolve('no reply'), 10_000);
       }),
+    PROBE,
   );
-  expect(reply).toEqual({ id: 99, ok: true, value: false });
+  expect(reply).toEqual({ type: 'RAW', value: false, id: PROBE });
 });

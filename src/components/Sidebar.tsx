@@ -13,7 +13,7 @@
  * sharpest edge in the product.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useLocation, useNavigate } from 'react-router';
 import {
@@ -27,9 +27,10 @@ import {
   Trash2,
   TriangleAlert,
 } from 'lucide-react';
-import { api, type SessionSummary } from '../api/client.ts';
+import { api, type SessionPage, type SessionSummary } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
+import { keys, useApiInfiniteQuery } from '../api/queryClient.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore, newConversation } from '../state/chatStore.ts';
 import type { ChatState } from '../state/chatStore.ts';
@@ -119,62 +120,66 @@ function useServerSessions(): {
   loadingMore: boolean;
 } {
   const { auth, ready } = useAuth();
-  const [health, setHealth] = useState<'idle' | 'degraded'>('idle');
-  const [cursor, setCursor] = useState('');
-  const [loadingMore, setLoadingMore] = useState(false);
+  /**
+   * The listing, as pages.
+   *
+   * `getNextPageParam` reading `X-Next-Cursor` is what the hand-held `cursor` state was: the
+   * service advertises the header when there may be more, and an empty one means this is the end.
+   * `isFetchingNextPage` is `loadingMore`. Neither is a behaviour change; they are the two pieces
+   * of the control that had to be kept in step by hand.
+   *
+   * Not enabled until auth resolves: the placeholder provider throws rather than sending an
+   * unauthenticated request, so running this earlier set `degraded` on every single boot.
+   */
+  const { data, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useApiInfiniteQuery<
+    SessionPage,
+    ApiError,
+    string
+  >({
+    queryKey: keys.sessions,
+    queryFn: ({ pageParam }) => api.pageSessions(auth, pageParam || undefined),
+    initialPageParam: '',
+    getNextPageParam: (page) => page.next || undefined,
+    enabled: ready,
+  });
 
+  /**
+   * Adopting what arrived, which is a *use* of the pages rather than part of fetching them.
+   *
+   * Keyed on the page array, so it runs once per page that arrives and is idempotent besides —
+   * `adoptSessions` adds only ids the store does not already hold.
+   */
+  const pages = data?.pages;
   useEffect(() => {
-    // The placeholder provider throws rather than sending an unauthenticated request, so running
-    // this before auth resolves would set `degraded` on every single boot.
-    if (!ready) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const page = await api.pageSessions(auth);
-        if (cancelled) return;
-        // Reset on success: without this a single failure latched the warning permanently, so a
-        // transient hiccup left "showing local conversations only" on screen for the session.
-        setHealth('idle');
-        setCursor(page.next);
-        adoptSessions(page.sessions);
-      } catch (err) {
-        // A backend without the listing endpoint and a backend that refused our token are not the
-        // same thing, and silently showing a local-only list made them look identical. Not worth
-        // a banner, but worth saying somewhere — and "somewhere" is now a real place rather than
-        // a sentence in this comment.
-        logger.warn('sessions.list_failed', {
-          kind: err instanceof ApiError ? err.kind : 'unknown',
-          ...(err instanceof ApiError && err.status ? { status: err.status } : {}),
-        });
-        if (!cancelled) setHealth('degraded');
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [auth, ready]);
+    if (!pages) return;
+    for (const page of pages) adoptSessions(page.sessions);
+  }, [pages]);
 
-  const more = useCallback(() => {
-    if (!cursor || loadingMore) return;
-    setLoadingMore(true);
-    void api
-      .pageSessions(auth, cursor)
-      .then((page) => {
-        setCursor(page.next);
-        adoptSessions(page.sessions);
-      })
-      .catch((err: unknown) => {
-        // A cursor this deployment cannot resume is a 422 and is final for this listing: clearing
-        // it takes the control off screen rather than offering a button that will never work.
-        logger.warn('sessions.page_failed', {
-          kind: err instanceof ApiError ? err.kind : 'unknown',
-        });
-        setCursor('');
-      })
-      .finally(() => setLoadingMore(false));
-  }, [auth, cursor, loadingMore]);
+  // A backend without the listing endpoint and a backend that refused our token are not the same
+  // thing, and silently showing a local-only list made them look identical. Not worth a banner,
+  // but worth saying somewhere.
+  //
+  // **It un-latches**, which is the half a plain `error` boolean would have kept and the old
+  // `setHealth('idle')` on success existed for: a single failure used to leave "showing local
+  // conversations only" on screen for the life of the session. react-query clears `error` on the
+  // next success, so the reset is the library's rather than a line that can be forgotten.
+  useEffect(() => {
+    if (!error) return;
+    logger.warn('sessions.list_failed', {
+      kind: error instanceof ApiError ? error.kind : 'unknown',
+      ...(error instanceof ApiError && error.status ? { status: error.status } : {}),
+    });
+  }, [error]);
 
-  return { health, more: cursor ? more : null, loadingMore };
+  return {
+    health: error ? 'degraded' : 'idle',
+    // A cursor this deployment cannot resume is a 422 and is final for this listing. That used to
+    // be handled by clearing the cursor, which took the control off screen; `hasNextPage` is
+    // `false` once a page errors for the same reason, so the button goes away rather than offering
+    // a retry that will never work.
+    more: hasNextPage ? () => void fetchNextPage() : null,
+    loadingMore: isFetchingNextPage,
+  };
 }
 
 /**

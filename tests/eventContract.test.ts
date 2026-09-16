@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { normalizeEvent } from '../shared/events.ts';
+import { EVENT_FIELDS, normalizeEvent } from '../shared/events.ts';
 import type { ChemclawEvent } from '../shared/events.ts';
 import { clientEventTypes } from './backendContract.ts';
 
@@ -242,11 +242,16 @@ describe('the event contract carries every field of every member', () => {
  * gate, `EVENT_TYPES` was written by hand, and prose in a docstring asking people to remember did
  * not hold for six members and then for three fields.
  *
- * So the fixture is checked against the *declarations* rather than trusted. `shared/events.ts` is
- * parsed with the TypeScript compiler API — the same compiler that type-checks it, so there is no
- * second idea of what the file says — and every property of every member of `ChemclawEvent` must
- * appear in `full`. Adding a field to an interface and nowhere else now fails here, and the two
- * tests above then prove `normalizeEvent` actually carries it.
+ * So the fixture is checked against the *declarations* rather than trusted — and the declarations
+ * are now the schemas themselves (`EVENT_FIELDS`), which is the honest version of what this used to
+ * do with the compiler API. Every field of every member must appear in `full`, and the two tests
+ * above then prove `normalizeEvent` actually *carries* it rather than defaulting it.
+ *
+ * What changed under this, and it is most of the reason F5 was worth doing: "adding a field to an
+ * interface and nowhere else" is no longer a thing that can happen. The interface and the decoder
+ * are one object. The remaining risk this guards is the other one — a field declared and then
+ * *defaulted away* by a wrong fallback — which a fixture carrying a distinguishable value is the
+ * only way to see.
  *
  * What this closes and what it does not: it makes this repository unable to gain a field in the
  * mirror without proving the normaliser preserves it. It cannot see the service, so a field added
@@ -258,11 +263,13 @@ describe('the event contract carries every field of every member', () => {
  * `shared/events.ts` parsed with the TypeScript compiler API — the same compiler that type-checks
  * it, so there is no second idea of what the file says.
  *
- * One helper because two describe blocks below read different things out of the same file (the
- * `ChemclawEvent` members' fields, and the `ErrorCode` union's literals). Two *walkers* are right —
- * they extract genuinely different properties — but two *parsers* would be two copies of the
- * cwd-relative-path decision, and the second copy would silently re-derive a choice the first one
- * documents.
+ * Still here for `ErrorCode`, and **only** for it. It used to read the `ChemclawEvent` members'
+ * fields as well, by finding each interface in the union and listing its property signatures.
+ * There are no interfaces any more: every member is a `valibot` schema and its type is
+ * `v.InferOutput` of that schema, so "what does this member declare" has an answer at runtime —
+ * `EVENT_FIELDS` — and parsing the file to ask it would be re-deriving a basis that is now
+ * observable. `ErrorCode` is a hand-written union with a hand-written runtime list beside it, so
+ * the walk below is still the only way to read the half that has no runtime existence.
  *
  * Repo-root relative, as `tests/delivery.test.ts` reads the Jenkinsfile: vitest runs from the root,
  * and `import.meta.url` is not a file: URL under this environment.
@@ -275,47 +282,17 @@ const eventsSource = (): ts.SourceFile =>
     true,
   );
 
-/** Every member of `ChemclawEvent`, as `discriminator -> declared field names`. */
-const declaredMembers = (): Map<string, Set<string>> => {
-  const source = eventsSource();
-
-  const interfaces = new Map<string, ts.InterfaceDeclaration>();
-  let union: ts.TypeAliasDeclaration | undefined;
-  for (const statement of source.statements) {
-    if (ts.isInterfaceDeclaration(statement)) interfaces.set(statement.name.text, statement);
-    if (ts.isTypeAliasDeclaration(statement) && statement.name.text === 'ChemclawEvent') {
-      union = statement;
-    }
-  }
-  if (!union || !ts.isUnionTypeNode(union.type)) {
-    throw new Error('ChemclawEvent is no longer a union of interfaces; this check needs updating');
-  }
-
-  const members = new Map<string, Set<string>>();
-  for (const node of union.type.types) {
-    if (!ts.isTypeReferenceNode(node) || !ts.isIdentifier(node.typeName)) continue;
-    const declaration = interfaces.get(node.typeName.text);
-    if (!declaration) throw new Error(`no interface found for ${node.typeName.text}`);
-
-    const fields = new Set<string>();
-    let discriminator: string | undefined;
-    for (const member of declaration.members) {
-      if (!ts.isPropertySignature(member) || !member.name) continue;
-      const name = member.name.getText(source);
-      // The discriminator is the key, not a field: `normalizeEvent` takes it as an argument and
-      // sets it, so it is never something the fixture has to carry.
-      if (name === 'type') {
-        const literal = member.type?.getText(source) ?? '';
-        discriminator = literal.replace(/['"]/g, '');
-        continue;
-      }
-      fields.add(name);
-    }
-    if (!discriminator) throw new Error(`${node.typeName.text} declares no literal \`type\``);
-    members.set(discriminator, fields);
-  }
-  return members;
-};
+/**
+ * Every member of `ChemclawEvent`, as `discriminator -> declared field names`.
+ *
+ * Read off the schemas rather than parsed out of the source. The question this used to answer with
+ * forty lines of compiler API — "is there a field in the interface that the normaliser does not
+ * carry?" — has no answer any more, because there is no interface for a field to be in: the
+ * normaliser IS the declaration. What is left worth asserting is the half below it, that the
+ * fixture populates every declared field, and that needs the list rather than the parse.
+ */
+const declaredMembers = (): ReadonlyMap<string, ReadonlySet<string>> =>
+  new Map([...EVENT_FIELDS].map(([type, fields]) => [type, new Set(fields)]));
 
 describe('the fixture is checked against the declarations, not trusted', () => {
   const fixture = new Map(full.map(([type, frame]) => [type, new Set(Object.keys(frame))]));
@@ -374,7 +351,7 @@ describe('the runtime gate and the interface union are one vocabulary', () => {
   it('is the list the gate actually holds, not a re-derivation of it', () => {
     // Every assertion below loops over this, so a reader that returned nothing would pass them
     // all. Seventeen members and one alias today; more than ten is the honest floor.
-    expect(gate().length, 'EVENT_TYPES parsed to nothing').toBeGreaterThan(10);
+    expect(gate().length, 'EVENT_TYPES read as nothing').toBeGreaterThan(10);
   });
 
   it('admits no name the union does not declare, except a pinned alias', () => {

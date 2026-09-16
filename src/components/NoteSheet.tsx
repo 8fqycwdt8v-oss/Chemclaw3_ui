@@ -16,10 +16,10 @@
  * and a chemist follows one.
  */
 
-import { useCallback, useState } from 'react';
 import { useAuth } from '../auth/AuthContext.tsx';
-import { api, type NoteRef, type NoteView } from '../api/client.ts';
-import { useNewestRead } from '../hooks/useNewestRead.ts';
+import { useApiQuery } from '../api/queryClient.ts';
+import { noteQuery } from '../api/queries.ts';
+import type { NoteRef } from '../api/client.ts';
 import { Markdown } from './LazyMarkdown.tsx';
 import { Molecule } from './Molecule.tsx';
 import { UseStructure } from '@/components/chem/UseStructure';
@@ -27,12 +27,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { EmptyState, Loading } from '@/components/chem/Feedback';
-
-type State =
-  | { status: 'idle' }
-  | { status: 'loading' }
-  | { status: 'ready'; view: NoteView }
-  | { status: 'failed'; message: string };
 
 /** A date the service may or may not have set, rendered as a date or as the open end of a range. */
 function boundary(value: string | null, openLabel: string): string {
@@ -85,39 +79,29 @@ export function NoteSheet({
   onAsk: (noteId: string) => void;
 }): React.JSX.Element {
   const { auth } = useAuth();
-  const [state, setState] = useState<State>({ status: 'idle' });
+  /**
+   * The note, keyed on which note.
+   *
+   * **`useNewestRead` is gone from this component and the reason is worth keeping.** Following a
+   * neighbour re-targets this panel rather than stacking another, so two reads could be in flight
+   * and the older one could land last: the heading, the provenance and the validity window all
+   * belong to one `noteId`, and showing another note's under it is worse than showing nothing. A
+   * claim token was how that was held. A key holds it by construction — the answer to
+   * `keys.note(a)` cannot be rendered under `keys.note(b)`, because it is not what this hook
+   * returns once `noteId` moves — and it holds the half the token could not: the neighbour a reader
+   * follows and then comes back from is not fetched twice.
+   *
+   * `enabled: open` rather than the `loadedFor !== noteId` render-phase call this replaces, which
+   * existed because the panel stays mounted behind a closed sheet and an effect on `open` alone
+   * would never fire again when the note changed underneath it.
+   */
+  const {
+    data: view,
+    error,
+    isPending,
+  } = useApiQuery({ ...noteQuery(noteId, auth), enabled: open });
 
-  const claim = useNewestRead();
-  const load = useCallback(
-    (id: string) => {
-      // Claimed before the request so a read this one supersedes cannot land afterwards: the
-      // heading, the provenance and the validity window all belong to `noteId`, and the panel
-      // showing another note's under it is worse than showing nothing. See `useNewestRead`.
-      const isNewest = claim();
-      setState({ status: 'loading' });
-      api
-        .getNote(id, auth)
-        .then((view) => isNewest() && setState({ status: 'ready', view }))
-        .catch((err: unknown) => {
-          if (!isNewest()) return;
-          setState({
-            status: 'failed',
-            message: err instanceof Error ? err.message : 'Could not read that note.',
-          });
-        });
-    },
-    [auth, claim],
-  );
-
-  // Keyed on `noteId` as well as `open` so following a neighbour refetches: the panel stays
-  // mounted across that transition, and an effect on `open` alone would never fire again.
-  const [loadedFor, setLoadedFor] = useState<string | null>(null);
-  if (open && loadedFor !== noteId) {
-    setLoadedFor(noteId);
-    load(noteId);
-  }
-
-  const note = state.status === 'ready' ? state.view.note : null;
+  const note = view?.note ?? null;
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -138,11 +122,11 @@ export function NoteSheet({
             )}
           </div>
 
-          {state.status === 'loading' && <Loading>Reading the note…</Loading>}
+          {isPending && !error && <Loading>Reading the note…</Loading>}
 
-          {state.status === 'failed' && (
+          {error && (
             <EmptyState title="That note could not be read">
-              <p>{state.message}</p>
+              <p>{error.message}</p>
               {/* The path this panel replaced, kept for when it cannot serve. Not every citation
                   is a note id — a `qm-…` reference names a job whose note may never have been
                   written — and the agent can still say what it knows about one. */}
@@ -160,9 +144,9 @@ export function NoteSheet({
             </EmptyState>
           )}
 
-          {state.status === 'ready' && (
+          {view && (
             <>
-              {isExpired(state.view.note) && (
+              {isExpired(view.note) && (
                 <p
                   role="alert"
                   className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
@@ -172,11 +156,11 @@ export function NoteSheet({
                 </p>
               )}
 
-              <Provenance note={state.view.note} />
+              <Provenance note={view.note} />
 
-              {state.view.note.tags.length > 0 && (
+              {view.note.tags.length > 0 && (
                 <ul className="flex flex-wrap gap-1.5">
-                  {state.view.note.tags.map((tag) => (
+                  {view.note.tags.map((tag) => (
                     <li key={tag}>
                       <Badge tone="neutral">{tag}</Badge>
                     </li>
@@ -184,16 +168,16 @@ export function NoteSheet({
                 </ul>
               )}
 
-              {state.view.note.compound_smiles && (
+              {view.note.compound_smiles && (
                 <div>
-                  <Molecule smiles={state.view.note.compound_smiles} />
+                  <Molecule smiles={view.note.compound_smiles} />
                   {/* The compound a note is about is very often the next thing a chemist wants to
                       ask about, and copying it out of a panel by hand was the only way. Closing
                       the sheet is part of the action: the message they are now editing is behind
                       it. */}
                   <div className="mt-1 flex justify-end">
                     <UseStructure
-                      smiles={state.view.note.compound_smiles}
+                      smiles={view.note.compound_smiles}
                       label
                       onUsed={() => onOpenChange(false)}
                     />
@@ -202,16 +186,16 @@ export function NoteSheet({
               )}
 
               <div className="border-t border-border-subtle pt-4 text-sm">
-                <Markdown>{state.view.body}</Markdown>
+                <Markdown>{view.body}</Markdown>
               </div>
 
-              {state.view.neighbors.length > 0 && (
+              {view.neighbors.length > 0 && (
                 <div className="border-t border-border-subtle pt-4">
                   <h3 className="mb-2 text-2xs font-medium tracking-wide text-ink-subtle uppercase">
                     Linked notes
                   </h3>
                   <ul className="flex flex-col items-start gap-1">
-                    {state.view.neighbors.map((neighbor) => (
+                    {view.neighbors.map((neighbor) => (
                       <li key={neighbor.id}>
                         <Button
                           variant="link"

@@ -20,6 +20,7 @@ import { useEffect, useState } from 'react';
 import { Menu, RefreshCw, X } from 'lucide-react';
 import { config } from '../env.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
+import { keys, useApiQuery } from '../api/queryClient.ts';
 import { useChatStore } from '../state/chatStore.ts';
 import { useOffline } from '../hooks/useOffline.ts';
 import { resetSession } from '../state/sendMessage.ts';
@@ -47,8 +48,11 @@ type Health = 'checking' | 'ok' | 'down';
  *  unreachable. The deadline is what makes "checking" a *transient* state: without it a backend
  *  that accepts the connection and never answers leaves the indicator in the one state that means
  *  "I do not know" for the life of the tab. Short of the interval, so a probe is never outlived by
- *  the next one. */
-const HEALTH_POLL_MS = 30_000;
+ *  the next one.
+ *
+ *  Exported so `tests/serviceHealth.test.ts` can advance a clock by it rather than transcribe it:
+ *  a test that hardcoded 30 s would go quietly green if the header started probing once an hour. */
+export const HEALTH_POLL_MS = 30_000;
 const HEALTH_TIMEOUT_MS = 5_000;
 
 const HEALTH: Record<Health, { status: Status; label: string }> = {
@@ -67,42 +71,41 @@ export function TopBar({
   conversationId?: string;
 }): React.JSX.Element {
   const { auth, refresh } = useAuth();
-  const [health, setHealth] = useState<Health>('checking');
   const [drawer, setDrawer] = useState(false);
   const banner = useChatStore((s) => s.banner);
   const activeId = useChatStore((s) => s.activeId);
   const offline = useOffline();
 
-  useEffect(() => {
-    let cancelled = false;
-    // Skipped while one is outstanding. Every probe is bounded now, so this cannot wedge the poll
-    // — and without it a hung backend collected a new never-resolving request every 30 s, plus one
-    // more on every visibility change.
-    let inFlight = false;
-    const check = (): void => {
-      if (typeof document !== 'undefined' && document.hidden) return;
-      if (inFlight) return;
-      inFlight = true;
-      void api_health().then((ok) => {
-        inFlight = false;
-        if (!cancelled) setHealth(ok ? 'ok' : 'down');
-      });
-    };
-    check();
-    const timer = setInterval(check, HEALTH_POLL_MS);
-    // Catch up immediately on return rather than waiting out the rest of the interval. `online`
-    // is the same argument for the other way back: every probe taken during an outage failed, so
-    // the dot reads "unreachable" and would go on reading it for up to 30 s after the Wi-Fi
-    // returned — which is the moment a chemist is most likely to be looking at it.
-    document.addEventListener('visibilitychange', check);
-    window.addEventListener('online', check);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-      document.removeEventListener('visibilitychange', check);
-      window.removeEventListener('online', check);
-    };
-  }, []);
+  /**
+   * The service-health poll — **the one read in this app that asks for focus refetching by name.**
+   *
+   * `queryClient.ts` turns `refetchOnWindowFocus` and `refetchOnReconnect` off globally, because
+   * nothing here refetched on focus before and because `/plans/pending` must not. This probe is the
+   * exception and always was: it carried its own `visibilitychange` and `online` listeners for
+   * exactly the reason those options exist — every probe taken during an outage failed, so the dot
+   * reads "unreachable" and would go on reading it for up to 30 s after the Wi-Fi returned, which
+   * is the moment a chemist is most likely to be looking at it. Spelling it out here is better than
+   * a default that would apply to twelve other reads.
+   *
+   * Three pieces of hand-rolled polling go with the listeners: the `setInterval` is
+   * `refetchInterval`; the "skip while one is outstanding" flag is what a query does anyway (a
+   * hung backend used to collect a new never-resolving request every 30 s, plus one per visibility
+   * change); and the `document.hidden` guard is `refetchIntervalInBackground: false`, which is the
+   * default and is why it does not appear below.
+   *
+   * `api_health` answers `false` rather than throwing, so this query never fails — which keeps
+   * `checking` the transient state it is documented to be: `isPending` is true only before the
+   * first answer, and `HEALTH_TIMEOUT_MS` is what stops that lasting the life of the tab.
+   */
+  const { data: reachable, isPending: probing } = useApiQuery({
+    queryKey: keys.health,
+    queryFn: api_health,
+    refetchInterval: HEALTH_POLL_MS,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
+    staleTime: 0,
+  });
+  const health: Health = probing ? 'checking' : reachable ? 'ok' : 'down';
 
   const account = auth.account;
   const meta = HEALTH[health];

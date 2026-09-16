@@ -33,6 +33,10 @@ export default defineConfig({
   },
   test: {
     environment: 'happy-dom',
+    // One line, argued in the file: the query cache is module-scoped, so a case that read a tool
+    // result would otherwise answer the next case's question — and the next case would pass while
+    // making no request at all.
+    setupFiles: ['tests/setup.ts'],
     // `.tsx` too, so a component can be tested where a store contract alone would not prove the
     // thing that was actually broken: a value written to state that nothing ever renders.
     include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],

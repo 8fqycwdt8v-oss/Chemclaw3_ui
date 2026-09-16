@@ -146,6 +146,32 @@ function mountJobs(at = '/jobs'): void {
 }
 
 describe('JobsPanel', () => {
+  it('stops the spinner when the LIST read failed, and says nothing is there', async () => {
+    // The list, not the sheet — the case further down covers the sheet, and this panel had no case
+    // for this one at all. That gap is what let a regression through: `data` on a failed query is
+    // `undefined`, and defaulting it to `null` means "still reading", so a 500 left "Reading the
+    // registry…" on screen for ever. "Still loading" and "this failed and will never load" being
+    // the same screen is exactly what the sheet's own case exists to prevent, one component out.
+    //
+    // An empty list rather than a banner is the deliberate part and is unchanged: this is a search
+    // over a durable-run archive, and a chemist who searched and found nothing is not misled the
+    // way one told "nothing is waiting on you" would be.
+    restore?.();
+    const stub = stubFetch(
+      () =>
+        new Response(JSON.stringify({ detail: 'boom' }), {
+          status: 500,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    restore = stub.restore;
+
+    mountJobs();
+
+    expect(await screen.findByText('No runs recorded yet')).toBeTruthy();
+    expect(screen.queryByText('Reading the registry…')).toBeNull();
+  });
+
   it('leads with why a run happened, not with its id', async () => {
     serve();
     mountJobs();

@@ -244,10 +244,17 @@ export function JobsPanel(): React.JSX.Element {
   // A failure still renders as an empty list rather than as a banner, unchanged: this panel is a
   // search over a durable-run archive, and a chemist who searched and found nothing is not misled
   // the way one told "nothing is waiting on you" would be.
-  const { data: jobs = null } = useApiQuery({
-    ...jobsQuery(submitted, auth),
-    enabled: ready,
-  });
+  const { data, isError } = useApiQuery({ ...jobsQuery(submitted, auth), enabled: ready });
+  // **`null` is "still reading" and `[]` is "nothing matched", and a failure is the second.** The
+  // catch this replaces answered `setLoaded({ query, list: [] })`, and `data` on a failed query is
+  // `undefined` — so defaulting it to `null` left the spinner on screen for ever, which is
+  // "still loading" and "this failed and will never load" being the same screen. That is the
+  // distinction the sheet below already makes for a single job, and this panel had no test for it.
+  //
+  // An empty list rather than a banner is unchanged and deliberate: this is a search over a
+  // durable-run archive, and a chemist who searched and found nothing is not misled the way one
+  // told "nothing is waiting on you" would be.
+  const jobs = data ?? (isError ? [] : null);
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">

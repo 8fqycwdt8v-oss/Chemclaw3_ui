@@ -66,10 +66,14 @@ export function ProtocolsPanel(): React.JSX.Element {
   // experiment design yet" — the 404-only policy `client.ts` documents, applied to every status.
   // `listProtocols` already swallows the 404, so anything that reaches `error` here is a fault a
   // reader should be shown, and it is shown.
-  const { data: designs = null, error } = useApiQuery({
+  const { data, error } = useApiQuery({
     ...protocolsQuery(status, submittedProject, auth),
     enabled: ready,
   });
+  // `[]` on a failure, not `null`: `null` is "still reading", and this panel renders the spinner
+  // and the error message from two independent conditions — so a failed read showed both at once.
+  // The catch this replaces answered `{ list: [], error }` for exactly that reason.
+  const designs = data ?? (error ? [] : null);
   const failed = error ? error.message : undefined;
 
   return (

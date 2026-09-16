@@ -72,22 +72,182 @@
  * the commit that wrote it, and renumbering prose every time the union moves is how the numbers in
  * it stop being checkable at all.)
  *
- * This file is imported by both the SPA (bundled by Vite) and the mock backend (bundled by
- * esbuild). Keep it dependency-free.
+ * ## This file used to say "keep it dependency-free", and now takes one
+ *
+ * It is imported by the SPA (bundled by Vite), by the mock backend (bundled by esbuild) and by the
+ * e2e fixture service (run under `node --experimental-strip-types`). All three resolve an ordinary
+ * npm dependency, so that rule was policy rather than physics — and the policy has now been
+ * reversed deliberately, on the record, for `valibot` and for nothing else. See
+ * `docs/dependencies.md`.
+ *
+ * **The reason is the changelog above.** Six members and three fields shipped upstream and were
+ * *deleted in transit*, because `normalizeEvent` rebuilt every event field by field: a field this
+ * mirror did not know about was not merely untyped, it was silently dropped, and a well-formed
+ * event arrived with its qualifying half removed. Every one of those was a hand-written switch
+ * branch failing to keep up with a hand-written interface beside it.
+ *
+ * So the interface is no longer hand-written. Each member is a `valibot` schema and its exported
+ * type is `v.InferOutput` of that schema, which makes the two the same object: **a field cannot
+ * exist in the type and be absent from the decoder**, because there is nowhere for it to exist. The
+ * class of defect this file has recorded nine times is now unrepresentable rather than tested for.
+ *
+ * What it costs, stated because it is a real loss in a file whose value is its prose: a field's
+ * documentation now sits above its schema entry instead of above an interface member, so an editor
+ * hovering `event.plan_hash` no longer shows it. The prose is in the same place in the file, one
+ * construct over, and that is the trade.
+ *
+ * **`valibot` rather than `zod`**: this surface tree-shakes to ~2-4 kB gz where zod classic is
+ * ~13 kB, and `shared/` is bundled into the SPA. `src/env.ts` declines a schema library for the
+ * runtime config and that decision stands — a dozen string checks over a handful of keys is not a
+ * 17-member discriminated union with per-field defaults, and the argument there ("more bytes than
+ * the rest of this module") is about a module this one is fifty times the size of.
  */
 
-export interface QueuedEvent {
-  type: 'queued';
+import * as v from 'valibot';
+
+/**
+ * Make some keys optional to *write* while leaving them present to read.
+ *
+ * Five fields on this wire are documented as "optional in the type, always populated by
+ * `normalizeEvent`", and the argument is theirs rather than this helper's: the backend defaults
+ * each one precisely so an existing consumer is unaffected, and a required mirror makes every
+ * construction site — every test, every fixture, the mock, the e2e fixture service — name a field
+ * that means "nothing". Measured: making the five required breaks 78 call sites.
+ *
+ * A schema cannot express that on its own — `v.optional(s, d)` produces a *required* output key,
+ * which is the correct reading for a consumer and the wrong one for a writer. So the relaxation is
+ * named here, per field, at the type alias. It is the only hand-written part of any event's shape,
+ * and it can only ever remove a `?`, never add or drop a field.
+ */
+type Loosen<T, K extends keyof T> = Omit<T, K> & { [P in K]?: T[P] };
+
+/* ── the coercion vocabulary ─────────────────────────────────────────────────
+ *
+ * Eight helpers, one per shape this wire actually carries, replacing the six hand-written coercers
+ * this file used to run inside a 130-line switch. Each is a `v.fallback`, so a malformed field
+ * costs that field and never the event: these values cross a process boundary, and a frame a
+ * service got wrong must not take a conversation with it.
+ */
+
+/** A string, or the stated fallback. The shape most of this wire has. */
+const text = (fallback = '') => v.fallback(v.string(), fallback);
+
+/** Every entry stringified; a non-array is empty. The wire's `[str]` fields, read exactly as they
+ *  were — `['a', 1]` is `['a', '1']`, because one unexpected entry is not a reason to drop a list a
+ *  surface is about to render. */
+const textList = () =>
+  v.fallback(
+    v.pipe(
+      v.array(v.unknown()),
+      v.transform((entries) => entries.map(String)),
+    ),
+    [] as string[],
+  );
+
+/** Finite numbers only. This array feeds numeric rendering, and one `NaN` in it is a blank cell
+ *  nobody can explain. */
+const numberList = () =>
+  v.fallback(
+    v.pipe(
+      v.array(v.unknown()),
+      v.transform((entries) =>
+        entries.filter((x): x is number => typeof x === 'number' && Number.isFinite(x)),
+      ),
+    ),
+    [] as number[],
+  );
+
+/** A count, never `NaN`/`Infinity`. Same reason as `numberList`'s filter, and `0` is the honest
+ *  reading of "not reported". */
+const count = () =>
+  v.fallback(
+    v.pipe(
+      v.number(),
+      v.check((n: number) => Number.isFinite(n)),
+      v.transform((n) => Math.trunc(n)),
+    ),
+    0,
+  );
+
+/** A real boolean, never merely truthy. A `1` or a `'yes'` is a service getting it wrong, and
+ *  every flag on this wire qualifies an answer — so the safe reading is the unqualified one. This
+ *  is `o.field === true` written once: anything that is not a boolean falls back to `false`. */
+const isTrue = () => v.fallback(v.boolean(), false);
+
+/** One of a closed set, or the stated fallback. */
+const oneOf = <T extends string>(options: readonly T[], fallback: T) =>
+  v.fallback(v.picklist(options), fallback);
+
+/** One of a closed set, or `null` — for a field whose absence is itself the information. An
+ *  unrecognised value normalises to `null` rather than passing through, because "a value this
+ *  build does not know" must read as nothing, never as the wrong something. */
+const oneOfOrNull = <T extends string>(options: readonly T[]) =>
+  v.fallback(v.nullable(v.picklist(options)), null);
+
+/** The members of a closed set, dropping the rest. The narrowing is per member for the reason
+ *  `checks_run` gives: an unknown entry would reach a renderer as a check that ran. */
+const listOf = <T extends string>(options: readonly T[]) =>
+  v.fallback(
+    v.pipe(
+      v.array(v.unknown()),
+      v.transform((entries) =>
+        entries.filter((x): x is T => (options as readonly unknown[]).includes(x)),
+      ),
+    ),
+    [] as T[],
+  );
+
+/** Any object, untouched. The backend types this as a bare `dict[str, object]`, so there is
+ *  nothing here to validate and pretending otherwise would drop keys a surface reads. */
+const jobSummary = () =>
+  v.fallback(
+    v.custom<JobSummary>((x) => typeof x === 'object' && x !== null),
+    {} as JobSummary,
+  );
+
+/**
+ * The labelled figures, dropping anything that is not one.
+ *
+ * A value with no label is not usable by the surfaces this field exists for — it is exactly the
+ * unnamed number `numbers` already carries — and a non-finite one is a blank cell nobody can
+ * explain, which is the same rule `numberList` takes one field up.
+ */
+const resultValues = () =>
+  v.fallback(
+    v.pipe(
+      v.array(v.unknown()),
+      v.transform((entries) =>
+        entries.flatMap((entry): ResultValue[] => {
+          if (typeof entry !== 'object' || entry === null) return [];
+          const row = entry as Record<string, unknown>;
+          const label = typeof row.label === 'string' ? row.label : '';
+          const value = row.value;
+          if (!label || typeof value !== 'number' || !Number.isFinite(value)) return [];
+          return [{ label, value, unit: typeof row.unit === 'string' ? row.unit : '' }];
+        }),
+      ),
+    ),
+    [] as ResultValue[],
+  );
+
+/** Which verifier can have produced a confidence. See `AnswerEvent.verified_by`. */
+const VERIFIED_BY = ['judge', 'citation-gate'] as const;
+
+/* ── the members ─────────────────────────────────────────────────────────── */
+
+const queuedEvent = v.object({
+  type: v.literal('queued'),
   /* No payload. The backend emits this only when the turn actually had to wait for an admission
    * permit, and it is then the FIRST event of that turn. A turn that gets a permit immediately —
    * the normal case — never sends one, so seeing it at all is the information. */
-}
+});
+export type QueuedEvent = v.InferOutput<typeof queuedEvent>;
 
-export interface PlanEvent {
-  type: 'plan';
+const planEvent = v.object({
+  type: v.literal('plan'),
   /** The harness's current todo list. Emitted only when the list CHANGED, so each one is a
    *  genuine revision rather than a repeat. Absent entirely unless harness mode is on. */
-  todos: string[];
+  todos: textList(),
   /**
    * The identity of THIS plan, which is what `POST /sessions/{id}/plan/decision` requires.
    *
@@ -100,15 +260,16 @@ export interface PlanEvent {
    * never as a hash that will match. The backend defaults it for exactly that reason, so an older
    * service degrades to the round trip rather than to a wrong answer.
    */
-  plan_hash: string;
-}
+  plan_hash: text(),
+});
+export type PlanEvent = v.InferOutput<typeof planEvent>;
 
-export interface ToolCallEvent {
-  type: 'tool_call';
-  tool: string;
+const toolCallEvent = v.object({
+  type: v.literal('tool_call'),
+  tool: text('unknown'),
   /** A RAW string truncated to 200 chars by the backend — NOT parsed JSON, and possibly cut
    *  mid-token. Never `JSON.parse` this unguarded. */
-  arguments: string;
+  arguments: text(),
   /** The specialist that raised this event; **empty means the main agent**, which is what every
    *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
    *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
@@ -119,33 +280,36 @@ export interface ToolCallEvent {
    *  consumer is unaffected, and a required mirror makes every construction site — every test,
    *  every fixture, the mock — name a field that means "no specialist". Absent and `''` both read
    *  as the main agent, so a falsy check is the whole handling. */
-  agent?: string;
-}
+  agent: text(),
+});
+export type ToolCallEvent = Loosen<v.InferOutput<typeof toolCallEvent>, 'agent'>;
 
-export interface TokenEvent {
-  type: 'token';
-  text: string;
+const tokenEvent = v.object({
+  type: v.literal('token'),
+  text: text(),
   /** The agent that produced this chunk; **empty means the main agent**. The backend emits it on
    *  every token (`agent="subagent" if namespace else ""`) and its own docstring says a consumer
    *  "concatenates only the unattributed ones", because an attributed chunk is another agent's
    *  working notes rather than part of the answer. Same optionality rule as `ToolCallEvent.agent`:
    *  optional in the type, always populated by `normalizeEvent`, and a falsy check is the whole
    *  handling. */
-  agent?: string;
-}
+  agent: text(),
+});
+export type TokenEvent = Loosen<v.InferOutput<typeof tokenEvent>, 'agent'>;
 
-export interface JobStartedEvent {
-  type: 'job_started';
-  job_id: string;
+const jobStartedEvent = v.object({
+  type: v.literal('job_started'),
+  job_id: text(),
   /** "calc" | "report" | "campaign" | "job" — lets a surface label the job without parsing the id. */
-  kind: string;
+  kind: text('job'),
   /** The plan step this job was launched for — the todo's bare text, so the checklist item can be
    *  matched without sharing a hash function with the service (backend D-2026-08-27). Empty means
    *  the job was not launched from a plan step, which is every job outside the harness. Same
    *  optionality rule as `TokenEvent.agent`: optional in the type, always populated by
    *  `normalizeEvent`, and a falsy check is the whole handling. */
-  plan_step?: string;
-}
+  plan_step: text(),
+});
+export type JobStartedEvent = Loosen<v.InferOutput<typeof jobStartedEvent>, 'plan_step'>;
 
 /** The one structured chemistry payload the backend produces. The backend types it as a bare
  *  `dict[str, object]`, so every key is unverified — treat all of them as optional. */
@@ -157,19 +321,21 @@ export interface JobSummary {
   [key: string]: unknown;
 }
 
-export interface JobCompletedEvent {
-  type: 'job_completed';
-  job_id: string;
-  summary: JobSummary;
-}
+const jobCompletedEvent = v.object({
+  type: v.literal('job_completed'),
+  job_id: text(),
+  summary: jobSummary(),
+});
+export type JobCompletedEvent = v.InferOutput<typeof jobCompletedEvent>;
 
-export interface JobFailedEvent {
-  type: 'job_failed';
-  job_id: string;
+const jobFailedEvent = v.object({
+  type: v.literal('job_failed'),
+  job_id: text(),
   /** Why it died, in the service's own words. May be empty — a job can fail without the
    *  workflow having anything printable to say about it, and "" must still read as a failure. */
-  reason: string;
-}
+  reason: text(),
+});
+export type JobFailedEvent = v.InferOutput<typeof jobFailedEvent>;
 
 /** The two terminal states of a durable job. Both arrive on the turn stream when the job finishes
  *  inside the turn, and on `GET /sessions/{id}/events` when it finishes after it. Anything that
@@ -195,38 +361,40 @@ export type JobTerminalEvent = JobCompletedEvent | JobFailedEvent;
  * That is the join: a surface that shows a wait as a running job can close it out on this event
  * instead of leaving it running until the tab is reloaded.
  */
-export interface AwaitingAnswerEvent {
-  type: 'awaiting_answer';
+const awaitingAnswerEvent = v.object({
+  type: v.literal('awaiting_answer'),
   /** What `GET /pending` and `POST /pending/{id}/answer` are keyed by. The only field that is
    *  always populated, and the only one worth branching on. */
-  request_id: string;
+  request_id: text(),
   /** `'waiting'` on the open and on every reminder, `'expired'` when the deadline passed with no
    *  answer. Open upstream — a string, not a union — because the backend types it as a bare `str`
    *  defaulted to `'waiting'`, and narrowing it here would make a third state this build does not
    *  know render as nothing at all. */
-  state: string;
+  state: text('waiting'),
   /** What is being decided, in one line. Sent on the **expiry** push. */
-  subject: string;
+  subject: text(),
   /** The category of request ('measurement', 'approval', …). Sent on the **open** push. */
-  kind: string;
+  kind: text(),
   /** Who was asked — a person or a role. Sent on the open push. Never a reason to hide the event
    *  from anyone else: the deadline is the whole point, and a request nobody can see is exactly
    *  the one that expires. */
-  asked_of: string;
+  asked_of: text(),
   /** The deadline, ISO-8601. Sent on the open push. Empty means this push did not carry one, so a
    *  surface must render "no deadline shown" rather than "no deadline". */
-  due_at: string;
+  due_at: text(),
   /** How many reminders had been sent when this push was written. `0` on the open. */
-  reminders: number;
-}
+  reminders: count(),
+});
+export type AwaitingAnswerEvent = v.InferOutput<typeof awaitingAnswerEvent>;
 
-export interface QuestionEvent {
-  type: 'question';
-  question: string;
+const questionEvent = v.object({
+  type: v.literal('question'),
+  question: text(),
   /** Concrete choices when the agent can enumerate them, so a surface can render buttons
    *  instead of free text. Often empty. */
-  options: string[];
-}
+  options: textList(),
+});
+export type QuestionEvent = v.InferOutput<typeof questionEvent>;
 
 /**
  * A note was written into the knowledge graph.
@@ -254,16 +422,17 @@ export interface QuestionEvent {
  * reason, an `ISSUES.md` row whose deletion expires the entry, and a date by which somebody
  * re-takes the decision.
  */
-export interface NoteProposedEvent {
-  type: 'note_proposed';
-  note_id: string;
+const noteProposedEvent = v.object({
+  type: v.literal('note_proposed'),
+  note_id: text(),
   /** The branch/PR reference the note was opened on, for the PR-gated knowledge graph. */
-  reference: string;
-}
+  reference: text(),
+});
+export type NoteProposedEvent = v.InferOutput<typeof noteProposedEvent>;
 
-export interface ApprovalRequestEvent {
-  type: 'approval_request';
-  prompt: string;
+const approvalRequestEvent = v.object({
+  type: v.literal('approval_request'),
+  prompt: text('Approval requested.'),
   /**
    * **Always `""`**, and mirrored only because that is what says so.
    *
@@ -276,14 +445,19 @@ export interface ApprovalRequestEvent {
    * A plan approval — the only shape this event has — is answered on
    * `POST /sessions/{id}/plan/decision` and bound by the hash on the `plan` event, never by this.
    */
-  approval_id: string;
-}
+  approval_id: text(),
+});
+export type ApprovalRequestEvent = v.InferOutput<typeof approvalRequestEvent>;
 
 /** An answer check the core layer can run. Mirrors `agent/verifier.AnswerCheck`. */
 export type AnswerCheck = 'verifier' | 'answer-shape';
 
-export interface AnswerEvent {
-  type: 'answer';
+/** Every member of `AnswerCheck`, because the schema narrows `checks_run` against a list rather
+ *  than a chain of comparisons: a third check is mirrored by adding it here, once. */
+const ANSWER_CHECKS: readonly AnswerCheck[] = ['verifier', 'answer-shape'];
+
+const answerEvent = v.object({
+  type: v.literal('answer'),
   /**
    * The FULL assembled answer — i.e. the concatenation of every preceding `token.text`.
    *
@@ -291,13 +465,13 @@ export interface AnswerEvent {
    * `src/state/chatStore.ts`: the store keeps `streamedText` and `finalText` apart and the
    * renderer picks one. There is deliberately no code path that concatenates them.
    */
-  text: string;
+  text: text(),
   /** Verifier citation-faithfulness score in [0,1]. `null` unless the verifier is enabled. */
-  confidence: number | null;
-  unsupported_claims: string[];
+  confidence: v.fallback(v.nullable(v.number()), null),
+  unsupported_claims: textList(),
   /** True exactly when `confidence < verifier_confidence_threshold`. The routing signal for a
    *  "needs expert review" affordance. */
-  review_required: boolean;
+  review_required: isTrue(),
   /**
    * Which answer checks actually ran on this turn. **Empty means none did.**
    *
@@ -316,7 +490,7 @@ export interface AnswerEvent {
    * A renderer should treat an empty array as *unverified*, not as *clean*. Anything else repeats
    * the ambiguity on the screen after the wire stopped carrying it.
    */
-  checks_run: AnswerCheck[];
+  checks_run: listOf(ANSWER_CHECKS),
   /**
    * Whether a second pass challenged this answer, and the durable hold that pass opened.
    *
@@ -331,9 +505,9 @@ export interface AnswerEvent {
    * coordinated three-repo cut, and the cut is precisely the change a hand-written mirror cannot
    * notice.
    */
-  challenged: boolean;
+  challenged: isTrue(),
   /** The hold id when `challenged`, `null` otherwise. See `challenged`. */
-  review_hold_id: string | null;
+  review_hold_id: v.fallback(v.nullable(v.string()), null),
   /**
    * Which verifier produced `confidence`, or `null` when none ran.
    *
@@ -342,8 +516,9 @@ export interface AnswerEvent {
    * and `judge` is an LLM scoring it against the claims. A surface that shows one score for both
    * is averaging two different measurements.
    */
-  verified_by: 'judge' | 'citation-gate' | null;
-}
+  verified_by: oneOfOrNull(VERIFIED_BY),
+});
+export type AnswerEvent = v.InferOutput<typeof answerEvent>;
 
 /**
  * The closed set of reasons a turn ends badly. Mirrors the backend's `ErrorCode` `Literal`.
@@ -376,7 +551,9 @@ export type ErrorCode =
   | 'bad_tool_arguments'
   | 'empty_answer';
 
-const ERROR_CODES = new Set<string>([
+/** Every member of `ErrorCode`. An array rather than a `Set` because the schema picks from it and
+ *  needs the literal types; `tests/eventContract.test.ts` holds it against the union beside it. */
+const ERROR_CODES: readonly ErrorCode[] = [
   'internal',
   'storage_unavailable',
   'llm_timeout',
@@ -387,31 +564,33 @@ const ERROR_CODES = new Set<string>([
   'spend_cap_reached',
   'bad_tool_arguments',
   'empty_answer',
-]);
+];
 
-export interface ErrorEvent {
-  type: 'error';
+const errorEvent = v.object({
+  type: v.literal('error'),
   /** Safe to show the user — the backend never puts stack traces here. Also how a turn that
    *  blew the wall-clock limit is reported: as a final SSE event, not an HTTP error. */
-  message: string;
+  message: text('The turn failed.'),
   /** What kind of failure, so the surface can say something better than "the turn failed" and
    *  can lock the composer on a `budget_exhausted` that arrived as an event rather than a 429. */
-  code: ErrorCode;
+  code: oneOf(ERROR_CODES, 'internal'),
   /** The backend's own judgement on whether sending the same turn again is worth doing. Not
    *  derivable from `code`: a `storage_unavailable` may or may not be, and it knows which. */
-  retryable: boolean;
+  retryable: isTrue(),
   /** Joins this failure to the audit trail and the server logs of the turn that produced it —
    *  the one thing a support conversation actually needs, and the one the user cannot look up. */
-  correlation_id: string;
-}
+  correlation_id: text(),
+});
+export type ErrorEvent = v.InferOutput<typeof errorEvent>;
 
-export interface CapabilityDegradedEvent {
-  type: 'capability_degraded';
+const capabilityDegradedEvent = v.object({
+  type: v.literal('capability_degraded'),
   /** Connectors that did not come up for this turn, so their tools were absent from it. Emitted
    *  before the first token, so a surface can mark the answer as partial while it streams rather
    *  than retroactively. The turn is NOT failed by this — it costs tools, not the conversation. */
-  connectors: string[];
-}
+  connectors: textList(),
+});
+export type CapabilityDegradedEvent = v.InferOutput<typeof capabilityDegradedEvent>;
 
 /**
  * The kinds of deliberate refusal a `tool_failed` can carry.
@@ -432,12 +611,12 @@ export const REFUSAL_REASONS: readonly RefusalReason[] = [
   'authz',
 ];
 
-export interface ToolFailedEvent {
-  type: 'tool_failed';
+const toolFailedEvent = v.object({
+  type: v.literal('tool_failed'),
   /** One tool call raised; the turn continues. Distinct from `error`, which ends it: the model
    *  can route around a failed call, and when it cannot, this is the only event that says why. */
-  tool: string;
-  message: string;
+  tool: text('unknown'),
+  message: text('The tool call failed.'),
   /**
    * What KIND of failure this is, where the kind is a decision somebody made rather than a fault.
    *
@@ -453,7 +632,7 @@ export interface ToolFailedEvent {
    *
    * `null` is "an ordinary failure", which is every failure emitted before the field existed.
    */
-  reason?: RefusalReason | null;
+  reason: oneOfOrNull(REFUSAL_REASONS),
   /** The specialist that raised this event; **empty means the main agent**, which is what every
    *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
    *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
@@ -464,8 +643,9 @@ export interface ToolFailedEvent {
    *  consumer is unaffected, and a required mirror makes every construction site — every test,
    *  every fixture, the mock — name a field that means "no specialist". Absent and `''` both read
    *  as the main agent, so a falsy check is the whole handling. */
-  agent?: string;
-}
+  agent: text(),
+});
+export type ToolFailedEvent = Loosen<v.InferOutput<typeof toolFailedEvent>, 'reason' | 'agent'>;
 
 /**
  * One number a structured tool result returned, under the name the tool gave it.
@@ -486,15 +666,15 @@ export interface ResultValue {
   unit: string;
 }
 
-export interface ToolResultEvent {
-  type: 'tool_result';
+const toolResultEvent = v.object({
+  type: v.literal('tool_result'),
   /** What a call returned, as data rather than as the model's paraphrase of it. Success only:
    *  a call that raised arrives as `tool_failed` instead, and the two are exhaustive — which is
    *  why there is no `ok` flag to check. */
-  tool: string;
+  tool: text('unknown'),
   /** Truncated by the backend exactly as `tool_call.arguments` is — a preview of the value, not
    *  the whole return. Raw; never `JSON.parse` it unguarded. */
-  preview: string;
+  preview: text(),
   /**
    * The content address of the untruncated result, fetchable at
    * `GET /sessions/{id}/tool-results/{ref}`. A SHA-256 hex digest of the result text.
@@ -507,7 +687,7 @@ export interface ToolResultEvent {
    * The split is the point: the stream keeps its 200-character budget and carries a *reference*,
    * and a surface that decides to render one result pulls that one result, once.
    */
-  result_ref: string;
+  result_ref: text(),
   /**
    * The whole result, when it was small enough to ride along instead of costing a fetch.
    *
@@ -518,12 +698,12 @@ export interface ToolResultEvent {
    * optimisation and never as the presence check. `result_ref` is still what says a result is
    * stored.
    */
-  result_inline?: string;
+  result_inline: text(),
   /** Note ids the result cited, untruncated even when `preview` is not — so a citation survives
    *  the cut that loses the sentence around it. */
-  note_ids: string[];
+  note_ids: textList(),
   /** Numeric values the result carried, untruncated for the same reason. */
-  numbers: number[];
+  numbers: numberList(),
   /**
    * The same figures, each under the key the tool filed it under — for a surface that *displays* a
    * value rather than checking one.
@@ -533,7 +713,7 @@ export interface ToolResultEvent {
    * what they are. Optional in the type and always populated by `normalizeEvent`, on the same
    * grounds as `agent`: the service defaults it, so an older one simply sends nothing.
    */
-  values?: ResultValue[];
+  values: resultValues(),
   /** The specialist that raised this event; **empty means the main agent**, which is what every
    *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
    *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
@@ -544,19 +724,23 @@ export interface ToolResultEvent {
    *  consumer is unaffected, and a required mirror makes every construction site — every test,
    *  every fixture, the mock — name a field that means "no specialist". Absent and `''` both read
    *  as the main agent, so a falsy check is the whole handling. */
-  agent?: string;
-}
+  agent: text(),
+});
+export type ToolResultEvent = Loosen<
+  v.InferOutput<typeof toolResultEvent>,
+  'result_inline' | 'values' | 'agent'
+>;
 
-export interface EvidenceSourceEvent {
-  type: 'evidence_source';
+const evidenceSourceEvent = v.object({
+  type: v.literal('evidence_source'),
   /** One retrieval source's own report of what it contributed to a sweep, emitted while the sweep
    *  runs. `gather_evidence` asks every source at once and merges the results, and in the merged
    *  list a source that returned nothing is indistinguishable from a source nobody asked — which
    *  is a real defect the backend has already paid for once. */
-  source: string;
+  source: text('unknown'),
   /** What the source FOUND, before the cross-source cap. So "had nothing to say" and "was crowded
    *  out of the budget" stay distinguishable; they are different problems with different fixes. */
-  chunks: number;
+  chunks: count(),
   /**
    * Whether this source's retriever RAISED, rather than being asked and having nothing.
    *
@@ -568,8 +752,9 @@ export interface EvidenceSourceEvent {
    * Optional in the type and always populated by `normalizeEvent`, for the same reason `agent` is:
    * the backend defaults it so an existing consumer is unaffected.
    */
-  failed?: boolean;
-}
+  failed: isTrue(),
+});
+export type EvidenceSourceEvent = Loosen<v.InferOutput<typeof evidenceSourceEvent>, 'failed'>;
 
 export type ChemclawEvent =
   | QueuedEvent
@@ -592,32 +777,81 @@ export type ChemclawEvent =
 
 export type ChemclawEventType = ChemclawEvent['type'];
 
-const EVENT_TYPES = new Set<string>([
-  'queued',
-  'plan',
-  'tool_call',
-  'token',
-  'job_started',
-  'job_completed',
-  'job_failed',
-  'awaiting_answer',
-  'capability_degraded',
-  'tool_failed',
-  'tool_result',
-  'evidence_source',
-  'question',
-  // The name the service used to send, retained until every loaded browser has reloaded. See
-  // `NoteProposedEvent`: the reader went first so that the emitter's switch broke nothing, and
-  // this line is the half that is still doing work — the interface union above changes nothing at
-  // runtime, the gate is this set. Its removal is Issue 13's third step and is argued in
-  // `tests/backendContract.test.ts`'s RETAINED_FOR_ROLLOUT rather than left looking like dead code.
-  'note_proposed',
-  // The name the service sends.
-  'note_recorded',
-  'approval_request',
-  'answer',
-  'error',
+/**
+ * Every member, in the order the union declares them. The one place membership is written down.
+ *
+ * `v.variant` dispatches on `type`, so this array *is* the gate `EVENT_TYPES` used to be — and it
+ * cannot drift from the decoder, because it is the decoder. That matters more here than anywhere
+ * else in this file: the rule this header records as having cost six events is "`EVENT_TYPES` is
+ * the gate, and an interface added to the union without its discriminator changes nothing at
+ * runtime". There is no longer a second list for a discriminator to be missing from.
+ */
+const EVENT_MEMBERS = [
+  queuedEvent,
+  planEvent,
+  toolCallEvent,
+  tokenEvent,
+  jobStartedEvent,
+  jobCompletedEvent,
+  jobFailedEvent,
+  awaitingAnswerEvent,
+  capabilityDegradedEvent,
+  toolFailedEvent,
+  toolResultEvent,
+  evidenceSourceEvent,
+  questionEvent,
+  noteProposedEvent,
+  approvalRequestEvent,
+  answerEvent,
+  errorEvent,
+] as const;
+
+/**
+ * A second wire spelling of a member this union already declares.
+ *
+ * The one thing a `v.variant` cannot express, and it is deliberately a map rather than a
+ * transforming member: a rename in flight across two repositories is a *decision with a deadline*,
+ * and one line naming both spellings is what a reader and a `grep` can find. Adding a second entry
+ * is an argument to make in `NoteProposedEvent`'s docstring, in
+ * `tests/backendContract.test.ts`'s `RETAINED_FOR_ROLLOUT`, and in the pinned list in
+ * `tests/eventContract.test.ts` — not a line in a set literal nobody has to explain.
+ *
+ * `note_recorded` is the name the service sends **today**; `note_proposed` is the member this app
+ * still calls it internally. See `NoteProposedEvent` for why the internal rename is a separate
+ * step and why the reader had to go first.
+ */
+const WIRE_ALIASES: Readonly<Record<string, string>> = { note_recorded: 'note_proposed' };
+
+/** The decoder. One `v.variant` over the members above, dispatching on the discriminator. */
+const eventSchema = v.variant('type', EVENT_MEMBERS);
+
+/**
+ * Every wire name this client admits — the gate, derived rather than transcribed.
+ *
+ * Exported because two test files need the list rather than a probe, and reading it off the
+ * schemas is what makes it impossible for the gate to admit a name no member declares. That is the
+ * defect the `handoff` mirror was: a consumer chain for an event nothing could send.
+ */
+export const EVENT_TYPES: ReadonlySet<string> = new Set<string>([
+  ...EVENT_MEMBERS.map((member) => member.entries.type.literal),
+  ...Object.keys(WIRE_ALIASES),
 ]);
+
+/**
+ * What each member carries, as `discriminator -> field names`, excluding the discriminator itself.
+ *
+ * Exported for the contract tests, which used to answer this question by parsing this file with
+ * the TypeScript compiler API — once to find the interfaces' properties, and once more to walk
+ * every `o.<name>` inside `normalizeEvent`'s switch. Both existed because the declaration and the
+ * decoder were different objects that could disagree. They are the same object now, so the
+ * question has an answer at runtime and the two walks are gone.
+ */
+export const EVENT_FIELDS: ReadonlyMap<string, readonly string[]> = new Map(
+  EVENT_MEMBERS.map((member) => [
+    member.entries.type.literal,
+    Object.keys(member.entries).filter((key) => key !== 'type'),
+  ]),
+);
 
 /** Tools the agent advertises, used only to pick an icon/label in the trace panel. An unknown
  *  tool renders with a neutral fallback, so this list going stale is cosmetic — which is why it
@@ -694,50 +928,6 @@ export const KNOWN_TOOLS = [
 
 export type KnownTool = (typeof KNOWN_TOOLS)[number];
 
-const asString = (v: unknown, fallback = ''): string => (typeof v === 'string' ? v : fallback);
-const asStringArray = (v: unknown): string[] => (Array.isArray(v) ? v.map((x) => String(x)) : []);
-
-/**
- * The declared answer checks, dropping anything this mirror does not know.
- *
- * Narrowed rather than passed through as `string[]`, for the reason every other union on this wire
- * is narrowed here: an unknown member would reach a renderer as a check that ran, and the whole
- * point of the field is that its contents are trustworthy enough to say "verified" from. A core
- * release that adds a third check therefore reads as *that check not having run* until this line
- * learns it — the safe direction, and the one a type error at the next build makes visible.
- */
-const asAnswerChecks = (v: unknown): AnswerCheck[] =>
-  Array.isArray(v)
-    ? v.filter((x): x is AnswerCheck => x === 'verifier' || x === 'answer-shape')
-    : [];
-/** Drops non-finite entries rather than passing `NaN`/`Infinity` on: this array feeds numeric
- *  rendering, and one `NaN` in it is a blank cell nobody can explain. */
-const asNumberArray = (v: unknown): number[] =>
-  Array.isArray(v) ? v.filter((x): x is number => typeof x === 'number' && Number.isFinite(x)) : [];
-/** A count, never `NaN`/`Infinity`. Same reason as `asNumberArray`'s filter: a non-finite number
- *  here renders as a blank nobody can explain, and 0 is the honest reading of "not reported". */
-const asCount = (v: unknown): number =>
-  typeof v === 'number' && Number.isFinite(v) ? Math.trunc(v) : 0;
-
-/**
- * The labelled figures, dropping anything that is not one.
- *
- * A value with no label is not usable by the surfaces this field exists for — it is exactly the
- * unnamed number `numbers` already carries — and a non-finite one is a blank cell nobody can
- * explain, which is the same rule `asNumberArray` takes one field up.
- */
-const asResultValues = (v: unknown): ResultValue[] =>
-  Array.isArray(v)
-    ? v.flatMap((entry) => {
-        if (typeof entry !== 'object' || entry === null) return [];
-        const row = entry as Record<string, unknown>;
-        const label = asString(row.label);
-        const value = row.value;
-        if (!label || typeof value !== 'number' || !Number.isFinite(value)) return [];
-        return [{ label, value, unit: asString(row.unit) }];
-      })
-    : [];
-
 /**
  * Coerce one decoded SSE frame into a `ChemclawEvent`, or `null` if it is not one we know.
  *
@@ -745,147 +935,27 @@ const asResultValues = (v: unknown): ResultValue[] =>
  * designed to grow ("adding an event is a new class here plus one branch in the runner and the
  * UI"), so an older frontend must ignore a newer event rather than break the turn.
  *
- * Every field is defensively coerced because these values cross a process boundary and a
- * malformed frame should cost one event, not the whole conversation.
+ * **The only way this returns `null` is an unrecognised discriminator.** Every field of every
+ * member has a fallback, so a malformed field costs that field and never the event — which is the
+ * same rule the hand-written coercers held, now stated once per shape instead of once per field.
+ * A frame whose `type` names no member fails `v.variant`'s dispatch, which is exactly the gate
+ * `EVENT_TYPES` used to be and is now the same object as the decoder.
+ *
+ * The discriminator may arrive on the payload or on the SSE `event:` line, and the payload wins —
+ * see the header. A second wire spelling of a member is resolved through `WIRE_ALIASES` *before*
+ * dispatch rather than by a transforming member, so the parsed event is the member itself and no
+ * consumer has to learn the second name.
  */
 export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEvent | null {
   if (typeof raw !== 'object' || raw === null) return null;
-  const o = raw as Record<string, unknown>;
-  const type = typeof o.type === 'string' ? o.type : sseEventName;
-  if (typeof type !== 'string' || !EVENT_TYPES.has(type)) return null;
-
-  switch (type) {
-    case 'queued':
-      return { type: 'queued' };
-    case 'plan':
-      return { type: 'plan', todos: asStringArray(o.todos), plan_hash: asString(o.plan_hash) };
-    case 'tool_call':
-      return {
-        type: 'tool_call',
-        tool: asString(o.tool, 'unknown'),
-        arguments: asString(o.arguments),
-        agent: asString(o.agent),
-      };
-    case 'token':
-      return { type: 'token', text: asString(o.text), agent: asString(o.agent) };
-    case 'job_started':
-      return {
-        type: 'job_started',
-        job_id: asString(o.job_id),
-        kind: asString(o.kind, 'job'),
-        plan_step: asString(o.plan_step),
-      };
-    case 'job_completed':
-      return {
-        type: 'job_completed',
-        job_id: asString(o.job_id),
-        summary:
-          typeof o.summary === 'object' && o.summary !== null ? (o.summary as JobSummary) : {},
-      };
-    case 'job_failed':
-      // No fallback text for `reason`: the backend defaults it to "" and a job can genuinely fail
-      // with nothing printable to say. Inventing a sentence here would put words in its mouth;
-      // the surface decides what an empty reason reads as.
-      return { type: 'job_failed', job_id: asString(o.job_id), reason: asString(o.reason) };
-    case 'awaiting_answer':
-      return {
-        type: 'awaiting_answer',
-        request_id: asString(o.request_id),
-        // The backend's own default, restated rather than left empty: an event that reached here
-        // at all describes a request that exists, and `''` would be a fourth state no surface has
-        // a rendering for. `'waiting'` is the honest reading of a push whose state did not arrive.
-        state: asString(o.state, 'waiting'),
-        subject: asString(o.subject),
-        kind: asString(o.kind),
-        asked_of: asString(o.asked_of),
-        due_at: asString(o.due_at),
-        // `asCount`, not a bare cast: a reminder count is rendered next to a deadline, and `NaN`
-        // there reads as a fault in the request rather than in the payload that carried it.
-        reminders: asCount(o.reminders),
-      };
-    case 'capability_degraded':
-      return { type: 'capability_degraded', connectors: asStringArray(o.connectors) };
-    case 'tool_failed':
-      return {
-        type: 'tool_failed',
-        tool: asString(o.tool, 'unknown'),
-        message: asString(o.message, 'The tool call failed.'),
-        // A closed set upstream, so an unrecognised value normalises to `null` rather than
-        // passing through: "a reason this build does not know" must read as an ordinary failure,
-        // never as a refusal it cannot render. Derived from `REFUSAL_REASONS` rather than written
-        // as a chain of comparisons, so a sixth member is mirrored by adding it in one place.
-        reason: REFUSAL_REASONS.find((r) => r === o.reason) ?? null,
-        agent: asString(o.agent),
-      };
-    case 'tool_result':
-      return {
-        type: 'tool_result',
-        tool: asString(o.tool, 'unknown'),
-        preview: asString(o.preview),
-        result_ref: asString(o.result_ref),
-        result_inline: asString(o.result_inline),
-        note_ids: asStringArray(o.note_ids),
-        numbers: asNumberArray(o.numbers),
-        values: asResultValues(o.values),
-        agent: asString(o.agent),
-      };
-    case 'evidence_source':
-      return {
-        type: 'evidence_source',
-        source: asString(o.source, 'unknown'),
-        chunks: asCount(o.chunks),
-        failed: o.failed === true,
-      };
-    case 'question':
-      return {
-        type: 'question',
-        question: asString(o.question),
-        options: asStringArray(o.options),
-      };
-    // Both wire names, one internal event. The fall-through is the whole of the tolerance: a
-    // frame named `note_recorded` is normalised to exactly what every surface already renders,
-    // so no consumer of this union has to learn the second name and none can miss it.
-    case 'note_recorded':
-    case 'note_proposed':
-      return {
-        type: 'note_proposed',
-        note_id: asString(o.note_id),
-        reference: asString(o.reference),
-      };
-    case 'approval_request':
-      return {
-        type: 'approval_request',
-        prompt: asString(o.prompt, 'Approval requested.'),
-        approval_id: asString(o.approval_id),
-      };
-    case 'answer':
-      return {
-        type: 'answer',
-        text: asString(o.text),
-        confidence: typeof o.confidence === 'number' ? o.confidence : null,
-        unsupported_claims: asStringArray(o.unsupported_claims),
-        review_required: o.review_required === true,
-        checks_run: asAnswerChecks(o.checks_run),
-        challenged: o.challenged === true,
-        review_hold_id: typeof o.review_hold_id === 'string' ? o.review_hold_id : null,
-        verified_by:
-          o.verified_by === 'judge' || o.verified_by === 'citation-gate' ? o.verified_by : null,
-      };
-    case 'error':
-      return {
-        type: 'error',
-        message: asString(o.message, 'The turn failed.'),
-        // An unrecognised code degrades to `internal` rather than dropping the event: a service
-        // that grew a code this build has not been taught should still be able to end a turn
-        // here. Not "a ninth code", which is what this said while nine were declared: a count in
-        // a comment is a claim about a commit, and `at_capacity` made that one wrong.
-        code: ERROR_CODES.has(asString(o.code)) ? (o.code as ErrorCode) : 'internal',
-        retryable: o.retryable === true,
-        correlation_id: asString(o.correlation_id),
-      };
-    default:
-      return null;
-  }
+  const frame = raw as Record<string, unknown>;
+  const wireName = typeof frame.type === 'string' ? frame.type : sseEventName;
+  if (typeof wireName !== 'string') return null;
+  const parsed = v.safeParse(eventSchema, {
+    ...frame,
+    type: WIRE_ALIASES[wireName] ?? wireName,
+  });
+  return parsed.success ? parsed.output : null;
 }
 
 /** Session ids are uuid4 hex from the backend: exactly 32 lowercase hex chars. The BFF uses

@@ -68,6 +68,7 @@
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.5",
     "@vitejs/plugin-react": "^5.0.0",
+    "culori": "^4.0.2",
     "esbuild": "^0.28.2",
     "eslint": "^9.39.5",
     "eslint-plugin-jsx-a11y": "^6.10.2",

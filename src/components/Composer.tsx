@@ -44,6 +44,8 @@ import { Hexagon, Paperclip, Send, Square, X } from 'lucide-react';
 import { api } from '../api/client.ts';
 import { config } from '../env.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
+import { useApiQuery } from '../api/queryClient.ts';
+import { profilesQuery } from '../api/queries.ts';
 import { useChatStore } from '../state/chatStore.ts';
 import { sendMessage, stopStreaming, warmSession } from '../state/sendMessage.ts';
 import {
@@ -331,7 +333,6 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   const sessionId = useChatStore((s) => s.conversations[conversationId]?.sessionId ?? null);
   const profile = useChatStore((s) => s.sessionProfiles[conversationId] ?? '');
   const setSessionProfile = useChatStore((s) => s.setSessionProfile);
-  const [profiles, setProfiles] = useState<string[]>([]);
   const text = useChatStore((s) => s.drafts[conversationId] ?? '');
   const setDraft = useChatStore((s) => s.setDraft);
 
@@ -467,22 +468,14 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     };
   }, []);
 
-  // The profiles this deployment offers, if more than one. Fetched once and cached in component
-  // state rather than the store: it is a property of the service, not of a conversation, and the
-  // composer outlives every conversation switch.
-  useEffect(() => {
-    if (!ready) return;
-    let cancelled = false;
-    void api
-      .listProfiles(auth)
-      .then((list) => !cancelled && setProfiles(list))
-      // Silent: a service without the route has exactly one profile, and a banner about a
-      // picker nobody asked for would be noise.
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [ready, auth]);
+  // The profiles this deployment offers, if more than one. A property of the *service*, not of a
+  // conversation — which is why it was in component state rather than the store, and why it is
+  // `staleTime: Infinity` here: the composer outlives every conversation switch and the answer
+  // does not change under it.
+  //
+  // Silent on failure, unchanged: a service without the route has exactly one profile, and a
+  // banner about a picker nobody asked for would be noise.
+  const { data: profiles = [] } = useApiQuery({ ...profilesQuery(auth), enabled: ready });
 
   // Mint the backend session while they type, so the first send is one round-trip rather than
   // two. Debounced, so a stray keypress in a conversation they abandon does not cost a session;

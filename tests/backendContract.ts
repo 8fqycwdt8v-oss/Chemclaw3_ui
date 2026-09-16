@@ -27,6 +27,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import ts from 'typescript';
+import { EVENT_FIELDS, EVENT_TYPES, normalizeEvent } from '../shared/events.ts';
 
 /* ------------------------------------------------------------------ the checkout */
 
@@ -366,83 +367,55 @@ const parse = (relative: string): ts.SourceFile =>
   ts.createSourceFile(relative, readLocal(relative), ts.ScriptTarget.ES2023, true);
 
 /**
- * The wire names `normalizeEvent` admits, read off `EVENT_TYPES` rather than probed.
+ * The wire names `normalizeEvent` admits, imported rather than scraped.
  *
  * Probing answers "does this name survive", which is the other direction and is what the test
- * does. This direction needs the *list*, and `shared/events.ts` states in its own header that
- * `EVENT_TYPES` is the gate — so the list is the thing to diff, not the union of interfaces beside
- * it, which has twice been the half that was right while the gate was wrong.
+ * does. This direction needs the *list*, and `shared/events.ts` derives `EVENT_TYPES` from the
+ * schemas it decodes with — so the list is now the same object as the decoder and there is nothing
+ * left to diff it against inside this repository.
+ *
+ * It used to be a regex over a `new Set<string>([…])` literal, with a comment-stripping pass in
+ * front of it because one apostrophe in a `//` line inside that literal ("the emitter's switch")
+ * opened a quote and enrolled four words of prose as members of the wire contract. Measured — that
+ * is exactly what the first run of the tolerant-reader change reported. A parser for a list the
+ * module can simply export was always the wrong shape; it existed because the list was written by
+ * hand.
  */
 export function clientEventTypes(): string[] {
-  const source = readLocal('shared/events.ts');
-  const set = /const EVENT_TYPES = new Set<string>\(\[([\s\S]*?)\]\)/.exec(source);
-  if (!set) throw new Error('shared/events.ts no longer declares EVENT_TYPES as a Set literal');
-  // Comments first, for the reason the Python side strips them: one apostrophe in a `//` line
-  // inside this literal ("the emitter's switch") opens a quote, and the scan then enrols four
-  // words of prose as members of the wire contract. Measured — that is exactly what the first
-  // run of the tolerant-reader change reported.
-  const members = (set[1] as string).replace(/\/\/[^\n]*/g, '');
-  return [...members.matchAll(/'([^']+)'/g)].map((m) => m[1] as string);
+  return [...EVENT_TYPES];
 }
 
 /**
  * Which fields `normalizeEvent` reads off the raw frame, per event type.
  *
- * From the AST rather than from a regex over the text, because the question is structural: every
- * `o.<name>` inside the `case '<type>':` clause, wherever it sits in the expression. A field read
- * here and absent upstream is the renamed-field drift — the client goes on reading a name nobody
- * sends, `asString` fills in `''`, and the surface renders a confident blank.
+ * A field read here and absent upstream is the renamed-field drift — the client goes on reading a
+ * name nobody sends, the fallback fills in `''`, and the surface renders a confident blank. That
+ * question is unchanged; what answers it is not.
  *
- * **A fall-through clause reads what it falls through to**, and that is not a detail here: the one
- * place this normaliser uses fall-through is the two wire names of the note event, which is the
- * event a rename is in flight on. Measured before this: `note_recorded` mapped to `[]`, so the
- * caller reported both of its fields as "the service sends these and this client ignores them" —
- * false, it reads both — and the direction that matters, a field read here and renamed upstream,
- * had nothing to compare for that event at all. An empty clause is not a branch that reads
- * nothing; it is the same branch as the next one with a body.
+ * It used to be a compiler-API walk collecting every `o.<name>` inside each `case '<type>':`
+ * clause of a 130-line switch, with a whole paragraph about fall-through — because the one place
+ * that switch fell through was the two wire names of the note event, and reading an empty clause
+ * as "reads nothing" had already reported both of that event's fields as ignored. There is no
+ * switch. Each member is a `valibot` schema, the fields it reads are its own keys, and
+ * `EVENT_FIELDS` is that list — so the walk is `EVENT_FIELDS`, the fall-through case is a one-line
+ * alias map, and both of the ways this function could be subtly wrong are gone with the thing it
+ * was reading.
+ *
+ * The alias is folded in here rather than exported separately: from the *backend's* point of view
+ * `note_recorded` is a name this client admits and carries two fields under, which is what the
+ * caller is diffing, and which is exactly what the fall-through paragraph above was reconstructing.
  */
 export function normalizeEventReads(): Map<string, string[]> {
-  const file = parse('shared/events.ts');
-  const reads = new Map<string, string[]>();
-  const fn = file.statements.find(
-    (s): s is ts.FunctionDeclaration =>
-      ts.isFunctionDeclaration(s) && s.name?.text === 'normalizeEvent',
-  );
-  if (!fn) throw new Error('shared/events.ts no longer declares function normalizeEvent');
-  const fieldsIn = (statements: readonly ts.Statement[]): string[] => {
-    const fields = new Set<string>();
-    const collect = (n: ts.Node): void => {
-      if (
-        ts.isPropertyAccessExpression(n) &&
-        ts.isIdentifier(n.expression) &&
-        n.expression.text === 'o'
-      ) {
-        fields.add(n.name.text);
-      }
-      ts.forEachChild(n, collect);
-    };
-    statements.forEach(collect);
-    return [...fields];
-  };
-  const visit = (node: ts.Node): void => {
-    if (ts.isCaseBlock(node)) {
-      // Walked as a block rather than clause by clause, because fall-through is a property of the
-      // sequence: an empty clause reads whatever the next clause with a body reads. Backwards, so
-      // "the next one with a body" is the last thing seen.
-      let pending: string[] = [];
-      for (const clause of [...node.clauses].reverse()) {
-        if (!ts.isCaseClause(clause) || !ts.isStringLiteral(clause.expression)) {
-          pending = [];
-          continue;
-        }
-        pending = clause.statements.length === 0 ? pending : fieldsIn(clause.statements);
-        reads.set(clause.expression.text, pending);
-      }
-      return;
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(fn);
+  const reads = new Map<string, string[]>([...EVENT_FIELDS].map(([type, f]) => [type, [...f]]));
+  for (const name of EVENT_TYPES) {
+    if (reads.has(name)) continue;
+    // An alias: a second wire spelling of a member already listed. Probed rather than read off the
+    // map in `shared/events.ts`, because what the caller needs is what a frame under this name
+    // *becomes*, which is the same question the gate test asks.
+    const parsed = normalizeEvent({ type: name });
+    const fields = parsed && reads.get(parsed.type);
+    if (fields) reads.set(name, fields);
+  }
   return reads;
 }
 

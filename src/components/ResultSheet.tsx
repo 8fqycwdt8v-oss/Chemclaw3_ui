@@ -15,19 +15,14 @@
  * it, the byte size, and the correlation id that joins it to the audit trail.
  */
 
-import { useState } from 'react';
 import { useAuth } from '../auth/AuthContext.tsx';
-import { api, type StoredToolResult } from '../api/client.ts';
+import { useApiQuery } from '../api/queryClient.ts';
+import { toolResultQuery } from '../api/queries.ts';
+import type { StoredToolResult } from '../api/client.ts';
 import { toolLabel } from '../lib/format.ts';
 import { rendererFor, RawText, Verdict } from '../results/renderers.tsx';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { EmptyState, Loading } from '@/components/chem/Feedback';
-
-type State =
-  | { status: 'idle' }
-  | { status: 'loading' }
-  | { status: 'ready'; result: StoredToolResult }
-  | { status: 'failed'; message: string };
 
 function Body({
   result,
@@ -87,22 +82,18 @@ export function ResultSheet({
   onOpenChange: (open: boolean) => void;
 }): React.JSX.Element {
   const { auth } = useAuth();
-  const [state, setState] = useState<State>({ status: 'idle' });
-  const [loadedFor, setLoadedFor] = useState<string | null>(null);
-
-  if (open && loadedFor !== resultRef) {
-    setLoadedFor(resultRef);
-    setState({ status: 'loading' });
-    api
-      .getToolResult(sessionId, resultRef, auth)
-      .then((result) => setState({ status: 'ready', result }))
-      .catch((err: unknown) =>
-        setState({
-          status: 'failed',
-          message: err instanceof Error ? err.message : 'Could not read that result.',
-        }),
-      );
-  }
+  // The same key `ResultBlock` reads, which is the point: a reader who opens the panel over a
+  // block that has already fetched pays nothing, and one who opens it over a block that has not
+  // gets the fetch the block would have made. That join used to be a `Map<string, Promise>` in
+  // `client.ts` that held nothing once the answer arrived, so opening the panel refetched.
+  //
+  // Fetched only while the panel is open: this component stays mounted behind a closed sheet, and
+  // reading every result of every turn is exactly what the ref/payload split exists to avoid.
+  const {
+    data: result,
+    error,
+    isPending,
+  } = useApiQuery({ ...toolResultQuery(sessionId, resultRef, auth), enabled: open });
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -117,22 +108,22 @@ export function ResultSheet({
             <p className="font-mono text-2xs text-ink-subtle">{tool}</p>
           </div>
 
-          {state.status === 'loading' && <Loading>Reading the full result…</Loading>}
+          {isPending && !error && <Loading>Reading the full result…</Loading>}
 
-          {state.status === 'failed' && (
+          {error && (
             <EmptyState title="That result could not be read">
-              {state.message} Stored results are retained for a limited time, so an old turn’s
+              {error.message} Stored results are retained for a limited time, so an old turn’s
               result may no longer be there.
             </EmptyState>
           )}
 
-          {state.status === 'ready' && (
+          {result && (
             <>
-              <Body result={state.result} onUsed={() => onOpenChange(false)} />
+              <Body result={result} onUsed={() => onOpenChange(false)} />
               {/* The join a GxP reviewer asks for, and the one a reference alone cannot make. */}
               <p className="border-t border-border-subtle pt-3 text-2xs text-ink-subtle">
-                {state.result.byte_size.toLocaleString()} bytes · correlation{' '}
-                <span className="font-mono">{state.result.correlation_id || 'not recorded'}</span>
+                {result.byte_size.toLocaleString()} bytes · correlation{' '}
+                <span className="font-mono">{result.correlation_id || 'not recorded'}</span>
               </p>
             </>
           )}

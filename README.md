@@ -159,7 +159,7 @@ shared/     the contracts mirrored by hand from the service — events.ts (the S
 scripts/    the gate (ci.mjs) and its checks, dev launcher, server bundler, smoke test
 e2e/        Playwright specs and the SSE fixture service
 public/     theme boot script, favicon — served as-is by the BFF
-docs/       the production-readiness record, and concept studies — what the chemistry
+docs/       the production-readiness record, the dependency record, and concept studies — what the chemistry
             surface is for, and what it still is not
 ```
 

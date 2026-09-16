@@ -7,6 +7,16 @@
  *
  * Validation is hand-rolled: this is a dozen string checks, and a schema library would be more
  * bytes than the rest of this module.
+ *
+ * **That stands, and it stood while `shared/events.ts` took one.** This module imports that one,
+ * so `valibot` is already in the graph and the byte argument no longer bites — which is exactly
+ * why it is worth saying that the byte argument was never the whole of it. What a schema buys
+ * there is that the TypeScript type is *derived* from the decoder, so a field cannot exist in one
+ * and be missing from the other; that file's header is a nine-incident changelog of precisely that
+ * happening. Here there is no second declaration to drift from: the keys are read once at boot,
+ * `RuntimeConfig` is the only shape, and a missing one is a default rather than a dropped field a
+ * surface renders around. Nothing has gone wrong in this module for a schema to prevent. See
+ * `docs/dependencies.md`.
  */
 
 import type { LogLevel } from './lib/logger.ts';

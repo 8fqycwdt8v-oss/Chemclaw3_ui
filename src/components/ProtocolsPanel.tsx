@@ -12,13 +12,14 @@
  * rendered as a danger badge rather than as a number in a column nobody reads.
  */
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { FlaskConical, Search } from 'lucide-react';
 import { useNavigate } from 'react-router';
-import { api } from '../api/client.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
+import { useApiQuery } from '../api/queryClient.ts';
+import { protocolsQuery } from '../api/queries.ts';
 import { relativeTime } from '../lib/format.ts';
-import type { DesignStatus, DesignSummary } from '../../shared/protocols.ts';
+import type { DesignStatus } from '../../shared/protocols.ts';
 import { DESIGN_STATUSES } from '../../shared/protocols.ts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -54,46 +55,26 @@ export function ProtocolsPanel(): React.JSX.Element {
   const [status, setStatus] = useState<DesignStatus | ''>('');
   const [project, setProject] = useState('');
   const [submittedProject, setSubmittedProject] = useState('');
-  // The result carries the query it answers, so "loading" is derived rather than set — the same
-  // shape `JobsPanel` uses, and for the same reason: clearing the list on the way into the effect
-  // is a second render, and it would show a stale list under a new filter in between.
-  const [loaded, setLoaded] = useState<{
-    key: string;
-    list: DesignSummary[];
-    error?: string;
-  } | null>(null);
-
-  const key = `${status}|${submittedProject}`;
-  const designs = loaded?.key === key ? loaded.list : null;
-  const failed = loaded?.key === key ? loaded.error : undefined;
   const filtered = status !== '' || submittedProject !== '';
 
-  useEffect(() => {
-    if (!ready) return;
-    let cancelled = false;
-    void api
-      .listProtocols(auth, {
-        ...(status ? { status } : {}),
-        ...(submittedProject ? { project: submittedProject } : {}),
-      })
-      .then((list) => !cancelled && setLoaded({ key: `${status}|${submittedProject}`, list }))
-      // **A broken service is not an empty lab.** This caught everything into an empty list, so a
-      // 500 and an expired session both rendered "No experiment design yet" — the 404-only policy
-      // `client.ts` documents, applied to every status. `listProtocols` already swallows the 404,
-      // so anything arriving here is a fault a reader should be shown.
-      .catch(
-        (err: unknown) =>
-          !cancelled &&
-          setLoaded({
-            key: `${status}|${submittedProject}`,
-            list: [],
-            error: err instanceof Error ? err.message : 'Could not read the design list.',
-          }),
-      );
-    return () => {
-      cancelled = true;
-    };
-  }, [auth, ready, status, submittedProject]);
+  // The filter is the key, which is what the `loaded.key === key` derivation this replaces was
+  // for — the same shape `JobsPanel` uses, and for the same reason: a stale list is never shown
+  // under a new filter, and there is no second render clearing the old one on the way in.
+  //
+  // **A broken service is not an empty lab**, and that distinction survives. An earlier version
+  // caught everything into an empty list, so a 500 and an expired session both rendered "No
+  // experiment design yet" — the 404-only policy `client.ts` documents, applied to every status.
+  // `listProtocols` already swallows the 404, so anything that reaches `error` here is a fault a
+  // reader should be shown, and it is shown.
+  const { data, error } = useApiQuery({
+    ...protocolsQuery(status, submittedProject, auth),
+    enabled: ready,
+  });
+  // `[]` on a failure, not `null`: `null` is "still reading", and this panel renders the spinner
+  // and the error message from two independent conditions — so a failed read showed both at once.
+  // The catch this replaces answered `{ list: [], error }` for exactly that reason.
+  const designs = data ?? (error ? [] : null);
+  const failed = error ? error.message : undefined;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">

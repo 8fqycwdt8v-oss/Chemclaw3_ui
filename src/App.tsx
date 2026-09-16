@@ -55,6 +55,20 @@ function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
  * brand-new local conversation a session before its first message, which is exactly this guard's
  * other conditions, and reading `/messages` for it would be a wasted round-trip that raises a warn
  * banner if it fails.
+ *
+ * **Deliberately not a `useQuery`, while ten other reads in this app became one.** This is not a
+ * view fetching what it renders; it is a procedure with an ordering constraint, and the constraint
+ * is the whole of it: the plan has to be read back *before* the transcript is hydrated, because
+ * hydrating raises `messageCount`, which is one of this hook's own guards — so the continuation
+ * that would read the plan afterwards has already been abandoned. Splitting that into two queries
+ * plus an effect that consumes them would put the ordering in a dependency array, which is the one
+ * place it cannot be read. The failure path is the same shape: the banner is a *write to the
+ * store*, not a rendered error state, so there is no `isError` for a surface to branch on.
+ *
+ * What the four lines here cost is what they cost everywhere else, and it is worth being plain
+ * about that rather than pretending this one is free: `cancelled` is still a flag somebody has to
+ * get right. The reason to leave it is that `useQuery` would not remove it — it would move it into
+ * an effect that has to re-derive the same ordering with less to go on.
  */
 function useRemoteTranscript(conversationId: string | undefined, nonce: number): void {
   const { auth, ready } = useAuth();

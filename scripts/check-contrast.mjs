@@ -1,8 +1,10 @@
 /**
  * Contrast gate for the design tokens.
  *
- * Reads the raw palette straight out of `src/index.css` — both themes — converts OKLCH to sRGB and
- * asserts WCAG 2.2 contrast on the pairs the UI actually puts together.
+ * Reads the raw palette straight out of `src/index.css` — both themes — maps each token into sRGB
+ * and asserts WCAG 2.2 contrast on the pairs the UI actually puts together. The colour science is
+ * `culori`'s; the gamut decision, the pair list and the thresholds are this file's, and the block
+ * below says why each of those three is not delegated.
  *
  * Why not just eyeball the lightness numbers: OKLCH's L is *perceptual*, and WCAG is defined on
  * sRGB relative luminance. Two tokens 50 points apart in OKLCH L can land either side of 4.5:1
@@ -13,41 +15,51 @@
  */
 
 import { readFile } from 'node:fs/promises';
+import { parse, toGamut, wcagContrast } from 'culori';
 
 const CSS = new URL('../src/index.css', import.meta.url);
 
-/* ── OKLCH -> sRGB -> WCAG relative luminance ─────────────────────────────── */
+/* ── OKLCH -> sRGB -> WCAG contrast ───────────────────────────────────────── */
 
-const cube = (x) => x * x * x;
+/**
+ * `culori` owns the colour science. This file used to carry the OKLab→LMS→linear-sRGB matrix as
+ * fifteen hand-transcribed constants, the relative-luminance weights, the `(hi+.05)/(lo+.05)`
+ * formula and an `oklch(...)` regex — four independently transcribable things, none of which this
+ * repository has any business owning, and every one of which is wrong silently if a digit moves.
+ *
+ * What is NOT delegated is the gamut question, because it changes the answer and the three
+ * available treatments disagree. Ten of this palette's twenty-three tokens are outside sRGB —
+ * dark `--danger-ink: oklch(86% 0.11 22)` asks for a linear red of 1.175 — so "what is its
+ * luminance" has no answer until you say which colour actually reaches the screen. Measured over
+ * all 46 pairs, against the previous implementation:
+ *
+ *   • naive clip of LINEAR rgb to [0,1] — what this file used to do — 0/46 pairs move (max |Δ|
+ *     under 5e-5, i.e. it is `culori`'s `clampGamut('rgb')` exactly: clipping before and after a
+ *     monotonic transfer curve that fixes 0 and 1 is the same clip).
+ *   • no gamut step at all, i.e. `wcagContrast` on the parsed colour — 8/46 pairs move, up to
+ *     +0.53. This is the tempting one-liner and it is the wrong number: it reports the contrast of
+ *     a colour no display can show.
+ *   • CSS Color 4 gamut mapping, `toGamut('rgb', 'oklch')` — 2/46 pairs move, by at most +0.22
+ *     (dark `danger-ink` on `danger-soft`, 8.83 → 9.05). Nothing crosses a threshold.
+ *
+ * The third is what is used here, because it is what the browser does with an out-of-gamut
+ * `oklch()` and therefore the only one of the three that is a claim about a chemist's screen. It
+ * is also the one that costs nothing to state, which the clip did not: the old `Math.min/max` read
+ * as a defensive guard and was in fact a colour-appearance decision taken in a `.map()`.
+ */
 
-function oklchToLinearRgb(L, C, hDeg) {
-  const h = (hDeg * Math.PI) / 180;
-  const a = C * Math.cos(h);
-  const b = C * Math.sin(h);
-
-  const l = cube(L + 0.3963377774 * a + 0.2158037573 * b);
-  const m = cube(L - 0.1055613458 * a - 0.0638541728 * b);
-  const s = cube(L - 0.0894841775 * a - 1.291485548 * b);
-
-  return [
-    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
-  ].map((v) => Math.min(1, Math.max(0, v))); // clamp out-of-gamut rather than throwing
-}
-
-/** WCAG relative luminance is defined on gamma-decoded channels, i.e. linear sRGB. */
-const luminance = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
-
-function contrast(a, b) {
-  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (hi + 0.05) / (lo + 0.05);
-}
+/** sRGB-mapped per CSS Color 4 — chroma reduction in OKLCH, not a clip. */
+const intoGamut = toGamut('rgb', 'oklch');
 
 /* ── Parse the palette ────────────────────────────────────────────────────── */
 
-const OKLCH = /oklch\(\s*([\d.]+)%\s+([\d.]+)\s+([\d.]+)\s*\)/;
-
+/**
+ * The CSS block extraction stays a regex deliberately. `postcss` is not a dependency here and
+ * Tailwind v4 no longer guarantees it is in the tree, so adding it to read two flat declaration
+ * lists would be a build-tool dependency bought for a `{...}` match. What the regex no longer does
+ * is parse the *colour*: `parse()` accepts any CSS colour, so a token rewritten as a hex or an
+ * `lab()` is now checked rather than silently dropped out of the palette.
+ */
 function parseBlock(css, selector) {
   // Non-greedy to the first closing brace: these blocks contain only declarations.
   const block = css.match(new RegExp(`${selector}\\s*\\{([^}]*)\\}`));
@@ -56,13 +68,9 @@ function parseBlock(css, selector) {
   for (const line of block[1].split('\n')) {
     const decl = line.match(/^\s*--([\w-]+)\s*:\s*(.+?);/);
     if (!decl) continue;
-    const colour = decl[2].match(OKLCH);
-    if (!colour) continue;
-    tokens[decl[1]] = oklchToLinearRgb(
-      Number(colour[1]) / 100,
-      Number(colour[2]),
-      Number(colour[3]),
-    );
+    const colour = parse(decl[2].trim());
+    if (!colour) continue; // not a colour — `--radius`, and anything else non-chromatic
+    tokens[decl[1]] = intoGamut(colour);
   }
   return tokens;
 }
@@ -138,7 +146,7 @@ for (const [theme, tokens] of Object.entries(themes)) {
       continue;
     }
     checked += 1;
-    const ratio = contrast(tokens[fg], tokens[bg]);
+    const ratio = wcagContrast(tokens[fg], tokens[bg]);
     const ok = ratio >= min;
     if (!ok) failures += 1;
     const line = `${ratio.toFixed(2)}:1 (needs ${min})`.padEnd(22);

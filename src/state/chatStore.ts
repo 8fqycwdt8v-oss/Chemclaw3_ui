@@ -481,8 +481,25 @@ export interface ChatState {
   jobFeed: JobFeedItem[];
   /** Standing-query findings claimed from the service's destructive mailbox — see `DigestCard`. */
   digests: DigestCard[];
-  /** True once the backend has told us twice that we are over its stream cap. */
+  /** True once the backend has told *this tab* twice that we are over its stream cap. */
   jobStreamsThrottled: boolean;
+  /**
+   * True while the tab holding the account's streams reports that it is over the cap.
+   *
+   * A second field rather than a second writer of `jobStreamsThrottled`, because the two carry
+   * different weights and only one of them may be irreversible. `jobStreamsThrottled` is this
+   * tab's own evidence — it 429'd, twice — and it never clears, because a tab that over-subscribed
+   * once will do it again. Relaying that decision into every other tab made one window's two 429s
+   * pin the whole account to a single stream for the life of every page, including tabs that never
+   * 429'd and including the next leader after a takeover; nothing expired it and nothing could.
+   *
+   * So what travels is a *report*, and it follows the reporter: a health note that says `false`
+   * clears it, and a leader that goes away is replaced by one that publishes its own health on
+   * takeover. It drives the indicator — a follower holds no streams and would otherwise show a
+   * chemist a healthy app — and it deliberately does not drive the budget, which is what the
+   * reporting tab's own flag is for.
+   */
+  jobStreamsThrottledElsewhere: boolean;
   /**
    * Sessions whose job push-back stream has failed to connect repeatedly.
    *
@@ -641,6 +658,7 @@ export interface ChatState {
    */
   giveUpOnInterruptedTurn: (conversationId: string, messageId: string) => void;
   setJobStreamsThrottled: (throttled: boolean) => void;
+  setJobStreamsThrottledElsewhere: (throttled: boolean) => void;
   setJobStreamFailing: (sessionId: string, failing: boolean) => void;
   setNotifyOnJobComplete: (enabled: boolean) => void;
   /** Set the session id only if there is not one already, returning whichever id now wins. */
@@ -1144,6 +1162,7 @@ export const useChatStore = create<ChatState>()(
       sessionProfiles: {},
       jobFeed: [],
       jobStreamsThrottled: false,
+      jobStreamsThrottledElsewhere: false,
       jobStreamsFailing: [],
       awaiting: [],
       awaitingRevision: 0,
@@ -1251,6 +1270,7 @@ export const useChatStore = create<ChatState>()(
             digests: [],
             sessionProfiles: {},
             jobStreamsThrottled: false,
+            jobStreamsThrottledElsewhere: false,
             jobStreamsFailing: [],
             awaiting: [],
             awaitingRevision: 0,
@@ -1689,6 +1709,11 @@ export const useChatStore = create<ChatState>()(
       setJobStreamsThrottled(throttled) {
         if (get().jobStreamsThrottled === throttled) return;
         set({ jobStreamsThrottled: throttled });
+      },
+
+      setJobStreamsThrottledElsewhere(throttled) {
+        if (get().jobStreamsThrottledElsewhere === throttled) return;
+        set({ jobStreamsThrottledElsewhere: throttled });
       },
 
       setJobStreamFailing(sessionId, failing) {

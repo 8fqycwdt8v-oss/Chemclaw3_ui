@@ -21,6 +21,8 @@ import { Composer } from '../src/components/Composer.tsx';
 import { Molecule } from '../src/components/Molecule.tsx';
 import { canonicalSmiles, rdkitAvailable } from '../src/chem/rdkit.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
+import { entitiesOf, useEntityStore } from '../src/chem/entities.ts';
+import type { ChemclawEvent } from '../shared/events.ts';
 import { pasteInto } from './helpers.ts';
 
 /** Counted, because "does it try again" is the other half of the finding. */
@@ -92,6 +94,36 @@ describe('the composer', () => {
     // Not a chemical verdict about the string: it is a perfectly good molecule and nothing here
     // is entitled to an opinion about it.
     expect(strip.textContent).not.toMatch(/could not read this as a molecule/i);
+  });
+});
+
+describe('the entity rail', () => {
+  it('admits no molecule at all rather than one keyed on a raw spelling', async () => {
+    // The bound on `ISSUES.md` Issue 11, asserted rather than read. `canonicalSmiles` answers
+    // `null` non-deterministically for a long-but-legal chain, so what happens downstream of a
+    // `null` decides whether that is an omission or a corruption: a rail that fell back to the raw
+    // string would mint a second row for a compound it already holds, under a key nothing else
+    // can match, and a later success would not merge with it.
+    //
+    // The toolkit being absent is the same `null` at the seam, which is why this case lives in
+    // this file: it is the one place the whole suite can produce that answer for a string that is
+    // unambiguously a molecule.
+    const conversationId = 'c-entities';
+    const raw = 'COc1ccc(Br)cc1';
+
+    expect(await useEntityStore.getState().ingestUserStructure(conversationId, raw, 'paste')).toBe(
+      null,
+    );
+    await useEntityStore.getState().ingest(conversationId, 'm1', {
+      type: 'tool_call',
+      id: 't1',
+      tool: 'predict_pka',
+      arguments: JSON.stringify({ smiles: raw }),
+    } as ChemclawEvent);
+
+    const held = entitiesOf(useEntityStore.getState(), conversationId);
+    expect(held.order).toEqual([]);
+    expect(Object.keys(held.entities)).toEqual([]);
   });
 });
 

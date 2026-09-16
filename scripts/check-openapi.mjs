@@ -30,6 +30,13 @@
  * admits. That is the exact shape all three production misses took — a type the code knows about
  * and the runtime drops — caught one layer earlier than the wire.
  *
+ * **And the gap above is now closed from the other side, offline.** `tests/backendContract.test.ts`
+ * reads the union out of `src/chemclaw/api/events.py` in a sibling checkout rather than off a
+ * running service, so the diff this section cannot do is done in the gate — names, and every field
+ * `normalizeEvent` reads. What that test cannot see is what a *deployment* renders: this script is
+ * still the only thing that asks a live service what it serves, and a service serving something
+ * other than what its source declares is exactly the difference between the two.
+ *
  * ## The two directions are not symmetric, in either section
  *
  * A whitelist entry pointing at a route the backend does not serve is a dead button, and fails this
@@ -227,9 +234,9 @@ if (published.length === 0) {
   note('the backend does not publish its SSE event schemas in OpenAPI', 'NOT CHECKED');
   console.log(
     '      The events are streamed rather than returned by any route, so FastAPI has nothing\n' +
-      '      to document and this half of the drift cannot be verified from here. Until the\n' +
-      '      backend exposes the union from a route, `shared/events.ts` is kept in step by\n' +
-      '      reading `src/chemclaw/api/events.py` — which is how all three misses got in.',
+      '      to document and this half of the drift cannot be verified from here. It is checked\n' +
+      '      against the DECLARATION instead, offline, by tests/backendContract.test.ts,\n' +
+      '      which reads api/events.py in a sibling checkout — the source, not the service.',
   );
 } else {
   const dropped = published.filter((schema) => normalizeEvent({ type: schema.type }) === null);

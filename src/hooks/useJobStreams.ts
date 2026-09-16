@@ -11,14 +11,20 @@
  *  - The backend caps concurrent event streams per user and 429s past the cap. The cap's value is
  *    now known — see `MAX_JOB_STREAMS` — but the failure mode is unchanged: the 429 path backs off
  *    and retries forever, so overshooting looks like "notifications quietly stopped". So there is
- *    an explicit client-side budget, and it only ever adjusts DOWNWARD.
+ *    an explicit client-side budget, and it only ever adjusts DOWNWARD. **The budget is now per
+ *    account rather than per tab**: `src/state/jobStreamLeader.ts` elects one tab to hold the
+ *    streams and relays what it sees to the rest, so two windows ask for three streams between
+ *    them instead of six. That file carries the election's failure modes; this one has to know
+ *    two things — a follower opens nothing and is told everything, and **what a tab wants watched
+ *    is not what it opens**, so the two are separate effects here. A follower that only opened
+ *    nothing, without also *asking*, would be a window whose own conversation nobody watches.
  *  - Its claim is destructive and scoped to three kinds in SQL. We are one of two consumers
  *    racing for those rows, so a missed event is expected and must never be treated as an error.
  *    More streams do not multiply delivery; they multiply racers.
  *  - A legitimately silent stream must stay open. Only the connect phase is bounded.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { config } from '../env.ts';
 import { retryAfterSeconds } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
@@ -31,6 +37,7 @@ import { readEventStream } from '../lib/sse.ts';
 // still held its own — two definitions of one behaviour, with the module's own prose claiming
 // otherwise, and the extracted `sleep` had dropped this one's abort-listener cleanup on the way.
 import { MAX_BACKOFF_MS, backoff, sleep } from '../lib/backoff.ts';
+import { createStreamLeader, type Note, type StreamLeader } from '../state/jobStreamLeader.ts';
 
 /**
  * How many sessions to watch at once.
@@ -42,15 +49,16 @@ import { MAX_BACKOFF_MS, backoff, sleep } from '../lib/backoff.ts';
  * in `routes/streams.py` beside a per-pod total. Three fits under five, so the number stands; what
  * changed is that it is a measured margin instead of a hope.
  *
- * The margin is thinner than it looks, and that is the part worth knowing. The cap is **per
- * principal, per process, counted across connections** — it has no idea what a tab is. Two windows
- * on one account ask for six against a cap of five, so the second window's last stream 429s.
- * Nothing here can see the other tab: the count lives in the pod's memory, and a client-side budget
- * can only bound its own. So the overshoot is real, expected in a two-window workflow, and handled
- * rather than prevented — the 429 path below drops this tab to a single stream, which brings the
- * pair back under the cap. Preventing it properly means one tab holding the streams for all of
- * them (a `BroadcastChannel` leader election), which is a feature and not a constant; it is filed
- * in ISSUES.md rather than half-built here.
+ * The cap is **per principal, per process, counted across connections** — it has no idea what a tab
+ * is. That used to make this number a per-tab budget against a per-account cap: two windows asked
+ * for six against a cap of five and the second window's last stream 429'd, handled rather than
+ * prevented. It is now a per-*account* budget, because exactly one tab opens streams
+ * (`src/state/jobStreamLeader.ts`) and the others are told what it saw. Three still fits under
+ * five, with the margin now covering the election's own overlap rather than a second window.
+ *
+ * The 429 path below is unchanged and is still the backstop: a woken tab that briefly believes it
+ * still leads, or a browser with no `BroadcastChannel`, both land back in the old shape, and the
+ * old shape is contained.
  */
 const MAX_JOB_STREAMS = 3;
 
@@ -143,6 +151,57 @@ export function watchedSessionKey(s: ChatState, backgrounded = false): string {
   return [...new Set(candidates)].join(',');
 }
 
+/**
+ * Apply one note — from this tab's own streams or from the leader's — to the store.
+ *
+ * The single path from "something happened on a stream" to "the store changed". A leader's own
+ * events go through it too (`publish` delivers locally before it broadcasts), so a follower cannot
+ * diverge from a leader by construction: there is no second reducer to keep in step.
+ */
+function applyNote(note: Note): void {
+  const store = useChatStore.getState();
+  switch (note.kind) {
+    case 'job':
+      // Idempotent on `job_id` — `pushJobFinished` keeps the original item for a repeat — which is
+      // what makes a note the leader also delivered to itself, or delivered twice across a
+      // takeover, cost nothing.
+      store.pushJobFinished(note.event, note.sessionId);
+      return;
+    case 'awaiting':
+      store.noteAwaiting(note.event);
+      return;
+    case 'health': {
+      // A follower holds no streams, so without this it would show a chemist no warning while
+      // notifications were in fact failing — the module docstring's own named hazard, moved one
+      // tab over. Applied as a diff because the store's action is per session.
+      for (const sessionId of store.jobStreamsFailing) {
+        if (!note.failing.includes(sessionId)) store.setJobStreamFailing(sessionId, false);
+      }
+      for (const sessionId of note.failing) store.setJobStreamFailing(sessionId, true);
+      // **Reported, not adopted.** `jobStreamsThrottled` is this tab's own evidence that it holds
+      // more than its share of the cap, and it is deliberately irreversible — which is exactly why
+      // a relay must not write it. Setting it here made one leader's two 429s pin *every* tab on
+      // the account to a single stream for the life of its page, the next leader after a takeover
+      // included, with nothing able to expire it: a per-tab degradation with a per-account blast
+      // radius. The report travels instead, it drives the same indicator, and it follows the
+      // reporter — a `false` clears it, and a takeover publishes its own health at once.
+      store.setJobStreamsThrottledElsewhere(note.throttled);
+      return;
+    }
+  }
+}
+
+/** This tab's health, as it stands, for the followers. Read back from the store rather than
+ *  tracked separately, so the note and the indicator cannot disagree. */
+function publishHealth(tab: StreamLeader): void {
+  const store = useChatStore.getState();
+  tab.publish({
+    kind: 'health',
+    failing: store.jobStreamsFailing,
+    throttled: store.jobStreamsThrottled,
+  });
+}
+
 export function useJobStreams(): void {
   const { auth, ready } = useAuth();
 
@@ -164,28 +223,111 @@ export function useJobStreams(): void {
   // below tears the surplus streams down — and rebuilds them when the tab comes back, which is the
   // half `jobStreamsThrottled` cannot express.
   const watchKey = useChatStore((s) => watchedSessionKey(s, backgrounded));
+  /**
+   * How many streams the *account* may hold, which is not how many this tab wants.
+   *
+   * `watchKey` above is already trimmed by `backgrounded`, and that trimming is about this window:
+   * a hidden tab should stop asking for three conversations. It must not also shrink what the
+   * account holds, or a backgrounded leader would cut the chemist's *visible* window to one stream.
+   * `jobStreamsThrottled` is the opposite — it is evidence that the account is over the pod's cap —
+   * so that one does belong here.
+   */
+  const budget = useChatStore((s) => (s.jobStreamsThrottled ? 1 : MAX_JOB_STREAMS));
+
+  /**
+   * This tab's membership of the election, for as long as the hook is mounted.
+   *
+   * Mounted once, by `AppShell`, so that is the life of the page. A ref rather than module state
+   * because a membership that outlived its hook would keep heartbeating — which in a test file is
+   * the next case's tab silently becoming a follower and opening nothing, and in `StrictMode` is
+   * the remount holding an election against itself.
+   *
+   * Created through a function rather than eagerly for the same `StrictMode` reason: React runs
+   * every cleanup before it re-runs the effects, so the close below has already fired by the time
+   * the effect asks for one again.
+   */
+  const membership = useRef<StreamLeader | null>(null);
+  const tab = (): StreamLeader => (membership.current ??= createStreamLeader(applyNote));
+  useEffect(
+    () => () => {
+      membership.current?.close();
+      membership.current = null;
+    },
+    [],
+  );
+
+  // **Asking is not opening.** Every tab says what it wants watched; only the leader opens
+  // anything. Separating the two effects is what lets a follower's conversation be watched at all:
+  // its interest has to reach the leader even though its own answer to "what do I open" is nothing.
+  useEffect(() => {
+    if (!ready) return;
+    tab().declare(watchKey ? watchKey.split(',').filter(Boolean) : [], budget);
+  }, [watchKey, budget, ready]);
 
   useEffect(() => {
-    if (!ready || !watchKey) return;
-    const sessionIds = watchKey.split(',').filter(Boolean);
-    const controllers = sessionIds.map((sessionId) => {
-      const controller = new AbortController();
-      void openStream(sessionId, auth, controller);
-      return controller;
-    });
-    return () => {
-      controllers.forEach((c) => c.abort());
+    if (!ready) return;
+    const joined = tab();
+    /** The stream this tab holds for each session, so a change to the set moves only what moved. */
+    const open = new Map<string, AbortController>();
+    let held = false;
+
+    const drop = (sessionId: string): void => {
+      open.get(sessionId)?.abort();
+      open.delete(sessionId);
       // A stream nobody is watching cannot be failing. Without this, dropping a conversation out
-      // of the watch set would leave its indicator up for the life of the page.
-      sessionIds.forEach((id) => useChatStore.getState().setJobStreamFailing(id, false));
+      // of the watch set — or losing the election — would leave its indicator up for the life of
+      // the page.
+      useChatStore.getState().setJobStreamFailing(sessionId, false);
     };
-  }, [watchKey, auth, ready]);
+
+    /**
+     * Hold exactly the streams the election says this tab holds.
+     *
+     * Driven by the election rather than by React state, deliberately. Leadership is not something
+     * this component renders, and routing it through `useState` would put `AppShell` — the top
+     * bar, the composer, the entity rail, the sidebar — on yet another render path, which is the
+     * exact hazard the `watchKey` projection above exists to avoid.
+     *
+     * A diff rather than a teardown, because the set now moves for reasons that are not this tab's:
+     * another window opening a conversation re-merges the account's watch set, and restarting every
+     * stream each time would spend connects against the very cap this feature exists to stay under.
+     */
+    const sync = (): void => {
+      const wanted = joined.watched();
+      if (joined.isLeader() && !held) {
+        // Taking over. Every failure warning on this page was relayed by the leader that has just
+        // gone, and it described streams that no longer exist; the ones about to open have not
+        // failed at anything yet. Left alone, a takeover would pin a red indicator on a healthy
+        // account until the page was reloaded.
+        for (const sessionId of [...useChatStore.getState().jobStreamsFailing]) {
+          useChatStore.getState().setJobStreamFailing(sessionId, false);
+        }
+        publishHealth(joined);
+      }
+      held = joined.isLeader();
+      for (const sessionId of [...open.keys()]) if (!wanted.includes(sessionId)) drop(sessionId);
+      for (const sessionId of wanted) {
+        if (open.has(sessionId)) continue;
+        const controller = new AbortController();
+        open.set(sessionId, controller);
+        void openStream(sessionId, auth, controller, joined);
+      }
+    };
+
+    const unsubscribe = joined.subscribe(sync);
+    sync();
+    return () => {
+      unsubscribe();
+      for (const sessionId of [...open.keys()]) drop(sessionId);
+    };
+  }, [auth, ready]);
 }
 
 async function openStream(
   sessionId: string,
   auth: AuthProvider,
   controller: AbortController,
+  tab: StreamLeader,
 ): Promise<void> {
   let attempt = 0;
   let consecutive429 = 0;
@@ -210,6 +352,7 @@ async function openStream(
     });
     if (failures >= FAILURES_BEFORE_REPORTING) {
       useChatStore.getState().setJobStreamFailing(sessionId, true);
+      publishHealth(tab);
     }
   };
 
@@ -226,6 +369,7 @@ async function openStream(
     if (failures === 0) return;
     failures = 0;
     useChatStore.getState().setJobStreamFailing(sessionId, false);
+    publishHealth(tab);
   };
 
   while (!controller.signal.aborted) {
@@ -312,7 +456,10 @@ async function openStream(
         // cannot fix, because the budget reduces how many streams there are, not whether the
         // survivor reports.
         consecutive429 += 1;
-        if (consecutive429 >= 2) useChatStore.getState().setJobStreamsThrottled(true);
+        if (consecutive429 >= 2) {
+          useChatStore.getState().setJobStreamsThrottled(true);
+          publishHealth(tab);
+        }
         attempt += 1;
         failed('stream_cap', 429);
         // **The wait stays at the ceiling, and the counter is what moves.** This branch used to
@@ -376,6 +523,7 @@ async function openStream(
           // permanent was the one that showed nothing: a conformer search finishing afterwards
           // produced no card, no badge and no notification.
           useChatStore.getState().setJobStreamFailing(sessionId, true);
+          publishHealth(tab);
           return;
         }
         reauthed = true;
@@ -413,14 +561,17 @@ async function openStream(
           if (event.type === 'job_completed' || event.type === 'job_failed') {
             // The event carries no session id — but we know which stream we opened, so the
             // association is attached here rather than by mutating the wire contract.
-            useChatStore.getState().pushJobFinished(event, sessionId);
+            //
+            // `publish` rather than a store call: this tab holds the only stream on this account,
+            // so a completion that stopped here would never reach the chemist's other window.
+            tab.publish({ kind: 'job', event, sessionId });
           } else if (event.type === 'awaiting_answer') {
             // The third kind this stream claims (backend D-2026-09-05). It is not a job ending —
             // it is a durable request *starting* or expiring — so it goes to its own slice rather
             // than into the job feed, where a "question waiting on you" would render as a run that
             // finished. The expiry push matters as much as the open: `noteAwaiting` removes on it,
             // which is what keeps the badge from counting a question nobody can answer any more.
-            useChatStore.getState().noteAwaiting(event);
+            tab.publish({ kind: 'awaiting', event });
           }
         } catch {
           // one bad frame is not worth dropping the stream

@@ -47,15 +47,29 @@ test('an unknown conversation says so rather than redirecting', async ({ page })
 });
 
 test('a shared session link adopts the session and pulls its transcript', async ({ page }) => {
-  await page.goto(`/s/${SHARED_SID}`);
+  await page.goto(`/open/${SHARED_SID}`);
 
   await expect(page).toHaveURL(/\/c\/[0-9a-f-]+$/);
   await expect(page.getByText('BrettPhos, at 1.2 equiv base.')).toBeVisible();
 });
 
 test('a malformed share link is explained, not redirected', async ({ page }) => {
-  await page.goto('/s/nonsense');
+  await page.goto('/open/nonsense');
   await expect(page.getByText(/32-character session id/)).toBeVisible();
+});
+
+test('an old /s/ bookmark is explained, through the real SPA fallback', async ({ page }) => {
+  // The path this app used to mint. It had no route, so it fell through `<Route path="*">` to `/`
+  // and opened a brand-new empty conversation — no error, nothing adopted, which a reader reads as
+  // "my conversation was lost". Driven here rather than only in jsdom because the other half of
+  // the claim is the BFF's own SPA fallback: a `/s/…` request has to reach `index.html` at all
+  // before the router can say anything about it.
+  await page.goto(`/s/${SHARED_SID}`);
+
+  await expect(page.getByText('That link has moved')).toBeVisible();
+  await expect(page.getByText(/\/open\//)).toBeVisible();
+  // The URL is where the reader put it. A redirect here is the defect coming back.
+  await expect(page).toHaveURL(new RegExp(`/s/${SHARED_SID}$`));
 });
 
 /** Below `lg` the sidebar is a drawer, so every sidebar control needs opening first. */

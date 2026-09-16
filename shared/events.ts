@@ -228,6 +228,32 @@ export interface QuestionEvent {
   options: string[];
 }
 
+/**
+ * A note was written into the knowledge graph.
+ *
+ * **The wire carries two names for this and the reader takes both.** The event is not a proposal:
+ * nothing reviews a note any more (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
+ * upstream), so the accurate name is `note_recorded`. Renaming an SSE discriminator is a
+ * two-repository deploy with a skew window, and the only ordering that has no broken state is
+ * **reader first**: this client accepted both names, the service switched to the new one, and no
+ * deployed frontend dropped an event in between. The reverse order — service first — silently
+ * drops the event in every browser that has not been redeployed, which is the exact failure
+ * `EVENT_TYPES` has cost six times.
+ *
+ * **The service has now shipped its half**, so `note_proposed` is the *old* name rather than the
+ * current one: `src/chemclaw/api/events.py` declares `type: Literal["note_recorded"]` and no
+ * longer declares the old spelling at all. This reader keeps it because every browser already
+ * loaded speaks it; dropping it before that rollout is done is the same event loss with the
+ * repositories swapped.
+ *
+ * `type` stays `'note_proposed'` inside this app on purpose: the internal name is a local rename
+ * that can happen any day, and doing it in the same step would put a second change in the skew
+ * window for no gain. Removing the old wire name is the third step, it is this repository's, and
+ * it is recorded in `ISSUES.md` with what unblocks it. `tests/backendContract.test.ts` holds the
+ * promise from the other end: `note_proposed` is in its `RETAINED_FOR_ROLLOUT` map with this
+ * reason, an `ISSUES.md` row whose deletion expires the entry, and a date by which somebody
+ * re-takes the decision.
+ */
 export interface NoteProposedEvent {
   type: 'note_proposed';
   note_id: string;
@@ -580,7 +606,14 @@ const EVENT_TYPES = new Set<string>([
   'tool_result',
   'evidence_source',
   'question',
+  // The name the service used to send, retained until every loaded browser has reloaded. See
+  // `NoteProposedEvent`: the reader went first so that the emitter's switch broke nothing, and
+  // this line is the half that is still doing work — the interface union above changes nothing at
+  // runtime, the gate is this set. Its removal is Issue 13's third step and is argued in
+  // `tests/backendContract.test.ts`'s RETAINED_FOR_ROLLOUT rather than left looking like dead code.
   'note_proposed',
+  // The name the service sends.
+  'note_recorded',
   'approval_request',
   'answer',
   'error',
@@ -777,9 +810,6 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         type: 'tool_failed',
         tool: asString(o.tool, 'unknown'),
         message: asString(o.message, 'The tool call failed.'),
-        // A closed set upstream, so an unrecognised value normalises to `null` rather than passing
-        // through: "a reason this build does not know" must read as an ordinary failure, never as
-        // a refusal it cannot render.
         // A closed set upstream, so an unrecognised value normalises to `null` rather than
         // passing through: "a reason this build does not know" must read as an ordinary failure,
         // never as a refusal it cannot render. Derived from `REFUSAL_REASONS` rather than written
@@ -812,6 +842,10 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
         question: asString(o.question),
         options: asStringArray(o.options),
       };
+    // Both wire names, one internal event. The fall-through is the whole of the tolerance: a
+    // frame named `note_recorded` is normalised to exactly what every surface already renders,
+    // so no consumer of this union has to learn the second name and none can miss it.
+    case 'note_recorded':
     case 'note_proposed':
       return {
         type: 'note_proposed',

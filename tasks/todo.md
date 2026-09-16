@@ -405,3 +405,117 @@ production code it protects, confirming red, and restoring from a backup kept ou
 16 mutations in all, including the three from the review that reproduced exactly, and the
 already-passing ones re-run to confirm no regression. The one "mutation" whose correct result is
 green is the hoisted `encodeURIComponent`, which is correct code that used to fail.
+
+# Wave 30 — the UI's share: a contract nobody checked, a name in two repositories, a record
+
+## W30.1 — nothing checks the client half of the wire contract
+
+- [x] **Read the backend, do not run it.** A check that needs a live service is a check that does
+      not run (`check:openapi` has never once run in a pipeline). The sibling checkout is on disk;
+      parse it. Resolved by `CHEMCLAW3_DIR`, else `../Chemclaw3`.
+- [x] **Four axes**, each failing in the direction that costs a chemist something:
+      the BFF whitelist against the routes the service registers; every event the backend declares
+      against what `normalizeEvent` admits; every _field_ `normalizeEvent` reads against the fields
+      the backend's model declares; every closed set the client mirrors (`ErrorCode`,
+      `RefusalReason`, `AnswerCheck`) against the Python `Literal` it mirrors.
+- [x] **What the client sends**, not only what it reads: every POST body in `src/api/` against the
+      Pydantic request model of the route it posts to — six of which are `extra="forbid"`, so a
+      stale key there is a 422 rather than a silent drop.
+- [x] **Drive it.** Introduce a renamed field, a removed route and a renamed event; each goes red
+      for its own reason, and the mutation is verified to have applied.
+- [x] **Say what it cannot check**, in the test, in the readiness record and in `ISSUES.md`.
+
+## W30.2 — `note_proposed` is not a proposal, and the name is a two-repo contract
+
+- [x] Accept both wire names, old and new, with a test for each. Do **not** remove the old one.
+- [x] Say in the commit, in `ISSUES.md` and in the contract check what the remaining step is.
+
+## W30.8 — the production-readiness record
+
+- [x] One document, every clause naming the test that holds it; a clause with no test is rewritten
+      as an accepted risk or deleted. Every remaining open item into `ISSUES.md` with an anchor.
+
+## Review — Wave 30, the UI's share
+
+**W30.1.** `tests/backendContract.test.ts` + `tests/backendContract.ts`. Five axes, each failing in
+one direction; eight mutations driven, each verified applied, each red for its own reason. The
+backend checkout is read and never written: every upstream mutation was made against a copy under
+the scratchpad and reached with `CHEMCLAW3_DIR`, which is also what proved that variable works.
+What it cannot check is in `ISSUES.md` Issue 14 rather than implied.
+
+**Two things the work found that were not in the brief.** Adding a 126th test file made two
+`sendMessage` tests time out — they spun on an unbounded `while (!ready()) await sleep(5)` inside
+vitest's default 5,000 ms and run in 6 ms alone, so they reported the stop path as broken whenever
+the machine was busy; they are bounded now and carry the stated timeout four of their neighbours
+already carry. And the contract reader's own `EVENT_TYPES` scan enrolled four words of prose as
+event names, because an apostrophe in a `//` comment opened a quoted string — the same defect the
+Python side of the same reader had already needed fixing for.
+
+**W30.2.** The tolerant reader ships, the old name stays, and the remaining steps are written down
+with who does each (`ISSUES.md` Issue 13). `AHEAD_OF_BACKEND` in the contract check is what reports
+the day the service ships its half.
+
+**W30.8.** `docs/production-readiness.md`, held by `tests/readinessRecord.test.ts`: a clause that
+claims something and cites no file fails, a citation whose file has gone away fails, and an
+accepted risk with nowhere to read the rest of it fails. Four mutations driven. The record is
+linked from `README.md`, which the same test asserts.
+
+**What was deliberately not done.** The contract check is not wired into either pipeline: that
+means checking out a second private repository in the gate job, which is a credential decision
+rather than a test change (`ISSUES.md` Issue 14). The path-encoding escapes are recorded rather
+than closed — one needs dataflow analysis, the other a character policy with a different blast
+radius than the traversal fix that was measured (`ISSUES.md` Issue 15).
+
+---
+
+## W30 review follow-up — what a fresh-context review of the merged wave found
+
+Five things, each reproduced before it was changed and each mutation verified applied with
+`git diff --numstat` before its result was believed.
+
+- [x] **The contract check was red against today's backend, and the design said it could not be.**
+      Chemclaw3 shipped Issue 13's step 2, so the _old_ wire name — the one step 3 deliberately
+      retains until deployed browsers reload — became "dead code" by this file's own message, and
+      the only mechanical remedy it offered was step 3 performed before the rollout: the ordering
+      that loses the event. `RETAINED_FOR_ROLLOUT` makes a retained name a state rather than an
+      error, beside `AHEAD_OF_BACKEND`, which holds the mirror-image one. The "step 3 is unblocked"
+      notice was _unreachable in the only case it was written for_ — it sat after the throwing
+      assertion in the same `it` — and now prints from the describe body.
+- [x] **An argued entry cost nothing.** `['fake_event', '']` satisfied "argued", and the only
+      expiry in the design was that unreachable notice. An entry now costs a reason of at least 40
+      characters, a phrase that must occur in `ISSUES.md` (so closing the row retires the entry),
+      and a review date that fails once it has passed. The validator is a pure function driven over
+      a deliberately-wrong map, because the maps' normal state is empty and a loop over an empty
+      map checks nothing.
+- [x] **Three ways a claiming clause satisfied the readiness record's rule without naming a test.**
+      Any `src/`/`server/`/`docs/` path counted; a clause indented under another was absorbed into
+      it and never parsed; `§n` was a shape that never resolved. All three closed, and the
+      shipped document needed no rewriting — measured first: every Enforced and Bounded clause
+      already cites a test, and every `§n` already resolves.
+- [x] **`tests/eventContract.test.ts` read the interface union while `shared/events.ts` says
+      `EVENT_TYPES` is the gate.** Two lists described as one: a name in the gate with no interface
+      and no branch produced zero failures. The two are now held to being one vocabulary, with an
+      alias — a second wire spelling for an existing event — permitted and **pinned** by name.
+- [x] **Not in the brief: a fall-through `case` was read as a branch that reads nothing.** So the
+      run printed two fields of `note_recorded` as ones this client ignores (false), and axis 3 —
+      the renamed-field drift — had nothing to compare for the one event a rename is in flight on.
+
+**What this leaves open.** Nothing new. The review's other findings were driven and hold; the
+`ISSUES.md` Issue 14 items (no CI lane checks the backend out, response shapes unchecked) are
+unchanged.
+
+---
+
+## W30 follow-up 2 review — one claim in the record that was wrong
+
+The round of fixes on top of `d2dc072` reproduced every finding before changing anything. One of
+them is not a code defect and has nowhere else to be corrected, because the claim was made in a
+commit message and a merged message cannot be edited:
+
+- [x] **`git log -S` names where a phrase first appeared, not where it was duplicated.** The
+      dedupe of the `tool_failed` comment in `shared/events.ts` (`052f77a`) attributed the second
+      copy to `0a45516`. Walked every revision of that file, counting the sentence: `0a45516`
+      takes it 0 → 1 and `17e7c09` takes it 1 → 2 — `git show 17e7c09 -- shared/events.ts` adds
+      the second copy and leaves the first. The dedupe itself is sound and stands; only its
+      provenance was wrong, and the rule worth keeping is that `-S` answers a different question
+      from "which commit duplicated this".

@@ -100,10 +100,10 @@ predates the fields still gets the placeholder rather than a blank row.
 
 ---
 
-## Issue 5: a shared conversation link is a second-device link, not a shared one
+## Closed: the second-device link now says that is what it is (was Issue 5)
 
-`/s/:sessionId` adopts a server session into a local conversation. Two things this note used to say
-were wrong, in opposite directions.
+**Decided, and the decision was smaller than the analysis.** Two things this note used to say were
+wrong in opposite directions, and both still stand as findings.
 
 **Durability is better than assumed.** Under `session_store="postgres"` the session id is a durable
 row in the ownership registry, and `deps._rehydrate_session` rebuilds a live handle over its
@@ -114,35 +114,113 @@ there is no registry and the link lasts one process.
 
 **Shareability is worse than assumed.** Every session-scoped route resolves through
 `_refuse_unless_owner`, which 404s a non-owner indistinguishably from an unknown id, deliberately.
-A link handed to a colleague does not degrade — to them the conversation simply does not exist. So
-`/s/:sessionId` is a second-device link for one person, and the UI must not imply otherwise.
+A link handed to a colleague does not degrade — to them the conversation simply does not exist.
 
-The rotation hazard is real but narrower than written: the client replaces the id in three places
-(`session_not_found` recovery, `resetSession`, a fresh conversation), so a link copied before one
-of those points at a session the sharer has stopped using.
+**What was decided: stop claiming otherwise, and do not build sharing here.** The route was `/s/`,
+which reads as _share_, and three user-visible strings said it outright — the sidebar row read
+"Shared conversation", a mistyped link was answered with "A shared link ends in a 32-character
+session id", and the spinner said "Opening the shared conversation…". None of that is a phrasing
+choice; it is this app advertising a capability the service refuses by design, to the one person
+who will find out by sending the link to a colleague and being told the conversation does not
+exist. The route is now `/open/:sessionId` and the copy says "Conversation from another device".
 
-**Fix, if cross-person sharing is ever wanted:** a stable server-side conversation id distinct from
-the session handle, _with an explicit grant_ — a durable id alone is not enough, because the 404
-above is an authorization decision and would still apply.
+Three things about the shape of that decision, since the cheaper-looking options were both worse:
+
+- **The old path is not kept as a redirect, and it is not left to the catch-all either.**
+  Preserving `/s/` would preserve exactly the string the decision is about. Nothing in the UI ever
+  offered the link for copying — its only entry points are two buttons in `/review`.
+  **This row used to end by saying a stale one "lands on this app's own 'That conversation isn't on
+  this device', which is the honest message anyway", and that was false.** `/s/` had no route at
+  all, so it fell through `<Route path="*">` to `/`, which mints a fresh conversation: driven
+  through the real `AppRoutes`, an old bookmark ended at `/c/<a new id>` with no error, nothing
+  adopted and no mention of the link. A reader sees an empty conversation and reads "mine was
+  lost" — worse than a 404, not better, and against the rule the e2e suite asserts by name ("an
+  unknown conversation says so rather than redirecting"). `/s/:sessionId` now renders an
+  explanation and goes nowhere, which is what the argument above needed in order to be true.
+  `tests/routing.test.tsx` drives it: the message, the path it names, that the URL does not move,
+  and that no conversation is minted.
+- **Cross-person sharing is declined here, not deferred quietly.** It is not a client change: the
+  404 is an _authorization_ decision, so a stable server-side conversation id would still be
+  refused without an explicit grant beside it. That is a backend feature with a data model and a
+  permission surface, and nobody has asked for it.
+- **The rotation hazard stays, narrower than this note used to claim.** The client replaces the id
+  in three places (`session_not_found` recovery, `resetSession`, a fresh conversation), so a link
+  copied before one of those points at a session the chemist has stopped using. That is a property
+  of the session handle being disposable, which is the same property that makes `/c/<local>` the
+  real URL.
+
+`tests/routing.test.tsx` pins the adopted title and the truncated-link copy against what is
+**rendered**, not against the file: `routes.tsx` quotes all three of the old strings in the
+paragraph explaining why they are gone, so a file-wide `toContain` would have passed with the
+change reverted.
+
+**What would change the answer:** somebody actually asking for cross-person sharing, which then
+starts upstream rather than here.
 
 ---
 
-## Issue 6: the per-user event-stream cap is shared across tabs, and no client can see it
+## Closed: one tab holds the streams and tells the others (was Issue 6)
 
-`service_max_event_streams_per_user` defaults to **5**, enforced per principal per process
-(`routes/streams.py`) beside a per-pod `service_max_event_streams_total`. `useJobStreams` budgets
-3, which fits — for one tab. Two windows on one account ask for six, and the second window's last
-stream 429s.
+`service_max_event_streams_per_user` is **5**, enforced per principal per process, and it has no
+idea what a tab is. `useJobStreams` budgeted 3, which fits one window and not two: a chemist with
+two windows asked for six and the second window's last stream 429'd. The 429 path contained that —
+two in a row drop a tab to a single stream for the life of the page — but handled is not prevented,
+and a chemist with two windows watched fewer conversations than they thought.
 
-Nothing client-side can see the other tab's usage: the count lives in the pod's memory. The 429
-path contains it (two in a row drops that tab to a single stream for the life of the page, which
-brings the pair back under the cap), so the failure is handled rather than silent — but handled is
-not prevented, and a chemist with two windows watches fewer conversations than they think.
+This entry filed it rather than half-building it, and the reason it gave is the reason it took this
+long: **a botched election loses notifications entirely, which is strictly worse than the contained
+degradation.** A durable job runs for minutes to hours and its completion arrives once, on a stream
+that must be open. So the failure modes were the work. `src/state/jobStreamLeader.ts` is the
+election and `tests/jobStreamElection.test.ts` drives every one of them:
 
-**Fix (client):** elect one tab to hold the streams over a `BroadcastChannel` and have the others
-read completions from the shared store. That is a feature with its own failure modes — leader
-crash, heartbeat timeouts — and a botched election loses notifications entirely, which is strictly
-worse than the contained degradation above. Filed rather than half-built.
+- **Two tabs opening in the same millisecond.** A campaign rather than a lock — a claim, 250 ms of
+  listening, and the smallest id wins — so the pair agrees in one round trip instead of both
+  winning and discovering it later. Driven with two real memberships over real `BroadcastChannel`s.
+- **The leader closing.** `pagehide` (not `beforeunload`, which is documented unreliable on exactly
+  the transitions that matter) broadcasts a resignation and every follower campaigns at once, so a
+  handover costs one election window rather than one lease.
+- **The leader crashing with nothing announced.** The lease expires and a follower campaigns. This
+  is why the lease exists at all: a design that depended on `pagehide` would lose every
+  notification after an OOM kill or a force quit. Driven, and driven _negatively_ too — a single
+  missed heartbeat must not depose a busy leader.
+- **The leader suspended or backgrounded.** Identical to a crash from the other side, deliberately:
+  a frozen tab's timers do not run, so the survivor does not have to know which it was.
+- **Two tabs both believing they lead**, which a woken tab produces by itself. Not prevented —
+  converged on: the larger id yields on hearing the other's heartbeat. Both directions of that
+  total order are driven, because getting it symmetrical ("somebody else leads, so I stop") is how
+  an election ends with _zero_ leaders and silent notifications.
+- **No `BroadcastChannel` at all.** Every tab leads, which is exactly what this app did before, and
+  what it did before is safe. A feature that degraded to "nobody watches" would be the one
+  unacceptable outcome.
+
+**The half the election does not cover, and it had to be measured to be seen.** Electing a leader
+says who opens streams; it does not say _which_ streams. `watchedSessionKey` reads this tab's own
+`conversations` and its own `activeId`, and neither is shared — the store is hydrated per tab and an
+active conversation is per window by definition. Driven: two windows, and the account held **one**
+stream, for the leader's own session, with the follower's conversation watched by nobody. That is
+the loss this whole feature exists to prevent, arriving from the direction the election does not
+look in, and it would have shipped.
+
+So every tab declares what it wants and the leader watches the **merge**, round-robin by rank, so
+each window's first choice is taken before any window's second. Three streams for the account
+instead of three per tab, and the two heads are always in it. A follower's periodic message _is_
+its interest, and an interest expires on the same lease as leadership — a crashed tab stops holding
+a slot for a window nobody is looking at.
+
+Two budget cases run in opposite directions and both are asserted: a **backgrounded** leader trims
+what it asks for and must not trim what the account holds, or a hidden tab would cut the chemist's
+visible window to one stream; **`jobStreamsThrottled`** is evidence about the account rather than
+about a window, so it does cut the merged set, which keeps the 429 backstop meaning what it did.
+
+The relay carries stream _health_ as well as completions, because a follower holds no streams and
+would otherwise be shown a working app while notifications were failing. And a takeover clears the
+warnings it inherited: they described streams that no longer exist, and left alone they pinned a
+red indicator on a healthy account until the page was reloaded.
+
+**What is still true:** the 429 path is unchanged and is still the backstop, because two leaders
+during a takeover and a browser with no `BroadcastChannel` both land back in the old shape. What a
+takeover costs is a delay rather than a loss — the service writes job endings into `session_events`
+and a row nobody has claimed is still there when the next stream opens.
 
 ---
 
@@ -158,6 +236,22 @@ changes what a session means in aggregate and a deployment may want it off.
 ---
 
 ## Issue 8: the access token lives in the browser, and its refresh runs on a mechanism browsers are removing
+
+**The posture, in four lines, so nobody re-derives it.** _Accepted:_ the access token stays in the
+browser and MSAL keeps refreshing it through a hidden iframe. _Why:_ the replacement is built and
+sound, and its blockers are operational rather than technical — see below. _What would unblock it:_
+a confidential-client registration in the target tenant (a Web platform, a client secret and
+`<origin>/auth/callback` as a redirect URI) plus two managed secrets with a rotation owner. _Who
+decides:_ the tenant administrator for the registration, and whoever owns this app's operations for
+the secrets — not this repository, and not a code review. Everything below is the evidence for
+those four lines and does not need re-deriving; PR #11 is retained and is reopened rather than
+rebuilt.
+
+**Reviewed again on 2026-09-13 (W30.6) and unchanged.** Nothing in the tenant moved, so nothing
+here moved. What _has_ changed since this was written is only the surface it worries about: this
+origin now also runs RDKit on a worker (W28.7), which is one more thread of third-party code on the
+origin that holds the token, and one more reason the second cost below is the one with a clock on
+it.
 
 **Decided, not merely open.** Moving token custody to the BFF was designed, built and tested on
 `claude/frontend-hardening-stabilization-gqxzko` (PR #11, closed), and deliberately not adopted.
@@ -261,6 +355,316 @@ The half that stays a poll is deliberate and is not this issue: `GET /pending` i
 
 ---
 
+## Issue 10: the CSP forbids what RDKit needs, so no container has ever drawn a structure
+
+**Found by measurement, not by report** — W28.7 moved the toolkit to a worker, went to prove in a
+real browser that a structure was drawn there, and found none is drawn anywhere.
+
+`server/config.ts` sends `script-src 'self' 'wasm-unsafe-eval'`. That token permits WebAssembly
+compilation and nothing else, which is exactly what its own comment says and exactly why it was
+chosen. `@rdkit/rdkit` needs more: Embind builds every JS invoker for the C++ surface with
+`Function(...)` — `craftInvokerFunction`, on the ordinary path rather than on a fallback — and
+`'unsafe-eval'` is what permits that.
+
+**Driven against the built bundle behind the real BFF**, loading the emitted RDKit chunk by hand:
+
+```
+EvalError: Refused to evaluate a string as JavaScript because 'unsafe-eval' is not an allowed
+source of script in the following Content Security Policy directive:
+"script-src 'self' 'wasm-unsafe-eval'".
+    at Function (<anonymous>)
+    at …/assets/RDKit_minimal-DP2qLPJt.js
+```
+
+and, driving the worker in its own protocol from the page: `toolkitLoads` → `false`, `drawSvg` →
+`null`. **It predates the worker** — the identical probe fails the same way against the pre-W28.7
+tree, on the page.
+
+**What a chemist sees.** Every `<Molecule>` renders its SMILES as text with "The structure toolkit
+could not be loaded, so nothing on this page can be drawn" beside it; the structure panel says the
+same; the entity rail cannot key a compound, because `canonicalSmiles` answers `null`. The copy is
+correct — the distinction `rdkitAvailable()` exists to keep is working exactly as designed — which
+is why this reads as a deployment quirk rather than as a break.
+
+**Why nobody saw it.** The Vite dev server serves `index.html` itself and never sends this header,
+so `npm run dev` draws structures perfectly. `server/config.ts`'s own comment said to verify
+against `http://localhost:3000` rather than `:5173`; nothing did, and the sentence beside it
+asserted in the present tense that the directive was what RDKit needs. Both are corrected in place.
+
+**Two ways out, and neither is taken here because both are posture rather than a typo.**
+
+- **Add `'unsafe-eval'` to `script-src`.** One line, and it re-opens `eval` and `new Function` for
+  the whole document — the origin that holds the bearer token, renders model output and injects
+  RDKit's SVG with `dangerouslySetInnerHTML`.
+- **Scope it to the worker.** A dedicated worker's policy is the document's in Chromium, so this
+  is not a header on the chunk — it means serving `src/chem/rdkit.worker.ts` from a `blob:` built
+  on this origin, or giving the worker its own document. More work, and it confines the
+  relaxation to a thread with no DOM and no markup path. W28.7 is what makes it available at all:
+  before it, the toolkit ran on the page and there was nothing to confine.
+
+**What it costs beyond the drawing, which is the part that outranks the rest of W28.7's record.**
+That wave's headline is a 600-character draw going from 587 ms of blocked main thread to 0, and
+`scripts/measure-rdkit-placement.mjs` measures it through the **Vite dev server** — which serves
+`index.html` itself and sends none of these headers. Behind the BFF nothing is drawn, so there is no
+main-thread cost to have saved: the work W28.7 did is sound and **no container-served deployment can
+observe any of it**. That is not an argument against the wave; it is the order the two should be
+read in, and `src/chem/rdkit.ts` now says so beside the table rather than eleven paragraphs below
+it. It also means this row, not the worker, is what stands between a chemist and a drawn structure.
+
+**Who decides:** whoever owns this app's CSP. Until then `rdkit.client.ts`'s fallback is doing its
+job — the app degrades to text and says so — and `e2e/worker.spec.ts` asserts the worker thread is
+started and answers, which is the most this repository can assert today.
+
+---
+
+## Issue 11: a 600-character chain is inside the parser cap and `canonicalSmiles` still answers `null`
+
+**Found by re-running W28.7's own measurement, not by report**, and it predates W28.7 — the same
+probe behaves the same way against the tree before it.
+
+`MAX_PARSED_SMILES_CHARS` is 600 and `tooLongToParse` is `length > 600`, so a 600-character chain is
+inside the cap this module declares. That constant's own docstring states the rule it exists to
+protect: a helper answering `null` for such a string "is saying _not a molecule_ about something
+that is one". RDKit's canonical ranking recurses, so on a deep enough chain it raises
+`RangeError: Maximum call stack size exceeded`, and on the main thread `withMol` turns that into the
+module's ordinary negative. The negative is indistinguishable from a chemical verdict.
+
+**Three measurements, all from `scripts/measure-rdkit-placement.mjs`:**
+
+- Sweeping 300 → 600 characters in one page, `canonicalSmiles` **answered at every length** and
+  blocked the main thread for 59–118 ms at 400 and above, one `longtask` each.
+- Calling 200 then 600 in a fresh page, the same 600-character string **answered `null`**.
+- The pre-W28.7 tree does the same: `null` at 600, after 147 ms of blocked main thread.
+
+So it is not a length threshold at all — **it depends on the JavaScript stack at the moment of the
+call**, which is why it has never been reproducible enough to be filed. The same string is a
+molecule or is not, in the same browser, depending on what ran before it.
+
+**What a chemist sees.** A long but legal structure renders as its SMILES with "not a recognised
+structure" beside it, sometimes, and draws correctly the rest of the time — `moleculeSvg` is
+unaffected and answered at every length measured. The entity rail cannot key such a compound,
+because `canonicalSmiles` is what mints the key.
+
+**Two things this also corrects about W28.7's record**, both in the direction of claiming more than
+was delivered:
+
+- The worker's boundary is between **300 and 400** characters, not "500 up". Above it,
+  `rdkit.client.ts` re-runs the call on the page, so the main-thread block comes straight back and
+  the wall clock is _worse_ than before the change — the worker attempt is paid first. The draw is
+  the unambiguous win; canonicalisation of a long chain was never moved off the main thread.
+- "The seam now answers identically at 200–600 characters in both placements" is true and is not
+  reassuring: what it answers identically can be `null`.
+
+**What it does not cost, traced rather than assumed.** A `null` here is an _omission_, never a
+second identity: every consumer of `canonicalSmiles` drops the molecule rather than admitting it
+under its raw spelling — `src/chem/entities.ts` at the tool-call path (`if (!canonical) continue`)
+and at `ingestUserStructure` (`return null`), and `src/chem/structure.ts` likewise — so no cache
+key, no dedupe key and no citation is ever minted from an uncanonicalised string, and a later
+success merges on the same canonical key as every earlier one. The cost is what the paragraph above
+says and no more: an intermittent gap in the rail, and an intermittent "not a recognised structure"
+for a structure that is one. `tests/rdkitUnavailable.test.tsx` now pins that bound — driven by
+making either drop site fall back to the raw string, it fails.
+
+**Options, none taken here because each is a real decision:** lower `MAX_PARSED_SMILES_CHARS` to
+something the ranking survives with margin (it would have to be measured, and it refuses structures
+that draw fine); distinguish a `RangeError` from a chemical negative at the seam, so the surfaces
+say "too complex to name" rather than "not a molecule" (the honest minimum, and it needs a third
+value the module deliberately does not thread through today — see `MAX_PARSED_SMILES_CHARS`); or
+raise the worker's stack, which is not configurable from here.
+
+**Who decides:** whoever owns `src/chem/`. Until then the cap is a number that does not bound what
+it claims to.
+
+---
+
+## Issue 12: a job ending read off a stream and not yet relayed dies with the tab that read it
+
+**Found by re-reading the docstring against the service, not by report.** `src/state/jobStreamLeader.ts`
+said, flatly, that "the gap during a takeover is a delay, not a loss … a row nobody has claimed is
+still there when the next stream opens". The first half is the important one and it is true. The
+sentence's scope was not.
+
+The service's claim is destructive by design (`chemclaw/agent/session_events.py`, read at
+`Chemclaw3` `1c2988fe`; that file itself last moved in `0bf7ff39`): one
+`UPDATE … FOR UPDATE SKIP LOCKED … RETURNING`, documented as at-most-once, with `restore_unconsumed`
+un-claiming a row whose _yield_ did not complete — which shrinks the loss window "to the transport
+itself", in that module's own words. So a `job_completed` frame that has been written to a tab's
+socket is already gone from the mailbox. If that tab dies between reading the frame and
+`tab.publish`ing it, the completion reaches no window on the account, and no takeover, reconnect or
+reload brings it back: the row is consumed and the job feed never held it.
+
+**How big it is.** Small, and not zero. The window is the browser-side gap between the frame
+arriving and `publish` running — the leader publishes synchronously inside the read loop, so for a
+tab that is merely _closed_ it is microseconds. It widens for a tab the OS kills, a renderer crash,
+or a laptop lid closing mid-frame. A durable run's ending arrives exactly once, which is the whole
+reason this stream exists, so the cost of hitting it is a chemist never being told.
+
+**Why it is not fixed here.** Every client-side arrangement loses the same frame: the row is gone
+before the browser has it, so relaying earlier, retrying, or persisting sooner all start after the
+only irreversible step. The fix is upstream — an acknowledgement before the claim, or a restore
+keyed on _delivery_ rather than on yield completing. That is a service change with a protocol
+attached, and nobody has asked for one.
+
+**What was done instead:** the docstring now says which half of the promise it can keep. A file that
+claimed "not a loss" about the one case it cannot cover is the thing worth removing immediately;
+the loss itself is a known, bounded, upstream-shaped hole.
+
+---
+
+## Issue 13: the note event is renamed in two repositories, and the last step waits on a rollout
+
+**Status: steps 1 and 2 are done. Step 3 is this repository's and is deliberately waiting — not on
+a commit, on a rollout.** The event is not a proposal — nothing reviews a note any more
+(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`) — so the accurate name is `note_recorded`,
+and renaming an SSE discriminator is "a coordinated two-repo deploy with a skew window in which one
+side silently drops the event".
+
+An SSE discriminator is a contract two repositories switch on, and there is exactly one ordering
+with no broken state:
+
+1. **The reader accepts both names.** Done — `shared/events.ts` admits `note_recorded` in
+   `EVENT_TYPES` and normalises it onto the internal `note_proposed`, so no surface has to learn
+   the second spelling and none can miss it. Held by four tests in `tests/eventContract.test.ts`
+   (old name, new name, the SSE `event:` line with no `type` in the body, and a near-miss name that
+   must still be refused) and one on the real wire path in `tests/streamTurn.test.ts`.
+2. **The service emits the new name.** **Done, and not this repository's step.**
+   `src/chemclaw/api/events.py` upstream declares `type: Literal["note_recorded"] = "note_recorded"`
+   and no longer declares the old spelling at all; its own model docstring records the ordering and
+   says the third step "is theirs and happens after this ships".
+3. **This repository removes the old name** — the `note_proposed` entry in `EVENT_TYPES`, the
+   fall-through case, and at the same time renames the internal type. **Deliberately not done
+   now**: every browser already loaded speaks the old name, so removing it before step 2 has
+   _rolled out_ is the rename done in the order that loses events. The trigger is a deployment,
+   which nothing in this repository can observe.
+
+**How the contract check holds a step that waits on a rollout.** `tests/backendContract.test.ts`
+compares the names this client admits against the names the service declares, and a name it admits
+and the service does not is dead code — which `note_proposed` now looks exactly like. It is not,
+and the difference is recorded rather than tolerated: the old spelling is an entry in that file's
+`RETAINED_FOR_ROLLOUT` map, beside `AHEAD_OF_BACKEND`, which holds the mirror-image state (a name
+this reader admits _before_ the service declares it). Both are held to the same discipline — a
+non-empty reason, a phrase naming this row, and a date by which somebody re-takes the decision —
+and an entry whose `ISSUES.md` row is deleted, or whose date has passed, fails. That is the expiry;
+the old edition had none but a `console.log`. An `AHEAD_OF_BACKEND` entry has a second one, in the
+lanes that have a checkout: it fails as soon as the service declares the name, because that
+end-state is written in the declaration this check already reads and the remedy is deleting an
+entry that by then exempts a name needing no exemption. `RETAINED_FOR_ROLLOUT` keeps only the
+notice, because its end-state is a deployment nothing here can observe.
+
+**It does not fail the gate, and that is now true rather than intended.** The first edition argued
+only the _new_ name, so the day the service renamed, the retained old name failed this file with a
+message calling it dead code — the only mechanical remedy being step 3, performed before the
+rollout, which is the event-losing order this whole entry exists to prevent. Measured against the
+sibling checkout on 2026-09-14: one failed test, and the "step 3 is unblocked" notice it was
+supposed to print never printed, because it sat after the throwing assertion in the same test.
+
+---
+
+## Issue 14: the contract check reads a declaration, and three things are outside it
+
+`tests/backendContract.test.ts` (W30.1) is the first thing in this repository that compares what
+this client sends and expects to what Chemclaw3 declares. What it covers is in
+[`docs/production-readiness.md`](docs/production-readiness.md) §2. This entry is the other half —
+what it does **not** cover — because a check whose boundary is unwritten gets read as covering
+everything next to it.
+
+- **No sibling checkout means no check at all.** It resolves `CHEMCLAW3_DIR`, else `../Chemclaw3`,
+  and where neither exists it verifies nothing: the run prints a warning naming what it is
+  therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns that into a failure. It runs for a
+  developer and for an agent with both trees, in the four-repository full-stack lane, and in the
+  Jenkins `Gate` stage, which now sets both variables against the `.jenkins-lib` checkout its
+  `Preflight` stage already makes. **In GitHub Actions it is still a warning**, and that is the
+  lane that runs on every push.
+
+  **And the Jenkins lane it now runs in is opt-in, which this entry read as a gate.**
+  `RUN_GATE` defaults to `false`, so that stage runs only when somebody ticks the box on a run —
+  meaning no lane of either pipeline gates this check by default, and the two sentences above are
+  about where it _can_ run rather than where it does. Turning the parameter on is the decision
+  below in miniature, taken by the same owner: it buys the check in the lane that ships the image,
+  and it costs a build that can red on a rename made in another repository. `tests/delivery.test.ts`
+  holds this paragraph and `docs/production-readiness.md` §2 to the default the pipeline declares,
+  so flipping it fails the suite until both are rewritten.
+
+  **The blocker this entry used to state was a credential, and it was wrong in both lanes.** The
+  `Jenkinsfile` beside it falsified half of that on its own: `Preflight` clones `Chemclaw3`
+  unconditionally on every run for the shared build library, so that lane had whatever credential
+  it needs all along, and what was missing was the source paths the reader opens plus the two
+  variables naming where they landed. Those paths are now derived from the reader itself by
+  `tests/delivery.test.ts` rather than transcribed, so a reader that opens a directory the pipeline
+  does not fetch fails there instead of quietly demoting the check to a warning; they are
+  directories rather than files because `git clone --sparse` is cone mode, and cone mode refuses a
+  file path outright. The other half is falsified by the repository itself — observed 2026-09-14,
+  `8fqycwdt8v-oss/Chemclaw3` is **public**, so `actions/checkout` reads it with no credential at
+  all and `GITHUB_TOKEN` never comes into it.
+
+  **What is actually open is a coupling decision, and it is a real one.** Checking that repository
+  out in the push gate points this repository's CI at another repository's moving `main`: a rename
+  there reds every pull request here, including one that changed nothing, and the remedy is an
+  argued entry in the maps above rather than anything the author of that PR did. That is the trade
+  to take deliberately — it is what a contract check is _for_, and it is also a build queue nobody
+  here controls. **Who decides:** whoever owns this repository's CI. It is not a credential
+  question, and this entry should not have said it was.
+
+  **That coupling is not the push lane's alone, and it grew while this entry named it only
+  there.** The argued maps used to fail on a name the service does **not** declare; one of them
+  now also fails on a name it **does** — an `AHEAD_OF_BACKEND` entry the service has caught up
+  with is expired bookkeeping, and deleting it is the remedy — so a change made upstream can red a
+  lane here in _both_ directions, a rename away and a rename toward. Every lane holding a checkout
+  inherits that: a developer's terminal, the four-repository full-stack lane, and the Jenkins
+  `Gate` stage on a run that ticks `RUN_GATE`. What differs between those lanes is only what a red
+  stops. In the push gate it stops a review of a pull request that changed nothing, which is the
+  cost weighed above; in the Jenkins lane it stops a _release_, and that is why the parameter's
+  default stays the conservative one rather than being an oversight. Same trade, same owner, and
+  the lane that ships is the one where a red is most expensive.
+
+- **Response shapes are not checked.** The interfaces this client declares for what it reads back
+  are not compared to the models the handlers return. The mapping is not mechanical — `GET
+/sessions` returns `list[SessionSummaryOut]` where the client reads a page plus an
+  `X-Next-Cursor` header — and a check that guessed at the pairing would produce confident findings
+  about a relationship it invented, which is worse than the gap. What exists instead is
+  `tests/contractDrift.test.tsx`, which drives the three fields this has actually cost
+  (`title`, `updated_at`, `result_ref`). **What would close it:** the handlers' return models being
+  readable route-by-route, which is a shape the backend does not owe anybody today.
+- **It reads what the service declares, not what a deployment serves.** A service serving something
+  other than its source says is exactly the difference between this check and
+  `npm run check:openapi`, which asks a live service and is operator-run (see "Known gaps" below).
+  Neither replaces the other and both docstrings now say which is which.
+
+Also outside it, and smaller: query parameters (dropped from every template on both sides), and
+the BFF's own routes — `POST /api/client-events` has no upstream at all, so `src/lib/logger.ts` is
+out of the reader's scope by name rather than by accident.
+
+---
+
+## Issue 15: two shapes the path-encoding rule does not see, and one it deliberately allows
+
+`tests/pathEncoding.test.ts` holds the rule that every interpolated path segment reaches the
+service encoded, as an invariant over the tree rather than as a list of call sites. Both escapes
+below were **driven on 2026-09-14** rather than reasoned about, and both are accepted rather than
+fixed — the reasoning is in [`docs/production-readiness.md`](docs/production-readiness.md) §3.
+
+- **A path assembled off a named constant is invisible to it.** `const PROBE_BASE = '/api/jobs/';
+fetch(PROBE_BASE + jobId)` in `src/hooks/useOffline.ts` passed the whole rule, while
+  ``fetch(`/api/jobs/${jobId}`)`` in the same file failed it. The scan recognises a concatenation
+  whose **left operand is a string literal** ending in `/`; an identifier holding that same literal
+  is a shape it does not follow. Widening it means chasing an identifier to its binding, which is a
+  dataflow analysis rather than a syntactic rule.
+- **Encoding is not a character policy.** `/api/notes/note-a%00b` resolves and is forwarded
+  verbatim; so does `%0A`; so does `/api/jobs/qm%00-1`. Traversal is refused — `isTraversal`
+  decides it, not the character class, and `tests/routes.test.ts` drives both directions. The wide
+  `NOTE`/`JOB`/`PENDING` classes exist because those ids embed a slug a model wrote or a Temporal
+  workflow id, so narrowing them is a different change with a different blast radius than the
+  traversal one that was measured. What makes a NUL harmless today is the upstream decoding it into
+  a `[^/]+` path parameter — a property of somebody else's component, which is the reason this is
+  written down rather than assumed.
+
+**Who decides:** whoever owns `server/routes.ts`. **What would change the answer:** an ingress in
+front of this process that normalises before the service (an Envoy with
+`path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD`, some nginx-ingress configurations) makes
+the second one worth a character policy rather than a length cap.
+
+---
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.
@@ -273,6 +677,17 @@ path routing with a working Back button; conversation search; upload progress an
 registry; profile selection; tool calls surviving a reload.
 
 **Still not done:**
+
+- **One intermittent browser test, seen once and not reproduced.**
+  `e2e/protocols.spec.ts:55` (`an edit becomes a new revision and comes back on the next read`)
+  failed on the **mobile** project in one `npm run ci` on 2026-09-14 — `locator.fill` timing out at
+  30 s waiting for `getByLabel(/^Temperature/)` after the Edit button had been clicked — and passed
+  on the re-run of the same suite (91 passed, 5 skipped) and in isolation (12 of 12 in that spec,
+  both projects). It is recorded rather than fixed because one occurrence does not say which of the
+  two candidates it is: a lazily-loaded editor chunk under four parallel workers on a loaded
+  machine, or the mobile sheet's open animation. **What would settle it:** the next occurrence, with
+  the trace kept — `test-results/` holds an `error-context.md` per failure, and both runs above
+  cleared it before anybody read it.
 
 - **Screenshot baselines.** The axe pass covers the mechanical half of the visual contract; nothing
   guards a layout regression that is still accessible.

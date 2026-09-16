@@ -121,3 +121,67 @@ describe('URL ↔ store', () => {
     expect(visited).toEqual([`/c/${b}`, `/c/${a}`]);
   });
 });
+
+/**
+ * W30.6 — `ISSUES.md` Issue 5. The second-device link says what it is.
+ *
+ * Every session-scoped route upstream resolves through `_refuse_unless_owner`, which 404s a
+ * non-owner indistinguishably from an unknown id. So this link cannot be handed to a colleague,
+ * and three user-visible strings said it could: the sidebar row read "Shared conversation", a
+ * mistyped link was answered with "A shared link ends in…", and the spinner said "Opening the
+ * shared conversation…". The route itself was `/s/`.
+ *
+ * Asserted against what is *rendered* and against the store, never against the file: `routes.tsx`
+ * quotes all three of the old strings in the paragraph explaining why they are gone, so a
+ * file-wide `toContain` would pass with the change reverted and fail with it applied — which is
+ * the shape this repository has shipped before.
+ */
+describe('a link to a session this device has never seen', () => {
+  it('adopts it under a name that does not promise sharing', async () => {
+    const sessionId = 'c'.repeat(32);
+    renderAt(`/open/${sessionId}`);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const adopted = Object.values(useChatStore.getState().conversations).find(
+      (c) => c.sessionId === sessionId,
+    );
+    expect(adopted?.title).toBe('Conversation from another device');
+  });
+
+  it('tells a truncated link what a conversation link is, not what a shared link is', async () => {
+    renderAt('/open/nonsense');
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(
+      await screen.findByText(/A conversation link ends in a 32-character session id/),
+    ).toBeTruthy();
+  });
+
+  it('explains the old /s/ link rather than opening a blank new conversation on it', async () => {
+    // The decision not to keep `/s/` as a redirect was argued on this link landing on "That
+    // conversation isn't on this device — the honest message anyway". It did not. With no route
+    // of its own it fell through the catch-all to `/`, and driven through this same router an old
+    // bookmark ended at `/c/<a fresh id>`: no error, nothing adopted, no mention of the link. A
+    // reader sees an empty conversation and reads it as "mine was lost", which is worse than a
+    // 404 rather than the better thing the argument claimed.
+    const sessionId = 'c'.repeat(32);
+    renderAt(`/s/${sessionId}`);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText(/That link has moved/)).toBeTruthy();
+    // It names the path that works now — the id on the end of the reader's bookmark is the same.
+    expect(screen.getByText(/\/open\//)).toBeTruthy();
+    // Nowhere: the URL the reader arrived on is the URL they are still on. Three entries here is
+    // the redirect coming back.
+    expect(visited).toEqual([`/s/${sessionId}`]);
+    // And nothing was minted or adopted on the way — the empty conversation is what made the old
+    // behaviour read as a loss.
+    expect(Object.keys(useChatStore.getState().conversations)).toEqual([]);
+  });
+});

@@ -3,6 +3,7 @@ import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { normalizeEvent } from '../shared/events.ts';
 import type { ChemclawEvent } from '../shared/events.ts';
+import { clientEventTypes } from './backendContract.ts';
 
 /**
  * The gate, asserted as a gate.
@@ -274,62 +275,60 @@ const eventsSource = (): ts.SourceFile =>
     true,
   );
 
+/** Every member of `ChemclawEvent`, as `discriminator -> declared field names`. */
+const declaredMembers = (): Map<string, Set<string>> => {
+  const source = eventsSource();
+
+  const interfaces = new Map<string, ts.InterfaceDeclaration>();
+  let union: ts.TypeAliasDeclaration | undefined;
+  for (const statement of source.statements) {
+    if (ts.isInterfaceDeclaration(statement)) interfaces.set(statement.name.text, statement);
+    if (ts.isTypeAliasDeclaration(statement) && statement.name.text === 'ChemclawEvent') {
+      union = statement;
+    }
+  }
+  if (!union || !ts.isUnionTypeNode(union.type)) {
+    throw new Error('ChemclawEvent is no longer a union of interfaces; this check needs updating');
+  }
+
+  const members = new Map<string, Set<string>>();
+  for (const node of union.type.types) {
+    if (!ts.isTypeReferenceNode(node) || !ts.isIdentifier(node.typeName)) continue;
+    const declaration = interfaces.get(node.typeName.text);
+    if (!declaration) throw new Error(`no interface found for ${node.typeName.text}`);
+
+    const fields = new Set<string>();
+    let discriminator: string | undefined;
+    for (const member of declaration.members) {
+      if (!ts.isPropertySignature(member) || !member.name) continue;
+      const name = member.name.getText(source);
+      // The discriminator is the key, not a field: `normalizeEvent` takes it as an argument and
+      // sets it, so it is never something the fixture has to carry.
+      if (name === 'type') {
+        const literal = member.type?.getText(source) ?? '';
+        discriminator = literal.replace(/['"]/g, '');
+        continue;
+      }
+      fields.add(name);
+    }
+    if (!discriminator) throw new Error(`${node.typeName.text} declares no literal \`type\``);
+    members.set(discriminator, fields);
+  }
+  return members;
+};
+
 describe('the fixture is checked against the declarations, not trusted', () => {
-  /** Every member of `ChemclawEvent`, as `discriminator -> declared field names`. */
-  const declared = (): Map<string, Set<string>> => {
-    const source = eventsSource();
-
-    const interfaces = new Map<string, ts.InterfaceDeclaration>();
-    let union: ts.TypeAliasDeclaration | undefined;
-    for (const statement of source.statements) {
-      if (ts.isInterfaceDeclaration(statement)) interfaces.set(statement.name.text, statement);
-      if (ts.isTypeAliasDeclaration(statement) && statement.name.text === 'ChemclawEvent') {
-        union = statement;
-      }
-    }
-    if (!union || !ts.isUnionTypeNode(union.type)) {
-      throw new Error(
-        'ChemclawEvent is no longer a union of interfaces; this check needs updating',
-      );
-    }
-
-    const members = new Map<string, Set<string>>();
-    for (const node of union.type.types) {
-      if (!ts.isTypeReferenceNode(node) || !ts.isIdentifier(node.typeName)) continue;
-      const declaration = interfaces.get(node.typeName.text);
-      if (!declaration) throw new Error(`no interface found for ${node.typeName.text}`);
-
-      const fields = new Set<string>();
-      let discriminator: string | undefined;
-      for (const member of declaration.members) {
-        if (!ts.isPropertySignature(member) || !member.name) continue;
-        const name = member.name.getText(source);
-        // The discriminator is the key, not a field: `normalizeEvent` takes it as an argument and
-        // sets it, so it is never something the fixture has to carry.
-        if (name === 'type') {
-          const literal = member.type?.getText(source) ?? '';
-          discriminator = literal.replace(/['"]/g, '');
-          continue;
-        }
-        fields.add(name);
-      }
-      if (!discriminator) throw new Error(`${node.typeName.text} declares no literal \`type\``);
-      members.set(discriminator, fields);
-    }
-    return members;
-  };
-
   const fixture = new Map(full.map(([type, frame]) => [type, new Set(Object.keys(frame))]));
 
   it('covers every member the union declares', () => {
-    const missing = [...declared().keys()].filter((type) => !fixture.has(type));
+    const missing = [...declaredMembers().keys()].filter((type) => !fixture.has(type));
     expect(
       missing,
       `these members of ChemclawEvent have no frame in the fixture: ${missing}`,
     ).toEqual([]);
   });
 
-  it.each([...declared()].map(([type, fields]) => [type, fields] as const))(
+  it.each([...declaredMembers()].map(([type, fields]) => [type, fields] as const))(
     'covers every field of %s',
     (type, fields) => {
       const covered = fixture.get(type);
@@ -347,6 +346,80 @@ describe('the fixture is checked against the declarations, not trusted', () => {
       ).toEqual([]);
     },
   );
+});
+
+/**
+ * The gate and the union are one vocabulary, and this file was reading only one of them.
+ *
+ * `shared/events.ts` states the rule as **`EVENT_TYPES` is the gate**, and everything above takes
+ * its subject from the *interface union* instead: `declaredMembers()` parses `ChemclawEvent` with
+ * the compiler API and the fixture is checked against that. The two lists are not the same list.
+ * Measured: `'fake_event'` added to `EVENT_TYPES` — admitted by `normalizeEvent` at runtime, with
+ * no interface and no branch — produced **zero** failures in this file.
+ *
+ * The direction that costs events is held (dropping a name from `EVENT_TYPES` reds the
+ * round-trips above with no backend checkout at all), so what this closes is the other one: dead
+ * names accumulating in the gate, which is where the `handoff` mirror came from — a consumer chain
+ * for an event nothing could send.
+ *
+ * The one name that is legitimately in the gate without an interface of its own is an **alias**: a
+ * second wire spelling that normalises onto a declared member, which is what a two-repository
+ * rename needs. So aliases are permitted and *pinned* — a new one is a deliberate edit here, not a
+ * line in a set literal that nobody has to explain.
+ */
+describe('the runtime gate and the interface union are one vocabulary', () => {
+  /** What the gate admits, read off `EVENT_TYPES` — the same reader the contract check uses. */
+  const gate = (): string[] => clientEventTypes();
+
+  it('is the list the gate actually holds, not a re-derivation of it', () => {
+    // Every assertion below loops over this, so a reader that returned nothing would pass them
+    // all. Seventeen members and one alias today; more than ten is the honest floor.
+    expect(gate().length, 'EVENT_TYPES parsed to nothing').toBeGreaterThan(10);
+  });
+
+  it('admits no name the union does not declare, except a pinned alias', () => {
+    const union = new Set(declaredMembers().keys());
+    const orphans: string[] = [];
+    const aliases: string[] = [];
+    for (const name of gate()) {
+      // Probed rather than read: the question is what a frame with this name *becomes*, which is
+      // what an alias is and what a dead entry is not.
+      const parsed = normalizeEvent({ type: name });
+      if (parsed === null) {
+        orphans.push(`${name}: in EVENT_TYPES and normalizeEvent has no branch for it`);
+        continue;
+      }
+      if (parsed.type === name) {
+        if (!union.has(name)) orphans.push(`${name}: no interface of that type in ChemclawEvent`);
+        continue;
+      }
+      if (!union.has(parsed.type)) {
+        orphans.push(`${name}: normalises onto ${parsed.type}, which the union does not declare`);
+      } else {
+        aliases.push(`${name} -> ${parsed.type}`);
+      }
+    }
+    expect(
+      orphans,
+      'in the runtime gate and nowhere in the union — the gate is the thing that admits, so this ' +
+        'is a name this client accepts and no surface can render',
+    ).toEqual([]);
+    // Pinned, not counted: a second alias is a second wire spelling of an existing event, which is
+    // a two-repository rename in progress and needs the argument that goes with one.
+    expect(
+      aliases,
+      'a wire name normalising onto another event — argue it in shared/events.ts and in ' +
+        "tests/backendContract.test.ts's RETAINED_FOR_ROLLOUT / AHEAD_OF_BACKEND, then pin it here",
+    ).toEqual(['note_recorded -> note_proposed']);
+  });
+
+  it('declares no member of the union that the gate would drop', () => {
+    // The direction that has cost six events. Held by the round-trips at the top of this file too;
+    // asserted here as well because this is where the two lists are compared, and a reader
+    // arriving at this describe should not have to know that.
+    const admitted = new Set(gate());
+    expect([...declaredMembers().keys()].filter((type) => !admitted.has(type))).toEqual([]);
+  });
 });
 
 /**
@@ -428,5 +501,51 @@ describe('the error-code union and its runtime set are one vocabulary', () => {
           `carrying it would be cancelled and its partial answer lost`,
       ).toBe(code);
     }
+  });
+});
+
+/**
+ * The note event under both of its names — the reader half of a two-repository rename.
+ *
+ * The service emits `note_proposed` for an event that is not a proposal, and says so in its own
+ * model docstring: nothing reviews a note any more, so the accurate name is `note_recorded`. An
+ * SSE discriminator is a contract two repositories switch on, and there is exactly one ordering
+ * with no broken state — the reader accepts both names first, the emitter changes afterwards.
+ * Done the other way round, every browser that has not been redeployed drops the event silently,
+ * which is the failure this file exists to end.
+ *
+ * Both directions are driven here because "accepts both" is two claims, and the old one is the
+ * one a careless rename would take away: every browser in the field speaks it today.
+ */
+describe('the note event is read under both of its wire names', () => {
+  const body = { note_id: 'note-suzuki-42', reference: 'agent/notes/suzuki-42' };
+
+  it('reads the name the service sends today', () => {
+    const event = normalizeEvent({ type: 'note_proposed', ...body });
+    expect(event, 'the name in production was dropped').not.toBeNull();
+    expect(event).toEqual({ type: 'note_proposed', ...body });
+  });
+
+  it('reads the name the service is moving to, as the same event', () => {
+    const event = normalizeEvent({ type: 'note_recorded', ...body });
+    expect(event, 'a `note_recorded` frame is dropped, so the rename would lose it').not.toBeNull();
+    // Normalised onto the internal name, so no surface has to learn the second spelling and none
+    // can miss it: the trace row, the entity rail and the turn summary all key on `note_proposed`.
+    expect(event).toEqual({ type: 'note_proposed', ...body });
+  });
+
+  it('reads the new name off the SSE event line when the payload carries no type', () => {
+    // The service sets both the `event:` name and the JSON `type`; this is the half that survives
+    // a frame whose body was written by something older, and it is the path `src/lib/sse.ts` uses
+    // as its fallback. A tolerance that only covered the JSON field would be half a tolerance.
+    const event = normalizeEvent(body, 'note_recorded');
+    expect(event).toEqual({ type: 'note_proposed', ...body });
+  });
+
+  it('still refuses a name neither side has ever sent', () => {
+    // The point of the two names is tolerance of one specific, argued rename — not of anything
+    // that looks like it. Without this, "accepts both" and "accepts everything" are the same test.
+    expect(normalizeEvent({ type: 'note_recorded_v2', ...body })).toBeNull();
+    expect(normalizeEvent({ type: 'note_written', ...body })).toBeNull();
   });
 });

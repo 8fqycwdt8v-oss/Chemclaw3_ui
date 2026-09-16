@@ -698,6 +698,29 @@ describe('sendMessage', () => {
   });
 });
 
+/**
+ * Wait for a condition, with a deadline and a name.
+ *
+ * The two stop tests below used `while (!ready()) await sleep(5)` with no ceiling, and each runs
+ * in 6 ms on its own. Measured under the full suite the day `tests/backendContract.test.ts` was
+ * added — 126 files rather than 125 — both timed out at vitest's default 5,000 ms and the run
+ * reported them as failures of the *stop* path, which is not what had happened: the token they
+ * were spinning for lands through `updateAssistant`, whose store writes are batched per animation
+ * frame, and a starved worker simply does not get one. An unbounded spin loop inside a 5,000 ms
+ * budget is a test that reports "Stop is broken" whenever the machine is busy.
+ *
+ * So: a stated deadline that is generous against the 6 ms this needs, and a failure that says what
+ * never became true rather than "test timed out".
+ */
+async function until(ready: () => boolean, what: string, deadlineMs = 10_000): Promise<void> {
+  const stopAt = Date.now() + deadlineMs;
+  while (!ready()) {
+    if (Date.now() > stopAt)
+      throw new Error(`timed out after ${deadlineMs} ms waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
 describe('detach and stop (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop)', () => {
   it('stopStreaming posts the explicit stop before aborting the stream', async () => {
     const { stopStreaming } = await import('../src/state/sendMessage.ts');
@@ -741,14 +764,14 @@ describe('detach and stop (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop)', (
       const message = useChatStore.getState().conversations[cid]?.messages.at(-1);
       return message?.role === 'assistant' && message.streamedText.length > 0;
     };
-    while (!firstToken()) await new Promise((r) => setTimeout(r, 5));
+    await until(firstToken, 'the first token of the streamed answer');
     stopStreaming();
     await turn;
 
     expect(stub.calls.some((c) => c.url.endsWith('/turn/stop'))).toBe(true);
     const message = useChatStore.getState().conversations[cid]?.messages.at(-1);
     expect(message?.role === 'assistant' && message.status).toBe('aborted');
-  });
+  }, 20_000);
 
   it('says the stop was not confirmed when the server refuses it, so the next 409 is expected', async () => {
     // `api.stopTurn` resolves `false` when there is no route and THROWS on a 500/503; both used to
@@ -792,7 +815,7 @@ describe('detach and stop (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop)', (
       const message = useChatStore.getState().conversations[cid]?.messages.at(-1);
       return message?.role === 'assistant' && message.streamedText.length > 0;
     };
-    while (!firstToken()) await new Promise((r) => setTimeout(r, 5));
+    await until(firstToken, 'the first token of the streamed answer');
     stopStreaming();
     await turn;
 
@@ -804,7 +827,7 @@ describe('detach and stop (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop)', (
     const banner = useChatStore.getState().banner;
     expect(banner?.kind).toBe('warn');
     expect(banner?.text).toContain('did not confirm');
-  });
+  }, 20_000);
 
   it('a dropped stream recovers the answer from the transcript instead of failing the turn', async () => {
     const broken = new ReadableStream<Uint8Array>({

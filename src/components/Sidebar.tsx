@@ -118,6 +118,8 @@ function useServerSessions(): {
   health: 'idle' | 'degraded';
   more: (() => void) | null;
   loadingMore: boolean;
+  /** How the last *next-page* fetch failed, when one did — see `moreFailed` below. */
+  moreFailed: 'retry' | 'final' | null;
 } {
   const { auth, ready } = useAuth();
   /**
@@ -131,17 +133,14 @@ function useServerSessions(): {
    * Not enabled until auth resolves: the placeholder provider throws rather than sending an
    * unauthenticated request, so running this earlier set `degraded` on every single boot.
    */
-  const { data, error, fetchNextPage, hasNextPage, isFetchingNextPage } = useApiInfiniteQuery<
-    SessionPage,
-    ApiError,
-    string
-  >({
-    queryKey: keys.sessions,
-    queryFn: ({ pageParam }) => api.pageSessions(auth, pageParam || undefined),
-    initialPageParam: '',
-    getNextPageParam: (page) => page.next || undefined,
-    enabled: ready,
-  });
+  const { data, error, fetchNextPage, hasNextPage, isFetchingNextPage, isFetchNextPageError } =
+    useApiInfiniteQuery<SessionPage, ApiError, string>({
+      queryKey: keys.sessions,
+      queryFn: ({ pageParam }) => api.pageSessions(auth, pageParam || undefined),
+      initialPageParam: '',
+      getNextPageParam: (page) => page.next || undefined,
+      enabled: ready,
+    });
 
   /**
    * Adopting what arrived, which is a *use* of the pages rather than part of fetching them.
@@ -171,14 +170,53 @@ function useServerSessions(): {
     });
   }, [error]);
 
+  /**
+   * How the last *next-page* fetch failed, when one did — and whether pressing the control again
+   * could plausibly work.
+   *
+   * **`hasNextPage` does not answer this, and the comment that used to stand below claimed it
+   * did.** It is `getNextPageParam(lastSuccessfulPage)`, and a fetch that *failed* never reaches
+   * `getNextPageParam` at all — so the flag keeps whatever the last page that did arrive said.
+   * Driven against the installed `@tanstack/query-core` with this app's own defaults, a listing
+   * whose page 1 advertises a cursor and whose page 2 throws lands on
+   * `{status:'error', hasNextPage:true, pages:1, isFetchNextPageError:true}`: `hasNextPage` goes
+   * `false` only when the *first* page fails, because then there is no page to derive one from.
+   * So "the button goes away" was true of exactly the case where there was no button.
+   *
+   * `isFetchNextPageError` is the flag that distinguishes the two failures, and they want opposite
+   * things: a first page that fails leaves no listing at all and is the `degraded` note below; a
+   * next page that fails leaves the listing on screen with its cursor unresolved, which is what
+   * this control is about.
+   *
+   * **Final and transient are not the same failure and must not get the same control.** A 422 —
+   * `not a session cursor`, or a registry that cannot resume a listing — is final: the same cursor
+   * will be refused for as long as it is pressed, which is the doomed retry this hook shipped
+   * offering. A 503, a 429 the limiter will lift, and a `fetch` that threw are not final, and
+   * there the button *is* the remedy. `ApiError.retryable` is this app's own answer to "could a
+   * bare retry of this request succeed?" — `sendMessage` reads the same flag to decide whether a
+   * banner offers Retry — so the two decisions cannot drift apart. Anything that is not an
+   * `ApiError` is treated as final: nothing here can say a retry would help, and offering one that
+   * cannot is the defect being fixed.
+   */
+  const moreFailed: 'retry' | 'final' | null = !isFetchNextPageError
+    ? null
+    : error instanceof ApiError && error.retryable
+      ? 'retry'
+      : 'final';
+
   return {
-    health: error ? 'degraded' : 'idle',
-    // A cursor this deployment cannot resume is a 422 and is final for this listing. That used to
-    // be handled by clearing the cursor, which took the control off screen; `hasNextPage` is
-    // `false` once a page errors for the same reason, so the button goes away rather than offering
-    // a retry that will never work.
-    more: hasNextPage ? () => void fetchNextPage() : null,
+    // Only when there is no server listing at all. It used to be any `error`, which put "showing
+    // local conversations only" underneath a list of server conversations the moment a *later*
+    // page failed — a sentence the rows above it contradict. `data.pages` is what tells the two
+    // apart, and it is the same distinction `moreFailed` is drawn on one field over.
+    health: error && !pages?.length ? 'degraded' : 'idle',
+    // Gone once a page has failed finally, because the cursor it would re-issue is the one the
+    // service refused. Kept when the failure was transient, because then pressing it again is
+    // what fixes it — react-query refetches the failed page rather than starting over, and a
+    // success clears `isFetchNextPageError` so the control returns to its ordinary label.
+    more: hasNextPage && moreFailed !== 'final' ? () => void fetchNextPage() : null,
     loadingMore: isFetchingNextPage,
+    moreFailed,
   };
 }
 
@@ -464,7 +502,7 @@ function SidebarLink({
 export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.JSX.Element {
   const navigate = useNavigate();
   const activeId = useChatStore((s) => s.activeId);
-  const { health: degraded, more: loadMoreSessions, loadingMore } = useServerSessions();
+  const { health: degraded, more: loadMoreSessions, loadingMore, moreFailed } = useServerSessions();
   // Either this tab 429'd itself, or the tab holding the account's streams says it did. The
   // chemist's question is the same one — "am I being told about finished jobs?" — and the second
   // is the only form a follower can ever see, because a follower holds no streams to 429.
@@ -571,8 +609,32 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
               disabled={loadingMore}
               onClick={loadMoreSessions}
             >
-              {loadingMore ? 'Loading…' : 'Load earlier conversations'}
+              {/* The label says which of the two this press is. A page that failed transiently
+                  leaves the control here *because* pressing it again is the remedy, and a button
+                  that reads "Load earlier conversations" after a failure says nothing about the
+                  failure — the reader would be guessing whether their last press did anything. */}
+              {loadingMore
+                ? 'Loading…'
+                : moreFailed === 'retry'
+                  ? 'Retry loading earlier conversations'
+                  : 'Load earlier conversations'}
             </Button>
+          </div>
+        )}
+
+        {/* A page the service refused finally takes the control away — and says so where the
+            control was. The pre-`react-query` code cleared the cursor on any failure, which
+            removed the button silently; a control that vanishes with no sentence is how a chemist
+            concludes the list is complete when it is not. Not the `degraded` note in the footer:
+            that one says "showing local conversations only", which is false here — the pages that
+            did arrive are on screen above this. */}
+        {moreFailed === 'final' && !needle && (
+          <div className="px-1 pt-2">
+            <StatusDot
+              status="warn"
+              label="Could not load earlier conversations — the service would not resume this listing. Only the conversations above are shown."
+              className="items-start text-2xs leading-snug"
+            />
           </div>
         )}
       </nav>

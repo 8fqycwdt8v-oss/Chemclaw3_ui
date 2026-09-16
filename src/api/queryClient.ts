@@ -165,6 +165,15 @@ export const keys = {
   toolResult: (sessionId: string, ref: string) => ['tool-result', sessionId, ref] as const,
   note: (noteId: string) => ['note', noteId] as const,
   pendingPlans: ['plans', 'pending'] as const,
+  /**
+   * The held-open questions, and the two things that re-ask for them.
+   *
+   * `nonce` and `pushes` are *in the key* rather than in a dependency array — a frame off the
+   * push-back stream moves `awaitingRevision`, which is the whole reason an inbox left open on
+   * screen notices a new question without polling. It lived inline at its one call site while this
+   * docstring said every key in the app is here, which is the one claim a key list exists to make.
+   */
+  pendingRequests: (nonce: number, pushes: number) => ['pending-requests', nonce, pushes] as const,
   sessions: ['sessions'] as const,
   jobs: (text: string) => ['jobs', text] as const,
   protocols: (status: string, project: string) => ['protocols', status, project] as const,

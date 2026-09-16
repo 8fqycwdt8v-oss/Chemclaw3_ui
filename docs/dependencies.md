@@ -54,12 +54,16 @@ exist.** That is the reason, and it is not "less code" — the file's prose grew
   same place in the file, one construct over. Who decides: whoever finds hover more valuable than
   the derivation; what would change it is a way to have both.
 
-**`src/env.ts` is not covered by this and was deliberately left alone.** It declines a schema
-library for the runtime config — "a dozen string checks, and a schema library would be more bytes
-than the rest of this module" — and that reasoning is sound _for `env.ts`_. It does not transfer: a
-handful of keys read once at boot is not a 17-member discriminated union with per-field defaults
-that decodes every frame of every turn, and `events.ts` is roughly fifty times the size of the
-module that argument is about.
+**`src/env.ts` is not covered by this and was deliberately left alone** — but for one of its two
+reasons, not both. The byte argument it was first written on ("a dozen string checks, and a schema
+library would be more bytes than the rest of this module") is **retired by this very reversal**:
+`env.ts` imports `shared/events.ts`, so `valibot` is already in the graph and costs that module
+nothing further. What survives is the reason that was never about size, and it is the one the table
+below now gives: there is no second declaration to drift from. `events.ts` took a schema because a
+field could exist in the hand-written interface and be missing from the hand-written decoder beside
+it, nine times; here `RuntimeConfig` is the only shape, the keys are read once at boot, and a
+missing one is a default rather than a dropped field a surface renders around. `src/env.ts` says
+the same thing at the point of use.
 
 ### `@tanstack/react-query` for the app's reads
 
@@ -113,7 +117,7 @@ it meets the reviewer.
 | `@microsoft/fetch-event-source`                                  | `src/api/streamTurn.ts`                                          | Unmaintained since 2021, and its auto-retry would double-spend the turn budget or hit the 409 session lock |
 | `broadcast-channel` (npm)                                        | `src/state/jobStreamLeader.ts`                                   | ~10 kB+ gz, and it carries Node/IndexedDB methods this app cannot use. `navigator.locks` is zero bytes     |
 | `postcss` in the contrast gate                                   | `scripts/check-contrast.mjs`                                     | A build-tool dependency bought for a `{...}` match, and Tailwind v4 no longer guarantees it is in the tree |
-| A schema library in `src/env.ts`                                 | `src/env.ts`                                                     | A dozen string checks; the library would be more bytes than the rest of the module. Unchanged by §1        |
+| A schema library in `src/env.ts`                                 | `src/env.ts`                                                     | No second declaration to drift from: read once at boot, one shape, a missing key is a default              |
 | A charting library                                               | `src/components/Sparkline.tsx`, `src/components/chem/Charts.tsx` | —                                                                                                          |
 | `rehype-raw`, `papaparse`, `file-saver`, `@tanstack/react-table` | their call sites                                                 | —                                                                                                          |
 | A web framework for the BFF; compression middleware              | `server/app.ts`                                                  | —                                                                                                          |

@@ -38,7 +38,7 @@ import { useEffect, useState } from 'react';
 import { Clock, Inbox, ListChecks } from 'lucide-react';
 import { Link } from 'react-router';
 import { useAuth } from '../auth/AuthContext.tsx';
-import { useApiQuery } from '../api/queryClient.ts';
+import { keys, useApiQuery } from '../api/queryClient.ts';
 import { pendingPlansQuery } from '../api/queries.ts';
 import { api, type PendingRequest, type PendingPlans as PendingPlansView } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
@@ -304,7 +304,7 @@ function PendingInbox(): React.JSX.Element {
     isError: failed,
     isPending,
   } = useApiQuery({
-    queryKey: ['pending-requests', nonce, pushes] as const,
+    queryKey: keys.pendingRequests(nonce, pushes),
     queryFn: () => api.listPendingRequests(auth),
     enabled: ready,
   });

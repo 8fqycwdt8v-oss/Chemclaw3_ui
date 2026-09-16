@@ -103,7 +103,14 @@ export interface DigestCard {
  * them from. `receivedAt` is when WE claimed it, and is the only clock this card has.
  */
 export interface CheckInCard {
-  /** The service's own id for the waiting question, and this card's identity. */
+  /**
+   * This card's identity: the service's own request id, or a content key when that is empty.
+   *
+   * `CheckIn`'s own docstring says every field is defaulted upstream and so "always present and
+   * possibly empty", and this was keyed on `request_id` with no guard — so two questions that
+   * both arrived with an empty id folded into one card and destroyed a notice the service will
+   * never send again. `checkInKey` is what decides it.
+   */
   requestId: string;
   subject: string;
   rationale: string;
@@ -112,6 +119,18 @@ export interface CheckInCard {
   daysLeft: number;
   /** When WE claimed it. The service sends no timestamp, so nothing here may imply one. */
   receivedAt: number;
+  /**
+   * When the last claim carrying this question landed — re-stamped on every refresh, where
+   * `receivedAt` deliberately is not.
+   *
+   * The two answer different questions and the card needs both. `receivedAt` orders the list and
+   * keeps a nine-day-old question from reading as news; `refreshedAt` says how old the *numbers*
+   * are. Without it nothing could decide which of two copies of one question is fresher, and
+   * `mergeWithStored` resolved that the wrong way round: a tab open since yesterday overwrote
+   * this morning's refresh on disk, so the countdown on screen was a day more generous than the
+   * truth — the exact direction the service's own `FLOOR` exists to avoid.
+   */
+  refreshedAt: number;
   dismissed: boolean;
 }
 
@@ -125,7 +144,7 @@ export interface CheckInCard {
  * yours is blocked" only when the claim actually answered — the same confident emptiness
  * `ReviewQueue` has now had to delete two sections over.
  */
-export type ClaimState = 'pending' | 'ready' | 'failed';
+export type ClaimState = 'pending' | 'ready' | 'failed' | 'absent';
 
 /**
  * One migration step. Each takes the shape the previous version wrote and returns the next, so
@@ -263,6 +282,31 @@ const MAX_PERSISTED_MESSAGES = 200;
 const MAX_JOB_FEED = 50;
 /** A completion older than this is history, not news. Bounds the persisted feed's size too. */
 const JOB_FEED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * How many claimed check-ins are kept. The job feed has had a bound since it was written and this
+ * did not, which matters more here than there: `_PAGE_ROWS` upstream is 200 and two free-text
+ * fields are truncated at 1,000 chars each, so one claim can be a few hundred kilobytes, and
+ * `withinLearnedCap` sheds *conversations* to stay inside the quota. Unbounded, a chemist with
+ * many open questions would lose transcript persistence to a list that only ever grows.
+ */
+const MAX_CHECK_INS = 200;
+
+/**
+ * A check-in's identity, and the reason it is not simply `request_id`.
+ *
+ * `CheckIn`'s docstring states that every field is defaulted upstream and so is "always present
+ * and possibly empty". Keyed on the id alone, two questions that both arrived with an empty id
+ * folded into one card — and since the read is the consume, the one that lost is destroyed
+ * rather than merely hidden. The content fallback is the shape `digests` already uses, and it has
+ * a second virtue: a row with no id cannot be refreshed either, so a content key at least keeps
+ * it stable across claims instead of minting a new card each time.
+ */
+export const checkInKey = (row: {
+  requestId: string;
+  subject: string;
+  rationale: string;
+}): string => row.requestId || `\u0000${row.subject}\u0000${row.rationale}`;
 const MAX_TRACE_ENTRIES = 200;
 const TITLE_MAX = 60;
 
@@ -706,7 +750,15 @@ export interface ChatState {
   /** Record that this page's one claim did not land, so the surface can say so rather than read
    *  as an empty mailbox. */
   failCheckInClaim: () => void;
-  dismissCheckIn: (requestId: string) => void;
+  /**
+   * The service answered 404: this deployment serves no check-in mailbox.
+   *
+   * Distinct from an empty one, because the section says "nothing of yours is blocked" and that
+   * sentence needs the service to have actually said so.
+   */
+  markCheckInsAbsent: () => void;
+  /** Dismiss one card, identified by `checkInKey` rather than by its possibly-empty id. */
+  dismissCheckIn: (key: string) => void;
   /**
    * Make a local conversation for a session the service forked from `parentId`.
    *
@@ -973,10 +1025,29 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
    * Folded ABOVE the `extra.length === 0` return, because the conversation half being unchanged
    * is exactly the common case in which the other tab has nonetheless claimed something.
    */
-  const union = <T>(ours: T[], theirs: T[] | undefined, keyOf: (row: T) => string): T[] => {
+  const union = <T>(
+    ours: T[],
+    theirs: T[] | undefined,
+    keyOf: (row: T) => string,
+    fresher?: (ours: T, theirs: T) => T,
+  ): T[] => {
     if (!Array.isArray(theirs) || theirs.length === 0) return ours;
-    const known = new Set(ours.map(keyOf));
+    const known = new Map(ours.map((row) => [keyOf(row), row]));
     const added = theirs.filter((row) => !known.has(keyOf(row)));
+    // **On a key collision, "ours wins" is right for a digest and wrong for a check-in**, and the
+    // difference is what the payload *is*. A digest's identity is its content, so two copies of
+    // one key are the same finding. A check-in's identity is the question and its content is a
+    // countdown, so two copies differ precisely in the part that matters — and the service has
+    // already consumed both, so whichever is discarded is discarded for ever. Measured before
+    // this argument existed: a tab open since yesterday overwrote this morning's refresh, showing
+    // a deadline a day more generous than the truth, and undid a dismissal made in the other tab.
+    if (fresher) {
+      for (const row of theirs) {
+        const mine = known.get(keyOf(row));
+        if (mine !== undefined) known.set(keyOf(row), fresher(mine, row));
+      }
+      return [...known.values(), ...added];
+    }
     return added.length === 0 ? ours : [...ours, ...added];
   };
   const jobFeed = union(next.jobFeed, stored.jobFeed, (j) => j.event.job_id).slice(0, MAX_JOB_FEED);
@@ -989,7 +1060,18 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
   );
   // Keyed by the service's own request id, which a digest does not have: two tabs claiming the
   // same blocked question fold to one card rather than to two notices about one question.
-  const checkIns = union(next.checkIns ?? [], stored.checkIns, (c) => c.requestId);
+  // **Aged out on both sides.** `partialize` drops a card older than the cutoff, and this fold
+  // then put every stored row the new state does not know straight back on disk — so the row
+  // that was just dropped returned, and rehydrated, for ever. A stale digest is a stale finding;
+  // a stale check-in is a countdown that is days wrong, which is the one payload where that is
+  // not harmless, and the comment added beside `partialize` claimed it did not happen.
+  const checkInCutoff = Date.now() - JOB_FEED_MAX_AGE_MS;
+  const checkIns = union(
+    next.checkIns ?? [],
+    (stored.checkIns ?? []).filter((c) => c.receivedAt > checkInCutoff),
+    checkInKey,
+    (mine, theirs) => (theirs.refreshedAt > mine.refreshedAt ? theirs : mine),
+  ).slice(0, MAX_CHECK_INS);
   const carried: PersistedState = { ...next, jobFeed, digests, checkIns };
 
   const extra = stored.order.filter((id) => {
@@ -1876,32 +1958,44 @@ export const useChatStore = create<ChatState>()(
 
       addCheckIns(claimed) {
         set((s) => {
-          const known = new Map(s.checkIns.map((c) => [c.requestId, c]));
+          const known = new Map(s.checkIns.map((c) => [checkInKey(c), c]));
           const fresh: string[] = [];
+          const now = Date.now();
           for (const row of claimed) {
-            const held = known.get(row.request_id);
-            known.set(row.request_id, {
+            const card = {
               requestId: row.request_id,
               subject: row.subject,
               rationale: row.rationale,
+            };
+            const key = checkInKey(card);
+            const held = known.get(key);
+            known.set(key, {
+              ...card,
               askedOf: row.asked_of,
               openDays: row.open_days,
               daysLeft: row.days_left,
               // A refresh keeps the position and the time it first arrived, exactly as a
               // redelivered job ending does: re-stamping would put a question that has been open
               // for nine days back at the top as though it were news.
-              receivedAt: held?.receivedAt ?? Date.now(),
+              receivedAt: held?.receivedAt ?? now,
+              // Re-stamped unconditionally, because this is the half `receivedAt` cannot answer:
+              // which of two copies of one question carries the newer countdown. `mergeWithStored`
+              // reads it, and without it a stale tab's copy won.
+              refreshedAt: now,
               dismissed: held?.dismissed ?? false,
             });
             // The map is written before this reads it again, so a request that appears **twice in
             // one claim** folds into one card rather than two. That is not hypothetical: the
             // answer is flattened out of every claimed mailbox row, and one unread row per
             // requester is a property the sweep maintains rather than one this client is told.
-            if (!held) fresh.push(row.request_id);
+            if (!held) fresh.push(key);
           }
           const card = (id: string): CheckInCard => known.get(id) as CheckInCard;
           return {
-            checkIns: [...fresh.map(card), ...s.checkIns.map((c) => card(c.requestId))],
+            checkIns: [...fresh.map(card), ...s.checkIns.map((c) => card(checkInKey(c)))].slice(
+              0,
+              MAX_CHECK_INS,
+            ),
             checkInClaim: 'ready' as const,
           };
         });
@@ -1913,13 +2007,19 @@ export const useChatStore = create<ChatState>()(
         set({ checkInClaim: 'failed' });
       },
 
-      dismissCheckIn(requestId) {
-        // A flag, not a delete, for `dismissDigest`'s reason — and by id rather than by index,
+      markCheckInsAbsent() {
+        set({ checkInClaim: 'absent' as const });
+      },
+
+      dismissCheckIn(key) {
+        // A flag, not a delete, for `dismissDigest`'s reason — and by key rather than by index,
         // because this list is rewritten in place by the next claim.
+        //
+        // The key is `checkInKey`'s, not the raw request id: an id-less row shares the empty
+        // string with every other id-less row, so dismissing one by id dismissed whichever
+        // happened to be first.
         set((s) => ({
-          checkIns: s.checkIns.map((c) =>
-            c.requestId === requestId ? { ...c, dismissed: true } : c,
-          ),
+          checkIns: s.checkIns.map((c) => (checkInKey(c) === key ? { ...c, dismissed: true } : c)),
         }));
       },
 

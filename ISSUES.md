@@ -700,6 +700,27 @@ can do — a field this client cannot be sent is not a field it may invent.
 
 ---
 
+## Issue 17: the e2e fixture serves no `/digests`, so every browser run logs a missing route
+
+`e2e/fixture-service.ts` stands in for the service in the Playwright lane, and it does not serve
+`/digests`. Every browser run therefore logs `api.list_route_missing {route: "/digests"}` —
+harmless, and exactly the noise that fixture's own `/pending` comment argues against, because a
+real missing route and a fixture that never had one look identical in the log a developer reads
+while chasing something else.
+
+Found while adding `/check-ins` to the same fixture, which is why it is recorded rather than fixed
+in that commit: the check-in work had its own subject and folding an unrelated route into it would
+have made the diff argue two things.
+
+**One line**, next to the `/check-ins` handler, returning `[]` the way the others do. The only
+thing to get right is that a fixture returning `[]` and a service returning 404 are different
+cases, and `listDigests` already swallows the second into the first — so the fixture should return
+the empty list rather than nothing, or the lane stops exercising the path it exists to exercise.
+
+Anchors: `e2e/fixture-service.ts`, its `/pending` comment, and `src/api/client.ts`'s `listDigests`.
+
+---
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.

@@ -269,3 +269,230 @@ describe('the check-in section', () => {
     expect(heading.getAttribute('id')).toBe('check-ins-heading');
   });
 });
+
+describe('a question the service sent with no request id', () => {
+  it('is two cards when it is two questions, not one card that swallowed the other', () => {
+    // `CheckInOut.request_id` is `str` with `""` available, and `addCheckIns` keyed on it raw — so
+    // every id-less row shared the key `''` and the second question overwrote the first. The
+    // fallback key is the pair a reader distinguishes them by, joined on a separator no subject or
+    // rationale can contain.
+    useChatStore
+      .getState()
+      .addCheckIns([
+        row({ request_id: '', subject: 'Which base for the telescoped step' }),
+        row({ request_id: '', subject: 'Is the 40 °C hold still needed' }),
+      ]);
+    const cards = useChatStore.getState().checkIns;
+    expect(cards).toHaveLength(2);
+    expect(cards.map((c) => c.subject).sort()).toEqual([
+      'Is the 40 °C hold still needed',
+      'Which base for the telescoped step',
+    ]);
+  });
+
+  it('is still refreshed rather than duplicated when the sweep re-sends it', () => {
+    // The other direction: the composite key has to be *stable*, or an id-less question stacks a
+    // fresh card every night the sweep re-sends it, and a chemist sees nine copies of one question.
+    useChatStore.getState().addCheckIns([row({ request_id: '', days_left: 5 })]);
+    useChatStore.getState().addCheckIns([row({ request_id: '', days_left: 4 })]);
+    const cards = useChatStore.getState().checkIns;
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.daysLeft).toBe(4);
+  });
+
+  it('dismisses the one that was clicked and leaves its neighbour', () => {
+    // The consequence of the key change that `dismissCheckIn` had to follow: dismissing by the raw
+    // id would have marked every id-less card at once.
+    useChatStore
+      .getState()
+      .addCheckIns([
+        row({ request_id: '', subject: 'First' }),
+        row({ request_id: '', subject: 'Second' }),
+      ]);
+    renderQueue();
+    const dismiss = screen.getAllByRole('button', { name: 'Dismiss' });
+    expect(dismiss).toHaveLength(2);
+    fireEvent.click(dismiss[0] as HTMLElement);
+    expect(useChatStore.getState().checkIns.filter((c) => c.dismissed)).toHaveLength(1);
+  });
+});
+
+describe('a deployment with no check-in mailbox', () => {
+  it('is not reported as an empty mailbox', () => {
+    // A 404 used to become `[]` like every other list route, so a deployment that does not serve
+    // the route told every chemist their work was unblocked. The route's absence is a fact about
+    // the *service*, and the only honest thing to say about their work is nothing.
+    useChatStore.getState().markCheckInsAbsent();
+    expect(useChatStore.getState().checkInClaim).toBe('absent');
+    renderQueue();
+    expect(screen.queryByText('Nothing of yours is blocked')).toBeNull();
+    expect(screen.getByText('No check-in mailbox here')).toBeTruthy();
+  });
+
+  it('does not clear cards an earlier page claimed from a service that did serve it', () => {
+    // Same argument as `failCheckInClaim`: the rows are the only copy, and a rolling deploy can
+    // put a page that has cards in front of a replica that does not serve the route.
+    useChatStore.getState().addCheckIns([row()]);
+    useChatStore.getState().markCheckInsAbsent();
+    expect(useChatStore.getState().checkIns).toHaveLength(1);
+    renderQueue();
+    expect(screen.getByText('Measured yield for the 2-MeTHF arm')).toBeTruthy();
+  });
+});
+
+/**
+ * The two halves that decide whether a check-in reaches disk, and what reaches it.
+ *
+ * Both are invisible from the store's own API: `partialize` and the cross-tab fold run inside the
+ * persist middleware, so what each one *decides* is only observable by driving a real write. The
+ * module registry is reset per test for the reason `persistBudget.test.ts` gives — `storageWritable`
+ * is module scope and latches.
+ */
+describe('what a check-in does on the way to disk', () => {
+  const KEY = 'chemclaw3.chat.v2.anon';
+  const WEEK = 7 * 24 * 60 * 60 * 1000;
+
+  /** A store module of this test's own, and a `localStorage` it can read back. */
+  async function freshStore() {
+    vi.resetModules();
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      length: 0,
+      key: () => null,
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    });
+    return { store, ...(await import('../src/state/chatStore.ts')) };
+  }
+
+  /** What a second tab left on disk, in the shape `mergeWithStored` parses. */
+  const onDisk = (store: Map<string, string>, checkIns: unknown[]): void => {
+    store.set(
+      KEY,
+      JSON.stringify({
+        version: 3,
+        state: {
+          conversations: {},
+          order: [],
+          activeId: null,
+          drafts: {},
+          jobFeed: [],
+          digests: [],
+          checkIns,
+          notifyOnJobComplete: false,
+        },
+      }),
+    );
+  };
+
+  const stored = (over: Record<string, unknown> = {}) => ({
+    requestId: 'await-1',
+    subject: 'Measured yield for the 2-MeTHF arm',
+    rationale: 'Round 4 conditions cannot be chosen until round 3 is measured.',
+    askedOf: 'process-chemistry',
+    openDays: 9,
+    daysLeft: 5,
+    receivedAt: Date.now(),
+    refreshedAt: Date.now(),
+    dismissed: false,
+    ...over,
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('an aged-out card that `partialize` dropped does not come back through the fold', async () => {
+    // `partialize` filtered on the cutoff and the fold then folded every stored row the new state
+    // did not know straight back in — so the card `partialize` had just dropped was written again,
+    // rehydrated on the next load, dropped, and written again, for ever. A stale digest is a stale
+    // finding; a stale check-in says a deadline that is a week wrong.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    onDisk(store, [stored({ requestId: 'old', receivedAt: Date.now() - WEEK - 1_000 })]);
+
+    const id = useChatStore.getState().createConversation();
+    useChatStore.getState().appendUserMessage(id, 'q');
+    flushChatPersistence();
+
+    expect(store.get(KEY) ?? '').not.toContain('"requestId":"old"');
+  });
+
+  it('carries a card the other tab claimed and this one has never seen', async () => {
+    // The complement, and the whole reason the fold exists: `GET /check-ins` consumes what it
+    // answers, so a row only the other tab claimed is a row nothing can re-fetch.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    onDisk(store, [stored({ requestId: 'theirs', subject: 'Claimed in the other window' })]);
+
+    const id = useChatStore.getState().createConversation();
+    useChatStore.getState().appendUserMessage(id, 'q');
+    flushChatPersistence();
+
+    expect(store.get(KEY) ?? '').toContain('Claimed in the other window');
+  });
+
+  it('keeps the fresher of two copies of one question, whichever tab holds it', async () => {
+    // A check-in's identity is the question and its content is a *countdown*, so the two copies
+    // differ in exactly the part that matters and "ours wins" is the wrong rule — measured before
+    // the `fresher` argument existed, a tab open since yesterday overwrote this morning's refresh
+    // and showed a deadline a day more generous than the truth.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const now = Date.now();
+    onDisk(store, [stored({ refreshedAt: now, daysLeft: 3, openDays: 11 })]);
+
+    // This tab's copy is the older claim: same question, a day's more slack, refreshed earlier.
+    useChatStore.setState({
+      checkIns: [
+        {
+          requestId: 'await-1',
+          subject: 'Measured yield for the 2-MeTHF arm',
+          rationale: 'Round 4 conditions cannot be chosen until round 3 is measured.',
+          askedOf: 'process-chemistry',
+          openDays: 10,
+          daysLeft: 4,
+          receivedAt: now - 1_000,
+          refreshedAt: now - 1_000,
+          dismissed: false,
+        },
+      ],
+    });
+    flushChatPersistence();
+
+    const written = JSON.parse(store.get(KEY) ?? '{}') as {
+      state: { checkIns: { daysLeft: number; openDays: number }[] };
+    };
+    expect(written.state.checkIns).toHaveLength(1);
+    expect(written.state.checkIns[0]).toMatchObject({ daysLeft: 3, openDays: 11 });
+  });
+
+  it('does not let the stale copy win just because this tab wrote last', async () => {
+    // The same fold in the other direction — `fresher` compares `refreshedAt`, not which side of
+    // the merge a row arrived on.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const now = Date.now();
+    onDisk(store, [stored({ refreshedAt: now - 86_400_000, daysLeft: 5, openDays: 9 })]);
+
+    useChatStore.setState({
+      checkIns: [
+        {
+          requestId: 'await-1',
+          subject: 'Measured yield for the 2-MeTHF arm',
+          rationale: 'Round 4 conditions cannot be chosen until round 3 is measured.',
+          askedOf: 'process-chemistry',
+          openDays: 10,
+          daysLeft: 4,
+          receivedAt: now - 86_400_000,
+          refreshedAt: now,
+          dismissed: false,
+        },
+      ],
+    });
+    flushChatPersistence();
+
+    const written = JSON.parse(store.get(KEY) ?? '{}') as {
+      state: { checkIns: { daysLeft: number }[] };
+    };
+    expect(written.state.checkIns).toHaveLength(1);
+    expect(written.state.checkIns[0]?.daysLeft).toBe(4);
+  });
+});

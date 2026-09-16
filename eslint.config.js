@@ -32,7 +32,19 @@ import reactHooks from 'eslint-plugin-react-hooks';
 import jsxA11y from 'eslint-plugin-jsx-a11y';
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'node_modules/**', 'playwright-report/**', 'test-results/**'] },
+  // `.claude/worktrees/**` is Claude Code's per-agent scratch: a throwaway git worktree, which is a
+  // full copy of this repository. eslint does not read `.gitignore`, so without this a run while an
+  // agent worktree exists lints the copy as well as the source — measured at 37,368 errors, none of
+  // them in a file anyone edits. Only `worktrees/` is ignored, matching `.gitignore`.
+  {
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'playwright-report/**',
+      'test-results/**',
+      '.claude/worktrees/**',
+    ],
+  },
 
   js.configs.recommended,
   ...tseslint.configs.recommended,

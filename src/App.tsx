@@ -249,7 +249,12 @@ function useCheckIns(): void {
     checkInsClaimed = true;
     void api
       .listCheckIns(auth)
-      .then((rows) => useChatStore.getState().addCheckIns(rows))
+      .then((rows) => {
+        // `absent` is a 404: this deployment's service does not serve the mailbox at all, which
+        // is not the same statement as an empty one and must not render as good news.
+        if (rows === 'absent') useChatStore.getState().markCheckInsAbsent();
+        else useChatStore.getState().addCheckIns(rows);
+      })
       .catch(() => {
         // The latch stays closed — a retry loop against a destructive mailbox is how one claim
         // becomes many — and the store carries the failure to the surface.

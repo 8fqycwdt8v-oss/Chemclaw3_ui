@@ -842,8 +842,36 @@ export const api = {
    * Swallowed to empty on a 404 like the other list routes — a service that predates the check-in
    * sweep is a smaller app, not an error. Nothing else is swallowed.
    */
-  listCheckIns(getToken: TokenGetter): Promise<CheckIn[]> {
-    return orEmpty('/check-ins', () => request<CheckIn[]>('/check-ins', getToken));
+  /**
+   * Claim the check-in mailbox, reporting *which* emptiness happened.
+   *
+   * Every other list route folds a 404 into `[]` through `orEmpty`, and for those that is right:
+   * an empty sidebar and a service that predates the route look the same to a reader and neither
+   * is a claim. This one is different, because the section it feeds says **"nothing of yours is
+   * blocked"** — an assertion about the chemist's work, on the one surface whose whole purpose is
+   * that a blocked question is not missed.
+   *
+   * Two ways to arrive at zero rows and only one of them supports that sentence:
+   *
+   * - The service answered `200 []`. The mailbox is genuinely empty.
+   * - The service has no such route (404), **or** it has the route and the sweep behind it is off
+   *   — `check_in_enabled` defaults to `false` upstream while `GET /check-ins` is mounted
+   *   unconditionally, so a deployment that has not turned the sweep on answers `200 []` for ever.
+   *
+   * The 404 is detectable here and is reported as `absent`. The second case is not visible from
+   * this side at all: the response model carries no "the sweep is running" signal, which is
+   * recorded as a fifth bullet on `ISSUES.md` Issue 16 rather than guessed at.
+   */
+  async listCheckIns(getToken: TokenGetter): Promise<CheckIn[] | 'absent'> {
+    try {
+      return await request<CheckIn[]>('/check-ins', getToken);
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'session_not_found') {
+        logger.warn('api.list_route_missing', { route: '/check-ins' });
+        return 'absent';
+      }
+      throw err;
+    }
   },
 
   /**

@@ -43,7 +43,7 @@ import { pendingPlansQuery } from '../api/queries.ts';
 import { api, type PendingRequest, type PendingPlans as PendingPlansView } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { relativeTime } from '../lib/format.ts';
-import { useChatStore } from '../state/chatStore.ts';
+import { checkInKey, useChatStore } from '../state/chatStore.ts';
 import { CitationChip } from './CitationChip.tsx';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -504,6 +504,18 @@ function CheckIns(): React.JSX.Element {
     // Only 'pending' is genuinely in flight: the claim runs once at the top of the app, so a
     // reader who navigated here later sees this for as long as that one request takes.
     if (claim === 'pending') return <Loading>Reading what you are waiting on…</Loading>;
+    // **Which emptiness this is.** "Nothing of yours is blocked" is a statement about the
+    // chemist's work, and it needs the service to have made it. A 404 says the deployment serves
+    // no mailbox at all, which is a different sentence and the one the page has already deleted
+    // two sections over for saying wrongly.
+    if (claim === 'absent') {
+      return (
+        <EmptyState icon={<Clock className="size-5" />} title="No check-in mailbox here">
+          This deployment&apos;s service does not serve the check-in mailbox, so nothing can be said
+          about what your work is waiting on — which is not the same as nothing waiting on it.
+        </EmptyState>
+      );
+    }
     return (
       <EmptyState icon={<Clock className="size-5" />} title="Nothing of yours is blocked">
         A question you asked that somebody else has to answer appears here while it is still open —
@@ -518,7 +530,7 @@ function CheckIns(): React.JSX.Element {
       <ul className="flex flex-col gap-2">
         {visible.map((card) => (
           <li
-            key={card.requestId}
+            key={checkInKey(card)}
             className="rounded-lg border border-border-subtle bg-surface-raised p-3"
           >
             <div className="flex flex-wrap items-start justify-between gap-2">
@@ -544,7 +556,7 @@ function CheckIns(): React.JSX.Element {
                   {card.openDays === 1 ? 'day' : 'days'} · claimed {relativeTime(card.receivedAt)}
                 </p>
               </div>
-              <Button size="xs" variant="ghost" onClick={() => dismiss(card.requestId)}>
+              <Button size="xs" variant="ghost" onClick={() => dismiss(checkInKey(card))}>
                 Dismiss
               </Button>
             </div>

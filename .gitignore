@@ -7,3 +7,8 @@ playwright-report/
 test-results/
 .DS_Store
 tsconfig.tsbuildinfo
+
+# Agent tooling scratch. Claude Code checks out a throwaway worktree per background
+# agent here; they are transient copies of this repo, never source. Only `worktrees/`
+# is ignored, so a `.claude/skills/<name>/SKILL.md` is still committable.
+.claude/worktrees/

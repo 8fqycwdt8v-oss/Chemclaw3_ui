@@ -27,6 +27,7 @@
 import { createServer, type ServerResponse } from 'node:http';
 import type { ChemclawEvent } from '../shared/events.ts';
 import type {
+  CheckIn,
   DurableJobStatus,
   JobRecordSummary,
   NoteView,
@@ -386,6 +387,29 @@ const PENDING_PLANS: PendingPlans = {
   truncated: false,
 };
 
+/**
+ * One question of the caller's own that is still open, so `/review` renders a check-in row.
+ *
+ * Non-empty rather than `[]` for the reason `PENDING_PLANS` is: the axe pass over that page should
+ * see the markup a chemist sees, and an empty state is a different piece of markup. Every field is
+ * stated — the service defaults all six, so it sends all six, and a fixture that omitted one would
+ * be describing a response nobody receives.
+ *
+ * `GET /check-ins` is a **destructive claim** upstream. This fixture answers the same rows every
+ * time, which is a deliberate difference and a harmless one: no browser test reloads and then
+ * asserts the notice is gone, and a fixture that consumed would make every spec order-dependent.
+ */
+const CHECK_INS: CheckIn[] = [
+  {
+    request_id: 'await-e2e-1',
+    subject: 'Measured yield for the 2-MeTHF arm',
+    rationale: 'The campaign cannot pick round 4 conditions until round 3 is measured.',
+    asked_of: 'process-chemistry',
+    open_days: 9,
+    days_left: 5,
+  },
+];
+
 const JOB: JobRecordSummary = {
   job_id: 'calc-9f2c',
   connector: 'calc',
@@ -662,6 +686,12 @@ createServer(async (req, res) => {
   // going unexercised, reported as noise.
   if (path === '/pending' && req.method === 'GET')
     return json(res, 200, { requests: [], count: 0 });
+
+  // The caller's own blocked work. Served rather than left to 404 for the reason `/pending` is:
+  // the shell claims this once per page, so an unimplemented route puts an `api.list_route_missing`
+  // warning in the log of every browser test — a real request path going unexercised, reported as
+  // noise.
+  if (path === '/check-ins' && req.method === 'GET') return json(res, 200, CHECK_INS);
 
   // The durable-run registry.
   if (path === '/jobs' && req.method === 'GET') {

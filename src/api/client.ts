@@ -353,6 +353,43 @@ export interface Digest {
   note_ids: string[];
 }
 
+/**
+ * One question of the caller's OWN that is still waiting on somebody else.
+ *
+ * `CheckInOut` in the service's `api/routes/streams.py`, and the opposite direction from
+ * `PendingRequest`: that one is work stopped *here*, waiting on this reader; this one is work
+ * stopped *somewhere else*, where the only thing to do is go and ask. They share a mailbox and
+ * nothing else — the service made it a route of its own for that reason.
+ *
+ * Every field is defaulted upstream, so each one is always present and possibly empty. Two of them
+ * are already whole days rather than timestamps: the service rounds, deliberately and downwards
+ * (`FLOOR`, not a cast that rounds 4.6 days up to "5 left"), so that a deadline is not overstated
+ * by two different surfaces doing the arithmetic two different ways. **Nothing here may recompute
+ * them**, and there is nothing to recompute them from.
+ *
+ * `subject` and `rationale` are the requester's own words, truncated by the service at 1,000
+ * characters with the truncation *named in the text itself* — so they are rendered as given, and a
+ * renderer that shortened them further would be hiding a notice that says how much was dropped.
+ *
+ * **Four things it deliberately does not carry**, each of which the UI would have used and none of
+ * which may be invented: the request's `kind` (the worker's `BlockedRequest` has one; the wire
+ * model drops it, so there is no badge), a `session_id` (so a row cannot link into the conversation
+ * that raised it, the way a plan and a pending question both do), the page's `truncated` flag (the
+ * service bounds one check-in at 200 rows and records whether it was short — `CheckIn.truncated` —
+ * and the wire model drops that too, so this list cannot say it may be incomplete the way
+ * `PartialScan` does for plans), and any timestamp at all. See `ISSUES.md` Issue 16.
+ */
+export interface CheckIn {
+  request_id: string;
+  subject: string;
+  rationale: string;
+  /** Who owes the answer: an object id, a upn, or an entitlement. Empty means "anyone". */
+  asked_of: string;
+  /** Whole days open, and whole days until the wait expires. Already floored by the service. */
+  open_days: number;
+  days_left: number;
+}
+
 /** One question the agent is holding a workflow open for, as an inbox renders it. */
 export interface PendingRequest {
   request_id: string;
@@ -829,6 +866,27 @@ export const api = {
    */
   listDigests(getToken: TokenGetter): Promise<Digest[]> {
     return orEmpty('/digests', () => request<Digest[]>('/digests', getToken));
+  },
+
+  /**
+   * Claim the check-ins waiting for this chemist — their own work, still blocked.
+   *
+   * The same mailbox as `listDigests`, the same destructive contract, and therefore the same shape:
+   * **the read is the consume**, so the caller claims once at the top of the app straight into
+   * persisted state rather than polling it from a screen that can unmount mid-flight.
+   *
+   * What differs is the cost of losing one, and it is higher. A digest is a notification about
+   * knowledge that is already merged — the notes stay, the watch stays, so losing the notice is not
+   * losing the finding. A check-in has nothing behind it to re-find: the service's own handler says
+   * an unreported one is a blocked question "a chemist simply does not learn about until it
+   * expires", which is the gap the sweep exists to close. That is why the failure of this claim is
+   * recorded in the store and said on screen rather than only logged.
+   *
+   * Swallowed to empty on a 404 like the other list routes — a service that predates the check-in
+   * sweep is a smaller app, not an error. Nothing else is swallowed.
+   */
+  listCheckIns(getToken: TokenGetter): Promise<CheckIn[]> {
+    return orEmpty('/check-ins', () => request<CheckIn[]>('/check-ins', getToken));
   },
 
   /**

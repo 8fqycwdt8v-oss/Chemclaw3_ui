@@ -114,6 +114,10 @@ for (const theme of ['light', 'dark'] as const) {
         page.getByRole('heading', { name: 'Plans waiting on you', level: 2 }),
       ).toBeVisible();
       await expect(page.getByText('Which solvent for the Suzuki step?')).toBeVisible();
+      // Waited for before the scan for the reason the line above is waited for: the check-in
+      // section renders three different things depending on how its claim went, and a scan that
+      // ran while it still said "Reading…" would be reporting on markup no chemist reads.
+      await expect(page.getByText('Measured yield for the 2-MeTHF arm')).toBeVisible();
       await scan(page);
     });
 

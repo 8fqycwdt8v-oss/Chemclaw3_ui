@@ -253,6 +253,14 @@ export const ROUTES: readonly Route[] = [
   // straight into persisted state rather than polling it from a screen.
   { method: 'GET', pattern: /^\/api\/digests$/, target: () => '/digests', sse: false },
 
+  // The caller's own blocked work, as last night's check-in sweep left it. The same mailbox as
+  // `/digests` and the same destructive claim, which is why the client reads it once at boot into
+  // persisted state; a route of its own upstream because "somebody owes you an answer" and "the
+  // corpus learned something" are different things to tell a reader. It takes no id — the service
+  // derives the mailbox from the authenticated principal, exactly as `/digests` does, so there is
+  // no path segment here to get right.
+  { method: 'GET', pattern: /^\/api\/check-ins$/, target: () => '/check-ins', sse: false },
+
   // The durable-run registry.
   //
   // Job ids are minted by the service and by Temporal, so they are constrained like an approval

@@ -13,6 +13,10 @@ import { persist, type PersistStorage, type StorageValue } from 'zustand/middlew
 import type { AwaitingAnswerEvent, ChemclawEvent, JobTerminalEvent } from '../../shared/events.ts';
 import { useEntityStore } from '../chem/entities.ts';
 import type { ApiErrorKind } from '../api/errors.ts';
+// Type-only, so this adds no edge to the module graph: the wire shape of a check-in is declared
+// where every other wire shape is, and restating it here would be a second definition of one
+// contract.
+import type { CheckIn } from '../api/client.ts';
 import type {
   AssistantMessage,
   Banner,
@@ -70,6 +74,15 @@ interface PersistedState {
    * destroys. Claimed once per page rather than polled, for the same reason.
    */
   digests: DigestCard[];
+  /**
+   * The caller's own blocked questions, claimed from the same mailbox as `digests`.
+   *
+   * Persisted for the same reason and with a sharper edge: `GET /check-ins` consumes the row it
+   * returns, and unlike a digest there is nothing behind it to re-find — the service's own handler
+   * says an unreported check-in is a blocked question a chemist does not learn about until it
+   * expires. Held only in component state it would be destroyed by a reload.
+   */
+  checkIns: CheckInCard[];
   notifyOnJobComplete: boolean;
 }
 
@@ -81,6 +94,38 @@ export interface DigestCard {
   receivedAt: number;
   dismissed: boolean;
 }
+
+/**
+ * One claimed check-in, plus what the wire shape does not carry.
+ *
+ * The service's six fields kept as they arrive — the two day counts especially, which it has
+ * already floored, and which nothing here recomputes because there is no timestamp to recompute
+ * them from. `receivedAt` is when WE claimed it, and is the only clock this card has.
+ */
+export interface CheckInCard {
+  /** The service's own id for the waiting question, and this card's identity. */
+  requestId: string;
+  subject: string;
+  rationale: string;
+  askedOf: string;
+  openDays: number;
+  daysLeft: number;
+  /** When WE claimed it. The service sends no timestamp, so nothing here may imply one. */
+  receivedAt: number;
+  dismissed: boolean;
+}
+
+/**
+ * How the once-per-page claim of `GET /check-ins` went.
+ *
+ * Not persisted: it is a fact about this page's request, not about the rows. A reload re-claims,
+ * so a stored `failed` would outlive the failure and a stored `ready` would outlive the evidence.
+ *
+ * It exists because the rows alone cannot tell the three apart. An empty list means "nothing of
+ * yours is blocked" only when the claim actually answered — the same confident emptiness
+ * `ReviewQueue` has now had to delete two sections over.
+ */
+export type ClaimState = 'pending' | 'ready' | 'failed';
 
 /**
  * One migration step. Each takes the shape the previous version wrote and returns the next, so
@@ -179,6 +224,7 @@ export function migratePersisted(persisted: unknown, version: number): Persisted
       ...migrated,
       drafts: migrated.drafts ?? {},
       digests: migrated.digests ?? [],
+      checkIns: migrated.checkIns ?? [],
     } as PersistedState;
   } catch {
     // A step that throws on a shape it did not expect — `migrateV1toV2` does exactly this on a
@@ -199,6 +245,7 @@ const emptyPersistedState = (): PersistedState => ({
   drafts: {},
   jobFeed: [],
   digests: [],
+  checkIns: [],
   notifyOnJobComplete: false,
 });
 
@@ -481,6 +528,10 @@ export interface ChatState {
   jobFeed: JobFeedItem[];
   /** Standing-query findings claimed from the service's destructive mailbox — see `DigestCard`. */
   digests: DigestCard[];
+  /** The caller's own blocked questions, from the same destructive mailbox — see `CheckInCard`. */
+  checkIns: CheckInCard[];
+  /** How this page's one claim of `GET /check-ins` went — see `ClaimState`. */
+  checkInClaim: ClaimState;
   /** True once the backend has told *this tab* twice that we are over its stream cap. */
   jobStreamsThrottled: boolean;
   /**
@@ -634,6 +685,28 @@ export interface ChatState {
    */
   addDigests: (digests: { query: string; note_ids: string[] }[]) => void;
   dismissDigest: (index: number) => void;
+  /**
+   * Record the check-ins this page claimed, and mark the claim answered.
+   *
+   * Keyed on `request_id`, and a row that is already here is **refreshed rather than dropped**,
+   * which is where this departs from `addDigests`. A digest's identity is its content, so a second
+   * copy is the same finding; a check-in's identity is the question, and the sweep re-sends it
+   * every night with `open_days` up and `days_left` down. Dropping the later row would leave a
+   * card saying "5 days left" for as long as the reader kept it — a deadline this app would then
+   * be overstating, which is the exact direction the service floors its arithmetic to avoid.
+   *
+   * `dismissed` survives a refresh: the reader said they had seen that question, and a nightly
+   * sweep is not news that undoes it.
+   *
+   * Called with `[]` too, which is how an empty mailbox marks the claim answered — the difference
+   * between "nothing is blocked" and "we could not ask" is the whole reason this is not a bare
+   * array.
+   */
+  addCheckIns: (claimed: CheckIn[]) => void;
+  /** Record that this page's one claim did not land, so the surface can say so rather than read
+   *  as an empty mailbox. */
+  failCheckInClaim: () => void;
+  dismissCheckIn: (requestId: string) => void;
   /**
    * Make a local conversation for a session the service forked from `parentId`.
    *
@@ -914,7 +987,10 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
     stored.digests,
     (d) => `${d.query}\u0000${d.noteIds.join(',')}`,
   );
-  const carried: PersistedState = { ...next, jobFeed, digests };
+  // Keyed by the service's own request id, which a digest does not have: two tabs claiming the
+  // same blocked question fold to one card rather than to two notices about one question.
+  const checkIns = union(next.checkIns ?? [], stored.checkIns, (c) => c.requestId);
+  const carried: PersistedState = { ...next, jobFeed, digests, checkIns };
 
   const extra = stored.order.filter((id) => {
     if (tombstoned.has(id)) return false;
@@ -1159,6 +1235,8 @@ export const useChatStore = create<ChatState>()(
       banner: null,
       drafts: {},
       digests: [],
+      checkIns: [],
+      checkInClaim: 'pending',
       sessionProfiles: {},
       jobFeed: [],
       jobStreamsThrottled: false,
@@ -1268,6 +1346,10 @@ export const useChatStore = create<ChatState>()(
             // `clearStorage()` removes the key) is what made the omission durable rather than
             // momentary — the surviving values get re-written into the fresh slot.
             digests: [],
+            // Content too, and the most personal of the three: a check-in holds the previous
+            // chemist's own subject line, their reason for asking, and who they are waiting on.
+            checkIns: [],
+            checkInClaim: 'pending',
             sessionProfiles: {},
             jobStreamsThrottled: false,
             jobStreamsThrottledElsewhere: false,
@@ -1792,6 +1874,55 @@ export const useChatStore = create<ChatState>()(
         }));
       },
 
+      addCheckIns(claimed) {
+        set((s) => {
+          const known = new Map(s.checkIns.map((c) => [c.requestId, c]));
+          const fresh: string[] = [];
+          for (const row of claimed) {
+            const held = known.get(row.request_id);
+            known.set(row.request_id, {
+              requestId: row.request_id,
+              subject: row.subject,
+              rationale: row.rationale,
+              askedOf: row.asked_of,
+              openDays: row.open_days,
+              daysLeft: row.days_left,
+              // A refresh keeps the position and the time it first arrived, exactly as a
+              // redelivered job ending does: re-stamping would put a question that has been open
+              // for nine days back at the top as though it were news.
+              receivedAt: held?.receivedAt ?? Date.now(),
+              dismissed: held?.dismissed ?? false,
+            });
+            // The map is written before this reads it again, so a request that appears **twice in
+            // one claim** folds into one card rather than two. That is not hypothetical: the
+            // answer is flattened out of every claimed mailbox row, and one unread row per
+            // requester is a property the sweep maintains rather than one this client is told.
+            if (!held) fresh.push(row.request_id);
+          }
+          const card = (id: string): CheckInCard => known.get(id) as CheckInCard;
+          return {
+            checkIns: [...fresh.map(card), ...s.checkIns.map((c) => card(c.requestId))],
+            checkInClaim: 'ready' as const,
+          };
+        });
+      },
+
+      failCheckInClaim() {
+        // Deliberately does not touch `checkIns`: cards claimed by an earlier page are still the
+        // only copy of what they say, and a failed claim is no evidence about them.
+        set({ checkInClaim: 'failed' });
+      },
+
+      dismissCheckIn(requestId) {
+        // A flag, not a delete, for `dismissDigest`'s reason — and by id rather than by index,
+        // because this list is rewritten in place by the next claim.
+        set((s) => ({
+          checkIns: s.checkIns.map((c) =>
+            c.requestId === requestId ? { ...c, dismissed: true } : c,
+          ),
+        }));
+      },
+
       dismissJobItem(jobId) {
         // A flag, not a delete. The feed is durable now, so an unguarded click on a 24px control
         // would otherwise be a permanent deletion of the only copy — the backend's is consumed.
@@ -1886,6 +2017,11 @@ export const useChatStore = create<ChatState>()(
           // last month is history rather than news. Never dropped for being *unread* — the claim
           // that produced it cannot be repeated.
           digests: state.digests.filter((d) => d.receivedAt > cutoff),
+          // The same clock, for a slightly different reason: a check-in is a *dated* notice — it
+          // says how many days are left — so one claimed a week ago is not merely old, it is
+          // wrong. Aged out rather than recomputed, because there is no timestamp to recompute
+          // from. Never dropped for being unread: the claim that produced it cannot be repeated.
+          checkIns: state.checkIns.filter((c) => c.receivedAt > cutoff),
           notifyOnJobComplete: state.notifyOnJobComplete,
         };
       },

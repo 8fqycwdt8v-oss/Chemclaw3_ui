@@ -26,6 +26,7 @@ describe('proxy route whitelist', () => {
       ['GET', `/api/sessions/${SID}/tool-results/${REF}`, `/sessions/${SID}/tool-results/${REF}`],
       ['GET', '/api/notes/note-suzuki-42', '/notes/note-suzuki-42'],
       ['GET', '/api/profiles', '/profiles'],
+      ['GET', '/api/check-ins', '/check-ins'],
       ['GET', '/api/jobs', '/jobs'],
       ['GET', '/api/jobs/qm-7', '/jobs/qm-7'],
       ['DELETE', '/api/jobs/qm-7', '/jobs/qm-7'],
@@ -132,6 +133,9 @@ describe('proxy route whitelist', () => {
     // would be a decision with no session named in the path — which is not a route the service
     // has, and must not become a path this proxy invents.
     expect(resolveRoute('POST', '/api/plans/pending')).toBeNull();
+    // The check-in mailbox is claimed by reading it, and the service serves a GET only. A POST
+    // here would be a path this proxy invented for a route that does not exist.
+    expect(resolveRoute('POST', '/api/check-ins')).toBeNull();
   });
 
   describe('tool-result refs', () => {

@@ -27,6 +27,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { produce, type Draft } from 'immer';
 import { api } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
@@ -42,7 +43,17 @@ import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { ConfirmDialog } from '@/components/chem/ConfirmDialog';
 
-/** A deep copy of the document to edit. The wire shape is plain JSON, so this is lossless. */
+/**
+ * A deep copy of the document to edit. The wire shape is plain JSON, so this is lossless.
+ *
+ * **Kept, deliberately, now that the edits go through `immer`.** `produce` never mutates its base,
+ * so the copy is not there to protect the draft — it is there to keep immer's auto-freeze off the
+ * object the *document page* still holds and renders. Measured: `produce(base, d => {…})` leaves
+ * `base` itself unfrozen but deep-freezes every sub-object structurally shared into the result, so
+ * seeding straight from `revision.design` would freeze most of the caller's own state on the first
+ * keystroke. Nothing mutates it today, which is exactly why that would be found in production
+ * rather than here.
+ */
 const clone = (design: ExperimentDesign): ExperimentDesign =>
   JSON.parse(JSON.stringify(design)) as ExperimentDesign;
 
@@ -275,83 +286,83 @@ export function ProtocolEditor({
     return () => window.removeEventListener('beforeunload', warn);
   });
 
-  const setSetpoint = <K extends keyof Setpoints>(key: K, value: Setpoints[K]): void =>
-    setDraft((d) => ({
-      ...d,
-      base: { ...d.base, setpoints: { ...d.base.setpoints, [key]: value } },
-    }));
+  /**
+   * One edit to the draft, written as if the document were mutable.
+   *
+   * Every setter below used to rebuild `design → base → charge[i] → field` by hand with a spread
+   * chain, and `setLevel` did it with a `map` inside a `map`. The failure mode of that shape is not
+   * a crash: it is a spread that reaches three levels where the change is four deep, which compiles,
+   * renders, and drops the edit. `produce` gives a mutable proxy and returns a new document with
+   * exactly the path that was written copied, so the nesting depth stops being something a reader
+   * has to check.
+   *
+   * **`isDirty` is unaffected and must stay a `JSON.stringify` compare.** It guards the only
+   * irreversible loss in this app — a stray Escape over twenty corrected setpoints — and it is
+   * correct under immer for the same reason it was correct before: a chemist who types 70 over 60
+   * and then 60 again has not edited the protocol. `produce` returns a *new reference* for that
+   * round trip, so a reference compare would call it dirty and refuse a close that should be free.
+   * That is a tempting simplification and it is wrong; it is not made here.
+   */
+  const edit = (recipe: (draft: Draft<ExperimentDesign>) => void): void =>
+    setDraft((current) => produce(current, recipe));
 
+  const setSetpoint = <K extends keyof Setpoints>(key: K, value: Setpoints[K]): void =>
+    edit((d) => {
+      d.base.setpoints[key] = value;
+    });
+
+  // Every indexed setter below guards the lookup rather than asserting it. That is not defensive
+  // padding: `noUncheckedIndexedAccess` is on, and the `map((x, i) => i === index ? … : x)` these
+  // replace already did nothing for an index that is not there. The guard is that behaviour,
+  // written down.
   const setChargeField = (
     index: number,
     key: 'equivalents' | 'amount_mmol' | 'mass_mg' | 'volume_ml',
     value: number | null,
   ): void =>
-    setDraft((d) => ({
-      ...d,
-      base: {
-        ...d.base,
-        charge: d.base.charge.map((line, i) => (i === index ? { ...line, [key]: value } : line)),
-      },
-    }));
+    edit((d) => {
+      const line = d.base.charge[index];
+      if (line) line[key] = value;
+    });
 
   const setStepText = (index: number, text: string): void =>
-    setDraft((d) => ({
-      ...d,
-      base: {
-        ...d.base,
-        steps: d.base.steps.map((step, i) => (i === index ? { ...step, text } : step)),
-      },
-    }));
+    edit((d) => {
+      const step = d.base.steps[index];
+      if (step) step.text = text;
+    });
 
   const setLevel = (factorIndex: number, levelIndex: number, patch: Partial<FactorLevel>): void =>
-    setDraft((d) => ({
-      ...d,
-      factors: d.factors.map((factor, fi) =>
-        fi === factorIndex
-          ? {
-              ...factor,
-              levels: factor.levels.map((level, li) =>
-                li === levelIndex ? { ...level, ...patch } : level,
-              ),
-            }
-          : factor,
-      ),
-    }));
+    edit((d) => {
+      const level = d.factors[factorIndex]?.levels[levelIndex];
+      if (level) Object.assign(level, patch);
+    });
 
   const setArmSetpoint = (
     armIndex: number,
     key: 'temperature_c' | 'time_h',
     value: number | null,
   ): void =>
-    setDraft((d) => ({
-      ...d,
-      arms: d.arms.map((arm, i) =>
-        i === armIndex
-          ? {
-              ...arm,
-              // An arm with no override yet gets one seeded from the base, so the override says
-              // what the arm runs at rather than what it leaves unstated — a `Setpoints` with a
-              // single field set and every other one null would silently unset the solvent.
-              setpoints: { ...(arm.setpoints ?? d.base.setpoints), [key]: value },
-            }
-          : arm,
-      ),
-    }));
+    edit((d) => {
+      const arm = d.arms[armIndex];
+      if (!arm) return;
+      // An arm with no override yet gets one seeded from the base, so the override says what the
+      // arm runs at rather than what it leaves unstated — a `Setpoints` with a single field set and
+      // every other one null would silently unset the solvent.
+      arm.setpoints ??= { ...d.base.setpoints };
+      arm.setpoints[key] = value;
+    });
 
   const clearArmOverride = (armIndex: number): void =>
-    setDraft((d) => ({
-      ...d,
-      arms: d.arms.map((arm, i) => (i === armIndex ? { ...arm, setpoints: null } : arm)),
-    }));
+    edit((d) => {
+      const arm = d.arms[armIndex];
+      if (arm) arm.setpoints = null;
+    });
 
   const setAnalytic = (index: number, patch: Partial<Analytic>): void =>
-    setDraft((d) => ({
-      ...d,
-      base: {
-        ...d.base,
-        analytics: d.base.analytics.map((a, i) => (i === index ? { ...a, ...patch } : a)),
-      },
-    }));
+    edit((d) => {
+      const analytic = d.base.analytics[index];
+      if (analytic) Object.assign(analytic, patch);
+    });
 
   const save = async (): Promise<void> => {
     setState({ status: 'saving' });

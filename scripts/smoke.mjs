@@ -12,6 +12,8 @@
  * (http://localhost:3000) to exercise the production path.
  */
 
+import { EventSourceParserStream } from 'eventsource-parser/stream';
+
 const base = (process.argv[2] ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const message = process.argv[3] ?? 'What is the pKa of acetic acid? Answer in one sentence.';
 const token = process.env.ACCESS_TOKEN;
@@ -90,26 +92,32 @@ let sessionId;
   if (res.headers.get('x-accel-buffering') === 'no') ok('x-accel-buffering: no is set');
   else bad('x-accel-buffering', 'missing — an nginx-style ingress may buffer this stream');
 
-  const decoder = new TextDecoder();
-  let buffer = '';
-  for await (const chunk of res.body) {
-    buffer += decoder.decode(chunk, { stream: true });
-    let idx;
-    while ((idx = buffer.indexOf('\n\n')) !== -1) {
-      const frame = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      const line = frame.split('\n').find((l) => l.startsWith('data:'));
-      if (!line) continue;
-      try {
-        const event = JSON.parse(line.slice(5).trim());
-        seen.add(event.type);
-        arrivals.push(Date.now() - started);
-        if (event.type === 'answer') answer = event;
-        if (event.type === 'error') bad('stream error event', event.message);
-      } catch {
-        /* ignore a partial or non-JSON frame */
-      }
+  // Framing is `eventsource-parser`'s, not this file's. `src/lib/sse.ts` already states why that
+  // matters — multi-line `data:`, comment frames, CRLF and frames split across chunk boundaries —
+  // and this script used to hand-roll an `indexOf('\n\n')` loop that handled none of them. It
+  // survived only because the BFF's heartbeat (`: hb\n\n`, server/proxy.ts) happens to have no
+  // `data:` line, so `.find(l => l.startsWith('data:'))` returned undefined and the frame was
+  // skipped by accident rather than by design.
+  //
+  // It also makes the buffering assertion below honest: `arrivals` now counts one entry per real
+  // SSE event, where the old loop counted one per `\n\n` — so a heartbeat used to be indistinguishable
+  // from a frame, and a stream held and released in one go alongside heartbeats could pass.
+  const stream = res.body
+    .pipeThrough(new TextDecoderStream())
+    .pipeThrough(new EventSourceParserStream());
+
+  for await (const frame of stream) {
+    if (!frame.data) continue; // an event name with no payload: a frame, but not an event
+    let event;
+    try {
+      event = JSON.parse(frame.data);
+    } catch {
+      continue; // one malformed frame is a blip, not a reason to abandon a good stream
     }
+    seen.add(event.type);
+    arrivals.push(Date.now() - started);
+    if (event.type === 'answer') answer = event;
+    if (event.type === 'error') bad('stream error event', event.message);
   }
 
   ok('event types seen', [...seen].join(', ') || 'none');
@@ -117,16 +125,17 @@ let sessionId;
   if (answer) ok('terminal answer received', `${answer.text.length} chars`);
   else bad('terminal answer', 'stream ended without an answer event');
 
-  // The buffering check: if every frame landed within a few ms of the last one, the stream was
-  // held and released in one go rather than streamed.
+  // The buffering check: if every event landed within a few ms of the last one, the stream was
+  // held and released in one go rather than streamed. Heartbeat comments are not counted — the
+  // parser does not surface them — so this measures the service producing, not the proxy padding.
   if (arrivals.length >= 3) {
     const spread = arrivals.at(-1) - arrivals[0];
     if (spread > 50)
-      ok('frames arrived incrementally', `${spread}ms spread over ${arrivals.length} frames`);
+      ok('frames arrived incrementally', `${spread}ms spread over ${arrivals.length} events`);
     else
       bad('frames arrived all at once', `${spread}ms spread — something is buffering the stream`);
   } else {
-    console.log(`  · only ${arrivals.length} frame(s); cannot judge buffering`);
+    console.log(`  · only ${arrivals.length} event(s); cannot judge buffering`);
   }
 }
 

@@ -27,9 +27,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as Comlink from 'comlink';
 import { canonicalSmiles, isMolecule, moleculeSvg } from '../src/chem/rdkit.ts';
 import { resetWorkerForTests } from '../src/chem/rdkit.client.ts';
-import type { Request, Response } from '../src/chem/rdkit.protocol.ts';
+import { operations } from '../src/chem/rdkit.engine.ts';
 import { CANONICALISATION_OVERFLOWS, resetHandles } from './stubs/rdkit.ts';
 // Side-effect import: this registers the worker's own `message` listener on the global, which is
 // what `deliver` below drives. Importing it is the only way to exercise the real dispatch.
@@ -39,12 +40,52 @@ import '../src/chem/rdkit.worker.ts';
 type Mode = 'deliver' | 'refuse' | 'silent';
 
 /**
+ * The other end of a worker that refuses everything, built out of the real `Comlink.expose`.
+ *
+ * A refusal is an engine call throwing inside the worker, and what `rdkit.client.ts` has to do with
+ * it is map it back to the engine's own negative rather than to a verdict. Hand-writing the reply
+ * would make this a test of *this file's* idea of Comlink's error frame; exposing a table whose
+ * every member throws drives Comlink's own serialisation, which is the thing the client actually
+ * meets.
+ *
+ * Returns the way to push a request in. The endpoint is a plain `EventTarget` because that is all
+ * `Comlink.Endpoint` needs beyond a `postMessage`, and the `postMessage` is the reply channel back
+ * to the fake worker.
+ */
+function refusingEnd(reply: (data: unknown) => void): (request: unknown) => void {
+  const target = new EventTarget();
+  Comlink.expose(
+    new Proxy(
+      {},
+      {
+        get: () => (): never => {
+          throw new Error('the engine threw inside the worker');
+        },
+      },
+    ),
+    {
+      addEventListener: (type, listener) =>
+        target.addEventListener(type, listener as EventListener),
+      removeEventListener: (type, listener) =>
+        target.removeEventListener(type, listener as EventListener),
+      postMessage: (data) => reply(data),
+    },
+  );
+  return (request) => target.dispatchEvent(new MessageEvent('message', { data: request }));
+}
+
+/**
  * A `Worker` whose other end is the real worker module.
  *
  * `postMessage` dispatches a `message` event on the global, which is where
- * `src/chem/rdkit.worker.ts` attached its listener under happy-dom; the reply comes back through
- * the stubbed `globalThis.postMessage` below and is handed to whichever instance is live. That is
- * as close to the real channel as a single-realm test can get.
+ * `src/chem/rdkit.worker.ts`'s `Comlink.expose(operations)` attached its listener under happy-dom;
+ * the reply comes back through the stubbed `globalThis.postMessage` below and is handed to
+ * whichever instance is live. That is as close to the real channel as a single-realm test can get.
+ *
+ * `sent` holds Comlink's own `APPLY` frames, and `ops` reads the operation name out of `path[0]`.
+ * That is a coupling to Comlink's protocol and it is deliberate: the alternative is asserting
+ * nothing about *which* call crossed the boundary, and the shape is the one documented thing about
+ * a remote method call.
  */
 class FakeWorker {
   static instances: FakeWorker[] = [];
@@ -53,10 +94,11 @@ class FakeWorker {
    *  case depends on winning a race against the worker's own reply. */
   static defaultMode: Mode = 'deliver';
 
-  readonly sent: Request[] = [];
+  readonly sent: { path?: readonly string[] }[] = [];
   terminated = false;
   mode: Mode = FakeWorker.defaultMode;
   private readonly handlers = new Map<string, Set<(event: unknown) => void>>();
+  private readonly refuse = refusingEnd((data) => this.reply(data));
 
   constructor(
     readonly url: URL | string,
@@ -66,17 +108,22 @@ class FakeWorker {
     FakeWorker.instances.push(this);
   }
 
+  /** The operations this worker was asked for, in order. */
+  get ops(): string[] {
+    return this.sent.flatMap((frame) => (frame.path?.[0] === undefined ? [] : [frame.path[0]]));
+  }
+
   addEventListener(type: string, handler: (event: unknown) => void): void {
     const set = this.handlers.get(type) ?? new Set();
     set.add(handler);
     this.handlers.set(type, set);
   }
 
-  postMessage(data: Request): void {
+  postMessage(data: { path?: readonly string[] }): void {
     this.sent.push(data);
     if (this.mode === 'silent') return;
     if (this.mode === 'refuse') {
-      this.reply({ id: data.id, ok: false });
+      this.refuse(data);
       return;
     }
     globalThis.dispatchEvent(new MessageEvent('message', { data }));
@@ -87,7 +134,7 @@ class FakeWorker {
   }
 
   /** A reply arriving from the other end. */
-  reply(response: Response): void {
+  reply(response: unknown): void {
     this.emit('message', { data: response });
   }
 
@@ -110,7 +157,7 @@ beforeEach(() => {
   // The worker module answers with `self.postMessage`, which under happy-dom is the page's own.
   // Routing it to the live fake is what closes the loop; leaving it alone would post the reply
   // back into the listener that produced it.
-  vi.stubGlobal('postMessage', (data: Response) => live()?.reply(data));
+  vi.stubGlobal('postMessage', (data: unknown) => live()?.reply(data));
 });
 
 afterEach(() => {
@@ -129,7 +176,7 @@ describe('where an RDKit call runs', () => {
     // the module type `vite.config.ts`'s `worker.format` is set to match.
     expect(String(worker.url)).toMatch(/\/chem\/rdkit\.worker\.ts(\?|$)/);
     expect(worker.options?.type).toBe('module');
-    expect(worker.sent.map((r) => r.op)).toEqual(['drawSvg']);
+    expect(worker.ops).toEqual(['drawSvg']);
   });
 
   it('keeps the drawing cache on the calling thread, so a hit costs no round trip', async () => {
@@ -140,7 +187,7 @@ describe('where an RDKit call runs', () => {
     expect(second).toBe(first);
     // One depiction for two calls. A cache behind the worker would have answered the second from
     // its own map and still paid a message, a reply and a structured clone of the SVG.
-    expect(FakeWorker.instances[0]!.sent.filter((r) => r.op === 'drawSvg')).toHaveLength(1);
+    expect(FakeWorker.instances[0]!.ops.filter((op) => op === 'drawSvg')).toHaveLength(1);
   });
 
   it('answers the same, with no worker at all', async () => {
@@ -194,14 +241,35 @@ describe('a worker that stops answering', () => {
     expect(FakeWorker.instances[0]!.terminated).toBe(true);
   });
 
+  it('does not re-run a real null answer, which is not the same as no answer', async () => {
+    // The trap in mapping Comlink onto this seam. A rejection means "this placement did not
+    // answer" and a `null` means "this string is not a molecule", and the two arrive on the same
+    // channel — so a client that folded them together would take the engine's own honest negative
+    // as a transport fault and pay a second, in-process run for every unreadable string a chemist
+    // pastes. The answer is wrapped rather than returned bare for exactly this reason.
+    // Counted on the engine table itself, because both placements dispatch through *this* object
+    // in this realm — the worker's `Comlink.expose(operations)` and the client's in-process
+    // fallback both look the name up at call time. So the count is the number of times the
+    // operation actually ran, which is the only thing that tells a real answer from a retry.
+    // Asserting on what crossed the worker boundary cannot: the retry does not cross it.
+    const ran = vi.spyOn(operations, 'canonicalSmiles');
+
+    expect(await canonicalSmiles('not-a-smiles')).toBeNull();
+
+    expect(FakeWorker.instances[0]!.ops).toEqual(['canonicalSmiles']);
+    expect(ran).toHaveBeenCalledTimes(1);
+    ran.mockRestore();
+  });
+
   it('re-runs here when the worker reports a failure', async () => {
     FakeWorker.defaultMode = 'refuse';
 
-    // `ok: false` is what the worker sends when an engine call throws inside it — which is how a
-    // stack exhaustion arrives (see below). The page has the bigger stack, so it runs the same
-    // call and answers.
+    // A rejection is what Comlink delivers when an engine call throws inside the worker — which is
+    // how a stack exhaustion arrives (see below). The page has the bigger stack, so it runs the
+    // same call and answers. What must NOT happen is the rejection reaching `canonicalSmiles`,
+    // where a transport fault would read as a chemical verdict.
     expect(await canonicalSmiles('OCC')).toBe('CCO');
-    expect(FakeWorker.instances[0]!.sent.map((r) => r.op)).toEqual(['canonicalSmiles']);
+    expect(FakeWorker.instances[0]!.ops).toEqual(['canonicalSmiles']);
   });
 });
 

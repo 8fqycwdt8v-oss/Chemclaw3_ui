@@ -90,10 +90,20 @@ function deferredFetch(bodies: Record<string, NoteView>) {
  * A read here crosses three awaits before it touches state — the token, `fetch`, then `.json()` —
  * so a couple of turns is not enough, and a timer-based wait would let the deferred responses this
  * test is holding resolve out from under it.
+ *
+ * Fifty rather than twelve since the read became a query: react-query settles a fetch through its
+ * own promise chain and then batches the notification onto another one, so the distance between
+ * "the response resolved" and "React has rendered it" grew. Twelve still passed on its own and
+ * failed inside the full suite, which is the worst possible shape for a number — a count of
+ * microtasks is an upper bound on an implementation detail, so it is generous rather than tuned.
+ *
+ * That this works at all is `src/api/queryClient.ts`'s `notifyManager.setScheduler(queueMicrotask)`,
+ * which is there for the app's sake and not this file's: upstream's default delivers a result on a
+ * `setTimeout(0)`, which no amount of microtask flushing reaches.
  */
 const settle = async (): Promise<void> => {
   await act(async () => {
-    for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    for (let i = 0; i < 50; i += 1) await Promise.resolve();
   });
 };
 

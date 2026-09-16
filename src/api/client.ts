@@ -29,6 +29,7 @@ import type {
   ProtocolCheck,
 } from '../../shared/protocols.ts';
 import { ApiError, CORRELATION_HEADER, errorFromStatus, readFailure } from './errors.ts';
+import { keys, queryClient } from './queryClient.ts';
 
 /**
  * How a request authenticates.
@@ -136,69 +137,25 @@ async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {
 }
 
 /**
- * Reads of an immutable, content-addressed resource that are already on the wire.
- *
- * Keyed by path and deleted the moment the request settles, so this is an in-flight join rather
- * than a cache: it holds nothing after the answer arrives, and it cannot grow.
- *
- * It exists because two components legitimately ask for the same bytes at the same instant — a
- * result block under the answer and the trace panel behind it both cite one `result_ref`, and a
- * citation chip and the note sheet it opens both cite one note id. Each component's own `requested`
- * ref guards against a double fetch *within one instance* and can see nothing outside it, so what
- * looked like one read was two round trips to the service's blob store.
- */
-const inFlight = new Map<string, Promise<unknown>>();
-
-/**
  * `request`, for a route whose URL changes whenever its bytes do.
  *
- * Two things follow from content-addressing and neither was being taken: concurrent readers can
- * share one request, and the browser's HTTP cache may keep the answer — `send` sets `no-store` on
- * everything by default, which does not merely skip the cache, it forbids writing to it, so a
- * remount (a route change, a conversation switch and back, a block scrolling out of the window and
- * in again) refetched the whole payload every time.
+ * All this does now is ask the browser to keep the answer: `send` sets `no-store` on everything by
+ * default, which does not merely skip the HTTP cache, it forbids writing to it. **Sharing the read
+ * between two components is no longer this function's job** — it was a `Map<string, Promise>`
+ * deleted the moment each request settled, an in-flight join for the case where a result block and
+ * the trace panel behind it cite one `result_ref` at the same instant. A `queryKey` is that join
+ * and also the thing the join could never be, a cache: the old one held nothing once the answer
+ * arrived, so "a remount refetched the whole payload every time" was its own docstring's admission.
+ * See `queries.ts`'s `IMMUTABLE`.
  *
- * **What this does not yet buy, said plainly**, because `ResultBlock`'s own docstring has claimed
+ * **What this still does not buy, said plainly**, because `ResultBlock`'s own docstring has claimed
  * for longer that "the browser and any cache in front of it can hold it forever": the service sets
  * no `Cache-Control` on either route, so `default` gets a revalidation at best rather than a hit.
- * This is the half that lives here; the backend half is a header on `GET /sessions/{id}/tool-results/{ref}`.
+ * This is the half that lives here; the backend half is a header on
+ * `GET /sessions/{id}/tool-results/{ref}`.
  */
 function contentAddressed<T>(path: string, auth: TokenGetter): Promise<T> {
-  const existing = inFlight.get(path);
-  if (existing) return existing as Promise<T>;
-  const pending = request<T>(path, auth, { cache: 'default' }).finally(() => {
-    inFlight.delete(path);
-  });
-  inFlight.set(path, pending);
-  return pending;
-}
-
-/**
- * The shortest interval between two scans of the plan inbox.
- *
- * `GET /plans/pending` is the most expensive thing one navigation in this app can trigger: the
- * service scans up to `service_max_plan_scans` (25) sessions, and its own route docstring says
- * each read "is a statement on a checkpointer that serializes them against every concurrent turn
- * on the pod". `ReviewQueue` mounts it on every visit to `/review`, uncached and undebounced, so a
- * chemist bouncing between the inbox and a conversation paid for the whole scan each time.
- *
- * Ten seconds, which is short enough that nobody navigates through it deliberately and long enough
- * to collapse a bounce. It is a *minimum interval*, not a cache with an expiry policy: the one
- * action that can invalidate this answer is a plan decision, and `decidePlan` drops the entry.
- */
-const PENDING_PLANS_MIN_INTERVAL_MS = 10_000;
-
-/** The last plan scan and when it was taken, or nothing. */
-let pendingPlansCache: { at: number; plans: PendingPlans } | null = null;
-
-/**
- * Test seam: this cache is module-wide, so one test would otherwise answer the next one's question.
- *
- * The same shape, and the same reason, as `resetClientEventBudget` in `server/clientEvents.ts`.
- * Nothing in the app calls it — a signed-out reader gets a fresh page and a fresh module.
- */
-export function resetPendingPlansCache(): void {
-  pendingPlansCache = null;
+  return request<T>(path, auth, { cache: 'default' });
 }
 
 /**
@@ -912,14 +869,7 @@ export const api = {
    * caller so the screen can say it could not ask.
    */
   listPendingPlans(getToken: TokenGetter): Promise<PendingPlans> {
-    const cached = pendingPlansCache;
-    if (cached && Date.now() - cached.at < PENDING_PLANS_MIN_INTERVAL_MS) {
-      return Promise.resolve(cached.plans);
-    }
-    return request<PendingPlans>('/plans/pending', getToken).then((plans) => {
-      pendingPlansCache = { at: Date.now(), plans };
-      return plans;
-    });
+    return request<PendingPlans>('/plans/pending', getToken);
   },
 
   /**
@@ -938,9 +888,11 @@ export const api = {
     getToken: TokenGetter,
   ): Promise<void> {
     // Whatever the outcome, this inbox's answer is now suspect: an approval removes a row, and a
-    // 409 means the plan moved under the reader. Dropping the entry is what keeps the interval
-    // below from being a staleness window on the one action that invalidates it.
-    pendingPlansCache = null;
+    // 409 means the plan moved under the reader. Invalidating is what keeps `PENDING_PLANS_STALE_MS`
+    // from being a staleness window on the one action that invalidates it — and it is `void`ed
+    // rather than awaited because the caller is waiting on the decision, not on a re-read of a list
+    // it may not even be looking at.
+    void queryClient.invalidateQueries({ queryKey: keys.pendingPlans });
     try {
       await request<void>(`/sessions/${encodeURIComponent(sessionId)}/plan/decision`, getToken, {
         method: 'POST',

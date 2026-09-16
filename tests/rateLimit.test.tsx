@@ -23,6 +23,7 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { ApiError, errorFromStatus } from '../src/api/errors.ts';
 import { TopBar } from '../src/components/TopBar.tsx';
+import { QUERY_GC_MS } from '../src/api/queryClient.ts';
 import { streamTurn } from '../src/api/streamTurn.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { sendMessage } from '../src/state/sendMessage.ts';
@@ -287,6 +288,11 @@ describe('the banner', () => {
     // shows up in neither the console nor a test that only reads the screen. The count is read
     // *after* advancing, because `TopBar`'s health probe legitimately leaves one-shot timers
     // pending at the moment of unmount — those drain, an interval does not.
+    //
+    // `QUERY_GC_MS` is one of them and is why the advance is a whole garbage-collection window:
+    // the health probe is a query now, and the cache arms a one-shot timeout when its last
+    // observer unmounts. It is bounded and it drains, which is exactly the distinction this case
+    // is drawing — so the advance is taken past it rather than the assertion weakened.
     useChatStore.setState({
       banner: {
         kind: 'warn',
@@ -303,7 +309,7 @@ describe('the banner', () => {
     expect(screen.getByText('28s')).toBeTruthy();
 
     unmount();
-    act(() => vi.advanceTimersByTime(30_000));
+    act(() => vi.advanceTimersByTime(30_000 + QUERY_GC_MS));
 
     expect(vi.getTimerCount()).toBe(0);
   });

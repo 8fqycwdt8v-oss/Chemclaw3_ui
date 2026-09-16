@@ -15,12 +15,14 @@
  * finish regardless, so the wording never claims the job stopped.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { Search, Server } from 'lucide-react';
 import { useAuth, useIsReviewer } from '../auth/AuthContext.tsx';
-import { api, type DurableJobStatus, type JobRecordSummary } from '../api/client.ts';
+import { api, type DurableJobStatus } from '../api/client.ts';
 import { useNewestRead } from '../hooks/useNewestRead.ts';
+import { useApiQuery } from '../api/queryClient.ts';
+import { jobsQuery } from '../api/queries.ts';
 import { relativeTime } from '../lib/format.ts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -235,23 +237,17 @@ export function JobsPanel(): React.JSX.Element {
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [submitted, setSubmitted] = useState('');
-  // The result carries the query it answers, so "loading" is derived rather than set: clearing
-  // the list on the way into the effect is a second render and a lint error, and this way a
-  // stale list is never shown under a new search either.
-  const [loaded, setLoaded] = useState<{ query: string; list: JobRecordSummary[] } | null>(null);
-  const jobs = loaded?.query === submitted ? loaded.list : null;
-
-  useEffect(() => {
-    if (!ready) return;
-    let cancelled = false;
-    void api
-      .listJobs(auth, { text: submitted })
-      .then((list) => !cancelled && setLoaded({ query: submitted, list }))
-      .catch(() => !cancelled && setLoaded({ query: submitted, list: [] }));
-    return () => {
-      cancelled = true;
-    };
-  }, [auth, ready, submitted]);
+  // The search text is the key, which is what the `loaded.query === submitted` derivation this
+  // replaces was for: a stale list is never shown under a new search, and there is no second
+  // render clearing the old one on the way in.
+  //
+  // A failure still renders as an empty list rather than as a banner, unchanged: this panel is a
+  // search over a durable-run archive, and a chemist who searched and found nothing is not misled
+  // the way one told "nothing is waiting on you" would be.
+  const { data: jobs = null } = useApiQuery({
+    ...jobsQuery(submitted, auth),
+    enabled: ready,
+  });
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">

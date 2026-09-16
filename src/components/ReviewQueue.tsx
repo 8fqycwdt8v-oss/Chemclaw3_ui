@@ -38,12 +38,9 @@ import { useEffect, useState } from 'react';
 import { Inbox, ListChecks } from 'lucide-react';
 import { Link } from 'react-router';
 import { useAuth } from '../auth/AuthContext.tsx';
-import {
-  api,
-  type PendingRequest,
-  type PendingRequests as PendingRequestsView,
-  type PendingPlans as PendingPlansView,
-} from '../api/client.ts';
+import { useApiQuery } from '../api/queryClient.ts';
+import { pendingPlansQuery } from '../api/queries.ts';
+import { api, type PendingRequest, type PendingPlans as PendingPlansView } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { relativeTime } from '../lib/format.ts';
 import { useChatStore } from '../state/chatStore.ts';
@@ -132,25 +129,18 @@ function PartialScan({ view }: { view: PendingPlansView }): React.JSX.Element | 
  */
 function PlanInbox(): React.JSX.Element {
   const { auth, ready } = useAuth();
-  const [view, setView] = useState<PendingPlansView | null>(null);
-  const [failed, setFailed] = useState(false);
+  // `staleTime` rather than the module-level `{ at, plans }` this replaces, and `decidePlan`
+  // invalidates the key rather than nulling a variable — see `PENDING_PLANS_STALE_MS`. The
+  // reason the interval exists is unchanged and is the most expensive route in the app.
+  const {
+    data: view = null,
+    isError: failed,
+    isPending,
+  } = useApiQuery({ ...pendingPlansQuery(auth), enabled: ready });
 
-  useEffect(() => {
-    if (!ready) return;
-    let cancelled = false;
-    void api
-      .listPendingPlans(auth)
-      .then((next) => {
-        if (cancelled) return;
-        setView(next);
-        setFailed(false);
-      })
-      .catch(() => !cancelled && setFailed(true));
-    return () => {
-      cancelled = true;
-    };
-  }, [auth, ready]);
-
+  // An error is shown as an error even while a refetch is in flight: `isError` stays true across a
+  // background refetch, which is the honest reading — the last thing we know is that we could not
+  // ask. Deliberately checked before `isPending`, which is `true` while `enabled` is false.
   if (failed) {
     return (
       <p role="alert" className="text-sm text-danger-ink">
@@ -159,7 +149,7 @@ function PlanInbox(): React.JSX.Element {
       </p>
     );
   }
-  if (!view) return <Loading>Reading the plan gate…</Loading>;
+  if (!view || isPending) return <Loading>Reading the plan gate…</Loading>;
   if (view.plans.length === 0) {
     return (
       <div className="flex flex-col gap-3">
@@ -298,42 +288,38 @@ function Digests(): React.JSX.Element | null {
  */
 function PendingInbox(): React.JSX.Element {
   const { auth, ready } = useAuth();
-  const [view, setView] = useState<PendingRequestsView | null>(null);
-  const [failed, setFailed] = useState(false);
   const [answering, setAnswering] = useState<string | null>(null);
   const [value, setValue] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   // The stream's own revision, not the list's length: `syncAwaiting` below must not be able to
-  // re-trigger the effect that calls it. See `awaitingRevision` in the store.
+  // re-trigger the read that calls it. See `awaitingRevision` in the store.
   const pushes = useChatStore((s) => s.awaitingRevision);
 
+  // `nonce` and `pushes` are in the *key* rather than in a dependency array, which is the same
+  // mechanism said better: a frame off the push-back stream moves `pushes`, and that is the whole
+  // reason an inbox left open on screen notices a new question without polling for one.
+  const {
+    data: view = null,
+    isError: failed,
+    isPending,
+  } = useApiQuery({
+    queryKey: ['pending-requests', nonce, pushes] as const,
+    queryFn: () => api.listPendingRequests(auth),
+    enabled: ready,
+  });
+
+  // The reconciliation, which is a *use* of the answer rather than part of fetching it, so it
+  // belongs in an effect keyed on the answer rather than inside a `then`. The service is the
+  // authority on what is open; the `awaiting_answer` stream only says that something changed.
+  // This is what keeps the sidebar badge honest after an answer given in another tab, and what
+  // fills in the fields neither push carries whole.
   useEffect(() => {
-    if (!ready) return;
-    let cancelled = false;
-    void api
-      .listPendingRequests(auth)
-      .then((next) => {
-        if (cancelled) return;
-        setView(next);
-        setFailed(false);
-        // The service is the authority on what is open; the `awaiting_answer` stream only says
-        // that something changed. Reconciling here is what keeps the sidebar badge honest after
-        // an answer given in another tab, and what fills in the fields neither push carries whole.
-        useChatStore
-          .getState()
-          .syncAwaiting(
-            next.requests.filter((r) => r.state === 'waiting').map((r) => r.request_id),
-          );
-      })
-      .catch(() => !cancelled && setFailed(true));
-    return () => {
-      cancelled = true;
-    };
-    // `pushes` is a dependency and not a value this reads: a frame off the push-back stream moves
-    // it, which is the whole mechanism by which an inbox left open on screen notices a new question
-    // without polling for one.
-  }, [auth, ready, nonce, pushes]);
+    if (!view) return;
+    useChatStore
+      .getState()
+      .syncAwaiting(view.requests.filter((r) => r.state === 'waiting').map((r) => r.request_id));
+  }, [view]);
 
   const submit = (request: PendingRequest) => async (): Promise<void> => {
     setNotice(null);
@@ -372,7 +358,7 @@ function PendingInbox(): React.JSX.Element {
       </p>
     );
   }
-  if (!view) return <Loading>Reading what is waiting…</Loading>;
+  if (!view || isPending) return <Loading>Reading what is waiting…</Loading>;
 
   const waiting = view.requests.filter((r) => r.state === 'waiting');
   if (waiting.length === 0) {

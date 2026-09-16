@@ -27,12 +27,14 @@
  * one-tap "regenerate this protocol" button is not here.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { FileDiff, FlaskConical, History, MessageSquarePlus, Pencil, Printer } from 'lucide-react';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
-import { api, type ProtocolView } from '../api/client.ts';
+import { api } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
+import { useApiQuery } from '../api/queryClient.ts';
+import { protocolQuery } from '../api/queries.ts';
 import { useChatStore } from '../state/chatStore.ts';
 import { prefill } from '../state/composerEvents.ts';
 import { relativeTime } from '../lib/format.ts';
@@ -385,19 +387,6 @@ export function ProtocolDocument(): React.JSX.Element {
   const { auth, ready } = useAuth();
   const navigate = useNavigate();
 
-  /**
-   * The read, carrying the request it answers.
-   *
-   * "Loading" is derived from that key rather than set on the way into the effect — the shape
-   * `JobsPanel` uses, and here it is what stops a stale document being shown under a revision the
-   * reader has just switched to. Clearing state in the effect body would be a second render and a
-   * cascading-render lint error besides.
-   */
-  const [loaded, setLoaded] = useState<{
-    key: string;
-    view: ProtocolView | null;
-    error: string | null;
-  } | null>(null);
   /** The revision being read. `undefined` is the head, which is what a fresh open wants. */
   /**
    * Which revision is on screen — in the URL, not in component state.
@@ -425,7 +414,7 @@ export function ProtocolDocument(): React.JSX.Element {
     },
     [setParams],
   );
-  const [nonce, setNonce] = useState(0);
+
   const [editing, setEditing] = useState(false);
   const [diff, setDiff] = useState<DesignDiff | null>(null);
   const [statusReason, setStatusReason] = useState('');
@@ -447,32 +436,28 @@ export function ProtocolDocument(): React.JSX.Element {
    */
   const [refusal, setRefusal] = useState<Refusal | null>(null);
 
-  const reload = useCallback(() => setNonce((n) => n + 1), []);
-
-  const key = `${designId}|${at ?? 'head'}|${nonce}`;
-  const current = loaded?.key === key ? loaded : null;
-  const view = current?.view ?? null;
-  const failed = current?.error ?? null;
-
-  useEffect(() => {
-    if (!ready || !designId) return;
-    let cancelled = false;
-    const asked = `${designId}|${at ?? 'head'}|${nonce}`;
-    void api
-      .getProtocol(designId, auth, at)
-      .then((next) => !cancelled && setLoaded({ key: asked, view: next, error: null }))
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        setLoaded({
-          key: asked,
-          view: null,
-          error: err instanceof Error ? err.message : 'Could not read that design.',
-        });
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [auth, ready, designId, at, nonce]);
+  /**
+   * The design, at the revision the URL names.
+   *
+   * `(designId, at)` is the key, which is what the `loaded.key === key` derivation this replaces
+   * was for: a stale document is never shown under a revision the reader has just switched to, and
+   * there is no second render clearing the old one on the way in.
+   *
+   * `reload` was a `nonce` in the key. It is `refetch` now, which is the same act with the two
+   * differences that matter here: it does not rebuild the key, so the answer already on screen
+   * stays on screen while the re-read is in flight, and every caller of it — the conflict banner,
+   * a status move, a saved revision — reaches the same one.
+   */
+  const {
+    data: view = null,
+    error,
+    refetch,
+  } = useApiQuery({
+    ...protocolQuery(designId, at, auth),
+    enabled: ready && Boolean(designId),
+  });
+  const failed = error ? error.message : null;
+  const reload = useCallback(() => void refetch(), [refetch]);
 
   const showDiff = async (from: number, to: number): Promise<void> => {
     try {

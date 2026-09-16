@@ -38,19 +38,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Table2 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext.tsx';
-import { api, type StoredToolResult } from '../api/client.ts';
+import { useApiQuery } from '../api/queryClient.ts';
+import { toolResultQuery } from '../api/queries.ts';
 import { rendererFor, Verdict } from '../results/renderers.tsx';
 import { methodFor } from '../chem/provenance.ts';
 import { Badge } from '@/components/ui/badge';
 import { ResultSheet } from './ResultSheet.tsx';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-
-type State =
-  | { status: 'idle' }
-  | { status: 'loading' }
-  | { status: 'ready'; result: StoredToolResult }
-  | { status: 'failed' };
 
 /**
  * Has this block been scrolled to?
@@ -102,7 +97,6 @@ export function ResultBlock({
   const { auth } = useAuth();
   const ref = useRef<HTMLDivElement | null>(null);
   const visible = useVisible(ref);
-  const [state, setState] = useState<State>({ status: 'idle' });
   // Memoised because the effect below depends on it: rebuilt every render, its identity would
   // change every render, and the effect that skips the fetch would re-run for nothing.
   const preloaded = useMemo(
@@ -121,47 +115,35 @@ export function ResultBlock({
     [inline, tool],
   );
   const [sheet, setSheet] = useState(false);
-  /** Which ref we have already asked for, so a re-render cannot ask twice. */
-  const requested = useRef<string | null>(null);
-  /** Whether this component is still mounted. See below for why it is not a cleanup flag. */
-  const mounted = useRef(true);
-  useEffect(() => {
-    // Re-armed on every mount, not only initialised once. `StrictMode` — which `main.tsx` uses —
-    // mounts, unmounts and remounts every component in development, and a flag that is only ever
-    // set to `false` by that first cleanup stays false for the life of the component: the fetch
-    // returns 200 and the block renders nothing, in development, for ever. The production build
-    // does not double-invoke, so the browser tier would have gone on passing over it.
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
 
-  // The guard is a ref and the cancellation is mount-scoped, and both of those are the fix for the
-  // same bug: written the obvious way — `state.status` in the dependency list, `cancelled` set in
-  // the cleanup — the `setState({status:'loading'})` re-runs the effect, whose cleanup then
-  // cancels the fetch its own previous run had just started. The request completes, the 200 comes
-  // back, and the block renders nothing for ever.
-  useEffect(() => {
-    // Nothing to fetch: the service sent the result with the event.
-    if (preloaded) return;
-    if (!visible || requested.current === resultRef) return;
-    requested.current = resultRef;
-    setState({ status: 'loading' });
-    api
-      .getToolResult(sessionId, resultRef, auth)
-      .then((result) => {
-        if (mounted.current) setState({ status: 'ready', result });
-      })
-      .catch(() => {
-        // Quiet on purpose. Nothing asked for this fetch, so a banner over a speculative read
-        // would report a failure the reader did not cause and cannot act on; the trace row below
-        // still offers the same result, and says so properly when it cannot be read either.
-        if (mounted.current) setState({ status: 'failed' });
-      });
-  }, [preloaded, visible, sessionId, resultRef, auth]);
+  /**
+   * The stored result, fetched once it scrolls into view — and **two refs shorter than it was.**
+   *
+   * `requested` guarded against asking twice, because written the obvious way — `state.status` in
+   * the dependency list, `cancelled` set in the cleanup — the `setState({status:'loading'})`
+   * re-ran the effect, whose cleanup then cancelled the fetch its own previous run had just
+   * started: the request completes, the 200 comes back, and the block renders nothing for ever.
+   * `mounted` was re-armed on *every* mount rather than initialised once, because `StrictMode`
+   * mounts, unmounts and remounts every component in development, and a flag only ever set to
+   * `false` by that first cleanup stays false for the life of the component — the same empty block,
+   * in development, for ever, with the production build passing over it.
+   *
+   * Both were dedup and lifecycle bookkeeping that a `queryKey` does by construction, and — this
+   * is the half neither ref could ever reach — the key is *shared*, so the trace panel citing the
+   * same `result_ref` is the same read rather than a second round trip to the blob store.
+   *
+   * Quiet on failure, on purpose and unchanged: nothing asked for this fetch, so a banner over a
+   * speculative read would report a failure the reader did not cause and cannot act on. The trace
+   * row below still offers the same result, and says so properly when it cannot be read either.
+   */
+  const { data: fetched } = useApiQuery({
+    ...toolResultQuery(sessionId, resultRef, auth),
+    // Nothing to fetch when the service sent the result with the event, and nothing to fetch
+    // before it is on screen — which is the whole design of the ref/payload split.
+    enabled: !preloaded && visible,
+  });
 
-  const result = preloaded ?? (state.status === 'ready' ? state.result : null);
+  const result = preloaded ?? fetched ?? null;
 
   /**
    * The payload, parsed and dispatched once per payload rather than once per render.

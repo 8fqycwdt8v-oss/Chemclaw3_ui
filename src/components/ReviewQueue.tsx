@@ -35,7 +35,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { Inbox, ListChecks } from 'lucide-react';
+import { Clock, Inbox, ListChecks } from 'lucide-react';
 import { Link } from 'react-router';
 import { useAuth } from '../auth/AuthContext.tsx';
 import {
@@ -470,6 +470,109 @@ function PendingInbox(): React.JSX.Element {
   );
 }
 
+/**
+ * The caller's own work, still blocked on somebody else.
+ *
+ * The other direction from the section above it, and the reason this is a fourth section rather
+ * than more rows in that one: `GET /pending` lists what is waiting on *this reader*, and every row
+ * there has an answer box. A check-in is a question this reader *asked*, waiting on a colleague,
+ * an instrument or a bench — there is nothing here to answer, and the action is to go and ask.
+ * Upstream keeps them apart for the same reason, and says so: they share a mailbox and nothing else.
+ *
+ * **The service's own gap this closes.** `awaiting.py` re-notifies `asked_of` on a timer and writes
+ * to the requester exactly once, on expiry — and `awaiting_max_days` is 90, so before the check-in
+ * sweep a chemist could hear nothing about their own blocked campaign for three months and then
+ * hear that it had failed. The sweep writes nightly into the mailbox; this is the surface that
+ * opens it, and until now nothing did: the route was served and no file here named it.
+ *
+ * **The read is the consume, so this renders what was already claimed**, exactly as `Digests` does
+ * — the claim is at the top of the app, straight into persisted state, because a claim fired from
+ * this screen would destroy a notice for anyone who opened `/review` and navigated away before the
+ * response landed. Dismissal is a flag rather than a delete for the same reason: this card is the
+ * only copy there is.
+ *
+ * **What it may not do is render an empty list as good news.** That is the failure this page has
+ * now deleted two sections over, and here it is one request away: a claim that failed leaves
+ * exactly the same empty array as a mailbox with nothing in it. `checkInClaim` is what tells them
+ * apart, and all three states are said in words.
+ */
+function CheckIns(): React.JSX.Element {
+  const cards = useChatStore((s) => s.checkIns);
+  const claim = useChatStore((s) => s.checkInClaim);
+  const dismiss = useChatStore((s) => s.dismissCheckIn);
+  const visible = cards.filter((card) => !card.dismissed);
+
+  // Reported even when there are cards, because those came from an earlier page and say nothing
+  // about whether something has been added since.
+  const failure =
+    claim === 'failed' ? (
+      <p role="alert" className="text-sm text-danger-ink">
+        The service could not be asked what your work is waiting on. This is not the same as nothing
+        waiting — a question nobody answers expires on its own, and the notice that it did is the
+        only other one you get.
+      </p>
+    ) : null;
+
+  if (visible.length === 0) {
+    if (failure) return failure;
+    // Only 'pending' is genuinely in flight: the claim runs once at the top of the app, so a
+    // reader who navigated here later sees this for as long as that one request takes.
+    if (claim === 'pending') return <Loading>Reading what you are waiting on…</Loading>;
+    return (
+      <EmptyState icon={<Clock className="size-5" />} title="Nothing of yours is blocked">
+        A question you asked that somebody else has to answer appears here while it is still open —
+        with how long it has been waiting, and how long is left before it expires.
+      </EmptyState>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      {failure}
+      <ul className="flex flex-col gap-2">
+        {visible.map((card) => (
+          <li
+            key={card.requestId}
+            className="rounded-lg border border-border-subtle bg-surface-raised p-3"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">
+                    {card.subject || 'A question with no subject'}
+                  </span>
+                  {/* Tone by urgency, text by the number the service sent. `days_left` is floored
+                      upstream, so 0 is "under a day" rather than "today" — saying "0 days left"
+                      would read as expired, which it is not: the sweep does not carry a request
+                      that has already expired. */}
+                  <Badge tone={card.daysLeft <= 1 ? 'danger' : 'warn'}>
+                    {card.daysLeft === 0
+                      ? 'less than a day left'
+                      : `${card.daysLeft} ${card.daysLeft === 1 ? 'day' : 'days'} left`}
+                  </Badge>
+                </div>
+                <p className="mt-0.5 text-2xs text-ink-subtle">
+                  {/* "Waiting on", not a link: the wire shape carries no session id, so there is
+                      no conversation to open from here — unlike a plan or a pending question. */}
+                  waiting on {card.askedOf || 'anyone'} · open {card.openDays}{' '}
+                  {card.openDays === 1 ? 'day' : 'days'} · claimed {relativeTime(card.receivedAt)}
+                </p>
+              </div>
+              <Button size="xs" variant="ghost" onClick={() => dismiss(card.requestId)}>
+                Dismiss
+              </Button>
+            </div>
+            {/* The requester's own words, as sent. The service truncates them at 1,000 characters
+                and says in the text itself how much it left out, so shortening them again here
+                would hide that notice. */}
+            {card.rationale && <p className="mt-1.5 text-sm text-ink-muted">{card.rationale}</p>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function ReviewQueue(): React.JSX.Element {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -498,6 +601,21 @@ export function ReviewQueue(): React.JSX.Element {
             that ran for seven days and then expired.
           </p>
           <PendingInbox />
+        </section>
+
+        {/* Last, because the two sections above hold work that is stopped *here* — a plan nobody
+            approved, a question only this reader can answer — and this one holds work that is
+            stopped somewhere else. It is a nudge rather than a decision. */}
+        <section aria-labelledby="check-ins-heading">
+          <h2 id="check-ins-heading" className="mb-1 text-lg font-semibold tracking-tight">
+            Your work waiting on somebody else
+          </h2>
+          <p className="mb-3 text-sm text-ink-muted">
+            Questions you asked that are still open, with how long is left before they expire. The
+            service tells you once more when one runs out — and until this section existed, that was
+            the only thing it ever told you.
+          </p>
+          <CheckIns />
         </section>
       </div>
     </div>

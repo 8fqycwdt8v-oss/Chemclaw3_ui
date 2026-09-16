@@ -519,3 +519,54 @@ commit message and a merged message cannot be edited:
       the second copy and leaves the first. The dedupe itself is sound and stands; only its
       provenance was wrong, and the rule worth keeping is that `-S` answers a different question
       from "which commit duplicated this".
+
+---
+
+## The check-in mailbox — a route the service served and nothing here read
+
+`GET /check-ins` has been live upstream since the nightly check-in sweep shipped, and `check-ins`
+occurred in **no file in this repository**: `tests/backendContract.test.ts` listed it, correctly and
+silently, among the service routes the BFF does not forward. That list is the one this repository
+already knows is dangerous — `/jobs`, `/proposals` and `/profiles` sat in it "looking like decisions
+while being real gaps".
+
+Built against the response model rather than against a description of it (`CheckInOut` in
+`api/routes/streams.py`, and the sweep behind it in `durable/check_in.py`).
+
+- [x] **The wire type, from the model.** `CheckIn` in `src/api/client.ts` — six fields, all
+      defaulted upstream so all six always arrive. `listCheckIns` swallows a 404 into `[]` like
+      every other list route and nothing else.
+- [x] **The BFF forwards it.** One whitelist row; `tests/routes.test.ts` pins the forwarding and
+      that a POST is not a path this proxy invents. `tests/backendContract.test.ts` no longer lists
+      the route as unforwarded, which is the measurement that the gap is closed.
+- [x] **The claim is once per page, into persisted state.** `useCheckIns` in `App.tsx`, latched at
+      module scope before the request, exactly as `useDigests` is and for the same reason: the read
+      is the _consume_, so a claim fired from the screen that displays it would destroy a notice
+      for anyone who navigated away before it landed.
+- [x] **A failure is carried to the surface, not only to the log.** This is where it departs from
+      the digest path, and the argument is the asymmetry the service states itself: a lost digest
+      leaves its notes merged and its watch saved, a lost check-in leaves a blocked question nobody
+      hears about until it expires. `checkInClaim` is what lets an empty section say "nothing is
+      blocked" only when the service actually said so — the confident emptiness `/review` has now
+      deleted two sections over.
+- [x] **A re-claim refreshes rather than dedups.** A digest's identity is its content; a check-in's
+      is the question, and the sweep re-sends it nightly with one day less left. Keyed on
+      `request_id`, the later numbers win, the position and the first-seen time do not move, and a
+      dismissal survives.
+- [x] **Proven end to end, not just per component.** `tests/checkIns.test.tsx` drives the store and
+      all four render states (reading / nothing blocked / the claim failed / cards _and_ a failed
+      claim). The path a component test cannot see — the shell claiming through the real BFF into
+      the persisted store — is `e2e/routing.spec.ts`, against `e2e/fixture-service.ts`; the a11y
+      pass now waits for the section before scanning, so axe covers it in both themes.
+
+**What this could not do, and it is a finding rather than a shortfall.** Four things the sweep has
+and the wire model drops: `kind` (so no badge), `session_id` (so no "open the conversation", which
+both sibling inboxes offer), `truncated` (so this list cannot say it may be short, which
+`PartialScan` does for plans), and any timestamp. Recorded as `ISSUES.md` Issue 16, because the fix
+is somebody else's repository and inventing any of the four here would be worse than doing without.
+
+**Run:** `npm run ci` — the whole gate, in the order `scripts/ci.mjs --list` prints — with
+`CHEMCLAW3_DIR` pointing at the `Chemclaw3` checkout, so `tests/backendContract.test.ts` reads the
+real response model rather than skipping with a reason. Not run, and neither is skippable by
+choice: `npm run check:live` needs a live Chemclaw3, and `npm run ci:container` needs a container
+runtime. No count of the suite is written here; the run prints one.

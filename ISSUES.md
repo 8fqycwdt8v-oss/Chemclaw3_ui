@@ -665,6 +665,41 @@ the second one worth a character policy rather than a length cap.
 
 ---
 
+## Issue 16: `GET /check-ins` drops four fields the sweep behind it has
+
+The check-in surface on `/review` is built and served (`USER-STORIES.md` F6). What it cannot show
+is not a gap in this repository: `CheckInOut` in the service's `api/routes/streams.py` carries
+`request_id`, `subject`, `rationale`, `asked_of`, `open_days` and `days_left`, and the worker-side
+shapes it is projected from carry four things more. None of them were invented here, and each costs
+the surface something a sibling section already does:
+
+- **`kind`.** `durable/check_in.py`'s `BlockedRequest` selects it and the wire model does not carry
+  it, so a check-in cannot be badged by what sort of answer it wants — while the pending inbox two
+  sections up badges every row with exactly that field off `GET /pending`.
+- **`session_id`.** Both other inboxes on this page end in "Open the conversation", which is where
+  the reasoning that raised the question lives. A check-in row ends nowhere: this client holds no
+  id to link, and matching the `request_id` against `GET /pending` would be a join across two
+  listings that are scoped to opposite people.
+- **`truncated`.** The sweep bounds one check-in at 200 rows (`_PAGE_ROWS`) and records on
+  `CheckIn` whether the requester had more; `_check_in` reads `payload["requests"]` and drops it.
+  So a chemist with 200+ open questions is shown a list that looks complete, and this page cannot
+  say "this may be short" — which is precisely what `PartialScan` says for plans, off the two
+  fields `GET /plans/pending` does send.
+- **Any timestamp.** Same as a digest, and handled the same way: the card is stamped with when
+  _we_ claimed it and says "claimed", never "asked".
+
+The two day counts are deliberately _not_ on this list. They arrive already floored, and the
+service's own comment says why (`::int` rounds, so 4.6 days left arrived as "5 left" — overstating
+a deadline in the direction that makes somebody act too late). Nothing here recomputes them.
+
+**Who decides:** whoever owns `api/routes/streams.py` in `Chemclaw3`. The first three are additive
+fields on a response model that is already `BlockedRequest` restated at the wire, and the ADR
+behind it argues for restating rather than importing, so adding one is a deliberate act there
+rather than a leak of a worker shape. **What would change the answer here:** nothing this repository
+can do — a field this client cannot be sent is not a field it may invent.
+
+---
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.

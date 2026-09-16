@@ -212,6 +212,39 @@ function useDigests(): void {
   }, [auth, ready]);
 }
 
+/**
+ * Claim this chemist's own blocked work, once per page.
+ *
+ * `useDigests`'s shape, because it is the same mailbox and the same destructive claim, and the
+ * reasoning above applies unchanged. What differs is what a failure costs, so a failure is
+ * recorded rather than only logged: a digest that is lost still leaves its notes merged and its
+ * watch saved, while a check-in has nothing behind it — the service's own handler says an
+ * unreported one is a blocked question nobody learns about until it expires. `ReviewQueue` reads
+ * `checkInClaim` so that an empty section can only say "nothing is blocked" when the service
+ * actually said so.
+ */
+let checkInsClaimed = false;
+
+function useCheckIns(): void {
+  const { auth, ready } = useAuth();
+
+  useEffect(() => {
+    if (!ready || checkInsClaimed) return;
+    // Latched before the request, for `useDigests`'s reason: a StrictMode double-invoke would
+    // otherwise consume rows the first claim is still carrying.
+    checkInsClaimed = true;
+    void api
+      .listCheckIns(auth)
+      .then((rows) => useChatStore.getState().addCheckIns(rows))
+      .catch(() => {
+        // The latch stays closed — a retry loop against a destructive mailbox is how one claim
+        // becomes many — and the store carries the failure to the surface.
+        useChatStore.getState().failCheckInClaim();
+        logger.warn('check_ins.claim_failed', {});
+      });
+  }, [auth, ready]);
+}
+
 /** Whether this page has already read `GET /pending` for the badge. Module scope for the reason
  *  `digestsClaimed` is — a ref does not survive the shell being reconciled at a new route shape. */
 let awaitingRead = false;
@@ -317,6 +350,7 @@ export function AppShell({
   useRemoteTranscript(conversationId, rehydrateNonce);
   useResumeInterruptedTurn(conversationId);
   useDigests();
+  useCheckIns();
   useAwaitingBadge();
   // Watches several conversations, not just this one: a job launched in one and completing while
   // the chemist reads another is the case the feature exists for.

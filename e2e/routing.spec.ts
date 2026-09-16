@@ -93,6 +93,16 @@ test('the review queue is reachable and shows what is waiting on a person', asyn
   await expect(page).toHaveURL(/\/review$/);
   await expect(page.getByRole('heading', { name: 'Plans waiting on you' })).toBeVisible();
   await expect(page.getByText('Which solvent for the Suzuki step?')).toBeVisible();
+
+  // The other direction, and the only assertion in this repository that drives the whole check-in
+  // path: the shell claims `GET /check-ins` once per page through the real BFF, writes it into the
+  // persisted store, and this section renders what it claimed. A component test cannot see any of
+  // the three — it renders the section over a store somebody set by hand.
+  await expect(
+    page.getByRole('heading', { name: 'Your work waiting on somebody else' }),
+  ).toBeVisible();
+  await expect(page.getByText('Measured yield for the 2-MeTHF arm')).toBeVisible();
+  await expect(page.getByText('5 days left')).toBeVisible();
 });
 
 test('the durable-run registry leads with why a run happened', async ({ page, isMobile }) => {

@@ -196,6 +196,7 @@ dispatch already exist, so each is a renderer rather than a feature.
 | **F3** | Chemist: find every decision waiting on me                                | Nothing stays blocked because someone closed a tab                                    | `GET /plans/pending` → `{plans, considered, gated, unread}`                                                 | **`SERVED`** |
 | **F4** | ~~Reviewer: review machine-written knowledge before it enters the graph~~ | ~~See the exact bytes that would land in the tree; approve, or reject with a reason~~ | ~~`GET /proposals`, `GET /proposals/{id}`, `POST /proposals/{id}/decision`~~ — the gate is deleted upstream | **`GONE`**   |
 | **F5** | Non-reviewer: do not offer me buttons that 403                            | Not learn my permissions from an error message                                        | The `roles` claim; `entra_privileged_role_set`                                                              | **`SERVED`** |
+| **F6** | Chemist: be told my own work is still blocked, before it expires          | Chase the person who owes the answer while there is still time to                     | `GET /check-ins` → `[{request_id, subject, rationale, asked_of, open_days, days_left}]`                     | **`SERVED`** |
 
 **F2 is what this frontend is for, and F1 no longer exists.** The plan decision is bound to the
 hash of the plan that was actually rendered, fetched on card mount so the two cannot drift; a 409
@@ -229,6 +230,22 @@ refuses outright rather than gating: no agent path writes a `SKILL.md`.
 All three routes 404 today. This repo's client half went first; the whitelist rows and this row
 outlived it, which is the same lag F1 had, and is why `tests/contractCheck.test.ts` now checks every
 `SERVED` in this table against the routes the BFF can actually reach.
+
+**F6 is the other direction from F3, and it was a served route nobody read.** F3 and the pending
+inbox both answer "what is waiting on _me_". This one answers "what am _I_ waiting on", and the
+service's own split is the argument for it being a fourth section rather than more rows in the
+third: `durable/awaiting.py` re-notifies the person who has to answer, and writes to the person who
+asked exactly once — on expiry. `awaiting_max_days` is 90, so a chemist could hear nothing about
+their own suspended campaign for three months and then hear that it had failed. The nightly
+check-in sweep closes that upstream; this is the surface that opens the mailbox, and before it
+`check-ins` appeared in no file in this repository while `tests/backendContract.test.ts` listed the
+route among the ones the BFF does not forward. **Built**, on `/review`. It carries no answer control
+because there is nothing here to answer — the question is somebody else's — and it cannot link into
+the conversation that raised it, because the wire model carries no session id (`ISSUES.md` Issue 16).
+
+Not one of the original twenty-four, and stated rather than folded in for the reason section I
+states it: the check-in sweep shipped upstream after this audit was written, so the counts in the
+header stay as they were measured.
 
 **F5.** ~~`AuthAccount.roles` is parsed from the token and used nowhere.~~ **Built**, as
 `useIsReviewer`. The role names cannot be hardcoded — they are a deployment's own — so they come
@@ -381,6 +398,7 @@ way.
 | A series renderer and one sparkline primitive, keyed on a run of numbers under any key, labelled with the key the service chose and no invented unit                                                                                                                                                                                                                        | E2 (partly)      |
 | The live activity row — plan step, open call, waiting job, elapsed — replacing "Thinking…" and the step counter; the trace disclosure now labelled with what the work was, and a step rail with per-step durations and a refusal counted as _held_ rather than failed                                                                                                       | A4, C1           |
 | The three qualifier boxes ranked into one strip: an alert for what stops a reader acting, a chip for what they consult — with the method chip above the answer rather than in a footer below it                                                                                                                                                                             | A1 (partly)      |
+| `GET /check-ins` whitelisted and claimed once per page into persisted state, with a fourth `/review` section for the caller's own blocked questions — the three states of the claim said in words, because a failed claim and an empty mailbox are the same empty array                                                                                                     | F6               |
 | `GET/POST /protocols[...]` whitelisted and mirrored in `shared/protocols.ts`; a `/protocols` list and a `/protocols/{id}` document with basis chips, a plate map, a run-sheet CSV and a revision history; a field-level editor whose save is a new revision bound to its parent and whose 409 is a re-read rather than a retry; and a `protocol` result block in the answer | I1, I2, I3, I4   |
 
 One thing fell out of the work rather than being planned, and is worth recording because it was

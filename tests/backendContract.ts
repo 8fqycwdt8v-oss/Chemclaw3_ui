@@ -39,9 +39,15 @@ import { EVENT_FIELDS, EVENT_TYPES, normalizeEvent } from '../shared/events.ts';
  * root — and under every composer in `package.json` those are the same directory, which is exactly
  * why a disagreement between them would never have surfaced in a lane.
  *
- * `import.meta.url` is deliberately not used for it: in this suite's default environment it is not
- * a `file:` URL, so a root derived from it throws on import rather than on use — driven, before
- * this.
+ * `import.meta.url` is deliberately not used for it, and the mechanism is worse than the one this
+ * paragraph used to state. Measured under the suite's default `happy-dom`: `import.meta.url` *is*
+ * a `file:` URL — the thing that moves is the **derived** root, because Vite rewrites a static
+ * `new URL(…, import.meta.url)` at transform time and hands back
+ * `http://localhost:3000/@fs/…`. Nothing throws: `existsSync` is given an `http:` URL and returns
+ * `false`, so a checkout that is there resolves as absent and the contract check skips itself with
+ * a message naming a path nobody typed. A silent `false` is the harm, not a throw — and the rewrite
+ * is per-environment, so an identical probe under `// @vitest-environment node` resolves correctly,
+ * which is how this was believed to be fine.
  */
 const relativeBase = (): string => process.cwd();
 
@@ -106,6 +112,15 @@ export function checkoutRoots(env: NodeJS.ProcessEnv = process.env): string[] {
  * defect a check of this shape dies of: not a wrong answer, a second answer, in the lane nobody
  * watches. `tests/delivery.test.ts` is what keeps it one, by refusing any other file in this suite
  * that reads a checkout-location variable of its own.
+ *
+ * "One" is per *marker*, though, and two variables can still split the suite between two
+ * checkouts. The fallback is deliberate and is what makes the sparse Jenkins checkout usable — a
+ * reader asking for the file it opens is what keeps "the checkout is there" from meaning "every
+ * reader's file is there", asserted below in `backendContract.test.ts`. The cost of it, said here
+ * because nothing else does: with both variables set, a marker the first checkout lacks resolves
+ * to the second, so a stale `CHEMCLAW_REPO` export beside a sparse `CHEMCLAW3_DIR` reads one file
+ * out of each — driven, the events marker answers the first and the protocols marker the second,
+ * in one run. No lane sets both today; a developer with an old export in a shell is the case.
  */
 export function backendCheckout(
   marker: string = EVENTS_MARKER,

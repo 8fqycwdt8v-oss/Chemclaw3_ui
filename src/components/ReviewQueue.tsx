@@ -524,9 +524,21 @@ function CheckIns(): React.JSX.Element {
     );
   }
 
+  // `=== true` rather than truthiness, exactly as `PartialScan` reads its own flag: a card
+  // persisted before this field existed carries `undefined`, and "not reported" must not become a
+  // claim in either direction. Read off any visible card, because the service stamps one notice's
+  // flag onto every entry that notice carried — it is the notice that was short, not the question.
+  const short = visible.some((card) => card.truncated === true);
+
   return (
     <div className="flex flex-col gap-3">
       {failure}
+      {short && (
+        <p role="status" className="text-xs text-ink-muted">
+          You have more questions waiting than one check-in carries, so this list may be short. Open
+          your requests to see the rest.
+        </p>
+      )}
       <ul className="flex flex-col gap-2">
         {visible.map((card) => (
           <li
@@ -539,6 +551,10 @@ function CheckIns(): React.JSX.Element {
                   <span className="font-medium">
                     {card.subject || 'A question with no subject'}
                   </span>
+                  {/* The same field and the same badge the pending inbox two sections up draws,
+                      so one page does not group two inboxes by two different things. Guarded
+                      because a card persisted before the service sent it has none. */}
+                  {card.kind && <Badge tone="warn">{card.kind}</Badge>}
                   {/* Tone by urgency, text by the number the service sent. `days_left` is floored
                       upstream, so 0 is "under a day" rather than "today" — saying "0 days left"
                       would read as expired, which it is not: the sweep does not carry a request
@@ -550,8 +566,6 @@ function CheckIns(): React.JSX.Element {
                   </Badge>
                 </div>
                 <p className="mt-0.5 text-2xs text-ink-subtle">
-                  {/* "Waiting on", not a link: the wire shape carries no session id, so there is
-                      no conversation to open from here — unlike a plan or a pending question. */}
                   waiting on {card.askedOf || 'anyone'} · open {card.openDays}{' '}
                   {card.openDays === 1 ? 'day' : 'days'} · claimed {relativeTime(card.receivedAt)}
                 </p>
@@ -564,6 +578,16 @@ function CheckIns(): React.JSX.Element {
                 and says in the text itself how much it left out, so shortening them again here
                 would hide that notice. */}
             {card.rationale && <p className="mt-1.5 text-sm text-ink-muted">{card.rationale}</p>}
+            {/* Where the reasoning that raised the question lives, which is the same ending both
+                other inboxes on this page have. Absent rather than dead where the service sent no
+                session: a wait opened by a plate run or a connector job was never in one. */}
+            {card.sessionId && (
+              <div className="mt-2">
+                <Button asChild size="sm" variant="ghost">
+                  <Link to={`/open/${card.sessionId}`}>Open the conversation</Link>
+                </Button>
+              </div>
+            )}
           </li>
         ))}
       </ul>

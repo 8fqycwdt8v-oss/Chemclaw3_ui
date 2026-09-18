@@ -694,40 +694,41 @@ the second one worth a character policy rather than a length cap.
 
 ---
 
-## Issue 16: `GET /check-ins` drops four fields the sweep behind it has
+## Closed: `GET /check-ins` sends three of the four fields it withheld (was Issue 16)
 
-The check-in surface on `/review` is built and served (`USER-STORIES.md` F6). What it cannot show
-is not a gap in this repository: `CheckInOut` in the service's `api/routes/streams.py` carries
-`request_id`, `subject`, `rationale`, `asked_of`, `open_days` and `days_left`, and the worker-side
-shapes it is projected from carry four things more. None of them were invented here, and each costs
-the surface something a sibling section already does:
+`CheckInOut` now carries `kind`, `session_id` and `truncated` beside the six it always sent, and
+this repository renders all three: the badge is the same one the pending inbox draws, the row ends
+in "Open the conversation" the way both other inboxes on `/review` do, and a short notice says so
+the way `PartialScan` says it for plans. Upstream's
+`D-2026-09-18-a-wire-model-cannot-drop-a-field-that-never-arrived` is the decision.
 
-- **`kind`.** `durable/check_in.py`'s `BlockedRequest` selects it and the wire model does not carry
-  it, so a check-in cannot be badged by what sort of answer it wants — while the pending inbox two
-  sections up badges every row with exactly that field off `GET /pending`.
-- **`session_id`.** Both other inboxes on this page end in "Open the conversation", which is where
-  the reasoning that raised the question lives. A check-in row ends nowhere: this client holds no
-  id to link, and matching the `request_id` against `GET /pending` would be a join across two
-  listings that are scoped to opposite people.
-- **`truncated`.** The sweep bounds one check-in at 200 rows (`_PAGE_ROWS`) and records on
-  `CheckIn` whether the requester had more; `_check_in` reads `payload["requests"]` and drops it.
-  So a chemist with 200+ open questions is shown a list that looks complete, and this page cannot
-  say "this may be short" — which is precisely what `PartialScan` says for plans, off the two
-  fields `GET /plans/pending` does send.
-- **Any timestamp.** Same as a digest, and handled the same way: the card is stamped with when
-  _we_ claimed it and says "claimed", never "asked".
+**This entry was wrong about where two of the three were missing, and recording that is the point.**
+It said the wire model _drops_ all three, and named `_check_in` as where `truncated` is dropped.
+Measured in the service before the fix, only `kind` was ever in the mailbox payload: `session_id`
+was a `pending_requests` column the sweep's own query never selected, and `truncated` was a
+`CheckIn` field the workflow never wrote into the payload at all. A reader cannot drop what never
+arrived — and the patch this entry implied would have added three fields to a response model, two of
+which would then have served `""` and `false` for ever, with every route-level assertion green.
 
-The two day counts are deliberately _not_ on this list. They arrive already floored, and the
-service's own comment says why (`::int` rounds, so 4.6 days left arrived as "5 left" — overstating
-a deadline in the direction that makes somebody act too late). Nothing here recomputes them.
+Nothing in this repository could have caught that: an entry written from the outside describes what
+the consumer can see, which is the _absence_, never the layer. Filed the same way next time, and
+read the same way: as the statement of a gap, not of its cause.
 
-**Who decides:** whoever owns `api/routes/streams.py` in `Chemclaw3`. The first three are additive
-fields on a response model that is already `BlockedRequest` restated at the wire, and the ADR
-behind it argues for restating rather than importing, so adding one is a deliberate act there
-rather than a leak of a worker shape. **What would change the answer here:** nothing this repository
-can do — a field this client cannot be sent is not a field it may invent.
+**The fourth is still not sent and still should not be.** No timestamp, same as a digest; the card
+says "claimed", which is the honest word for a mailbox whose read is the consume. The two day
+counts are still not recomputed here either — they arrive floored, deliberately and downwards.
 
----
+**One thing this fix did not reach, and it was never on this entry's list.** `api.listCheckIns`'s
+own docstring claimed that "the response model carries no 'the sweep is running' signal" was
+recorded here "as a fifth bullet rather than guessed at". It was not: this entry had four bullets
+and none of them was that. So it is recorded now. `check_in_enabled` defaults to `false` upstream
+while `GET /check-ins` is mounted unconditionally, so a deployment that has not turned the sweep on
+answers `200 []` for ever — indistinguishable from an empty mailbox, from this side. That is a
+service-side decision about what its own response says, and this repository may not invent it.
+
+`tests/checkIns.test.tsx` holds the three: the store keeps them, the badge and the link render off
+them, the link is absent where the service sent no session, and the notice appears only when the
+service said the notice was short.
 
 ## Issue 17: the e2e fixture serves no `/digests`, so every browser run logs a missing route
 

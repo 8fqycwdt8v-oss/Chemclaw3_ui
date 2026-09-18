@@ -112,11 +112,17 @@ export interface CheckInCard {
    * never send again. `checkInKey` is what decides it.
    */
   requestId: string;
+  /** What class of answer is wanted, badged as given — the pending inbox badges its rows by it too. */
+  kind: string;
   subject: string;
   rationale: string;
   askedOf: string;
   openDays: number;
   daysLeft: number;
+  /** The conversation that raised it, or empty — a plate run and a connector job have none. */
+  sessionId: string;
+  /** Whether the notice this arrived in was short of the whole set. See `CheckIn.truncated`. */
+  truncated: boolean;
   /** When WE claimed it. The service sends no timestamp, so nothing here may imply one. */
   receivedAt: number;
   /**
@@ -1971,9 +1977,16 @@ export const useChatStore = create<ChatState>()(
             const held = known.get(key);
             known.set(key, {
               ...card,
+              kind: row.kind,
               askedOf: row.asked_of,
               openDays: row.open_days,
               daysLeft: row.days_left,
+              sessionId: row.session_id,
+              // Taken from the row rather than OR-ed with what is held, for the same reason the
+              // day counts are: the newest notice is the one that is true about now, and a card
+              // that kept a "may be short" from a night when the asker had 200 questions would go
+              // on saying it after they were down to three.
+              truncated: row.truncated,
               // A refresh keeps the position and the time it first arrived, exactly as a
               // redelivered job ending does: re-stamping would put a question that has been open
               // for nine days back at the top as though it were news.

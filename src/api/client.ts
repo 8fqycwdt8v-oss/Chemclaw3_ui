@@ -328,16 +328,22 @@ export interface Digest {
  * characters with the truncation *named in the text itself* — so they are rendered as given, and a
  * renderer that shortened them further would be hiding a notice that says how much was dropped.
  *
- * **Four things it deliberately does not carry**, each of which the UI would have used and none of
- * which may be invented: the request's `kind` (the worker's `BlockedRequest` has one; the wire
- * model drops it, so there is no badge), a `session_id` (so a row cannot link into the conversation
- * that raised it, the way a plan and a pending question both do), the page's `truncated` flag (the
- * service bounds one check-in at 200 rows and records whether it was short — `CheckIn.truncated` —
- * and the wire model drops that too, so this list cannot say it may be incomplete the way
- * `PartialScan` does for plans), and any timestamp at all. See `ISSUES.md` Issue 16.
+ * **Three of the four things this used to say it does not carry are now here** (upstream's
+ * `D-2026-09-18-a-wire-model-cannot-drop-a-field-that-never-arrived`, which closed Issue 16). That
+ * entry — and the service's own backlog row — described all three as fields `CheckInOut` dropped.
+ * Measured there before the fix, only `kind` was: `session_id` was a `pending_requests` column the
+ * sweep's query never selected, and `truncated` was a `CheckIn` field the workflow never wrote
+ * into the mailbox payload. Nothing here could have caught that, which is why the reading is
+ * recorded rather than the outcome.
+ *
+ * **What it still does not carry is any timestamp**, and that is unchanged and deliberate: a
+ * digest has none either, and the card is stamped with when _we_ claimed it and says "claimed",
+ * never "asked".
  */
 export interface CheckIn {
   request_id: string;
+  /** What class of answer is wanted — the same vocabulary `PendingRequest.kind` is badged by. */
+  kind: string;
   subject: string;
   rationale: string;
   /** Who owes the answer: an object id, a upn, or an entitlement. Empty means "anyone". */
@@ -345,6 +351,22 @@ export interface CheckIn {
   /** Whole days open, and whole days until the wait expires. Already floored by the service. */
   open_days: number;
   days_left: number;
+  /**
+   * The conversation the question was asked in, or empty.
+   *
+   * Empty is ordinary rather than exceptional: a wait opened by a plate run or a connector job was
+   * never in a conversation. Always one of this reader's own — the sweep is scoped to who asked,
+   * and the route claims only the caller's mailbox.
+   */
+  session_id: string;
+  /**
+   * Whether the notice this question arrived in was short of the asker's whole blocked set.
+   *
+   * A property of the claimed mailbox row, which the service stamps onto every entry that row
+   * carried, because its answer is a flat list flattened across rows. So it is the same value on
+   * every card from one notice, and reading it off any one of them is reading it off the notice.
+   */
+  truncated: boolean;
 }
 
 /** One question the agent is holding a workflow open for, as an inbox renders it. */
@@ -859,8 +881,10 @@ export const api = {
    *   unconditionally, so a deployment that has not turned the sweep on answers `200 []` for ever.
    *
    * The 404 is detectable here and is reported as `absent`. The second case is not visible from
-   * this side at all: the response model carries no "the sweep is running" signal, which is
-   * recorded as a fifth bullet on `ISSUES.md` Issue 16 rather than guessed at.
+   * this side at all: the response model carries no "the sweep is running" signal. This used to say
+   * that was "recorded as a fifth bullet on `ISSUES.md` Issue 16 rather than guessed at" — it was
+   * not; that entry had four bullets and none of them was this. It is recorded now, on the closed
+   * entry, as the one thing the fix did not reach.
    */
   async listCheckIns(getToken: TokenGetter): Promise<CheckIn[] | 'absent'> {
     try {

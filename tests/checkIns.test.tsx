@@ -29,14 +29,17 @@ import { ReviewQueue } from '../src/components/ReviewQueue.tsx';
 import type { CheckIn } from '../src/api/client.ts';
 import { stubFetch } from './helpers.ts';
 
-/** One blocked question, exactly as `CheckInOut` serialises it — all six fields, always. */
+/** One blocked question, exactly as `CheckInOut` serialises it — every field, always. */
 const row = (over: Partial<CheckIn> = {}): CheckIn => ({
   request_id: 'await-1',
+  kind: 'measurement',
   subject: 'Measured yield for the 2-MeTHF arm',
   rationale: 'Round 4 conditions cannot be chosen until round 3 is measured.',
   asked_of: 'process-chemistry',
   open_days: 9,
   days_left: 5,
+  session_id: 'conv-7',
+  truncated: false,
   ...over,
 });
 
@@ -108,6 +111,15 @@ describe('the check-in store', () => {
       dismissed: false,
     });
     expect(useChatStore.getState().checkInClaim).toBe('ready');
+  });
+
+  it('keeps the three fields the card badges, links and warns by', () => {
+    // Each was added upstream at a different layer — `kind` at the wire, `session_id` at the
+    // sweep's own query, `truncated` on the payload the workflow writes — and the card needs all
+    // three. A card that dropped one here would read as a service that never sent it.
+    useChatStore.getState().addCheckIns([row({ truncated: true })]);
+    const [card] = useChatStore.getState().checkIns;
+    expect(card).toMatchObject({ kind: 'measurement', sessionId: 'conv-7', truncated: true });
   });
 
   it('an empty claim is an answer, not an absence of one', () => {
@@ -216,6 +228,46 @@ describe('the check-in section', () => {
     expect(
       screen.getByText('Round 4 conditions cannot be chosen until round 3 is measured.'),
     ).toBeTruthy();
+  });
+
+  it('badges the question by the class of answer it wants', () => {
+    // The same field the pending inbox two sections up badges every row by, off `GET /pending`.
+    // Without it the two inboxes on one page grouped their rows differently for no reason a
+    // reader could see.
+    useChatStore.getState().addCheckIns([row()]);
+    renderQueue();
+    expect(screen.getByText('measurement')).toBeTruthy();
+  });
+
+  it('ends the row in the conversation that raised it, as both other inboxes do', () => {
+    useChatStore.getState().addCheckIns([row()]);
+    renderQueue();
+    const link = screen.getByRole('link', { name: /open the conversation/i });
+    expect(link.getAttribute('href')).toBe('/open/conv-7');
+  });
+
+  it('offers no conversation where the service sent no session', () => {
+    // A wait opened by a BO plate run or a connector job has none, and `AwaitRequest.session_id`
+    // defaults to empty for exactly those. A link to `/open/` would be a dead end this page
+    // invented.
+    useChatStore.getState().addCheckIns([row({ session_id: '' })]);
+    renderQueue();
+    expect(screen.queryByRole('link', { name: /open the conversation/i })).toBeNull();
+  });
+
+  it('says the list may be short when the sweep served the requester short', () => {
+    // `PartialScan` says exactly this for plans one section up. Without it a chemist with more
+    // than 200 open questions is shown a list that looks complete — the confident emptiness this
+    // page refuses everywhere else.
+    useChatStore.getState().addCheckIns([row({ truncated: true })]);
+    renderQueue();
+    expect(screen.getByText(/this list may be short/i)).toBeTruthy();
+  });
+
+  it('claims nothing about completeness when the service did not', () => {
+    useChatStore.getState().addCheckIns([row()]);
+    renderQueue();
+    expect(screen.queryByText(/this list may be short/i)).toBeNull();
   });
 
   it('reads a floored zero as under a day rather than as expired', () => {
@@ -445,9 +497,12 @@ describe('what a check-in does on the way to disk', () => {
       checkIns: [
         {
           requestId: 'await-1',
+          kind: 'measurement',
           subject: 'Measured yield for the 2-MeTHF arm',
           rationale: 'Round 4 conditions cannot be chosen until round 3 is measured.',
           askedOf: 'process-chemistry',
+          sessionId: 'conv-7',
+          truncated: false,
           openDays: 10,
           daysLeft: 4,
           receivedAt: now - 1_000,
@@ -476,9 +531,12 @@ describe('what a check-in does on the way to disk', () => {
       checkIns: [
         {
           requestId: 'await-1',
+          kind: 'measurement',
           subject: 'Measured yield for the 2-MeTHF arm',
           rationale: 'Round 4 conditions cannot be chosen until round 3 is measured.',
           askedOf: 'process-chemistry',
+          sessionId: 'conv-7',
+          truncated: false,
           openDays: 10,
           daysLeft: 4,
           receivedAt: now - 86_400_000,

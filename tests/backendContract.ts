@@ -351,6 +351,34 @@ export function backendRoutes(root: string): BackendRoute[] {
 }
 
 /**
+ * A route handler's parameter list and the text that follows it, or `null` when the handler is not
+ * in the module the route names.
+ *
+ * `^\s*`, not `^`: `api/app.py` declares its one decorated handler inside `register()`, so an
+ * anchored search misses the route that describes all the others.
+ *
+ * One definition of that, because there were two and they drifted. `returnAnnotationOf` was fixed
+ * and `requestModelOf` was left with `^`, where the same bug is *invisible*: a handler this reader
+ * cannot find and a handler that takes no body both answer `null`. Measured on the nested
+ * `GET /openapi.json` handler, `returnAnnotationOf` gave `dict[str, Any]` while `requestModelOf`
+ * gave `null` — handler not found, reading as "no body", which that route happens to be and would
+ * have gone on reading as the day it grew one. Sharing the search is what makes the two answers
+ * about the same handler: the all-routes assertion in `backendContract.test.ts` that every
+ * registered route annotates its return now reds if this anchor loosens for either caller.
+ */
+function handlerSignature(
+  root: string,
+  route: BackendRoute,
+): { params: string; after: string } | null {
+  if (!route.handler) return null;
+  const text = readPy(root, route.module);
+  const at = text.search(new RegExp(`^\\s*(?:async )?def ${route.handler}\\(`, 'm'));
+  if (at < 0) return null;
+  const { text: params, end } = balanced(text, text.indexOf('(', at));
+  return { params, after: text.slice(end + 1) };
+}
+
+/**
  * The request-body model of a route, or `null` when it takes no body.
  *
  * FastAPI decides that by annotation: a parameter typed as a `BaseModel` subclass is the JSON
@@ -358,12 +386,9 @@ export function backendRoutes(root: string): BackendRoute[] {
  * than from a hand-kept table, so a route that grows a body is covered the day it does.
  */
 export function requestModelOf(root: string, route: BackendRoute): string | null {
-  if (!route.handler) return null;
-  const text = readPy(root, route.module);
-  const at = text.search(new RegExp(`^(?:async )?def ${route.handler}\\(`, 'm'));
-  if (at < 0) return null;
-  const { text: params } = balanced(text, text.indexOf('(', at));
-  return /\bbody\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(params)?.[1] ?? null;
+  const signature = handlerSignature(root, route);
+  if (signature === null) return null;
+  return /\bbody\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(signature.params)?.[1] ?? null;
 }
 
 /**
@@ -380,15 +405,9 @@ export function requestModelOf(root: string, route: BackendRoute): string | null
  * where naming one anyway is how a check invents the pairing it then reports findings about.
  */
 export function returnAnnotationOf(root: string, route: BackendRoute): string | null {
-  if (!route.handler) return null;
-  const text = readPy(root, route.module);
-  // `^\s*`, not `^`: `api/app.py` declares its one decorated handler inside `register()`, so an
-  // anchored search missed the route that describes all the others — driven, it was the only
-  // handler this reader reported as annotating nothing while the source annotates it.
-  const at = text.search(new RegExp(`^\\s*(?:async )?def ${route.handler}\\(`, 'm'));
-  if (at < 0) return null;
-  const { end } = balanced(text, text.indexOf('(', at));
-  return /^\s*->\s*([^:\n]+):/.exec(text.slice(end + 1))?.[1]?.trim() ?? null;
+  const signature = handlerSignature(root, route);
+  if (signature === null) return null;
+  return /^\s*->\s*([^:\n]+):/.exec(signature.after)?.[1]?.trim() ?? null;
 }
 
 /** The one model a route returns, or `null` — see `returnAnnotationOf` for what is read. */

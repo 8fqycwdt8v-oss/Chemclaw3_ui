@@ -39,9 +39,15 @@ import { EVENT_FIELDS, EVENT_TYPES, normalizeEvent } from '../shared/events.ts';
  * root — and under every composer in `package.json` those are the same directory, which is exactly
  * why a disagreement between them would never have surfaced in a lane.
  *
- * `import.meta.url` is deliberately not used for it: in this suite's default environment it is not
- * a `file:` URL, so a root derived from it throws on import rather than on use — driven, before
- * this.
+ * `import.meta.url` is deliberately not used for it, and the mechanism is worse than the one this
+ * paragraph used to state. Measured under the suite's default `happy-dom`: `import.meta.url` *is*
+ * a `file:` URL — the thing that moves is the **derived** root, because Vite rewrites a static
+ * `new URL(…, import.meta.url)` at transform time and hands back
+ * `http://localhost:3000/@fs/…`. Nothing throws: `existsSync` is given an `http:` URL and returns
+ * `false`, so a checkout that is there resolves as absent and the contract check skips itself with
+ * a message naming a path nobody typed. A silent `false` is the harm, not a throw — and the rewrite
+ * is per-environment, so an identical probe under `// @vitest-environment node` resolves correctly,
+ * which is how this was believed to be fine.
  */
 const relativeBase = (): string => process.cwd();
 
@@ -73,6 +79,16 @@ export const EVENTS_MARKER = join('src', 'chemclaw', 'api', 'events.py');
 export const CHECKOUT_VARS = ['CHEMCLAW3_DIR', 'CHEMCLAW_REPO'] as const;
 
 /**
+ * Where this reader looks when nothing names a checkout, relative to `relativeBase()`.
+ *
+ * A constant rather than a literal inside `checkoutRoots` because it is read back: the last step
+ * of the resolution is as much a part of "where is the checkout" as the two variables are, and
+ * `tests/delivery.test.ts` holds the three documents that describe that resolution to this
+ * sequence — names *and order* — rather than to the variable names occurring somewhere in a file.
+ */
+export const DEFAULT_CHECKOUT = '../Chemclaw3';
+
+/**
  * Every directory this suite will look in for a Chemclaw3 checkout, in order.
  *
  * Takes its environment as an argument so the resolution can be driven over environments built to
@@ -85,7 +101,7 @@ export function checkoutRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const configured = CHECKOUT_VARS.map((name) => env[name]).filter(
     (value): value is string => typeof value === 'string' && value.trim() !== '',
   );
-  return configured.length > 0 ? configured.map(absolute) : [resolve(base, '..', 'Chemclaw3')];
+  return configured.length > 0 ? configured.map(absolute) : [resolve(base, DEFAULT_CHECKOUT)];
 }
 
 /**
@@ -96,6 +112,15 @@ export function checkoutRoots(env: NodeJS.ProcessEnv = process.env): string[] {
  * defect a check of this shape dies of: not a wrong answer, a second answer, in the lane nobody
  * watches. `tests/delivery.test.ts` is what keeps it one, by refusing any other file in this suite
  * that reads a checkout-location variable of its own.
+ *
+ * "One" is per *marker*, though, and two variables can still split the suite between two
+ * checkouts. The fallback is deliberate and is what makes the sparse Jenkins checkout usable — a
+ * reader asking for the file it opens is what keeps "the checkout is there" from meaning "every
+ * reader's file is there", asserted below in `backendContract.test.ts`. The cost of it, said here
+ * because nothing else does: with both variables set, a marker the first checkout lacks resolves
+ * to the second, so a stale `CHEMCLAW_REPO` export beside a sparse `CHEMCLAW3_DIR` reads one file
+ * out of each — driven, the events marker answers the first and the protocols marker the second,
+ * in one run. No lane sets both today; a developer with an old export in a shell is the case.
  */
 export function backendCheckout(
   marker: string = EVENTS_MARKER,
@@ -351,6 +376,34 @@ export function backendRoutes(root: string): BackendRoute[] {
 }
 
 /**
+ * A route handler's parameter list and the text that follows it, or `null` when the handler is not
+ * in the module the route names.
+ *
+ * `^\s*`, not `^`: `api/app.py` declares its one decorated handler inside `register()`, so an
+ * anchored search misses the route that describes all the others.
+ *
+ * One definition of that, because there were two and they drifted. `returnAnnotationOf` was fixed
+ * and `requestModelOf` was left with `^`, where the same bug is *invisible*: a handler this reader
+ * cannot find and a handler that takes no body both answer `null`. Measured on the nested
+ * `GET /openapi.json` handler, `returnAnnotationOf` gave `dict[str, Any]` while `requestModelOf`
+ * gave `null` — handler not found, reading as "no body", which that route happens to be and would
+ * have gone on reading as the day it grew one. Sharing the search is what makes the two answers
+ * about the same handler: the all-routes assertion in `backendContract.test.ts` that every
+ * registered route annotates its return now reds if this anchor loosens for either caller.
+ */
+function handlerSignature(
+  root: string,
+  route: BackendRoute,
+): { params: string; after: string } | null {
+  if (!route.handler) return null;
+  const text = readPy(root, route.module);
+  const at = text.search(new RegExp(`^\\s*(?:async )?def ${route.handler}\\(`, 'm'));
+  if (at < 0) return null;
+  const { text: params, end } = balanced(text, text.indexOf('(', at));
+  return { params, after: text.slice(end + 1) };
+}
+
+/**
  * The request-body model of a route, or `null` when it takes no body.
  *
  * FastAPI decides that by annotation: a parameter typed as a `BaseModel` subclass is the JSON
@@ -358,12 +411,9 @@ export function backendRoutes(root: string): BackendRoute[] {
  * than from a hand-kept table, so a route that grows a body is covered the day it does.
  */
 export function requestModelOf(root: string, route: BackendRoute): string | null {
-  if (!route.handler) return null;
-  const text = readPy(root, route.module);
-  const at = text.search(new RegExp(`^(?:async )?def ${route.handler}\\(`, 'm'));
-  if (at < 0) return null;
-  const { text: params } = balanced(text, text.indexOf('(', at));
-  return /\bbody\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(params)?.[1] ?? null;
+  const signature = handlerSignature(root, route);
+  if (signature === null) return null;
+  return /\bbody\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(signature.params)?.[1] ?? null;
 }
 
 /**
@@ -380,15 +430,9 @@ export function requestModelOf(root: string, route: BackendRoute): string | null
  * where naming one anyway is how a check invents the pairing it then reports findings about.
  */
 export function returnAnnotationOf(root: string, route: BackendRoute): string | null {
-  if (!route.handler) return null;
-  const text = readPy(root, route.module);
-  // `^\s*`, not `^`: `api/app.py` declares its one decorated handler inside `register()`, so an
-  // anchored search missed the route that describes all the others — driven, it was the only
-  // handler this reader reported as annotating nothing while the source annotates it.
-  const at = text.search(new RegExp(`^\\s*(?:async )?def ${route.handler}\\(`, 'm'));
-  if (at < 0) return null;
-  const { end } = balanced(text, text.indexOf('(', at));
-  return /^\s*->\s*([^:\n]+):/.exec(text.slice(end + 1))?.[1]?.trim() ?? null;
+  const signature = handlerSignature(root, route);
+  if (signature === null) return null;
+  return /^\s*->\s*([^:\n]+):/.exec(signature.after)?.[1]?.trim() ?? null;
 }
 
 /** The one model a route returns, or `null` — see `returnAnnotationOf` for what is read. */

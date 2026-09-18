@@ -17,7 +17,7 @@ import { createServer, type Server } from 'node:http';
 import { readFileSync, readdirSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { CHECKOUT_VARS } from './backendContract.ts';
+import { CHECKOUT_VARS, DEFAULT_CHECKOUT } from './backendContract.ts';
 
 const pipeline = readFileSync('Jenkinsfile', 'utf8');
 const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
@@ -100,6 +100,15 @@ const RESOLVER = 'tests/backendContract.ts';
  * clause* rather than a window of characters before the `from`: the first edition allowed 200 of
  * them, and adding three parser names to `tests/backendContract.test.ts`'s import list pushed
  * `backendCheckout` out of the window, failing the file that owns this axis for having grown.
+ *
+ * And the whole specifier rather than `[./]*backendContract.ts`: `suiteSources()` walks `e2e/` as
+ * well as `tests/`, and a file there must write `'../tests/backendContract.ts'`, which that form
+ * never matches. Both halves of that were wrong and the second is the one that matters — an `e2e/`
+ * reader that asks and then opens opaquely fell into *neither* population, so nothing fired and
+ * the sparse checkout did not fetch what it read, which is precisely the silent demotion this pair
+ * of derivations exists to prevent, one directory over. The other half failed a file that does ask
+ * with a message telling it to ask, which is a red with no edit that clears it. The probe below
+ * drives both shapes from `e2e/`.
  */
 const RESOLVER_FUNCTIONS = ['backendCheckout', 'backendSearchPath', 'checkoutRoots'];
 
@@ -109,7 +118,7 @@ const resolverUsers = (
   files.filter(
     (file) =>
       file.path === RESOLVER ||
-      [...file.text.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*'[./]*backendContract\.ts'/g)].some(
+      [...file.text.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*'[^']*backendContract\.ts'/g)].some(
         (match) =>
           RESOLVER_FUNCTIONS.some((name) => new RegExp(`\\b${name}\\b`).test(match[1] ?? '')),
       ),
@@ -253,14 +262,30 @@ describe('the Jenkins pipeline', () => {
         path: 'tests/honest.test.ts',
         text: "import { backendCheckout } from './backendContract.ts';\nreadPy(root, 'api/events.py')",
       },
+      // The same two shapes from `e2e/`, which `suiteSources()` walks and which has to reach the
+      // resolver as `'../tests/backendContract.ts'`. Driven: the import derivation used to require
+      // the specifier be dots and slashes only, so neither of these was a resolver user — the
+      // opaque one was in no set at all and fired nothing, and the honest one was reported as
+      // opening a checkout "without asking" while its first line asks.
+      {
+        path: 'e2e/opaque.spec.ts',
+        text: "import { backendCheckout } from '../tests/backendContract.ts';\nreadFileSync(join(root, DIR))",
+      },
+      {
+        path: 'e2e/honest.spec.ts',
+        text: "import { backendCheckout } from '../tests/backendContract.ts';\nreadPy(root, 'api/events.py')",
+      },
     ];
     expect(contractReaders(probe).map((file) => file.path)).toEqual([
       'tests/rogue.test.ts',
       'tests/honest.test.ts',
+      'e2e/honest.spec.ts',
     ]);
     expect(resolverUsers(probe).map((file) => file.path)).toEqual([
       'tests/opaque.test.ts',
       'tests/honest.test.ts',
+      'e2e/opaque.spec.ts',
+      'e2e/honest.spec.ts',
     ]);
   });
 
@@ -296,7 +321,20 @@ describe('the Jenkins pipeline', () => {
     // exclusion above is not a hole: a read hidden from the derivations still cannot say where to
     // read from.
     const names = [...CHECKOUT_VARS, 'CHEMCLAW3_REQUIRED'];
-    const pattern = new RegExp(`process\\.env[^\\n]{0,4}(${names.join('|')})`);
+    // Two shapes, because there are two ways to read one of these and the scan held only one: a
+    // member read passed at 24 passed where the same variable read off `process.env` by property
+    // reds. The docstring above claims the absolute rule, so it is the scan that was narrow rather
+    // than the rule. Both shapes are probed below, and neither the probes nor this comment may
+    // spell a name beside the access — assembled from the constant, or this file matches itself,
+    // which it did, twice, once for each arm.
+    //
+    // What is still outside it, said rather than implied: this scan can only see a name written
+    // down, so a variable read through one held in a constant is invisible here exactly as a built
+    // directory name is to the source-directory derivation. The remedy is the same one.
+    const pattern = new RegExp(
+      `process\\.env[^\\n]{0,4}(${names.join('|')})` +
+        `|\\{[^}]*\\b(${names.join('|')})\\b[^}]*\\}\\s*=\\s*process\\.env`,
+    );
     const rogue = [
       ...suiteSources(),
       { path: DERIVATION_OWNER, text: readFileSync(DERIVATION_OWNER, 'utf8') },
@@ -315,23 +353,36 @@ describe('the Jenkins pipeline', () => {
     for (const name of names) {
       expect(pattern.test(`const x = process.env.${name} ?? 'fallback';`)).toBe(true);
       expect(pattern.test(`const x = process.env['${name}'];`)).toBe(true);
+      expect(pattern.test(`const { ${name} } = process.env;`)).toBe(true);
+      expect(pattern.test(`const {\n  ${name}: where,\n} = process.env;`)).toBe(true);
       // Naming one is not reading one: this file asserts the Jenkinsfile *declares* them.
       expect(pattern.test(`expect(pipeline).toContain("${name} = '1'");`)).toBe(false);
     }
   });
 
-  it('is described by the record with the checkout variables the resolver actually reads', () => {
+  it('is described by the record with the resolution the resolver actually performs', () => {
     // Same rule as the RUN_GATE clause below and for the same reason: three documents tell a
     // reader where to put the checkout, and one of them told them to use a variable the contract
-    // reader did not read. A variable added to `CHECKOUT_VARS` now reds here until they say so.
+    // reader did not read.
+    //
+    // A *phrase*, not a mention of each name. This check was `text.includes(name)` anywhere in the
+    // file, which is satisfied by any occurrence — driven: rewriting the sentence in `README.md`
+    // that actually describes the resolution left the suite green, because `CHEMCLAW_REPO` is
+    // named elsewhere in that file for an unrelated reason, and only deleting *every* mention
+    // reds. Order was held by nothing at all, and order is the half a reader acts on: which of two
+    // exported variables wins decides which checkout the suite reads.
+    //
+    // Assembled from `CHECKOUT_VARS` and `DEFAULT_CHECKOUT` rather than written out, so adding a
+    // variable, reordering two, or moving the fallback path reds here until the record says so.
+    // Whitespace-normalised because a Markdown paragraph wraps, and all three wrap this sentence
+    // in different places.
+    const claim = [...CHECKOUT_VARS, DEFAULT_CHECKOUT].map((name) => `\`${name}\``).join(', then ');
     for (const doc of ['README.md', 'docs/production-readiness.md', 'ISSUES.md']) {
-      const text = readFileSync(doc, 'utf8');
-      for (const name of CHECKOUT_VARS) {
-        expect(
-          text.includes(name),
-          `${doc} does not name ${name}, which is a variable the contract reader resolves`,
-        ).toBe(true);
-      }
+      const text = readFileSync(doc, 'utf8').replace(/\s+/g, ' ');
+      expect(
+        text.includes(claim),
+        `${doc} does not say ${claim}, which is the resolution the contract reader performs`,
+      ).toBe(true);
     }
   });
 

@@ -90,6 +90,7 @@ import {
   returnAnnotationOf,
   whitelistTemplate,
 } from './backendContract.ts';
+import type { BackendRoute } from './backendContract.ts';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -508,6 +509,65 @@ describe('the one resolution of where the Chemclaw3 checkout is', () => {
     expect(checkoutRequired({ CHEMCLAW3_REQUIRED: '1' })).toBe(true);
     expect(checkoutRequired({ CHEMCLAW3_REQUIRED: 'true' })).toBe(false);
     expect(checkoutRequired({})).toBe(false);
+  });
+});
+
+/**
+ * The two readers of a handler's signature, driven over a module written to be nested.
+ *
+ * `api/app.py` declares its one decorated handler inside `register()`, so an unanchored `^def`
+ * search misses it. That was found and fixed in `returnAnnotationOf` and left standing in
+ * `requestModelOf`, where the same bug is **invisible**: a handler this reader cannot find and a
+ * handler that takes no body both answer `null`. The one nested route in the checkout is a `GET`
+ * with no body, so no assertion anywhere in this file could tell the two apart — the population
+ * that would expose it is empty, which is the shape this repository keeps finding satisfied by
+ * being broken.
+ *
+ * So the module is built here rather than found: a nested handler that *does* take a body, beside
+ * a top-level one, so both readers are asked the same question about the same two shapes. This
+ * describe needs no Chemclaw3 checkout — it plants its own.
+ */
+describe('a handler is read the same way by both readers, nested or not', () => {
+  const root = mkdtempSync(join(tmpdir(), 'chemclaw-handlers-'));
+  mkdirSync(join(root, 'src', 'chemclaw', 'api'), { recursive: true });
+  writeFileSync(
+    join(root, 'src', 'chemclaw', 'api', 'nested.py'),
+    [
+      '@router.post("/top")',
+      'async def create_top(body: TopIn, principal: CurrentUser) -> TopOut:',
+      '    return TopOut()',
+      '',
+      '',
+      'def register(app: FastAPI) -> None:',
+      '    @app.post("/nested")',
+      '    async def create_nested(body: NestedIn, principal: CurrentUser) -> NestedOut:',
+      '        return NestedOut()',
+      '',
+    ].join('\n'),
+  );
+  const route = (handler: string): BackendRoute => ({
+    method: 'POST',
+    template: `/${handler}`,
+    handler,
+    module: 'api/nested.py',
+  });
+
+  it('finds the body model of a top-level handler', () => {
+    expect(requestModelOf(root, route('create_top'))).toBe('TopIn');
+    expect(returnAnnotationOf(root, route('create_top'))).toBe('TopOut');
+  });
+
+  it('finds the body model of a handler declared inside a function', () => {
+    // The assertion the shipped checkout cannot make: its one nested route takes no body, so
+    // `null` there is right for the wrong reason and stays right until somebody adds one.
+    expect(requestModelOf(root, route('create_nested'))).toBe('NestedIn');
+    expect(returnAnnotationOf(root, route('create_nested'))).toBe('NestedOut');
+  });
+
+  it('answers null for a handler the module does not declare', () => {
+    // Guard the guard: a search that matched anything would satisfy both tests above.
+    expect(requestModelOf(root, route('create_absent'))).toBe(null);
+    expect(returnAnnotationOf(root, route('create_absent'))).toBe(null);
   });
 });
 

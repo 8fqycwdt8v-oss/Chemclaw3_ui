@@ -628,14 +628,32 @@ everything next to it.
   default stays the conservative one rather than being an oversight. Same trade, same owner, and
   the lane that ships is the one where a red is most expensive.
 
-- **Response shapes are not checked.** The interfaces this client declares for what it reads back
-  are not compared to the models the handlers return. The mapping is not mechanical — `GET
-/sessions` returns `list[SessionSummaryOut]` where the client reads a page plus an
-  `X-Next-Cursor` header — and a check that guessed at the pairing would produce confident findings
-  about a relationship it invented, which is worse than the gap. What exists instead is
-  `tests/contractDrift.test.tsx`, which drives the three fields this has actually cost
-  (`title`, `updated_at`, `result_ref`). **What would close it:** the handlers' return models being
-  readable route-by-route, which is a shape the backend does not owe anybody today.
+- **Response shapes are checked where the pairing is not a guess, which is a minority of them, and
+  this entry used to say they were not checked at all.** It also named the blocker wrongly: "the
+  handlers' return models being readable route-by-route, which is a shape the backend does not owe
+  anybody today". Measured 2026-09-18 against the checkout, that is false — every route the
+  service registers annotates its return, and `tests/backendContract.test.ts` now asserts _that_
+  rather than transcribing it, because the day it stops being true is the day this axis silently
+  narrows. (The same sentence named the model `SessionSummaryOut`; the service declares
+  `SessionSummary`.)
+
+  So the readable half is here and what is still open is on **this** side. A route is compared only
+  where this client declares the wire shape _itself_ — the enclosing API function's return type is
+  one interface, and it is the model's own name — and for most of what `src/api/client.ts` does
+  that is not so: it narrows a union (`CheckIn[] | 'absent'`), unwraps an envelope
+  (`DesignSummary[]` out of `DesignListOut`), reshapes a listing into a page plus an
+  `X-Next-Cursor` header, or resolves `void`. Pairing those anyway is the check inventing a
+  relationship and then reporting findings about it, which is worse than the gap. Where the two
+  sides are named alike but one of them cannot be _read_ — `JobRecordSummary` is on the wire as a
+  model declared in `durable/`, outside the `api/` package the wire models live in — it is listed
+  rather than reached for, on the same argument. Beside all of it, `tests/contractDrift.test.tsx`
+  still drives the three fields this has actually cost (`title`, `updated_at`, `result_ref`).
+
+  **Who decides:** whoever owns `src/api/client.ts`. **What would close the rest:** this client
+  declaring the wire shape and doing its reshaping downstream of a declared type, which is a
+  refactor of the API surface rather than a check — or the service publishing the envelope
+  relationship in a form a reader can follow, which nothing declares today.
+
 - **It reads what the service declares, not what a deployment serves.** A service serving something
   other than its source says is exactly the difference between this check and
   `npm run check:openapi`, which asks a live service and is operator-run (see "Known gaps" below).

@@ -366,6 +366,39 @@ export function requestModelOf(root: string, route: BackendRoute): string | null
   return /\bbody\s*:\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(params)?.[1] ?? null;
 }
 
+/**
+ * The return annotation of a route's handler, verbatim, or `null` when there is none.
+ *
+ * Every route this service registers annotates its return, which is the half of the response
+ * question `ISSUES.md` Issue 14 recorded as blocked on the backend owing a shape it does not —
+ * measured against the checkout on 2026-09-18 and false, so an assertion holds it rather than a
+ * sentence. `list[X]` unwraps to `X` because a page of a model is that model on the wire.
+ *
+ * `null` here means the handler could not be found or annotates nothing at all;
+ * `responseModelOf` below is the narrower question, and returns `null` for `Response`, a
+ * `dict[...]` and a union like `NoteView | Response` — a route whose body this reader cannot name,
+ * where naming one anyway is how a check invents the pairing it then reports findings about.
+ */
+export function returnAnnotationOf(root: string, route: BackendRoute): string | null {
+  if (!route.handler) return null;
+  const text = readPy(root, route.module);
+  // `^\s*`, not `^`: `api/app.py` declares its one decorated handler inside `register()`, so an
+  // anchored search missed the route that describes all the others — driven, it was the only
+  // handler this reader reported as annotating nothing while the source annotates it.
+  const at = text.search(new RegExp(`^\\s*(?:async )?def ${route.handler}\\(`, 'm'));
+  if (at < 0) return null;
+  const { end } = balanced(text, text.indexOf('(', at));
+  return /^\s*->\s*([^:\n]+):/.exec(text.slice(end + 1))?.[1]?.trim() ?? null;
+}
+
+/** The one model a route returns, or `null` — see `returnAnnotationOf` for what is read. */
+export function responseModelOf(root: string, route: BackendRoute): string | null {
+  const annotation = returnAnnotationOf(root, route);
+  if (annotation === null) return null;
+  const single = /^list\[([A-Za-z_][A-Za-z0-9_]*)\]$/.exec(annotation)?.[1] ?? annotation;
+  return /^[A-Z][A-Za-z0-9_]*$/.test(single) ? single : null;
+}
+
 /* ------------------------------------------------------------------- the events */
 
 export interface BackendEvent {
@@ -504,6 +537,16 @@ export interface ClientRequest {
    * something it did not read.
    */
   bodyKeys: string[] | null;
+  /**
+   * The type the enclosing API function declares it resolves to, with `Promise<>` and `[]`
+   * stripped — or `null` when that is not one interface by name.
+   *
+   * `null` for `void`, for `{ session_id: string }` written inline, for a narrowed union like
+   * `CheckIn[] | 'absent'`, and for a call inside a helper that declares nothing. Those are the
+   * responses this client does **not** declare the wire shape of, and a checker that paired them
+   * with the model anyway would be inventing the relationship it then reports on.
+   */
+  responseType: string | null;
   file: string;
   line: number;
 }
@@ -577,6 +620,7 @@ export function clientRequests(): ClientRequest[] {
               isOpen && verb && ts.isStringLiteral(verb) ? verb.text : (shape?.method ?? 'GET'),
             template,
             bodyKeys: shape?.bodyKeys ?? null,
+            responseType: declaredResponseType(node, file),
             file: relative,
             line: line + 1,
           });
@@ -622,4 +666,56 @@ function requestShape(
   };
   visit(options);
   return { method, bodyKeys };
+}
+
+/**
+ * The response type the function around a call declares, as one interface name.
+ *
+ * Walks out to the nearest declaration with a return annotation, because the call is inside
+ * `request<T>(...)`'s caller rather than in the API function's signature line. Everything that is
+ * not a bare identifier after unwrapping `Promise<>` and `[]` is `null` rather than a guess —
+ * see `ClientRequest.responseType` for which shapes those are and why it matters.
+ */
+function declaredResponseType(node: ts.Node, file: ts.SourceFile): string | null {
+  let current: ts.Node | undefined = node.parent;
+  while (current) {
+    if (
+      ts.isMethodDeclaration(current) ||
+      ts.isFunctionDeclaration(current) ||
+      ts.isArrowFunction(current)
+    ) {
+      const annotation = current.type?.getText(file);
+      if (annotation === undefined) return null;
+      const resolved = /^Promise<([\s\S]*)>$/.exec(annotation.trim())?.[1] ?? annotation;
+      const single = resolved.trim().replace(/\[\]$/, '').trim();
+      return /^[A-Z][A-Za-z0-9_]*$/.test(single) ? single : null;
+    }
+    current = current.parent;
+  }
+  return null;
+}
+
+/**
+ * The property names of an interface this client declares, or `null` if it declares no such one.
+ *
+ * Only the files that build requests are searched, which is where every response interface in this
+ * client is written today. A type imported from elsewhere reads as `null` — not compared rather
+ * than compared against nothing, which is the same refusal `responseModelOf` makes upstream.
+ */
+export function clientInterfaceFields(name: string): string[] | null {
+  for (const relative of REQUEST_SOURCES) {
+    const file = parse(relative);
+    let found: string[] | null = null;
+    const visit = (node: ts.Node): void => {
+      if (ts.isInterfaceDeclaration(node) && node.name.text === name) {
+        found = node.members.flatMap((member) =>
+          member.name && ts.isIdentifier(member.name) ? [member.name.text] : [],
+        );
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(file);
+    if (found !== null) return found;
+  }
+  return null;
 }

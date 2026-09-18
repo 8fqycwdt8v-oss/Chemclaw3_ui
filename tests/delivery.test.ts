@@ -96,7 +96,10 @@ const RESOLVER = 'tests/backendContract.ts';
  *
  * The named functions rather than the module: `tests/eventContract.test.ts` imports
  * `clientEventTypes` from it and opens no checkout at all, so a predicate about the *module* put
- * it in this set and failed it for a read it does not make — driven, before this.
+ * it in this set and failed it for a read it does not make — driven, before this. And the *import
+ * clause* rather than a window of characters before the `from`: the first edition allowed 200 of
+ * them, and adding three parser names to `tests/backendContract.test.ts`'s import list pushed
+ * `backendCheckout` out of the window, failing the file that owns this axis for having grown.
  */
 const RESOLVER_FUNCTIONS = ['backendCheckout', 'backendSearchPath', 'checkoutRoots'];
 
@@ -106,8 +109,9 @@ const resolverUsers = (
   files.filter(
     (file) =>
       file.path === RESOLVER ||
-      RESOLVER_FUNCTIONS.some((name) =>
-        new RegExp(`\\b${name}\\b[\\s\\S]{0,200}?from '[./]*backendContract\\.ts'`).test(file.text),
+      [...file.text.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*'[./]*backendContract\.ts'/g)].some(
+        (match) =>
+          RESOLVER_FUNCTIONS.some((name) => new RegExp(`\\b${name}\\b`).test(match[1] ?? '')),
       ),
   );
 

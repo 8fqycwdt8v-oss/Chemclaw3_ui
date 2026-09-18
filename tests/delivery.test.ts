@@ -17,7 +17,8 @@ import { createServer, type Server } from 'node:http';
 import { readFileSync, readdirSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { CHECKOUT_VARS, DEFAULT_CHECKOUT } from './backendContract.ts';
+import { resolve } from 'node:path';
+import { CHECKOUT_VARS, DEFAULT_CHECKOUT, checkoutRoots } from './backendContract.ts';
 
 const pipeline = readFileSync('Jenkinsfile', 'utf8');
 const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
@@ -376,7 +377,32 @@ describe('the Jenkins pipeline', () => {
     // variable, reordering two, or moving the fallback path reds here until the record says so.
     // Whitespace-normalised because a Markdown paragraph wraps, and all three wrap this sentence
     // in different places.
-    const claim = [...CHECKOUT_VARS, DEFAULT_CHECKOUT].map((name) => `\`${name}\``).join(', then ');
+    //
+    // The *fallback* is not a third candidate, and this check used to pin three documents to
+    // saying it was: `` `CHEMCLAW3_DIR`, then `CHEMCLAW_REPO`, then `../Chemclaw3` `` reads as a
+    // fall-through, and `checkoutRoots` takes the default *instead of* the configured roots.
+    // Driven at the commit that pinned it: `checkoutRoots({ CHEMCLAW3_DIR: '/nonexistent-xyz' })`
+    // is `['/nonexistent-xyz']` and `backendCheckout` is `null` — a stale export switches the
+    // check off rather than quietly reading the sibling, which is the opposite of what a reader
+    // who acted on that sentence would expect. So the two halves join differently.
+    const claim =
+      CHECKOUT_VARS.map((name) => `\`${name}\``).join(', then ') +
+      `, and only where none of those is set, \`${DEFAULT_CHECKOUT}\``;
+
+    // And the sentence's second half is a claim about the resolver rather than about this string,
+    // so it is driven here, in the `it` that enforces the sentence: making `DEFAULT_CHECKOUT` a
+    // third candidate would red beside the prose it falsifies. `tests/backendContract.test.ts`
+    // asserts the same shape from the other side (`falls back to the sibling path, and only when
+    // nothing names one`), and the two cannot drift because both read this constant.
+    const sibling = resolve(process.cwd(), DEFAULT_CHECKOUT);
+    expect(checkoutRoots({})).toContain(sibling);
+    for (const name of CHECKOUT_VARS) {
+      expect(
+        checkoutRoots({ [name]: '/nonexistent-xyz' }),
+        `${name} naming a directory that does not exist must not fall through to ` +
+          `${DEFAULT_CHECKOUT} — the record above says it does not`,
+      ).not.toContain(sibling);
+    }
     for (const doc of ['README.md', 'docs/production-readiness.md', 'ISSUES.md']) {
       const text = readFileSync(doc, 'utf8').replace(/\s+/g, ' ');
       expect(

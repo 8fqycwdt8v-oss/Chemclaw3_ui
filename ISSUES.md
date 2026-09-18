@@ -730,9 +730,22 @@ service-side decision about what its own response says, and this repository may 
 them, the link is absent where the service sent no session, and the notice appears only when the
 service said the notice was short.
 
-## Issue 17: the e2e fixture serves no `/digests`, so every browser run logs a missing route
+## Issue 17 (closed): the e2e fixture serves no `/digests`, so every browser run logs a missing route
 
-`e2e/fixture-service.ts` stands in for the service in the Playwright lane, and it does not serve
+Closed 2026-09-18. `e2e/fixture-service.ts` serves `/digests` as an empty list beside `/pending`
+and `/check-ins`, which is the third route to need this and the second to have needed it _because_
+`orEmpty` hides the difference: a 404 and an empty list arrive at the caller identically, so the
+lane could not tell a fixture that never had the route from a service with nothing to report.
+
+**Empty rather than a row, and that is the one decision in a one-line change.** `/check-ins` carries
+a row because a spec asserts on the card it draws. **No spec asserts on a digest card at all** — the
+rendering is unexercised by the browser lane — so a row here would have changed the `/review` a11y
+snapshot in order to exercise nothing. The uncovered rendering is recorded in _Still not done_
+rather than papered over with a fixture that makes the lane look like it covers it.
+
+The original report follows.
+
+`e2e/fixture-service.ts` stands in for the service in the Playwright lane, and it did not serve
 `/digests`. Every browser run therefore logs `api.list_route_missing {route: "/digests"}` —
 harmless, and exactly the noise that fixture's own `/pending` comment argues against, because a
 real missing route and a fixture that never had one look identical in the log a developer reads
@@ -763,6 +776,14 @@ path routing with a working Back button; conversation search; upload progress an
 registry; profile selection; tool calls surviving a reload.
 
 **Still not done:**
+
+- **No browser test asserts on a digest card.** `/digests` is served by the e2e fixture (Issue 17)
+  so the _request_ path is exercised and the log is quiet, and nothing exercises the _rendering_ —
+  `e2e/` mentions digests nowhere. The unit tests cover the store and the card; what is missing is
+  the lane that would catch a digest section that renders blank in a real browser, which is the
+  failure class the e2e suite exists for. Adding it means a fixture row and a new `/review`
+  assertion, and it changes that page's a11y snapshot, so it is its own change rather than a line
+  in somebody else's.
 
 - **One intermittent browser test, seen once and not reproduced.**
   `e2e/protocols.spec.ts:55` (`an edit becomes a new revision and comes back on the next read`)

@@ -95,6 +95,15 @@
  * clock is *worse* than before — the worker attempt is paid before the page does the work anyway.
  * `ISSUES.md` Issue 11 has it, including the part that is not deterministic.
  *
+ * **And when the page's stack runs out too, this seam now says so instead of saying "not a
+ * molecule".** That was Issue 11's own worst consequence and it is closed: `readCanonicalSmiles`
+ * is three-valued, `canonicalSmiles` narrows it back to a key or nothing, and
+ * `rdkit.engine.ts`'s `Refused` carries the argument for threading one value here when every other
+ * negative in this module is a predicate. What it did **not** do is make a long chain nameable —
+ * the stack is the stack. Run `node scripts/measure-rdkit-rangeerror.mjs`: the refusal is still
+ * there, at the same lengths, and the same string asked a second time still answers, which is the
+ * part of this that is about a call rather than about a molecule.
+ *
  * **The CSP has to allow it, and today's does not.** Instantiating WASM needs `script-src
  * 'wasm-unsafe-eval'` (`server/config.ts`) — and that is necessary rather than sufficient, which
  * this paragraph asserted the opposite of for as long as it has existed. Embind builds this
@@ -115,10 +124,10 @@
  */
 
 import { call } from './rdkit.client.ts';
-import type { DrawOptions } from './rdkit.engine.ts';
+import type { CanonicalRead, DrawOptions } from './rdkit.engine.ts';
 
 export { MAX_PARSED_SMILES_CHARS, tooLongToParse } from './rdkit.engine.ts';
-export type { DrawOptions } from './rdkit.engine.ts';
+export type { CanonicalRead, DrawOptions, Refused } from './rdkit.engine.ts';
 
 /**
  * Is the toolkit actually here?
@@ -130,9 +139,12 @@ export type { DrawOptions } from './rdkit.engine.ts';
  * page's lifetime.
  *
  * So the distinction lives here, and the rule is: **anything about to make a chemical claim on a
- * negative answer asks this first.** Not the helpers themselves — threading a third value through
- * every one of them puts the question at every call site instead of at the three that make a
- * claim, and `entities.ts` would have to handle a case it can do nothing about.
+ * negative answer asks this first.** Not the helpers themselves — threading this through every one
+ * of them puts a question at every call site instead of at the three that make a claim, and
+ * `entities.ts` would have to handle a case it can do nothing about. The one exception is
+ * `readCanonicalSmiles` below, and it is an exception for a reason this shape cannot cover: a
+ * stack exhaustion is a fact about one string on one thread, so there is no cheap predicate to ask
+ * about it afterwards.
  *
  * It reports on the attempt that has already been made rather than commissioning another one,
  * which is what makes it cheap enough to ask from a render path. A caller that wants a *retry*
@@ -143,14 +155,35 @@ export async function rdkitAvailable(): Promise<boolean> {
 }
 
 /**
- * The canonical SMILES for `smiles`, or `null` if it is not a readable molecule.
+ * What RDKit made of `smiles`: its canonical name, or why there is none.
+ *
+ * The seam's only three-valued answer, and the two surfaces that make a claim about a string are
+ * the only callers. `rdkit.engine.ts`'s `Refused` carries what the third value is and why it could
+ * not be a predicate; what belongs here is what it costs the boundary, which is nothing — the
+ * union is plain data and clones.
+ */
+export async function readCanonicalSmiles(smiles: string): Promise<CanonicalRead> {
+  return call('readCanonicalSmiles', smiles);
+}
+
+/**
+ * The canonical SMILES for `smiles`, or `null` if there is no name for it.
  *
  * This is the entity key. Two spellings of one molecule must collapse to one string here or the
  * entity rail shows the same compound twice and can never join a computed value to the structure
  * it was computed for.
+ *
+ * **Both refusals are `null` here, and that is the invariant rather than a loss of information.**
+ * A `too-complex` chain has no canonical form on this thread, so there is nothing to key it by —
+ * and the failure to avoid is not the missing row, it is the *raw spelling* becoming a key, which
+ * would file one compound under a string nothing else can match and would never merge with the
+ * later success. Every caller but two wants a key or nothing, gets exactly that, and needs no line
+ * changed; `tests/rdkitUnavailable.test.tsx` and `tests/rdkitTooComplex.test.tsx` hold it from
+ * both directions.
  */
 export async function canonicalSmiles(smiles: string): Promise<string | null> {
-  return call('canonicalSmiles', smiles);
+  const read = await readCanonicalSmiles(smiles);
+  return read.status === 'named' ? read.canonical : null;
 }
 
 /** Whether RDKit can read `smiles` as a molecule. The gate a recogniser's guess must pass before

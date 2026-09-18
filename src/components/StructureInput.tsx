@@ -44,10 +44,10 @@ import { Dialog } from 'radix-ui';
 import { ChevronLeft, ChevronRight, FileUp, PenLine, Sparkles, X } from 'lucide-react';
 import {
   MAX_PARSED_SMILES_CHARS,
-  canonicalSmiles,
   canonicalSmilesFromMolblock,
   moleculesFromMolfile,
   rdkitAvailable,
+  readCanonicalSmiles,
   tooLongToParse,
   type MolfileRecords,
 } from '../chem/rdkit.ts';
@@ -72,7 +72,7 @@ import { Molecule } from './Molecule.tsx';
  */
 interface Verdict {
   of: string;
-  status: 'ok' | 'name' | 'invalid' | 'unavailable' | 'too-large';
+  status: 'ok' | 'name' | 'invalid' | 'unavailable' | 'too-large' | 'too-complex';
   canonical?: string;
 }
 
@@ -88,7 +88,11 @@ type Check =
   /** Past `MAX_PARSED_SMILES_CHARS`. Also not a refusal about the chemistry — `src/chem/rdkit.ts`
    *  declines to hand the parser a string long enough to trap the WASM, and the range it declines
    *  starts well below the one that actually traps. */
-  | { status: 'too-large' };
+  | { status: 'too-large' }
+  /** Inside the cap, read as a molecule, and RDKit ran out of stack producing its canonical name.
+   *  The third refusal that is not about the chemistry, and the only one that could not be
+   *  predicted from the string: see `Refused` in `src/chem/rdkit.engine.ts`. */
+  | { status: 'too-complex' };
 
 function checkOf(raw: string, verdict: Verdict | null): Check {
   const text = raw.trim();
@@ -251,12 +255,20 @@ export function StructureInput({
 
     let cancelled = false;
     const timer = setTimeout(() => {
-      void canonicalSmiles(text).then(async (canonical) => {
+      void readCanonicalSmiles(text).then(async (read) => {
         // The await crossed a keystroke: a later string may already be in the field, and letting
         // this answer land would report on text nobody can see any more.
         if (cancelled) return;
-        if (canonical) {
-          setVerdict({ of: text, status: 'ok', canonical });
+        if (read.status === 'named') {
+          setVerdict({ of: text, status: 'ok', canonical: read.canonical });
+          return;
+        }
+        // Asked before `tooLongToParse` and before the toolkit, because it is the narrowest of the
+        // three and the only one the other two would answer wrongly: the string is inside the cap
+        // and the toolkit is right here, so both of those checks pass and the panel would fall
+        // through to "not a molecule" about a molecule.
+        if (read.status === 'too-complex') {
+          setVerdict({ of: text, status: 'too-complex' });
           return;
         }
         // "Not a molecule" is a claim about the string, and it is only ours to make if the toolkit
@@ -553,6 +565,16 @@ export function StructureInput({
             That is longer than this panel will parse — {raw.trim().length} characters, against a
             limit of {MAX_PARSED_SMILES_CHARS}. Nothing is wrong with it as chemistry; the toolkit
             is unstable on strings that long, so it is not read here.
+          </span>
+        )}
+        {check.status === 'too-complex' && (
+          // Warn rather than danger, and the wording is about this browser rather than about the
+          // molecule: RDKit read it, and then ran out of stack working out its canonical name.
+          // "Too complex to name here" is the honest scope — a claim about the renderer.
+          <span className="text-warn-ink">
+            RDKit read this as a molecule and then ran out of stack naming it, so it is too complex
+            to name here — and without that name there is nothing to file it under. Nothing is wrong
+            with it as chemistry; it is a limit of the browser this is running in.
           </span>
         )}
       </p>

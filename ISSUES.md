@@ -417,7 +417,78 @@ started and answers, which is the most this repository can assert today.
 
 ---
 
-## Issue 11: a 600-character chain is inside the parser cap and `canonicalSmiles` still answers `null`
+## Issue 11 (closed): a 600-character chain is inside the parser cap and `canonicalSmiles` still answers `null`
+
+Closed 2026-09-18. **The second option is taken — the `RangeError` is told apart from a chemical
+negative at the seam — and the first and third are not.** `MAX_PARSED_SMILES_CHARS` is unchanged at
+600: lowering it would refuse structures that draw fine, and the measurement below says there is no
+threshold to lower it _to_.
+
+**Reproduced first, on the commit being fixed, because the figures in the original report are a
+claim about an older one.** `scripts/measure-rdkit-rangeerror.mjs` is what produced these and is
+shipped beside `measure-rdkit-placement.mjs` for the same reason that one is — run it rather than
+read this. Real Chromium, the app's own seam, a fresh page per length, twice.
+
+**Which half of this table is which**, since it is one table across two trees: the `null` column is
+the defect, reproduced on the unfixed tree first — three runs at 550–600 put the boundary at the
+same place — and it is _unchanged_ by the fix, because a fix cannot give this thread a bigger
+stack. The `named` spellings are what those same answers are called afterwards; before the fix that
+column read `answered`/`null` and could not say which negative it was.
+
+| chars   | `canonicalSmiles`, first call | main thread blocked | the same string asked again | engine, shallower stack | `isMolecule` | `moleculeSvg` |
+| ------- | ----------------------------- | ------------------- | --------------------------- | ----------------------- | ------------ | ------------- |
+| 200–570 | answered                      | 0–143 ms            | named                       | named                   | true         | answered      |
+| 580     | **`null`**                    | 179–193 ms          | **named**                   | named                   | true         | answered      |
+| 590     | **`null`**                    | 162–171 ms          | **named**                   | named                   | true         | answered      |
+| 600     | **`null`**                    | 162–179 ms          | **named**                   | named                   | true         | answered      |
+
+Three things that table settles, and the third is the one that decided the fix:
+
+- **It is a `RangeError` out of the canonical ranking, not a parse failure.** Instrumented at the
+  `catch` and then reverted: at 570 the worker raises `RangeError: Maximum call stack size
+exceeded` and the page answers; at 600 both raise it, and `withMol` swallowed the second into
+  `null`. `isMolecule` and `moleculeSvg` answer at every length because neither asks for a
+  canonical name — so the blast radius is one helper, measured rather than assumed.
+- **A blocked main thread of 160–190 ms on a `null` is both placements refusing.** The worker
+  blocks nothing, so that column is what attributes an answer to a placement without instrumenting
+  the app.
+- **There is no length threshold, and 580 is not one.** The call that refuses is the _first_ one at
+  a length: six consecutive reads of the same 600-character chain in one page went `too-complex`
+  then `named` five times, and asking `readCanonicalSmiles` before `canonicalSmiles` moved the
+  refusal to whichever ran first. The shipped script's `read #2` and `read #3` columns are that
+  effect standing in the table rather than in this paragraph. That is why lowering the cap is not
+  the fix — the number it would have to clear is not a property of the molecule.
+
+**What shipped.** `rdkit.engine.ts` gains `Refused` (`'unreadable' | 'too-complex'`), `withMol`
+returns which one, and `readCanonicalSmiles` carries it across the worker boundary as plain data.
+`canonicalSmiles` is that call narrowed back to `string | null`, so **every existing caller is
+untouched** — `entities.ts` and `structure.ts` still drop the molecule on a falsy answer, no cache
+key, dedupe key or citation is ever minted from a raw spelling, and `tests/rdkitUnavailable.test.tsx`
+still pins it. The two surfaces that _make a claim_ read the three-valued call and say "too complex
+to name here", in the same words, coloured as a warning rather than a refusal: the structure panel
+and the composer's paste strip.
+
+**Why a third value rather than a predicate**, since this module spent four docstrings arguing
+against exactly that. `rdkitAvailable()` works because "the toolkit never loaded" is a property of
+the _page_ — true for every string, still true a tick later, cheap to ask afterwards. A stack
+exhaustion is about one string on one thread at one depth, several canonicalisations run at once,
+and a module-scoped "the last one overflowed" flag would answer about whichever call finished last.
+So one value is threaded, exactly one, and exactly as far as the two surfaces that need it.
+
+**`isMolecule` and `moleculeSvg` are deliberately left alone**, on the measurement rather than on a
+guess: neither calls `get_smiles`, both answered at every length in the table above, so there is no
+case to distinguish and a fourth state in `Molecule.tsx` would be furniture that looks like a
+control. `canonicalSmilesFromMolblock` **can** reach it — a 999-atom V2000 chain raises the same
+`RangeError` — and it collapses it into the ordinary negative on purpose; that is the one piece
+left open and it is in _Still not done_.
+
+**Red before green**, against a pristine `origin/main` with only the new test file added: 5 of 7
+failed, including `expected 'Pasted CCCC…' to match /too complex to name here/i` against the
+received `"… — RDKit could not read this as a molecule."`. The two that passed on the unfixed tree
+are the two that assert the _bound_ — `canonicalSmiles` still answers `null`, and the rail mints
+nothing — which is what it means for an invariant to survive a fix.
+
+The original report follows.
 
 **Found by re-running W28.7's own measurement, not by report**, and it predates W28.7 — the same
 probe behaves the same way against the tree before it.
@@ -465,7 +536,7 @@ says and no more: an intermittent gap in the rail, and an intermittent "not a re
 for a structure that is one. `tests/rdkitUnavailable.test.tsx` now pins that bound — driven by
 making either drop site fall back to the raw string, it fails.
 
-**Options, none taken here because each is a real decision:** lower `MAX_PARSED_SMILES_CHARS` to
+**Options, none taken in the original report because each is a real decision:** lower `MAX_PARSED_SMILES_CHARS` to
 something the ranking survives with margin (it would have to be measured, and it refuses structures
 that draw fine); distinguish a `RangeError` from a chemical negative at the seam, so the surfaces
 say "too complex to name" rather than "not a molecule" (the honest minimum, and it needs a third
@@ -817,6 +888,26 @@ registry; profile selection; tool calls surviving a reload.
   machine, or the mobile sheet's open animation. **What would settle it:** the next occurrence, with
   the trace kept — `test-results/` holds an `error-context.md` per failure, and both runs above
   cleared it before anybody read it.
+
+- **A molblock record that is a molecule is still counted as one RDKit could not read.** Issue 11
+  threaded `too-complex` as far as the two surfaces that make a claim about one string a chemist is
+  looking at, and `canonicalSmilesFromMolblock` collapses it back into the ordinary negative — with
+  a comment saying so at the line that does it. It is reachable: `withSmilesMol`'s own docstring
+  records a 999-atom V2000 chain raising exactly that `RangeError` with the runtime still alive, so
+  a dropped `.sdf` can make `moleculesFromMolfile` report "12 of 15 records were readable" about a
+  file whose other three are molecules. **It is its own change rather than a line in that one**
+  because the surface is a count over a file rather than a verdict about a string: carrying it
+  means a fourth field on `MolfileRecords`, both sentence builders in `StructureInput`, and the
+  sketcher's own refusal — and `stillAlive()` runs once per refused record, which is a second
+  parse per record on a file that can hold a thousand. Anchors: `canonicalSmilesFromMolblock` in
+  `src/chem/rdkit.engine.ts`, `MolfileRecords` in `src/chem/rdkit.ts`.
+
+- **No browser test covers the "too complex to name here" wording, and none can here.** Issue 11's
+  surfaces are held by `tests/rdkitTooComplex.test.tsx` against the behavioural stub, which is the
+  right level for the sentence; what is missing is the same string through a real RDKit in a real
+  browser. The e2e lane cannot be it — behind the BFF the toolkit does not instantiate at all
+  (Issue 10), so every structure surface there is already in its `unavailable` state. This row
+  closes with Issue 10, not before.
 
 - **Screenshot baselines.** The axe pass covers the mechanical half of the visual contract; nothing
   guards a layout regression that is still accessible.

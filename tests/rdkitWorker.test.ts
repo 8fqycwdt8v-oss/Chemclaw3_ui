@@ -252,11 +252,11 @@ describe('a worker that stops answering', () => {
     // fallback both look the name up at call time. So the count is the number of times the
     // operation actually ran, which is the only thing that tells a real answer from a retry.
     // Asserting on what crossed the worker boundary cannot: the retry does not cross it.
-    const ran = vi.spyOn(operations, 'canonicalSmiles');
+    const ran = vi.spyOn(operations, 'readCanonicalSmiles');
 
     expect(await canonicalSmiles('not-a-smiles')).toBeNull();
 
-    expect(FakeWorker.instances[0]!.ops).toEqual(['canonicalSmiles']);
+    expect(FakeWorker.instances[0]!.ops).toEqual(['readCanonicalSmiles']);
     expect(ran).toHaveBeenCalledTimes(1);
     ran.mockRestore();
   });
@@ -269,7 +269,7 @@ describe('a worker that stops answering', () => {
     // same call and answers. What must NOT happen is the rejection reaching `canonicalSmiles`,
     // where a transport fault would read as a chemical verdict.
     expect(await canonicalSmiles('OCC')).toBe('CCO');
-    expect(FakeWorker.instances[0]!.ops).toEqual(['canonicalSmiles']);
+    expect(FakeWorker.instances[0]!.ops).toEqual(['readCanonicalSmiles']);
   });
 });
 
@@ -292,13 +292,24 @@ describe('a stack exhaustion is a fact about a thread, not about a molecule', ()
     const engine = await engineIn('worker');
     // Measured in Chromium: `C`*500 canonicalises on the page and raises a `RangeError` on a
     // worker, whose stack is smaller. Swallowing that into `null` is a claim about the string.
-    await expect(engine.canonicalSmiles(CANONICALISATION_OVERFLOWS)).rejects.toThrow(RangeError);
+    await expect(engine.readCanonicalSmiles(CANONICALISATION_OVERFLOWS)).rejects.toThrow(
+      RangeError,
+    );
   });
 
-  it('is the end of the line on the page, where there is nowhere better to send it', async () => {
+  it('is named as its own refusal on the page, where there is nowhere better to send it', async () => {
     const engine = await engineIn('page');
-    // The same throw, from the placement with the biggest stack there is. Here `null` is the
-    // honest answer and is what the 999-atom molblock in `withSmilesMol`'s docstring already got.
-    await expect(engine.canonicalSmiles(CANONICALISATION_OVERFLOWS)).resolves.toBeNull();
+    // The same throw, from the placement with the biggest stack there is — so the escalation is
+    // spent and the answer has to be honest instead.
+    //
+    // **This assertion used to read `resolves.toBeNull()`, and it was pinning the defect.** A
+    // `null` here is what every caller reads as "not a molecule", about a chain the very next call
+    // draws; measured in Chromium, the seam answered `null` at 580 characters while the same page
+    // answered the same string from a shallower stack milliseconds later (`ISSUES.md` Issue 11).
+    // `too-complex` is the same *negative* — no key is minted either way — carrying the one fact
+    // that decides which sentence a chemist is shown.
+    await expect(engine.readCanonicalSmiles(CANONICALISATION_OVERFLOWS)).resolves.toEqual({
+      status: 'too-complex',
+    });
   });
 });

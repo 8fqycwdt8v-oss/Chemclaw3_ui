@@ -330,6 +330,11 @@ const TOOLING = new Set([
   // Chromium and a dev server and takes minutes — and it is an npm script at all so that the
   // figures W28.7 published can be re-run by somebody who does not already know it exists.
   'measure-rdkit-placement.mjs',
+  // The same, for the defect rather than for the cost: it sweeps lengths across fresh pages and
+  // prints where the seam stops agreeing with the engine under it (`ISSUES.md` Issue 11). Also a
+  // measurement — the behaviour it found is held by `tests/rdkitTooComplex.test.tsx`, which is in
+  // the gate, and this prints a table and exits 0.
+  'measure-rdkit-rangeerror.mjs',
 ]);
 
 /** Every `scripts/*.mjs` an npm script's command line names. */

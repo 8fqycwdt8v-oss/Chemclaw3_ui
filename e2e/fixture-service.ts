@@ -697,6 +697,17 @@ createServer(async (req, res) => {
   // noise.
   if (path === '/check-ins' && req.method === 'GET') return json(res, 200, CHECK_INS);
 
+  // Knowledge the watch found since last time. Served for the third time for the same reason:
+  // `App.tsx` claims it once per page, so an unimplemented route put an `api.list_route_missing`
+  // warning in the log of every browser test — and `listDigests` swallows a 404 into `[]`, so the
+  // lane could not tell "the service has no digests" from "the fixture never had the route".
+  //
+  // **Empty rather than a row, unlike `/check-ins` above.** That one carries a row because a spec
+  // asserts on the card it draws. No spec asserts on a digest card, so a row here would change the
+  // `/review` a11y snapshot to exercise nothing — which is a different change from this one, and
+  // the uncovered rendering is recorded as a gap rather than papered over with a fixture.
+  if (path === '/digests' && req.method === 'GET') return json(res, 200, []);
+
   // The durable-run registry.
   if (path === '/jobs' && req.method === 'GET') {
     const text = url.searchParams.get('text') ?? '';

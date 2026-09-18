@@ -321,7 +321,20 @@ describe('the Jenkins pipeline', () => {
     // exclusion above is not a hole: a read hidden from the derivations still cannot say where to
     // read from.
     const names = [...CHECKOUT_VARS, 'CHEMCLAW3_REQUIRED'];
-    const pattern = new RegExp(`process\\.env[^\\n]{0,4}(${names.join('|')})`);
+    // Two shapes, because there are two ways to read one of these and the scan held only one: a
+    // member read passed at 24 passed where the same variable read off `process.env` by property
+    // reds. The docstring above claims the absolute rule, so it is the scan that was narrow rather
+    // than the rule. Both shapes are probed below, and neither the probes nor this comment may
+    // spell a name beside the access — assembled from the constant, or this file matches itself,
+    // which it did, twice, once for each arm.
+    //
+    // What is still outside it, said rather than implied: this scan can only see a name written
+    // down, so a variable read through one held in a constant is invisible here exactly as a built
+    // directory name is to the source-directory derivation. The remedy is the same one.
+    const pattern = new RegExp(
+      `process\\.env[^\\n]{0,4}(${names.join('|')})` +
+        `|\\{[^}]*\\b(${names.join('|')})\\b[^}]*\\}\\s*=\\s*process\\.env`,
+    );
     const rogue = [
       ...suiteSources(),
       { path: DERIVATION_OWNER, text: readFileSync(DERIVATION_OWNER, 'utf8') },
@@ -340,6 +353,8 @@ describe('the Jenkins pipeline', () => {
     for (const name of names) {
       expect(pattern.test(`const x = process.env.${name} ?? 'fallback';`)).toBe(true);
       expect(pattern.test(`const x = process.env['${name}'];`)).toBe(true);
+      expect(pattern.test(`const { ${name} } = process.env;`)).toBe(true);
+      expect(pattern.test(`const {\n  ${name}: where,\n} = process.env;`)).toBe(true);
       // Naming one is not reading one: this file asserts the Jenkinsfile *declares* them.
       expect(pattern.test(`expect(pipeline).toContain("${name} = '1'");`)).toBe(false);
     }

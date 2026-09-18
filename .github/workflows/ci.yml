@@ -50,6 +50,24 @@ jobs:
           node-version: '22'
           cache: npm
 
+      # The service this client is written against. Without it `tests/backendContract.test.ts`
+      # verifies **nothing** and says so in a warning — which is what this lane did, and it is the
+      # lane that runs on every push, so the one check comparing what this client sends to what
+      # Chemclaw3 declares was a gate nowhere by default.
+      #
+      # A **full** checkout, deliberately, where `Jenkinsfile`'s `Preflight` clones sparsely. That
+      # pipeline needs `deploy/jenkins/lib` for the build and derives the rest of its sparse paths
+      # from the reader itself, asserted by `tests/delivery.test.ts`. Repeating that list here
+      # would be a second declaration of it with nothing reconciling the two — the defect that file
+      # exists to prevent — so this names no paths at all and cannot drift from the reader.
+      # No credential: every repository in this family is public, so `contents: read` reaches it.
+      - name: The Chemclaw3 checkout the contract check reads
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 8fqycwdt8v-oss/Chemclaw3
+          path: .chemclaw3
+          fetch-depth: 1
+
       - run: npm ci
 
       # Provisioning a browser is an agent concern, not an assertion, so it stays in the pipeline:
@@ -58,6 +76,14 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: The gate
+        env:
+          CHEMCLAW3_DIR: ${{ github.workspace }}/.chemclaw3
+          # REQUIRED rather than best-effort. A check that degrades to a warning the moment the
+          # checkout moves is a control this lane would claim and not have, which is the state
+          # this step replaces. What it costs is real and was the recorded reason for not doing
+          # it: this lane now reds on a rename merged in another repository, including on a pull
+          # request that has nothing to do with the contract.
+          CHEMCLAW3_REQUIRED: '1'
         run: npm run ci
 
       - if: failure()

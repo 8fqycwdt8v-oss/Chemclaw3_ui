@@ -568,16 +568,35 @@ this client sends and expects to what Chemclaw3 declares. What it covers is in
 what it does **not** cover — because a check whose boundary is unwritten gets read as covering
 everything next to it.
 
-- **No sibling checkout means no check at all.** `tests/backendContract.test.ts` resolves
-  `CHEMCLAW3_DIR`, then `CHEMCLAW_REPO`, and only where none of those is set, `../Chemclaw3` — a
-  default rather than a third candidate, so a stale export naming a directory that has moved
-  switches the check off instead of falling through to the sibling. Where what it resolves holds no
-  checkout it verifies nothing: the run prints a warning naming what it is therefore not evidence
-  about, and `CHEMCLAW3_REQUIRED=1` turns that into a failure. It runs for a developer and for an
-  agent with both trees, in the four-repository full-stack lane, and in the Jenkins `Gate` stage,
-  which now sets both variables against the `.jenkins-lib` checkout its `Preflight` stage already
-  makes. **In GitHub Actions it is still a warning**, and that is the lane that runs on every
-  push.
+- **No sibling checkout means no check at all — and the push lane now makes one.**
+  `tests/backendContract.test.ts` resolves `CHEMCLAW3_DIR`, then `CHEMCLAW_REPO`, and only where
+  none of those is set, `../Chemclaw3` — a default rather than a third candidate, so a stale export
+  naming a directory that has moved switches the check off instead of falling through to the
+  sibling. Where what it resolves holds no checkout it verifies nothing: the run prints a warning
+  naming what it is therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns that into a
+  failure. It runs for a developer and for an agent with both trees, in the four-repository
+  full-stack lane, in the Jenkins `Gate` stage against the `.jenkins-lib` checkout its `Preflight`
+  stage already makes, and — since 2026-09-18 — in GitHub Actions.
+
+  **This bullet said "in GitHub Actions it is still a warning, and that is the lane that runs on
+  every push", and that is closed.** That workflow checks Chemclaw3 out and sets both variables, so
+  the push lane gates. A **full** checkout, where `Preflight` clones sparsely: that pipeline's
+  sparse list is derived from what the reader opens, and repeating it here would be a second
+  declaration of one fact with nothing reconciling the two — so this lane names no Chemclaw3 source
+  directory, which `tests/delivery.test.ts` asserts in both directions rather than promising.
+
+  **The blocker recorded below was never a credential, and it was not the coupling either — the
+  coupling was the price.** Every repository in this family is public, so `contents: read` reaches
+  Chemclaw3 with no secret. What the push lane now buys is a red build when a rename lands in
+  another repository, on pull requests that have nothing to do with the contract. That is the
+  accepted cost, taken deliberately: a check that silently verifies nothing is worse than one that
+  occasionally fails loudly for a reason a reader can see.
+
+  **And it shipped with a defect only the runner could show.** `actions/checkout` may write only
+  inside the workspace, so the service's source lands at `.chemclaw3` where this repository's own
+  lint and format globs reach it — the first run failed on 10 errors in another repository's
+  browser script. Both ignore files now cover it, reconciled against the workflow's declared path
+  by a test rather than kept in step by hand.
 
   **`CHEMCLAW_REPO` is in that list since 2026-09-18, and reading it is what closed a second
   answer to this question.** `tests/protocolStatusTransitions.test.ts` honoured that variable and

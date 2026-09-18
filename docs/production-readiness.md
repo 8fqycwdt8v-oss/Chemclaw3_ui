@@ -100,19 +100,28 @@ indistinguishable from one that does not work — and this repository has produc
   validator is driven over a map built to be wrong in every one of those ways, because both maps
   are normally empty and a loop over an empty map checks nothing (`tests/backendContract.test.ts`).
   This part needs no sibling checkout, so unlike the clause above it runs in every lane.
-- **Accepted.** With no sibling checkout the contract check verifies **nothing** and says so: a
-  warning naming what the run is therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns the
-  skip into a failure. **No lane runs it as a gate by default, and this clause used to say one
-  did.** The GitHub Actions runner — the lane that runs on every push — checks out this
-  repository alone, so the check warns there. The Jenkins `Gate` stage does set both variables
-  against the checkout its `Preflight` stage already makes, but that stage is behind a parameter:
-  `RUN_GATE` defaults to `false`, so it is a gate only in a run somebody ticked the box on, and
-  that lane builds and ships an image rather than answering a pull request. So the check gates for
-  a developer or an agent with both trees, and in the four-repository full-stack lane, and nowhere
-  else. What holds it back in the push lane is not a credential but the coupling: that lane would
-  then red on a rename made in another repository. `tests/delivery.test.ts` holds this paragraph to
-  the default the pipeline declares, so flipping the parameter fails here until the record is
-  rewritten. Recorded in `ISSUES.md` Issue 14.
+- **Enforced, and this clause used to record the opposite.** With no sibling checkout the contract
+  check verifies **nothing** and says so: a warning naming what the run is therefore not evidence
+  about, and `CHEMCLAW3_REQUIRED=1` turns the skip into a failure. The GitHub Actions runner — the
+  lane that runs on every push — now checks Chemclaw3 out and sets both variables, so the check
+  gates there. It is a **full** checkout where `Jenkinsfile`'s `Preflight` clones sparsely, because
+  that pipeline's sparse path list is derived from what the reader opens and repeating it here
+  would be a second declaration of one fact with nothing reconciling the two;
+  `tests/delivery.test.ts` asserts this lane names no Chemclaw3 source directory at all. No
+  credential was ever the blocker and is not one now — every repository in this family is public.
+
+  **What it costs is the reason this was an accepted risk rather than an oversight, and it is now
+  paid**: this lane reds on a rename merged in another repository, including on a pull request that
+  has nothing to do with the contract. The judgement is that a check which silently verifies
+  nothing is worse than one that occasionally fails loudly for a reason a reader can see.
+
+  The Jenkins `Gate` stage also sets both variables against the checkout its `Preflight` stage
+  makes, but that stage is behind a parameter: `RUN_GATE` defaults to `false`, so it gates there
+  only in a run somebody ticked the box on, and that lane builds and ships an image rather than
+  answering a pull request. `tests/delivery.test.ts` holds this paragraph to the default the
+  pipeline declares, so flipping the parameter fails here until the record is rewritten. Recorded
+  in `ISSUES.md` Issue 14.
+
 - **Enforced.** Every route the service registers declares what it returns, and every response
   this client declares the wire shape _of_ — the API function's return type is one interface and it
   carries the model's own name — has its properties compared to that model's fields. A property

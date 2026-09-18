@@ -568,13 +568,24 @@ this client sends and expects to what Chemclaw3 declares. What it covers is in
 what it does **not** cover — because a check whose boundary is unwritten gets read as covering
 everything next to it.
 
-- **No sibling checkout means no check at all.** It resolves `CHEMCLAW3_DIR`, else `../Chemclaw3`,
-  and where neither exists it verifies nothing: the run prints a warning naming what it is
-  therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns that into a failure. It runs for a
-  developer and for an agent with both trees, in the four-repository full-stack lane, and in the
-  Jenkins `Gate` stage, which now sets both variables against the `.jenkins-lib` checkout its
-  `Preflight` stage already makes. **In GitHub Actions it is still a warning**, and that is the
-  lane that runs on every push.
+- **No sibling checkout means no check at all.** It resolves `CHEMCLAW3_DIR`, then
+  `CHEMCLAW_REPO`, then `../Chemclaw3`, and where none exists it verifies nothing: the run prints a
+  warning naming what it is therefore not evidence about, and `CHEMCLAW3_REQUIRED=1` turns that
+  into a failure. It runs for a developer and for an agent with both trees, in the
+  four-repository full-stack lane, and in the Jenkins `Gate` stage, which now sets both variables
+  against the `.jenkins-lib` checkout its `Preflight` stage already makes. **In GitHub Actions it
+  is still a warning**, and that is the lane that runs on every push.
+
+  **`CHEMCLAW_REPO` is in that list since 2026-09-18, and reading it is what closed a second
+  answer to this question.** `tests/protocolStatusTransitions.test.ts` honoured that variable and
+  this reader did not, so the configuration `README.md` documents — a checkout somewhere other than
+  the sibling path, named by `CHEMCLAW_REPO` — ran the design-lifecycle drift check and left the
+  contract check off. Driven on `0fca446`: 8 tests against the service in the same run that printed
+  “backend contract NOT CHECKED”. There is one resolver now, and three assertions in
+  `tests/delivery.test.ts` keep it one — the readers are _derived_ from the tree rather than
+  listed (a fourth reader used to be invisible to the sparse-checkout derivation, measured green at
+  20 passed while the lane fetched nothing it read), every derived reader must ask that resolver,
+  and no other file in the suite may read a checkout variable at all.
 
   **And the Jenkins lane it now runs in is opt-in, which this entry read as a gate.**
   `RUN_GATE` defaults to `false`, so that stage runs only when somebody ticks the box on a run —

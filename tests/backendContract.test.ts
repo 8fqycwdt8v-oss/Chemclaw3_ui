@@ -70,6 +70,8 @@ import {
   backendEvents,
   backendRoutes,
   backendSearchPath,
+  checkoutRequired,
+  checkoutRoots,
   clientEventTypes,
   clientRequests,
   literalMembers,
@@ -79,8 +81,9 @@ import {
   requestModelOf,
   whitelistTemplate,
 } from './backendContract.ts';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 const root = backendCheckout();
 
@@ -378,6 +381,83 @@ describe('a name this client admits and the service does not is argued, not mere
   });
 });
 
+/**
+ * Where the checkout is, driven over environments built to be wrong.
+ *
+ * The suite normally runs with one checkout, at the default path, with no variable set — so every
+ * assertion anywhere else in this file exercises exactly one branch of this resolution and would
+ * pass with the other three deleted. That is the shape this repository keeps finding: a predicate
+ * whose population is one happy value.
+ *
+ * This describe needs no Chemclaw3 checkout — it builds its own — so it runs in every lane.
+ */
+describe('the one resolution of where the Chemclaw3 checkout is', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'chemclaw-checkout-'));
+  const MARKER = join('src', 'chemclaw', 'api', 'events.py');
+  const OTHER_MARKER = join('src', 'chemclaw', 'protocols', 'store.py');
+  const plant = (name: string, marker: string): string => {
+    const dir = join(tmp, name);
+    mkdirSync(join(dir, marker, '..'), { recursive: true });
+    writeFileSync(join(dir, marker), '# planted');
+    return dir;
+  };
+  const named = plant('named', MARKER);
+  const compose = plant('compose', MARKER);
+  const sparse = plant('sparse', OTHER_MARKER);
+
+  it('prefers the variable a lane sets to the one a developer sets', () => {
+    expect(backendCheckout(MARKER, { CHEMCLAW3_DIR: named, CHEMCLAW_REPO: compose })).toBe(named);
+  });
+
+  it('resolves the variable README.md and docker-compose.yml document', () => {
+    // The whole of this fix: this arm used to resolve to nothing here and to a checkout in
+    // `tests/protocolStatusTransitions.test.ts`, which is one question with two answers.
+    expect(backendCheckout(MARKER, { CHEMCLAW_REPO: compose })).toBe(compose);
+  });
+
+  it('falls back to the sibling path, and only when nothing names one', () => {
+    expect(checkoutRoots({})).toEqual([resolve(process.cwd(), '..', 'Chemclaw3')]);
+    // An exported-but-empty variable is how a shell hands over "unset", and treating it as a path
+    // resolves the repository root — which holds no marker, so the failure would be a silent skip.
+    expect(checkoutRoots({ CHEMCLAW3_DIR: '', CHEMCLAW_REPO: '  ' })).toEqual([
+      resolve(process.cwd(), '..', 'Chemclaw3'),
+    ]);
+  });
+
+  it('takes a relative path as relative to where the suite was started', () => {
+    expect(checkoutRoots({ CHEMCLAW3_DIR: '../elsewhere' })).toEqual([
+      resolve(process.cwd(), '..', 'elsewhere'),
+    ]);
+  });
+
+  it('treats a directory without the marker as absent rather than as an empty contract', () => {
+    expect(backendCheckout(MARKER, { CHEMCLAW3_DIR: join(tmp, 'nothing-here') })).toBe(null);
+    // And it keeps looking: a first variable pointing somewhere wrong must not shadow a second
+    // that is right, or a stale export in a shell switches the check off.
+    expect(
+      backendCheckout(MARKER, { CHEMCLAW3_DIR: join(tmp, 'gone'), CHEMCLAW_REPO: compose }),
+    ).toBe(compose);
+  });
+
+  it('answers per marker, because the lane that has a checkout has a sparse one', () => {
+    // `Preflight` fetches four directories of one repository. A reader asking for the file it
+    // opens is what keeps "the checkout is there" from meaning "every reader's file is there".
+    expect(backendCheckout(OTHER_MARKER, { CHEMCLAW3_DIR: sparse })).toBe(sparse);
+    expect(backendCheckout(MARKER, { CHEMCLAW3_DIR: sparse })).toBe(null);
+  });
+
+  it('says where it looked, naming the variable that pointed there', () => {
+    expect(backendSearchPath(MARKER, { CHEMCLAW_REPO: compose })).toContain('CHEMCLAW_REPO=');
+    expect(backendSearchPath(MARKER, {})).toContain('CHEMCLAW3_DIR or CHEMCLAW_REPO');
+  });
+
+  it('reads CHEMCLAW3_REQUIRED as the one thing that turns a skip into a failure', () => {
+    expect(checkoutRequired({ CHEMCLAW3_REQUIRED: '1' })).toBe(true);
+    expect(checkoutRequired({ CHEMCLAW3_REQUIRED: 'true' })).toBe(false);
+    expect(checkoutRequired({})).toBe(false);
+  });
+});
+
 if (root === null) {
   describe('the backend contract', () => {
     it('is not checked here, and this run is not evidence about it', () => {
@@ -387,9 +467,9 @@ if (root === null) {
           `\n    went unverified in this run. Set CHEMCLAW3_REQUIRED=1 to make that a failure.\n`,
       );
       expect(
-        process.env.CHEMCLAW3_REQUIRED,
+        checkoutRequired(),
         'CHEMCLAW3_REQUIRED=1 was set, so a missing checkout is a failure rather than a skip',
-      ).not.toBe('1');
+      ).toBe(false);
     });
   });
 } else {

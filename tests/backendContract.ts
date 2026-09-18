@@ -32,30 +32,104 @@ import { EVENT_FIELDS, EVENT_TYPES, normalizeEvent } from '../shared/events.ts';
 /* ------------------------------------------------------------------ the checkout */
 
 /**
- * The Chemclaw3 checkout, or `null`.
+ * What a relative checkout path is relative to: the directory the suite was started in.
  *
- * `CHEMCLAW3_DIR` first so a CI runner that checks the backend out somewhere else can say where;
- * `../Chemclaw3` otherwise, which is the layout `docker-compose.yml` already assumes for
- * `CHEMCLAW_REPO`. A directory that exists but holds no `src/chemclaw/api/events.py` is treated as
- * absent rather than as an empty contract — that is a wrong path, not a backend with no events.
+ * One base, for the same reason there is one order below. The two cross-repository readers used
+ * two — this one resolved against `process.cwd()` and the other against its own file's repository
+ * root — and under every composer in `package.json` those are the same directory, which is exactly
+ * why a disagreement between them would never have surfaced in a lane.
+ *
+ * `import.meta.url` is deliberately not used for it: in this suite's default environment it is not
+ * a `file:` URL, so a root derived from it throws on import rather than on use — driven, before
+ * this.
  */
-export function backendCheckout(): string | null {
-  const configured = process.env.CHEMCLAW3_DIR;
-  const candidates = configured
-    ? [isAbsolute(configured) ? configured : resolve(process.cwd(), configured)]
-    : [resolve(process.cwd(), '..', 'Chemclaw3')];
-  for (const path of candidates) {
-    if (existsSync(join(path, 'src', 'chemclaw', 'api', 'events.py'))) return path;
+const relativeBase = (): string => process.cwd();
+
+/**
+ * The marker that proves a directory is a Chemclaw3 checkout *for this reader*.
+ *
+ * A directory that exists but holds no `src/chemclaw/api/events.py` is treated as absent rather
+ * than as an empty contract — that is a wrong path, not a backend with no events. Every reader
+ * passes the file it actually opens, because the Jenkins lane fetches a **sparse** checkout and a
+ * marker one reader needs may legitimately not be the one another does.
+ */
+export const EVENTS_MARKER = join('src', 'chemclaw', 'api', 'events.py');
+
+/**
+ * The environment variables that say where the Chemclaw3 checkout is, in the order they win.
+ *
+ * `CHEMCLAW3_DIR` first, because that is what a lane sets — the Jenkins `Gate` stage exports it at
+ * the `.jenkins-lib` clone `Preflight` makes. `CHEMCLAW_REPO` second, because that is what
+ * `README.md` tells a developer to override with and what `docker-compose.yml` reads, and a
+ * developer who takes the documented route was getting this check silently switched off: driven on
+ * `0fca446`, with `CHEMCLAW_REPO` naming a real checkout and no sibling at the default path,
+ * `tests/protocolStatusTransitions.test.ts` ran its 8 tests against the service while this reader
+ * printed “backend contract NOT CHECKED” — one question, two answers, in one run.
+ *
+ * Exported because it is read back: `tests/delivery.test.ts` holds the documents that describe the
+ * resolution to the names actually resolved, so adding a third variable here fails there until the
+ * record says so.
+ */
+export const CHECKOUT_VARS = ['CHEMCLAW3_DIR', 'CHEMCLAW_REPO'] as const;
+
+/**
+ * Every directory this suite will look in for a Chemclaw3 checkout, in order.
+ *
+ * Takes its environment as an argument so the resolution can be driven over environments built to
+ * be wrong, rather than only over the one the run happens to have — the same reason every other
+ * predicate in this suite takes its inputs.
+ */
+export function checkoutRoots(env: NodeJS.ProcessEnv = process.env): string[] {
+  const base = relativeBase();
+  const absolute = (path: string): string => (isAbsolute(path) ? path : resolve(base, path));
+  const configured = CHECKOUT_VARS.map((name) => env[name]).filter(
+    (value): value is string => typeof value === 'string' && value.trim() !== '',
+  );
+  return configured.length > 0 ? configured.map(absolute) : [resolve(base, '..', 'Chemclaw3')];
+}
+
+/**
+ * The Chemclaw3 checkout holding `marker`, or `null`.
+ *
+ * One resolution for the whole suite. It used to be two — this function and a `??` chain in
+ * `tests/protocolStatusTransitions.test.ts` reading a variable this one did not — which is the
+ * defect a check of this shape dies of: not a wrong answer, a second answer, in the lane nobody
+ * watches. `tests/delivery.test.ts` is what keeps it one, by refusing any other file in this suite
+ * that reads a checkout-location variable of its own.
+ */
+export function backendCheckout(
+  marker: string = EVENTS_MARKER,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  for (const path of checkoutRoots(env)) {
+    if (existsSync(join(path, marker))) return path;
   }
   return null;
 }
 
 /** Where this reader looked, for a skip message that can be acted on. */
-export function backendSearchPath(): string {
-  const configured = process.env.CHEMCLAW3_DIR;
-  return configured
-    ? `CHEMCLAW3_DIR=${configured}`
-    : `${resolve(process.cwd(), '..', 'Chemclaw3')} (set CHEMCLAW3_DIR to point elsewhere)`;
+export function backendSearchPath(
+  marker: string = EVENTS_MARKER,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const named = CHECKOUT_VARS.filter((name) => (env[name] ?? '').trim() !== '');
+  const where = checkoutRoots(env)
+    .map((path) => join(path, marker))
+    .join(', ');
+  return named.length > 0
+    ? `${named.map((name) => `${name}=${env[name] ?? ''}`).join(', ')} → ${where}`
+    : `${where} (set ${CHECKOUT_VARS.join(' or ')} to point elsewhere)`;
+}
+
+/**
+ * Whether a lane has declared that a missing checkout is a failure rather than a skip.
+ *
+ * Here for the same reason the resolution is: both cross-repository readers answer it, the Jenkins
+ * `Gate` stage sets it once for both, and two copies of “is a skip allowed” is how one of them
+ * ends up not asking.
+ */
+export function checkoutRequired(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.CHEMCLAW3_REQUIRED === '1';
 }
 
 const readPy = (root: string, relative: string): string =>

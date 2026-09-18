@@ -73,8 +73,14 @@ indistinguishable from one that does not work — and this repository has produc
   behind it; every event the service declares survives `normalizeEvent`; every field that
   normaliser reads exists on the model that sends it; and every member of `ErrorCode`,
   `RefusalReason` and `AnswerCheck` survives the narrowing filter that mirrors it.
-  `tests/backendContract.test.ts` reads all of that out of a `Chemclaw3` checkout
-  (`CHEMCLAW3_DIR`, else `../Chemclaw3`) rather than off a running service.
+  `tests/backendContract.test.ts` reads all of that out of a `Chemclaw3` checkout rather than off
+  a running service. **Where that checkout is has one answer for the whole suite**, and it had two:
+  this reader resolved `CHEMCLAW3_DIR` else `../Chemclaw3`, while `tests/protocolStatusTransitions.test.ts`
+  also honoured `CHEMCLAW_REPO` — the variable `README.md` documents and `docker-compose.yml`
+  reads — so a developer who took the documented route ran the drift check and not the contract
+  check, in the same green run. Both now call one resolver (`CHEMCLAW3_DIR`, then `CHEMCLAW_REPO`,
+  then `../Chemclaw3`), and `tests/delivery.test.ts` refuses any other file in the suite that reads
+  a checkout variable of its own.
 - **Enforced.** Every member of the event union survives `normalizeEvent` carrying every field,
   checked by round-tripping a frame of each rather than by reading the list — the list is the thing
   that has been wrong six times (`tests/eventContract.test.ts`).

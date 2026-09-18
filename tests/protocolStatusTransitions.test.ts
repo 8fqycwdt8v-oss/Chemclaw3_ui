@@ -15,12 +15,15 @@
  * `src/chemclaw/protocols/store.py` out of a sibling checkout and fails on any difference in
  * either direction.
  *
- * **Where that checkout is, is one question with one answer.** `CHEMCLAW3_DIR` first, because that
- * is what a lane sets — `tests/backendContract.ts` reads it and the Jenkins `Gate` stage exports
- * it — then `CHEMCLAW_REPO`, which `docker-compose.yml` and this file's own first edition use,
- * then `../Chemclaw3`. Reading only the second was not a preference: driven with the Gate stage's
- * exact environment (`CHEMCLAW3_DIR` set, `CHEMCLAW3_REQUIRED=1`, no sibling at the default path),
- * this file reported 4 passed and 3 skipped and the lane stayed green with the drift check off.
+ * **Where that checkout is, is one question with one answer, and the answer is not written here.**
+ * It was, and having it written here twice is what made it two answers: this file resolved
+ * `CHEMCLAW3_DIR`, else `CHEMCLAW_REPO`, else `../Chemclaw3` relative to this tree's root, while
+ * `tests/backendContract.ts` resolved `CHEMCLAW3_DIR`, else `../Chemclaw3` relative to the working
+ * directory. Driven on `0fca446` with `CHEMCLAW_REPO` naming a real checkout and no sibling at the
+ * default path: this file ran all 8 of its tests against the service in the same run in which the
+ * contract check printed “NOT CHECKED”. Both now call `backendCheckout`, each passing the file it
+ * opens, because the Jenkins lane's checkout is sparse and the marker one reader needs is not the
+ * marker another does.
  *
  * **When there is no checkout, this file says so and does not pretend.** The cross-repo half is
  * skipped and reported as skipped, exactly as `check-openapi.mjs` prints its gap rather than a
@@ -31,8 +34,10 @@
  * actually calls.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { backendCheckout, backendSearchPath, checkoutRequired } from './backendContract.ts';
 import {
   DESIGN_STATUSES,
   LEGAL_STATUS_MOVES,
@@ -41,16 +46,16 @@ import {
   type DesignStatus,
 } from '../shared/protocols.ts';
 
-/** Resolved against the repository ROOT, which is what a relative checkout path is relative to. */
-const ROOT = new URL('../', import.meta.url);
-const CHECKOUT = process.env.CHEMCLAW3_DIR ?? process.env.CHEMCLAW_REPO ?? '../Chemclaw3';
-const STORE = new URL(`${CHECKOUT.replace(/\/$/, '')}/src/chemclaw/protocols/store.py`, ROOT);
-const HAVE_SERVICE = existsSync(STORE);
+/** The one file this reader opens out of that checkout, and the marker that proves it is there. */
+const STORE_MARKER = join('src', 'chemclaw', 'protocols', 'store.py');
+const CHECKOUT = backendCheckout(STORE_MARKER);
+const STORE = CHECKOUT === null ? null : join(CHECKOUT, STORE_MARKER);
+const HAVE_SERVICE = STORE !== null;
 
 if (!HAVE_SERVICE) {
   console.warn(
-    `[protocol transitions] NOT CHECKED against the service: no ${STORE.pathname}. ` +
-      'Set CHEMCLAW3_DIR (or CHEMCLAW_REPO) to a Chemclaw3 checkout to run the drift check.',
+    `[protocol transitions] NOT CHECKED against the service: no ${STORE_MARKER} at ` +
+      `${backendSearchPath(STORE_MARKER)}.`,
   );
 }
 
@@ -123,13 +128,13 @@ describe('the design lifecycle this repository draws buttons from', () => {
     // honoured it since the lane was wired; this one did not, so the Gate stage ran green with
     // this drift check off — measured with that stage's exact environment.
     expect(
-      HAVE_SERVICE || process.env.CHEMCLAW3_REQUIRED !== '1',
-      `CHEMCLAW3_REQUIRED=1, and there is no Chemclaw3 checkout at ${STORE.pathname}`,
+      HAVE_SERVICE || !checkoutRequired(),
+      `CHEMCLAW3_REQUIRED=1, and there is no ${STORE_MARKER} at ${backendSearchPath(STORE_MARKER)}`,
     ).toBe(true);
   });
 
   describe.skipIf(!HAVE_SERVICE)('against the service that enforces it', () => {
-    const source = HAVE_SERVICE ? readFileSync(STORE, 'utf8') : '';
+    const source = STORE === null ? '' : readFileSync(STORE, 'utf8');
 
     it('matches `_LEGAL_MOVES` in chemclaw/protocols/store.py, edge for edge', () => {
       const theirs = serviceTable(source);

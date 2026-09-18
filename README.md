@@ -286,7 +286,8 @@ runner has no service to point them at. `tests/gate.test.ts` asserts both halves
 failing if either pipeline starts naming it, so wiring it in means coming back to this paragraph.
 
 **The wire contract is checked against the backend's source, in the gate.**
-`tests/backendContract.test.ts` reads a `Chemclaw3` checkout — `CHEMCLAW3_DIR`, or `../Chemclaw3` —
+`tests/backendContract.test.ts` reads a `Chemclaw3` checkout — `CHEMCLAW3_DIR`, then `CHEMCLAW_REPO`,
+then `../Chemclaw3`, which is the one resolution every cross-repository reader in the suite asks for —
 and compares five things this repo consumes against what that repo declares: the BFF's route
 whitelist, every path and JSON body `src/api/` sends, every event `normalizeEvent` admits, every
 field it reads off one, and the three closed sets it mirrors (`ErrorCode`, `RefusalReason`,

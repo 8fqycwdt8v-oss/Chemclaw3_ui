@@ -407,9 +407,15 @@ describe('the Jenkins pipeline', () => {
 
     // And the sentence's second half is a claim about the resolver rather than about this string,
     // so it is driven here, in the `it` that enforces the sentence: making `DEFAULT_CHECKOUT` a
-    // third candidate would red beside the prose it falsifies. `tests/backendContract.test.ts`
-    // asserts the same shape from the other side (`falls back to the sibling path, and only when
-    // nothing names one`), and the two cannot drift because both read this constant.
+    // third candidate reds beside the prose it falsifies, and the two cannot drift because both
+    // read the one constant.
+    //
+    // Not redundant with `tests/backendContract.test.ts`, which is the reading that would delete
+    // it. Its `falls back to the sibling path, and only when nothing names one` drives only the
+    // nothing-set arm, so it is **green** under exactly that mutation — measured:
+    // `[...configured.map(absolute), resolve(base, DEFAULT_CHECKOUT)]` leaves that `it` passing
+    // and reds three of its neighbours plus this one. The title says "only when nothing names
+    // one"; the assertions underneath do not check the other half.
     const sibling = resolve(process.cwd(), DEFAULT_CHECKOUT);
     expect(checkoutRoots({})).toContain(sibling);
     for (const name of CHECKOUT_VARS) {

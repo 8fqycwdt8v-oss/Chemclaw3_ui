@@ -79,8 +79,8 @@ indistinguishable from one that does not work — and this repository has produc
   also honoured `CHEMCLAW_REPO` — the variable `README.md` documents and `docker-compose.yml`
   reads — so a developer who took the documented route ran the drift check and not the contract
   check, in the same green run. Both now call one resolver (`CHEMCLAW3_DIR`, then `CHEMCLAW_REPO`,
-  then `../Chemclaw3`), and `tests/delivery.test.ts` refuses any other file in the suite that reads
-  a checkout variable of its own.
+  and only where none of those is set, `../Chemclaw3`), and `tests/delivery.test.ts` refuses any
+  other file in the suite that reads a checkout variable of its own.
 - **Enforced.** Every member of the event union survives `normalizeEvent` carrying every field,
   checked by round-tripping a frame of each rather than by reading the list — the list is the thing
   that has been wrong six times (`tests/eventContract.test.ts`).

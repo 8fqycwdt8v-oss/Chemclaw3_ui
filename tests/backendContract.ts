@@ -81,10 +81,16 @@ export const CHECKOUT_VARS = ['CHEMCLAW3_DIR', 'CHEMCLAW_REPO'] as const;
 /**
  * Where this reader looks when nothing names a checkout, relative to `relativeBase()`.
  *
- * A constant rather than a literal inside `checkoutRoots` because it is read back: the last step
- * of the resolution is as much a part of "where is the checkout" as the two variables are, and
- * `tests/delivery.test.ts` holds the three documents that describe that resolution to this
- * sequence — names *and order* — rather than to the variable names occurring somewhere in a file.
+ * A constant rather than a literal inside `checkoutRoots` because it is read back: where the
+ * resolution lands with nothing set is as much a part of "where is the checkout" as the two
+ * variables are, and `tests/delivery.test.ts` holds the three documents that describe that
+ * resolution to these names, their order, and this default — rather than to the variable names
+ * occurring somewhere in a file.
+ *
+ * A default, and not a third candidate: `checkoutRoots` takes it *instead of* the configured
+ * roots rather than after them, so a stale export naming a directory that has moved switches the
+ * check off rather than quietly reading the sibling. Three documents described it as a
+ * fall-through until 2026-09-18 and this check pinned them to saying so.
  */
 export const DEFAULT_CHECKOUT = '../Chemclaw3';
 

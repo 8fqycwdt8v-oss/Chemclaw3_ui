@@ -392,8 +392,9 @@ const PENDING_PLANS: PendingPlans = {
  *
  * Non-empty rather than `[]` for the reason `PENDING_PLANS` is: the axe pass over that page should
  * see the markup a chemist sees, and an empty state is a different piece of markup. Every field is
- * stated — the service defaults all six, so it sends all six, and a fixture that omitted one would
- * be describing a response nobody receives.
+ * stated — the service defaults them all, so it sends them all, and a fixture that omitted one
+ * would be describing a response nobody receives. `truncated: false` so the axe pass sees the
+ * ordinary row rather than the short-list notice, which is the state a chemist is almost always in.
  *
  * `GET /check-ins` is a **destructive claim** upstream. This fixture answers the same rows every
  * time, which is a deliberate difference and a harmless one: no browser test reloads and then
@@ -402,11 +403,14 @@ const PENDING_PLANS: PendingPlans = {
 const CHECK_INS: CheckIn[] = [
   {
     request_id: 'await-e2e-1',
+    kind: 'measurement',
     subject: 'Measured yield for the 2-MeTHF arm',
     rationale: 'The campaign cannot pick round 4 conditions until round 3 is measured.',
     asked_of: 'process-chemistry',
     open_days: 9,
     days_left: 5,
+    session_id: 'sess-e2e-1',
+    truncated: false,
   },
 ];
 

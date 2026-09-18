@@ -240,8 +240,10 @@ their own suspended campaign for three months and then hear that it had failed. 
 check-in sweep closes that upstream; this is the surface that opens the mailbox, and before it
 `check-ins` appeared in no file in this repository while `tests/backendContract.test.ts` listed the
 route among the ones the BFF does not forward. **Built**, on `/review`. It carries no answer control
-because there is nothing here to answer — the question is somebody else's — and it cannot link into
-the conversation that raised it, because the wire model carries no session id (`ISSUES.md` Issue 16).
+because there is nothing here to answer — the question is somebody else's. It links into the
+conversation that raised it where there is one: `CheckInOut` carries `session_id` since upstream's
+`D-2026-09-18-a-wire-model-cannot-drop-a-field-that-never-arrived`, and a wait opened by a plate run
+or a connector job has none, so the link is absent rather than dead.
 
 Not one of the original twenty-four, and stated rather than folded in for the reason section I
 states it: the check-in sweep shipped upstream after this audit was written, so the counts in the

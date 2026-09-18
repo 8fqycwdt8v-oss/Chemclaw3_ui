@@ -17,7 +17,7 @@ import { createServer, type Server } from 'node:http';
 import { readFileSync, readdirSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { CHECKOUT_VARS } from './backendContract.ts';
+import { CHECKOUT_VARS, DEFAULT_CHECKOUT } from './backendContract.ts';
 
 const pipeline = readFileSync('Jenkinsfile', 'utf8');
 const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
@@ -360,18 +360,29 @@ describe('the Jenkins pipeline', () => {
     }
   });
 
-  it('is described by the record with the checkout variables the resolver actually reads', () => {
+  it('is described by the record with the resolution the resolver actually performs', () => {
     // Same rule as the RUN_GATE clause below and for the same reason: three documents tell a
     // reader where to put the checkout, and one of them told them to use a variable the contract
-    // reader did not read. A variable added to `CHECKOUT_VARS` now reds here until they say so.
+    // reader did not read.
+    //
+    // A *phrase*, not a mention of each name. This check was `text.includes(name)` anywhere in the
+    // file, which is satisfied by any occurrence — driven: rewriting the sentence in `README.md`
+    // that actually describes the resolution left the suite green, because `CHEMCLAW_REPO` is
+    // named elsewhere in that file for an unrelated reason, and only deleting *every* mention
+    // reds. Order was held by nothing at all, and order is the half a reader acts on: which of two
+    // exported variables wins decides which checkout the suite reads.
+    //
+    // Assembled from `CHECKOUT_VARS` and `DEFAULT_CHECKOUT` rather than written out, so adding a
+    // variable, reordering two, or moving the fallback path reds here until the record says so.
+    // Whitespace-normalised because a Markdown paragraph wraps, and all three wrap this sentence
+    // in different places.
+    const claim = [...CHECKOUT_VARS, DEFAULT_CHECKOUT].map((name) => `\`${name}\``).join(', then ');
     for (const doc of ['README.md', 'docs/production-readiness.md', 'ISSUES.md']) {
-      const text = readFileSync(doc, 'utf8');
-      for (const name of CHECKOUT_VARS) {
-        expect(
-          text.includes(name),
-          `${doc} does not name ${name}, which is a variable the contract reader resolves`,
-        ).toBe(true);
-      }
+      const text = readFileSync(doc, 'utf8').replace(/\s+/g, ' ');
+      expect(
+        text.includes(claim),
+        `${doc} does not say ${claim}, which is the resolution the contract reader performs`,
+      ).toBe(true);
     }
   });
 

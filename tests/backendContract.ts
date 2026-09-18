@@ -73,6 +73,16 @@ export const EVENTS_MARKER = join('src', 'chemclaw', 'api', 'events.py');
 export const CHECKOUT_VARS = ['CHEMCLAW3_DIR', 'CHEMCLAW_REPO'] as const;
 
 /**
+ * Where this reader looks when nothing names a checkout, relative to `relativeBase()`.
+ *
+ * A constant rather than a literal inside `checkoutRoots` because it is read back: the last step
+ * of the resolution is as much a part of "where is the checkout" as the two variables are, and
+ * `tests/delivery.test.ts` holds the three documents that describe that resolution to this
+ * sequence — names *and order* — rather than to the variable names occurring somewhere in a file.
+ */
+export const DEFAULT_CHECKOUT = '../Chemclaw3';
+
+/**
  * Every directory this suite will look in for a Chemclaw3 checkout, in order.
  *
  * Takes its environment as an argument so the resolution can be driven over environments built to
@@ -85,7 +95,7 @@ export function checkoutRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const configured = CHECKOUT_VARS.map((name) => env[name]).filter(
     (value): value is string => typeof value === 'string' && value.trim() !== '',
   );
-  return configured.length > 0 ? configured.map(absolute) : [resolve(base, '..', 'Chemclaw3')];
+  return configured.length > 0 ? configured.map(absolute) : [resolve(base, DEFAULT_CHECKOUT)];
 }
 
 /**

@@ -286,7 +286,8 @@ runner has no service to point them at. `tests/gate.test.ts` asserts both halves
 failing if either pipeline starts naming it, so wiring it in means coming back to this paragraph.
 
 **The wire contract is checked against the backend's source, in the gate.**
-`tests/backendContract.test.ts` reads a `Chemclaw3` checkout — `CHEMCLAW3_DIR`, or `../Chemclaw3` —
+`tests/backendContract.test.ts` reads a `Chemclaw3` checkout — `CHEMCLAW3_DIR`, then `CHEMCLAW_REPO`,
+then `../Chemclaw3`, which is the one resolution every cross-repository reader in the suite asks for —
 and compares five things this repo consumes against what that repo declares: the BFF's route
 whitelist, every path and JSON body `src/api/` sends, every event `normalizeEvent` admits, every
 field it reads off one, and the three closed sets it mirrors (`ErrorCode`, `RefusalReason`,
@@ -332,7 +333,9 @@ Everything else is verified against the real service.
 
 GitHub Actions is where the gate runs on every push; `npm run ci` is what it runs. `Jenkinsfile` is
 the half Actions cannot do: publish the image to a registry and roll it out. It does not re-run the
-gate by default (`RUN_GATE` is an opt-in for a Jenkins-only estate) — but when it does, it runs the
+gate by default — `RUN_GATE` defaults to `false`, an opt-in for a Jenkins-only estate, and that is
+where the cross-repository contract check would gate if it gated anywhere (`ISSUES.md` Issue 14) —
+but when it does, it runs the
 same `npm run ci`, which it did not before: that stage used to list six commands of its own, with no
 `npm audit`, no contrast check and no browser suite, so a Jenkins-only estate was gated to a
 narrower bar than anybody said. It publishes **by digest** — a tag is a pointer, and a rollback that

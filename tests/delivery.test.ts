@@ -14,9 +14,10 @@
 import { describe, expect, it } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
+import { CHECKOUT_VARS } from './backendContract.ts';
 
 const pipeline = readFileSync('Jenkinsfile', 'utf8');
 const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
@@ -41,20 +42,83 @@ const shellBlocks = [
 ];
 
 /**
- * The readers, as text: every file in this suite that opens a Chemclaw3 checkout.
+ * This file, which is the one source in the suite the derivations below must not read.
  *
- * Three rather than two, and the third was outside this derivation and outside the pipeline's
- * sparse list: `tests/protocolStatusTransitions.test.ts` reads
- * `src/chemclaw/protocols/store.py`, so the Gate stage fetched a checkout that reader's
- * directory was not in. A second cross-repository reader is exactly what a derived list is for.
+ * Not tidiness and not a hole: the probes further down hand those derivations text built to
+ * contain every shape they claim to see (`readPy(root, 'kg/…')`, a `join(root, 'src', 'chemclaw',
+ * 'durable', …)`, a `/src/chemclaw/publish/` URL), and a scan that read its own fixtures would
+ * demand the pipeline fetch four directories nothing opens. What stops a real read hiding behind
+ * the exclusion is the last assertion in this describe, which holds *every* file in the suite —
+ * this one included — to resolving a checkout through one function rather than an environment
+ * variable of its own.
  */
+const DERIVATION_OWNER = 'tests/delivery.test.ts';
+
+/** Every TypeScript source in this suite, as `{ path, text }`. */
+const suiteSources = (): { path: string; text: string }[] => {
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) return walk(full);
+      return /\.tsx?$/.test(entry.name) ? [full] : [];
+    });
+  return [...walk('tests'), ...walk('e2e')]
+    .filter((path) => path !== DERIVATION_OWNER)
+    .map((path) => ({ path, text: readFileSync(path, 'utf8') }));
+};
+
+/**
+ * The cross-repository readers, derived rather than named: a file this suite holds that opens
+ * something out of a Chemclaw3 checkout.
+ *
+ * The list used to be three filenames written here, under a docstring saying the *directories*
+ * were derived rather than transcribed — true of the directories and false of the readers, which
+ * is the same sentence being right about somebody else. Driven on `0fca446`: a fourth reader
+ * opening `src/chemclaw/memory/tiers.py` left this file green at 20 passed while the Gate stage's
+ * sparse checkout fetched no `memory/`, which is the silent demotion to a warning that the
+ * derivation exists to prevent, arriving by the one route it could not see.
+ */
+const contractReaders = (
+  files: { path: string; text: string }[] = suiteSources(),
+): { path: string; text: string }[] =>
+  files.filter((file) => contractSourceDirs(file.text).length > 0);
+
+/** The one file allowed to answer "where is the Chemclaw3 checkout". */
+const RESOLVER = 'tests/backendContract.ts';
+
+/**
+ * The files that ask `tests/backendContract.ts` where the checkout is.
+ *
+ * The second derivation of the same population, and it has to be a different question from the
+ * first or the agreement below would be an identity. This one reads the *import*; the other reads
+ * the *path*. A file in one and not the other is a defect in whichever direction it is missing
+ * from, and both directions have happened in this repository.
+ *
+ * The named functions rather than the module: `tests/eventContract.test.ts` imports
+ * `clientEventTypes` from it and opens no checkout at all, so a predicate about the *module* put
+ * it in this set and failed it for a read it does not make — driven, before this. And the *import
+ * clause* rather than a window of characters before the `from`: the first edition allowed 200 of
+ * them, and adding three parser names to `tests/backendContract.test.ts`'s import list pushed
+ * `backendCheckout` out of the window, failing the file that owns this axis for having grown.
+ */
+const RESOLVER_FUNCTIONS = ['backendCheckout', 'backendSearchPath', 'checkoutRoots'];
+
+const resolverUsers = (
+  files: { path: string; text: string }[] = suiteSources(),
+): { path: string; text: string }[] =>
+  files.filter(
+    (file) =>
+      file.path === RESOLVER ||
+      [...file.text.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*'[./]*backendContract\.ts'/g)].some(
+        (match) =>
+          RESOLVER_FUNCTIONS.some((name) => new RegExp(`\\b${name}\\b`).test(match[1] ?? '')),
+      ),
+  );
+
+/** The readers, as one text, for the directory derivation the sparse checkout follows. */
 const contractReader = (): string =>
-  [
-    'tests/backendContract.ts',
-    'tests/backendContract.test.ts',
-    'tests/protocolStatusTransitions.test.ts',
-  ]
-    .map((file) => readFileSync(file, 'utf8'))
+  contractReaders()
+    .map((file) => file.text)
     .join('\n');
 
 /**
@@ -167,6 +231,110 @@ describe('the Jenkins pipeline', () => {
     expect(pipeline).toContain("CHEMCLAW3_REQUIRED = '1'");
   });
 
+  it('derives the readers themselves, rather than being handed a list of them', () => {
+    // Two derivations of one population, over inputs built to disagree with each other. The set is
+    // normally three files that already agree, so a filter over it answers the same thing whatever
+    // its predicate does — this is what makes the assertion below about the predicates.
+    const probe = [
+      // Opens a checkout path and never asks where the checkout is: the shape that grew a fourth
+      // reader outside the sparse list.
+      { path: 'tests/rogue.test.ts', text: "readPy(root, 'memory/tiers.py')" },
+      // Asks where the checkout is and opens it in a shape no derivation can follow: the boundary
+      // the directory derivation's own docstring states and nothing used to enforce.
+      {
+        path: 'tests/opaque.test.ts',
+        text: "import { backendCheckout } from './backendContract.ts';\nreadFileSync(join(root, DIR))",
+      },
+      // Names a path in prose and opens nothing. In neither set, and that is the point: a mention
+      // is not a read, and a derivation that counted one would make the pipeline fetch prose.
+      { path: 'tests/prose.test.ts', text: 'transcribed from src/chemclaw/api/events.py' },
+      // Both, which is what every real reader is.
+      {
+        path: 'tests/honest.test.ts',
+        text: "import { backendCheckout } from './backendContract.ts';\nreadPy(root, 'api/events.py')",
+      },
+    ];
+    expect(contractReaders(probe).map((file) => file.path)).toEqual([
+      'tests/rogue.test.ts',
+      'tests/honest.test.ts',
+    ]);
+    expect(resolverUsers(probe).map((file) => file.path)).toEqual([
+      'tests/opaque.test.ts',
+      'tests/honest.test.ts',
+    ]);
+  });
+
+  it('holds every cross-repository reader to the one resolution of where the checkout is', () => {
+    const opens = contractReaders().map((file) => file.path);
+    const asks = resolverUsers().map((file) => file.path);
+    // A floor, because both derivations answer `[]` for a regex that has stopped matching, and
+    // that is how a check of this shape dies. Two is the smallest population that can disagree.
+    expect(opens.length, 'no file in this suite opens a Chemclaw3 checkout').toBeGreaterThan(1);
+
+    expect(
+      opens.filter((path) => !asks.includes(path)),
+      'these open a Chemclaw3 checkout without asking `tests/backendContract.ts` where it is — ' +
+        'a second resolution is how one reader ends up checking and another silently warning in ' +
+        'the same run',
+    ).toEqual([]);
+    expect(
+      asks.filter((path) => !opens.includes(path)),
+      'these resolve a checkout and then open it in a shape the directory derivation cannot ' +
+        'follow, so the pipeline will not fetch what they read — write the read as a literal ' +
+        'first path segment',
+    ).toEqual([]);
+  });
+
+  it('leaves the checkout variables to that one file, everywhere in the suite', () => {
+    // The invariant behind the two above: `tests/protocolStatusTransitions.test.ts` read
+    // `CHEMCLAW_REPO`, which the contract reader did not, so a developer following `README.md`'s
+    // documented override ran the drift check and not the contract check. Driven on `0fca446`:
+    // `CHEMCLAW_REPO=…` with no sibling at the default path gave 8 tests against the service in
+    // the same run that printed "backend contract NOT CHECKED".
+    //
+    // This one reads the whole suite including the file it is written in, which is why the
+    // exclusion above is not a hole: a read hidden from the derivations still cannot say where to
+    // read from.
+    const names = [...CHECKOUT_VARS, 'CHEMCLAW3_REQUIRED'];
+    const pattern = new RegExp(`process\\.env[^\\n]{0,4}(${names.join('|')})`);
+    const rogue = [
+      ...suiteSources(),
+      { path: DERIVATION_OWNER, text: readFileSync(DERIVATION_OWNER, 'utf8') },
+    ]
+      .filter((file) => file.path !== RESOLVER && pattern.test(file.text))
+      .map((file) => file.path);
+    expect(
+      rogue,
+      `only ${RESOLVER} may read ${names.join('/')} — every other file asks it, so there is one ` +
+        'answer to where the checkout is and one answer to whether a skip is allowed',
+    ).toEqual([]);
+
+    // Guard the guard: the pattern is built from an imported constant, so a rename upstream that
+    // stopped it matching would empty the filter above in silence. Both probes are assembled from
+    // that constant rather than written out, or this file would match itself — driven, it did.
+    for (const name of names) {
+      expect(pattern.test(`const x = process.env.${name} ?? 'fallback';`)).toBe(true);
+      expect(pattern.test(`const x = process.env['${name}'];`)).toBe(true);
+      // Naming one is not reading one: this file asserts the Jenkinsfile *declares* them.
+      expect(pattern.test(`expect(pipeline).toContain("${name} = '1'");`)).toBe(false);
+    }
+  });
+
+  it('is described by the record with the checkout variables the resolver actually reads', () => {
+    // Same rule as the RUN_GATE clause below and for the same reason: three documents tell a
+    // reader where to put the checkout, and one of them told them to use a variable the contract
+    // reader did not read. A variable added to `CHECKOUT_VARS` now reds here until they say so.
+    for (const doc of ['README.md', 'docs/production-readiness.md', 'ISSUES.md']) {
+      const text = readFileSync(doc, 'utf8');
+      for (const name of CHECKOUT_VARS) {
+        expect(
+          text.includes(name),
+          `${doc} does not name ${name}, which is a variable the contract reader resolves`,
+        ).toBe(true);
+      }
+    }
+  });
+
   it('derives a source directory from either shape the reader opens one with', () => {
     // Driven, before this: deleting the `join(root, 'src', 'chemclaw', …)` loop is a 0/3 diff and
     // leaves this file green, which reads as "the loop is dead". It is not — it is subsumed. Each
@@ -197,7 +365,11 @@ describe('the Jenkins pipeline', () => {
       null,
     );
     const claim = `\`RUN_GATE\` defaults to \`${declared}\``;
-    for (const doc of ['docs/production-readiness.md', 'ISSUES.md']) {
+    // Three documents, because three describe the parameter. `README.md` was outside this list
+    // while saying `RUN_GATE` "is an opt-in", which is the same claim in words the verbatim check
+    // could not see — so a flipped default would have left one of the three describing a pipeline
+    // that no longer existed, quietly, which is what this assertion is for.
+    for (const doc of ['docs/production-readiness.md', 'ISSUES.md', 'README.md']) {
       expect(
         readFileSync(doc, 'utf8').includes(claim),
         `${doc} does not say ${claim}, which is what the pipeline declares — the two lanes this ` +

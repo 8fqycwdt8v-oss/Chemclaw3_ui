@@ -73,8 +73,14 @@ indistinguishable from one that does not work — and this repository has produc
   behind it; every event the service declares survives `normalizeEvent`; every field that
   normaliser reads exists on the model that sends it; and every member of `ErrorCode`,
   `RefusalReason` and `AnswerCheck` survives the narrowing filter that mirrors it.
-  `tests/backendContract.test.ts` reads all of that out of a `Chemclaw3` checkout
-  (`CHEMCLAW3_DIR`, else `../Chemclaw3`) rather than off a running service.
+  `tests/backendContract.test.ts` reads all of that out of a `Chemclaw3` checkout rather than off
+  a running service. **Where that checkout is has one answer for the whole suite**, and it had two:
+  this reader resolved `CHEMCLAW3_DIR` else `../Chemclaw3`, while `tests/protocolStatusTransitions.test.ts`
+  also honoured `CHEMCLAW_REPO` — the variable `README.md` documents and `docker-compose.yml`
+  reads — so a developer who took the documented route ran the drift check and not the contract
+  check, in the same green run. Both now call one resolver (`CHEMCLAW3_DIR`, then `CHEMCLAW_REPO`,
+  then `../Chemclaw3`), and `tests/delivery.test.ts` refuses any other file in the suite that reads
+  a checkout variable of its own.
 - **Enforced.** Every member of the event union survives `normalizeEvent` carrying every field,
   checked by round-tripping a frame of each rather than by reading the list — the list is the thing
   that has been wrong six times (`tests/eventContract.test.ts`).
@@ -107,12 +113,19 @@ indistinguishable from one that does not work — and this repository has produc
   then red on a rename made in another repository. `tests/delivery.test.ts` holds this paragraph to
   the default the pipeline declares, so flipping the parameter fails here until the record is
   rewritten. Recorded in `ISSUES.md` Issue 14.
-- **Accepted.** Response shapes are not checked. The client's interfaces for what it reads back are
-  not compared to the models the handlers return: the mapping is not mechanical — one handler
-  returns `list[SessionSummaryOut]` where the client reads a page plus an `X-Next-Cursor` header —
-  and a check that guessed it would produce confident findings about a pairing it invented. What is
-  covered is the three fields this has actually cost, driven end to end
-  (`tests/contractDrift.test.tsx`). `ISSUES.md` Issue 14.
+- **Enforced.** Every route the service registers declares what it returns, and every response
+  this client declares the wire shape _of_ — the API function's return type is one interface and it
+  carries the model's own name — has its properties compared to that model's fields. A property
+  declared here and sent by nobody fails; a field sent and not declared is listed
+  (`tests/backendContract.test.ts`).
+- **Accepted.** That is a minority of the responses, because for most calls this client's declared
+  type is not the wire shape: it narrows a union, unwraps an envelope, reshapes a listing into a
+  page plus an `X-Next-Cursor` header, or resolves `void`. Those are listed rather than paired, and
+  a pair whose model is declared outside the service's `api/` package is listed too — reaching for
+  either would be the check inventing the relationship it then reports on. The three fields this
+  has actually cost are driven end to end (`tests/contractDrift.test.tsx`). **Who decides:**
+  whoever owns `src/api/client.ts`. **What would change it:** this client declaring the wire shape
+  and reshaping downstream of it. `ISSUES.md` Issue 14.
 - **Accepted.** The check reads what the service **declares**, not what a deployment **serves**.
   `npm run check:openapi` is still the only thing that asks a running service, and it is
   operator-run (§1).

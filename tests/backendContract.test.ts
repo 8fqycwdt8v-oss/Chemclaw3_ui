@@ -16,7 +16,7 @@
  * read as a mistyped URL. This file needs no service: the contract is *declared* in Python source
  * that is on disk beside this checkout.
  *
- * ## The five axes, and which direction fails
+ * ## The axes, and which direction fails
  *
  * Every axis is asymmetric, and getting the asymmetry right is most of the value:
  *
@@ -44,15 +44,21 @@
  *     one the BFF forwards; every key in every JSON body must be a field of that route's request
  *     model, and every *required* field of that model must be in the body. Six of those models are
  *     `extra="forbid"`, so a stale key there is a 422 rather than a silent drop.
+ *  6. **What it reads back, where the pairing is not a guess.** Every route annotates its return,
+ *     so the model is readable route by route; where this client's own declared type *is* that
+ *     model, a property it declares and nobody sends fails, and a field sent and not declared is
+ *     listed. Where the two are named differently, or one of them cannot be read, the pair is
+ *     printed rather than reached for — see the boundary below.
  *
  * ## What this cannot check, and therefore does not claim
  *
- *  - **Response shapes.** The client's TypeScript interfaces for what it reads back
- *    (`SessionSummary`, `TranscriptMessage`, `NoteView`, …) are not compared to the models the
- *    handlers return. The mapping is not mechanical — one handler returns `list[SessionSummaryOut]`
- *    where the client reads a page plus a header — and a check that guessed it would produce
- *    confident findings about a pairing it invented. `tests/contractDrift.test.tsx` covers the
- *    three fields this has actually cost so far, by driving them. Recorded in `ISSUES.md`.
+ *  - **Most response shapes.** Axis 6 below compares a response only where this client declares
+ *    the wire shape itself — the API function's return type is one interface, carrying the model's
+ *    own name — and for most calls it is not: the client narrows a union, unwraps an envelope,
+ *    reshapes a listing into a page plus an `X-Next-Cursor` header, or resolves `void`. Those are
+ *    listed rather than paired, because a check that guessed the pairing would produce confident
+ *    findings about a relationship it invented. `tests/contractDrift.test.tsx` covers the three
+ *    fields this has actually cost so far, by driving them. Recorded in `ISSUES.md` Issue 14.
  *  - **Semantics.** That `plan_hash` is the hash of the plan shown, that `preview` is 200
  *    characters, that a 409 means what this client says it means — none of that is in a
  *    declaration.
@@ -70,17 +76,23 @@ import {
   backendEvents,
   backendRoutes,
   backendSearchPath,
+  checkoutRequired,
+  checkoutRoots,
   clientEventTypes,
   clientRequests,
   literalMembers,
   modelFields,
   normalizeEventReads,
+  clientInterfaceFields,
   normalizeTemplate,
   requestModelOf,
+  responseModelOf,
+  returnAnnotationOf,
   whitelistTemplate,
 } from './backendContract.ts';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 const root = backendCheckout();
 
@@ -378,6 +390,127 @@ describe('a name this client admits and the service does not is argued, not mere
   });
 });
 
+/**
+ * What a response interface declares that its model does not, and the other way round.
+ *
+ * A pure function for the reason every other predicate in this file is one: the pairs it runs over
+ * are the ones where this client declares the wire shape *by name*, and there are two of them, both
+ * currently agreeing — so the loop that calls it is satisfied by any body at all. The probe below
+ * is what makes its run over the real trees mean something.
+ *
+ * The asymmetry is the same as the event axis's, and for the same reason. A property this client
+ * declares and the model does not send arrives `undefined` and renders as a confident blank, so it
+ * **fails**; a field the model sends and this client does not declare is a surface nobody built
+ * yet, so it is listed.
+ */
+export function responseDrift(
+  model: string,
+  declaredHere: readonly string[],
+  sentUpstream: readonly string[],
+): { wrong: string[]; unread: string[] } {
+  const sent = new Set(sentUpstream);
+  const read = new Set(declaredHere);
+  return {
+    wrong: declaredHere.filter((field) => !sent.has(field)).map((field) => `${model}.${field}`),
+    unread: sentUpstream.filter((field) => !read.has(field)).map((field) => `${model}.${field}`),
+  };
+}
+
+describe('the response drift this client can be held to', () => {
+  it('fails a property nobody sends and lists a field nobody reads', () => {
+    // Both directions and neither empty, because the two real pairs agree today: a loop over them
+    // reports `{ wrong: [], unread: [] }` whatever this function does.
+    expect(
+      responseDrift(
+        'SessionSummary',
+        ['session_id', 'titel', 'updated_at'],
+        ['session_id', 'title', 'updated_at', 'profile'],
+      ),
+    ).toEqual({
+      wrong: ['SessionSummary.titel'],
+      unread: ['SessionSummary.title', 'SessionSummary.profile'],
+    });
+    expect(responseDrift('Digest', ['a', 'b'], ['b', 'a'])).toEqual({ wrong: [], unread: [] });
+  });
+});
+
+/**
+ * Where the checkout is, driven over environments built to be wrong.
+ *
+ * The suite normally runs with one checkout, at the default path, with no variable set — so every
+ * assertion anywhere else in this file exercises exactly one branch of this resolution and would
+ * pass with the other three deleted. That is the shape this repository keeps finding: a predicate
+ * whose population is one happy value.
+ *
+ * This describe needs no Chemclaw3 checkout — it builds its own — so it runs in every lane.
+ */
+describe('the one resolution of where the Chemclaw3 checkout is', () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'chemclaw-checkout-'));
+  const MARKER = join('src', 'chemclaw', 'api', 'events.py');
+  const OTHER_MARKER = join('src', 'chemclaw', 'protocols', 'store.py');
+  const plant = (name: string, marker: string): string => {
+    const dir = join(tmp, name);
+    mkdirSync(join(dir, marker, '..'), { recursive: true });
+    writeFileSync(join(dir, marker), '# planted');
+    return dir;
+  };
+  const named = plant('named', MARKER);
+  const compose = plant('compose', MARKER);
+  const sparse = plant('sparse', OTHER_MARKER);
+
+  it('prefers the variable a lane sets to the one a developer sets', () => {
+    expect(backendCheckout(MARKER, { CHEMCLAW3_DIR: named, CHEMCLAW_REPO: compose })).toBe(named);
+  });
+
+  it('resolves the variable README.md and docker-compose.yml document', () => {
+    // The whole of this fix: this arm used to resolve to nothing here and to a checkout in
+    // `tests/protocolStatusTransitions.test.ts`, which is one question with two answers.
+    expect(backendCheckout(MARKER, { CHEMCLAW_REPO: compose })).toBe(compose);
+  });
+
+  it('falls back to the sibling path, and only when nothing names one', () => {
+    expect(checkoutRoots({})).toEqual([resolve(process.cwd(), '..', 'Chemclaw3')]);
+    // An exported-but-empty variable is how a shell hands over "unset", and treating it as a path
+    // resolves the repository root — which holds no marker, so the failure would be a silent skip.
+    expect(checkoutRoots({ CHEMCLAW3_DIR: '', CHEMCLAW_REPO: '  ' })).toEqual([
+      resolve(process.cwd(), '..', 'Chemclaw3'),
+    ]);
+  });
+
+  it('takes a relative path as relative to where the suite was started', () => {
+    expect(checkoutRoots({ CHEMCLAW3_DIR: '../elsewhere' })).toEqual([
+      resolve(process.cwd(), '..', 'elsewhere'),
+    ]);
+  });
+
+  it('treats a directory without the marker as absent rather than as an empty contract', () => {
+    expect(backendCheckout(MARKER, { CHEMCLAW3_DIR: join(tmp, 'nothing-here') })).toBe(null);
+    // And it keeps looking: a first variable pointing somewhere wrong must not shadow a second
+    // that is right, or a stale export in a shell switches the check off.
+    expect(
+      backendCheckout(MARKER, { CHEMCLAW3_DIR: join(tmp, 'gone'), CHEMCLAW_REPO: compose }),
+    ).toBe(compose);
+  });
+
+  it('answers per marker, because the lane that has a checkout has a sparse one', () => {
+    // `Preflight` fetches four directories of one repository. A reader asking for the file it
+    // opens is what keeps "the checkout is there" from meaning "every reader's file is there".
+    expect(backendCheckout(OTHER_MARKER, { CHEMCLAW3_DIR: sparse })).toBe(sparse);
+    expect(backendCheckout(MARKER, { CHEMCLAW3_DIR: sparse })).toBe(null);
+  });
+
+  it('says where it looked, naming the variable that pointed there', () => {
+    expect(backendSearchPath(MARKER, { CHEMCLAW_REPO: compose })).toContain('CHEMCLAW_REPO=');
+    expect(backendSearchPath(MARKER, {})).toContain('CHEMCLAW3_DIR or CHEMCLAW_REPO');
+  });
+
+  it('reads CHEMCLAW3_REQUIRED as the one thing that turns a skip into a failure', () => {
+    expect(checkoutRequired({ CHEMCLAW3_REQUIRED: '1' })).toBe(true);
+    expect(checkoutRequired({ CHEMCLAW3_REQUIRED: 'true' })).toBe(false);
+    expect(checkoutRequired({})).toBe(false);
+  });
+});
+
 if (root === null) {
   describe('the backend contract', () => {
     it('is not checked here, and this run is not evidence about it', () => {
@@ -387,9 +520,9 @@ if (root === null) {
           `\n    went unverified in this run. Set CHEMCLAW3_REQUIRED=1 to make that a failure.\n`,
       );
       expect(
-        process.env.CHEMCLAW3_REQUIRED,
+        checkoutRequired(),
         'CHEMCLAW3_REQUIRED=1 was set, so a missing checkout is a failure rather than a skip',
-      ).not.toBe('1');
+      ).toBe(false);
     });
   });
 } else {
@@ -577,6 +710,108 @@ if (root === null) {
           parsed && 'checks_run' in parsed && parsed.checks_run,
           `answer check ${check}`,
         ).toEqual([check]);
+      }
+    });
+  });
+
+  describe('what this client reads back', () => {
+    // The axis `ISSUES.md` Issue 14 records as absent, half of which turned out not to be. That
+    // row said what would close it is "the handlers' return models being readable route-by-route,
+    // which is a shape the backend does not owe anybody today" — measured against this checkout,
+    // every route the service registers annotates its return, so the readable half is here and the
+    // part that is still open is on *this* side: for all but a couple of the calls it makes, this
+    // client's declared type is not the wire shape but something it builds out of one.
+    const requests = clientRequests();
+
+    it('is named on every route the service registers, which is the premise of the rest', () => {
+      // `ISSUES.md` Issue 14 said what would close this axis is the return models being readable
+      // route by route, "which is a shape the backend does not owe anybody today". It owes it:
+      // every registered route annotates its return. That is asserted rather than transcribed
+      // because the day it stops being true is the day this axis silently narrows — a handler
+      // with no annotation drops out of every comparison below and nothing goes red.
+      const unannotated = backend
+        .filter((route) => returnAnnotationOf(root, route) === null)
+        .map((route) => `${route.method} ${route.template} → ${route.handler} (${route.module})`);
+      expect(
+        unannotated,
+        'these handlers declare no return type, so what they answer with is not readable here',
+      ).toEqual([]);
+      // Guard the guard: an empty `backend` would pass the line above without reading anything.
+      expect(backend.length, 'no route was read off the service at all').toBeGreaterThan(5);
+
+      // Printed rather than asserted: `Response`, `dict[str, str]` and `NoteView | Response` are
+      // all deliberate, and none of them is one model this reader may pair with an interface.
+      const unnamed = backend
+        .filter((route) => responseModelOf(root, route) === null)
+        .map((route) => `${route.method} ${route.template} → ${returnAnnotationOf(root, route)}`);
+      console.log(
+        `\n  ${unnamed.length} service route(s) whose return is not one model by name:\n` +
+          unnamed.map((route) => `      ${route}`).join('\n'),
+      );
+    });
+
+    const named = requests.flatMap((request) => {
+      const route = backend.find(
+        (candidate) =>
+          candidate.method === request.method &&
+          normalizeTemplate(candidate.template) === request.template,
+      );
+      const model = route ? responseModelOf(root, route) : null;
+      return model !== null && request.responseType === model ? [{ request, model }] : [];
+    });
+
+    it('declares the wire shape itself for the responses it declares at all', () => {
+      // Both sides have to be *readable* as well as named the same, and refusing where one is not
+      // is the whole of why this axis can exist at all: `JobRecordSummary` is on the wire as a
+      // model declared in `durable/`, outside the `api/` package these wire models live in, and
+      // the sibling's own record argues for restating a worker shape at the wire rather than
+      // importing it. Reaching into that package to compare anyway is precisely the invented
+      // pairing `ISSUES.md` Issue 14 refuses. So it is listed, not compared, not failed.
+      const unreadable: string[] = [];
+      const pairs = named.filter(({ model }) => {
+        const readable = modelFields(root, model) !== null && clientInterfaceFields(model) !== null;
+        if (!readable) unreadable.push(model);
+        return readable;
+      });
+      if (unreadable.length > 0) {
+        console.log(
+          `\n  ${unreadable.length} response(s) named the same on both sides that this reader ` +
+            `cannot read one half of:\n` +
+            unreadable.map((model) => `      ${model}`).join('\n'),
+        );
+      }
+      // Two of them today, so the loop below is nearly empty and would pass with its body
+      // deleted — which is why the comparison is a function driven over built inputs one `it`
+      // down, and why the pairs it *cannot* make are printed rather than silently dropped.
+      expect(
+        pairs.length,
+        'no response this client declares is the wire model by name — the pairing this axis ' +
+          'rests on has stopped resolving, and the two assertions here now check nothing',
+      ).toBeGreaterThan(1);
+
+      const wrong: string[] = [];
+      const unread: string[] = [];
+      for (const { request, model } of pairs) {
+        const declared = modelFields(root, model) ?? [];
+        const read = clientInterfaceFields(model) ?? [];
+        const drift = responseDrift(
+          model,
+          read,
+          declared.map((field) => field.name),
+        );
+        wrong.push(...drift.wrong.map((field) => `${field} (${request.file}:${request.line})`));
+        unread.push(...drift.unread);
+      }
+      expect(
+        wrong,
+        'this client declares these properties on a response and no model upstream sends them — ' +
+          'every one arrives `undefined`, which is the confident blank this axis exists to catch',
+      ).toEqual([]);
+      if (unread.length > 0) {
+        console.log(
+          `\n  ${unread.length} response field(s) the service sends and this client does not declare:\n` +
+            unread.map((field) => `      ${field}`).join('\n'),
+        );
       }
     });
   });

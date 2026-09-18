@@ -365,7 +365,11 @@ describe('the Jenkins pipeline', () => {
       null,
     );
     const claim = `\`RUN_GATE\` defaults to \`${declared}\``;
-    for (const doc of ['docs/production-readiness.md', 'ISSUES.md']) {
+    // Three documents, because three describe the parameter. `README.md` was outside this list
+    // while saying `RUN_GATE` "is an opt-in", which is the same claim in words the verbatim check
+    // could not see — so a flipped default would have left one of the three describing a pipeline
+    // that no longer existed, quietly, which is what this assertion is for.
+    for (const doc of ['docs/production-readiness.md', 'ISSUES.md', 'README.md']) {
       expect(
         readFileSync(doc, 'utf8').includes(claim),
         `${doc} does not say ${claim}, which is what the pipeline declares — the two lanes this ` +

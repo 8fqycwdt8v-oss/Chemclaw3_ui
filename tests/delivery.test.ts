@@ -100,6 +100,15 @@ const RESOLVER = 'tests/backendContract.ts';
  * clause* rather than a window of characters before the `from`: the first edition allowed 200 of
  * them, and adding three parser names to `tests/backendContract.test.ts`'s import list pushed
  * `backendCheckout` out of the window, failing the file that owns this axis for having grown.
+ *
+ * And the whole specifier rather than `[./]*backendContract.ts`: `suiteSources()` walks `e2e/` as
+ * well as `tests/`, and a file there must write `'../tests/backendContract.ts'`, which that form
+ * never matches. Both halves of that were wrong and the second is the one that matters — an `e2e/`
+ * reader that asks and then opens opaquely fell into *neither* population, so nothing fired and
+ * the sparse checkout did not fetch what it read, which is precisely the silent demotion this pair
+ * of derivations exists to prevent, one directory over. The other half failed a file that does ask
+ * with a message telling it to ask, which is a red with no edit that clears it. The probe below
+ * drives both shapes from `e2e/`.
  */
 const RESOLVER_FUNCTIONS = ['backendCheckout', 'backendSearchPath', 'checkoutRoots'];
 
@@ -109,7 +118,7 @@ const resolverUsers = (
   files.filter(
     (file) =>
       file.path === RESOLVER ||
-      [...file.text.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*'[./]*backendContract\.ts'/g)].some(
+      [...file.text.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*'[^']*backendContract\.ts'/g)].some(
         (match) =>
           RESOLVER_FUNCTIONS.some((name) => new RegExp(`\\b${name}\\b`).test(match[1] ?? '')),
       ),
@@ -253,14 +262,30 @@ describe('the Jenkins pipeline', () => {
         path: 'tests/honest.test.ts',
         text: "import { backendCheckout } from './backendContract.ts';\nreadPy(root, 'api/events.py')",
       },
+      // The same two shapes from `e2e/`, which `suiteSources()` walks and which has to reach the
+      // resolver as `'../tests/backendContract.ts'`. Driven: the import derivation used to require
+      // the specifier be dots and slashes only, so neither of these was a resolver user — the
+      // opaque one was in no set at all and fired nothing, and the honest one was reported as
+      // opening a checkout "without asking" while its first line asks.
+      {
+        path: 'e2e/opaque.spec.ts',
+        text: "import { backendCheckout } from '../tests/backendContract.ts';\nreadFileSync(join(root, DIR))",
+      },
+      {
+        path: 'e2e/honest.spec.ts',
+        text: "import { backendCheckout } from '../tests/backendContract.ts';\nreadPy(root, 'api/events.py')",
+      },
     ];
     expect(contractReaders(probe).map((file) => file.path)).toEqual([
       'tests/rogue.test.ts',
       'tests/honest.test.ts',
+      'e2e/honest.spec.ts',
     ]);
     expect(resolverUsers(probe).map((file) => file.path)).toEqual([
       'tests/opaque.test.ts',
       'tests/honest.test.ts',
+      'e2e/opaque.spec.ts',
+      'e2e/honest.spec.ts',
     ]);
   });
 

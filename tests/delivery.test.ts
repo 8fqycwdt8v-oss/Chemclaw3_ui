@@ -453,22 +453,32 @@ describe('the Jenkins pipeline', () => {
       `${CONTRACT_READER} is what the documents' sentences are about and what this check looks ` +
         'for a block by — it has been renamed, so the anchor names nothing',
     ).toBe(true);
-    for (const doc of ['README.md', 'docs/production-readiness.md', 'ISSUES.md']) {
-      const describing = readFileSync(doc, 'utf8')
+    // Collected and asserted as a list, which is this file's own idiom (`expect(missing).toEqual([])`)
+    // and not only tidiness: a `for` loop of bare `expect`s aborts on the first failure, and the
+    // edit that falsifies *all three* documents at once is the one most likely to happen — moving
+    // `DEFAULT_CHECKOUT`. Driven under the loop, with `DEFAULT_CHECKOUT = '../Chemclaw3-elsewhere'`:
+    // one failure, naming `README.md`, and three round trips to find out the other two were wrong
+    // too. The commit that added this check said "reds all three documents", which was true of its
+    // effect and not of what a reader is shown.
+    const described = ['README.md', 'docs/production-readiness.md', 'ISSUES.md'].map((doc) => ({
+      doc,
+      blocks: readFileSync(doc, 'utf8')
         .split(/\n\s*\n|\n(?=[-*] )/)
         .map((block) => block.replace(/\s+/g, ' '))
-        .filter((block) => block.includes(CONTRACT_READER));
-      expect(
-        describing.length,
-        `${doc} no longer names ${CONTRACT_READER}, so there is no block for this check to read ` +
-          'the resolution out of',
-      ).toBeGreaterThan(0);
-      expect(
-        describing.some((block) => block.includes(claim)),
-        `${doc} does not say ${claim} in a block that names ${CONTRACT_READER}, which is the ` +
-          'resolution that reader performs',
-      ).toBe(true);
-    }
+        .filter((block) => block.includes(CONTRACT_READER)),
+    }));
+    expect(
+      described.filter((entry) => entry.blocks.length === 0).map((entry) => entry.doc),
+      `these no longer name ${CONTRACT_READER}, so there is no block for this check to read the ` +
+        'resolution out of',
+    ).toEqual([]);
+    expect(
+      described
+        .filter((entry) => !entry.blocks.some((block) => block.includes(claim)))
+        .map((entry) => entry.doc),
+      `these do not say ${claim} in a block that names ${CONTRACT_READER}, which is the ` +
+        'resolution that reader performs',
+    ).toEqual([]);
   });
 
   it('derives a source directory from either shape the reader opens one with', () => {

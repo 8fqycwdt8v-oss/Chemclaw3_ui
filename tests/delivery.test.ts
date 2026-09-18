@@ -323,11 +323,17 @@ describe('the Jenkins pipeline', () => {
     // read from.
     const names = [...CHECKOUT_VARS, 'CHEMCLAW3_REQUIRED'];
     // Two shapes, because there are two ways to read one of these and the scan held only one: a
-    // member read passed at 24 passed where the same variable read off `process.env` by property
-    // reds. The docstring above claims the absolute rule, so it is the scan that was narrow rather
-    // than the rule. Both shapes are probed below, and neither the probes nor this comment may
-    // spell a name beside the access — assembled from the constant, or this file matches itself,
-    // which it did, twice, once for each arm.
+    // *destructuring binding* passed at 24 passed, where the same name read off `process.env` as a
+    // property already reds. Driven at `b35964f`, planting one probe file per shape: the property
+    // read gave `1 failed | 23 passed` naming that file, the destructured one gave `24 passed`.
+    // Which way round that went is worth stating carefully, because this comment had it backwards
+    // for a day — `process.env.<name>` *is* the property read, so "a member read passed where the
+    // same variable read off `process.env` by property reds" names one form and hands it both
+    // outcomes. The docstring above claims the absolute rule, so it is the scan that was narrow
+    // rather than the rule. Both shapes are probed below, and neither the probes nor this comment
+    // may spell a name beside the access — assembled from the constant, or this file matches
+    // itself, which it did, twice, once for each arm, and once more while correcting this
+    // paragraph.
     //
     // What is still outside it, said rather than implied: this scan can only see a name written
     // down, so a variable read through one held in a constant is invisible here exactly as a built

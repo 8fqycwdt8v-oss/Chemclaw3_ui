@@ -21,6 +21,7 @@ import { resolve } from 'node:path';
 import { CHECKOUT_VARS, DEFAULT_CHECKOUT, checkoutRoots } from './backendContract.ts';
 
 const pipeline = readFileSync('Jenkinsfile', 'utf8');
+const workflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as { scripts: Record<string, string> };
 
 /**
@@ -506,12 +507,13 @@ describe('the Jenkins pipeline', () => {
   });
 
   it('is described by the record with the RUN_GATE default it actually declares', () => {
-    // The stage above is the only lane with a Chemclaw3 checkout, so it is the only lane where the
-    // cross-repository contract check can gate — and it is behind `RUN_GATE`, which ships off. Two
-    // documents described that stage as a gate for a day, which is the failure mode this whole
-    // record exists to end: a control that is believed because it was written down. Rather than
-    // asking each document for a phrase, both are held to the parameter's own value, so flipping
-    // the default is a decision that cannot be taken in the pipeline alone.
+    // **This comment used to say the stage above is the only lane with a Chemclaw3 checkout, and
+    // that stopped being true when the push lane grew one.** What survives is the reason the
+    // assertion exists: `RUN_GATE` ships off, so this pipeline gates the contract check only in a
+    // run somebody ticked the box on, and two documents described the stage as a gate for a day —
+    // the failure mode this record exists to end, a control believed because it was written down.
+    // Rather than asking each document for a phrase, all three are held to the parameter's own
+    // value, so flipping the default is a decision that cannot be taken in the pipeline alone.
     const declared = runGateDefault();
     expect(declared, 'the Jenkinsfile no longer declares a RUN_GATE boolean parameter').not.toBe(
       null,
@@ -628,5 +630,53 @@ describe('the four promises, driven against scripts/check-serving.mjs', () => {
       `check-serving.mjs passed a server that does not keep ${label}:\n${output}`,
     ).toBe(1);
     expect(output).toContain('✗');
+  });
+});
+
+describe('the push lane', () => {
+  it('gives the contract check the Chemclaw3 checkout it needs, and refuses to warn instead', () => {
+    // **The lane that runs on every push, which is the one this check was missing from.**
+    // `tests/backendContract.test.ts` verifies nothing without a Chemclaw3 checkout and says so
+    // in a warning; this workflow checked out only this repository, so the sole comparison
+    // between what this client sends and what the service declares was a gate in no lane by
+    // default — the Jenkins `Gate` stage being behind `RUN_GATE`, which ships off.
+    //
+    // Two assertions, because a checkout with no variable pointing at it is as silent as no
+    // checkout at all, and a variable naming a path nothing populates fails the run rather than
+    // the contract.
+    expect(
+      /repository:\s*8fqycwdt8v-oss\/Chemclaw3\b/.test(workflow),
+      'the push lane checks out no Chemclaw3, so the contract check warns there instead of gating',
+    ).toBe(true);
+    expect(
+      /CHEMCLAW3_DIR:\s*\$\{\{\s*github\.workspace\s*\}\}\/\.chemclaw3/.test(workflow),
+      'the push lane makes a Chemclaw3 checkout and does not tell the reader where it went',
+    ).toBe(true);
+    expect(
+      /CHEMCLAW3_REQUIRED:\s*'1'/.test(workflow),
+      'the push lane has a checkout but leaves the check best-effort, so it degrades to a ' +
+        'warning the moment the path moves — which is a control this lane would claim and not have',
+    ).toBe(true);
+  });
+
+  it('names no Chemclaw3 source directory, so it cannot drift from the reader', () => {
+    // **The reason this checkout is full where `Jenkinsfile`'s is sparse**, and it is the same
+    // argument `test_the_index...`-style derivations make everywhere in this family: the sparse
+    // path list in `Preflight` is *derived* from what the contract reader opens, asserted above by
+    // `gives its gate the Chemclaw3 checkout the contract reader needs`. Repeating that list here
+    // would be a second declaration of one fact with nothing reconciling the two, so a reader that
+    // grew a fifth source directory would be fetched by one lane and not the other — silently, in
+    // the lane with no `RUN_GATE` in front of it.
+    //
+    // Driven rather than asserted in prose: every directory the reader opens must be absent from
+    // this workflow, which is what makes "it names none" a checked fact rather than a promise.
+    const dirs = contractSourceDirs();
+    expect(dirs.length, 'found no Chemclaw3 source the contract reader opens').toBeGreaterThan(1);
+    const named = dirs.filter((dir) => workflow.includes(`src/chemclaw/${dir}`));
+    expect(
+      named,
+      'the push lane names Chemclaw3 source directories, which is a second copy of the sparse ' +
+        'list the Jenkinsfile derives — take the full checkout instead, or reconcile the two',
+    ).toEqual([]);
   });
 });

@@ -36,6 +36,18 @@ export default tseslint.config(
   // full copy of this repository. eslint does not read `.gitignore`, so without this a run while an
   // agent worktree exists lints the copy as well as the source — measured at 37,368 errors, none of
   // them in a file anyone edits. Only `worktrees/` is ignored, matching `.gitignore`.
+  //
+  // `.chemclaw3/**` is the same shape and arrived the same way: `.github/workflows/ci.yml` checks
+  // the **service** out there so `tests/backendContract.test.ts` gates rather than warns, and
+  // `actions/checkout` may only write inside the workspace — so another repository's source lands
+  // where this one's globs reach. Driven: the push lane failed on 10 `no-undef`/`no-unused-vars`
+  // errors in `.chemclaw3/src/chemclaw/api/static/app.js`, a browser script written against rules
+  // this config does not apply to it. A local run pointing `CHEMCLAW3_DIR` at a checkout *outside*
+  // the workspace cannot see that, which is why it reached CI.
+  //
+  // The name is not free to change here alone: `tests/delivery.test.ts` reads the path out of the
+  // workflow and asserts both this list and `.prettierignore` cover it, because two declarations
+  // of one directory with nothing reconciling them is how the next lane grows a blind spot.
   {
     ignores: [
       'dist/**',
@@ -43,6 +55,7 @@ export default tseslint.config(
       'playwright-report/**',
       'test-results/**',
       '.claude/worktrees/**',
+      '.chemclaw3/**',
     ],
   },
 

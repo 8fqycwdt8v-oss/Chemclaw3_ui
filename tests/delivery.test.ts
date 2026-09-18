@@ -659,6 +659,36 @@ describe('the push lane', () => {
     ).toBe(true);
   });
 
+  it('keeps that checkout out of the globs that lint and format this repository', () => {
+    // **The defect this lane shipped with, and it could only fail on the runner.**
+    // `actions/checkout` may write only inside the workspace, so the service's source lands where
+    // this repository's own globs reach. Driven: the first push-lane run failed on 10
+    // `no-undef`/`no-unused-vars` errors in `.chemclaw3/src/chemclaw/api/static/app.js` — another
+    // repository's browser script, judged by rules written for this one. A local run pointing
+    // `CHEMCLAW3_DIR` at a checkout *outside* the workspace passes, which is exactly why it got
+    // through: the local and the runner layouts differ in the one way that matters.
+    //
+    // The path is read out of the workflow rather than written here, so renaming the checkout
+    // directory in one file and not the others reds instead of quietly re-exposing the tree.
+    // `.claude/worktrees/**` is the same shape already solved the same way.
+    const dir = /path:\s*([.\w/-]+)/.exec(workflow)?.[1];
+    expect(dir, 'the push lane checks out Chemclaw3 to no declared path').toBeTruthy();
+    const bare = String(dir).replace(/^\.\//, '');
+
+    expect(
+      readFileSync('eslint.config.js', 'utf8').includes(`'${bare}/**'`),
+      `eslint.config.js does not ignore ${bare}/**, so lint judges the service's source by this ` +
+        "repository's rules — which is a red build about a file nobody here can edit",
+    ).toBe(true);
+    expect(
+      readFileSync('.prettierignore', 'utf8')
+        .split('\n')
+        .some((line) => line.trim() === bare),
+      `.prettierignore does not list ${bare}, so the format check reports a diff in another ` +
+        'repository',
+    ).toBe(true);
+  });
+
   it('names no Chemclaw3 source directory, so it cannot drift from the reader', () => {
     // **The reason this checkout is full where `Jenkinsfile`'s is sparse**, and it is the same
     // argument `test_the_index...`-style derivations make everywhere in this family: the sparse

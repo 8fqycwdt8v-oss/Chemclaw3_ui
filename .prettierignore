@@ -8,3 +8,9 @@ package-lock.json
 # context lines, which is exactly the byte that makes `git am` work — formatting this file silently
 # turns a working patch into one that fails to apply.
 BACKEND-SESSION-LISTING.md
+
+# The service checkout `.github/workflows/ci.yml` makes so the backend-contract check gates rather
+# than warns. `actions/checkout` may only write inside the workspace, so another repository's source
+# lands where this one's globs reach. Kept in step with `eslint.config.js` by a test that reads the
+# path out of the workflow rather than by both files being edited together.
+.chemclaw3

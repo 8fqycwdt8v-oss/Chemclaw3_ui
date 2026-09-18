@@ -88,6 +88,16 @@ const contractReaders = (
 const RESOLVER = 'tests/backendContract.ts';
 
 /**
+ * The file the three documents' sentences about the checkout resolution are *about*.
+ *
+ * Transcribed rather than derived, because no derivation in this file produces it — and asserted
+ * to exist where it is used, so a rename cannot leave it naming nothing while the region check it
+ * anchors quietly matches no block at all. That is the whole cost of binding a phrase to a region
+ * rather than to a file, and it is one path rather than three sentences.
+ */
+const CONTRACT_READER = 'tests/backendContract.test.ts';
+
+/**
  * The files that ask `tests/backendContract.ts` where the checkout is.
  *
  * The second derivation of the same population, and it has to be a different question from the
@@ -409,11 +419,54 @@ describe('the Jenkins pipeline', () => {
           `${DEFAULT_CHECKOUT} — the record above says it does not`,
       ).not.toContain(sibling);
     }
+    // ## The phrase is bound to a block, not to a file, and that was a decision
+    //
+    // A whole-file `includes` is satisfied by *any* occurrence, which is the same axis this check
+    // already narrowed once (from "each name anywhere" to "the phrase anywhere") and did not
+    // finish. Driven: destroy the live sentence in `README.md` — the two variables replaced by
+    // "some directory nobody documents" — and append a superseded historical note carrying the
+    // phrase verbatim, `git diff --numstat` `4 3 README.md`, and the suite is **24 passed**. The
+    // document now describes the resolution nowhere and the check cannot tell.
+    //
+    // Taken deliberately, because the cheap answers do not close it and the expensive one is not
+    // as expensive as it looks. A per-document occurrence *count* fails: that mutation leaves
+    // exactly one occurrence. Binding the phrase to a region is what closes it, and the cost is an
+    // anchor — so the anchor is `CONTRACT_READER`, the filename of the reader the sentence is
+    // about, which is one path, asserted to exist here, and already named in the describing block
+    // of all three documents (`ISSUES.md` said "It resolves", six lines from its antecedent, and
+    // now names the file). A prose anchor would be the stale thing; a path that must resolve on
+    // disk cannot be, and a document that stops naming the reader reds with that as its message
+    // rather than emptying the check in silence.
+    //
+    // Blocks split on a blank line *and* on a top-level list item, because two of the three
+    // documents describe the resolution inside a bullet and the bullets in them are not
+    // blank-line separated — splitting on blank lines alone makes one block of a whole section,
+    // which is a region check in name only.
+    //
+    // **What is left, said rather than implied.** A document may name the reader in more than one
+    // block (`docs/production-readiness.md` does, four times), so a superseded note placed inside
+    // one of *those* blocks still passes. That is a narrower hole than the file, not no hole. And
+    // the `RUN_GATE` clause below is still a whole-file `includes` on the same axis; it is not
+    // covered by any of this.
+    expect(
+      existsSync(CONTRACT_READER),
+      `${CONTRACT_READER} is what the documents' sentences are about and what this check looks ` +
+        'for a block by — it has been renamed, so the anchor names nothing',
+    ).toBe(true);
     for (const doc of ['README.md', 'docs/production-readiness.md', 'ISSUES.md']) {
-      const text = readFileSync(doc, 'utf8').replace(/\s+/g, ' ');
+      const describing = readFileSync(doc, 'utf8')
+        .split(/\n\s*\n|\n(?=[-*] )/)
+        .map((block) => block.replace(/\s+/g, ' '))
+        .filter((block) => block.includes(CONTRACT_READER));
       expect(
-        text.includes(claim),
-        `${doc} does not say ${claim}, which is the resolution the contract reader performs`,
+        describing.length,
+        `${doc} no longer names ${CONTRACT_READER}, so there is no block for this check to read ` +
+          'the resolution out of',
+      ).toBeGreaterThan(0);
+      expect(
+        describing.some((block) => block.includes(claim)),
+        `${doc} does not say ${claim} in a block that names ${CONTRACT_READER}, which is the ` +
+          'resolution that reader performs',
       ).toBe(true);
     }
   });

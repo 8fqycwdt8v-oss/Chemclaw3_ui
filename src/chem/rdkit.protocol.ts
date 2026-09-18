@@ -14,8 +14,12 @@
  * question about the boundary, not about the one file that currently asks it.
  *
  * **Every value crossing that boundary survives a structured clone.** That is a property of the
- * operations rather than of this file: each answers with a string, a boolean or `null`, and
- * `DrawOptions` is three plain fields. Nothing here carries a `JSMol`, and nothing could.
+ * operations rather than of this file: each answers with a string, a boolean, `null` or — since
+ * `readCanonicalSmiles` had to carry a reason as well as a name — a plain object of string
+ * literals, and `DrawOptions` is three plain fields. Nothing here carries a `JSMol`, and nothing
+ * could. A discriminated union is worth naming as the case to watch: it clones because every arm
+ * is data, and it would stop the day somebody put a class instance, a `Symbol` or an `Error` in
+ * one, which is precisely how a reason for a failure tends to get carried.
  */
 
 import type { operations } from './rdkit.engine.ts';

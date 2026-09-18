@@ -33,7 +33,8 @@
     "check:openapi": "node --experimental-strip-types scripts/check-openapi.mjs",
     "check:live": "npm run smoke && npm run check:openapi",
     "test:e2e:full-stack": "playwright test --config playwright.full-stack.config.ts",
-    "measure:rdkit": "node scripts/measure-rdkit-placement.mjs"
+    "measure:rdkit": "node scripts/measure-rdkit-placement.mjs",
+    "measure:rdkit:rangeerror": "node scripts/measure-rdkit-rangeerror.mjs"
   },
   "dependencies": {
     "@azure/msal-browser": "^5.19.0",

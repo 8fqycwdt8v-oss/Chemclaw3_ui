@@ -62,8 +62,15 @@ import { withLoadTimeout } from './toolkitLoad.ts';
  * characters is a molecule RDKit can read and this module declines to — and a helper that answers
  * `null` for it is saying "not a molecule" about something that is one. That distinction is the
  * same one `rdkitAvailable()` exists for, and it is kept the same way: a cheap predicate the two
- * surfaces that make a claim consult before making it, rather than a third value threaded through
- * every helper.
+ * surfaces that make a claim consult before making it.
+ *
+ * **What that shape could not cover, and this constant's own bound is where it showed.** A string
+ * *inside* the cap answered `null` too — RDKit's canonical ranking recurses, so a long enough
+ * chain exhausts the JavaScript stack and `withMol` swallowed the `RangeError` into the same
+ * negative. A predicate cannot be the answer there: the fact is about one string on one thread at
+ * one stack depth rather than about the page, so there is nothing cheap to ask afterwards. One
+ * value is threaded instead, and exactly one — `readCanonicalSmiles` below, and `Refused` carries
+ * the argument for where it stops.
  */
 export const MAX_PARSED_SMILES_CHARS = 600;
 
@@ -159,9 +166,11 @@ function loadRDKit(): Promise<RDKitModule | null> {
  * page's lifetime.
  *
  * So the distinction lives here, and the rule is: **anything about to make a chemical claim on a
- * negative answer asks this first.** Not the helpers themselves — threading a third value through
- * every one of them puts the question at every call site instead of at the three that make a
- * claim, and `entities.ts` would have to handle a case it can do nothing about.
+ * negative answer asks this first.** Not the helpers themselves — threading this through every one
+ * of them puts a question at every call site instead of at the three that make a claim, and
+ * `entities.ts` would have to handle a case it can do nothing about. That argument holds for *this*
+ * fact, which is about the page; it does not hold for a stack exhaustion, which is about one
+ * string, and `Refused` says why the answer there had to be threaded rather than asked.
  *
  * It reports on the attempt that has already been made rather than commissioning another one, and
  * that is what makes it cheap enough to ask from a render path. A caller that wants a *retry*
@@ -173,18 +182,52 @@ export async function rdkitAvailable(): Promise<boolean> {
 }
 
 /**
+ * Why a call into RDKit produced nothing. **Two different facts, and only the first is about the
+ * string.**
+ *
+ * `unreadable` is the chemical negative — RDKit read the input and it is not a molecule.
+ * `too-complex` is this thread running out of stack inside RDKit's canonical ranking, which
+ * recurses over the molecule: the input *is* a molecule, and the next call draws it. Measured in
+ * Chromium through this app's own seam (`scripts/measure-rdkit-rangeerror.mjs`, and Issue 11), a
+ * chain of 580 characters — inside `MAX_PARSED_SMILES_CHARS`, whose whole job is to keep the
+ * refusals above it honest — came back from the seam as `null` while the very same call, made from
+ * a shallower stack in the same page milliseconds later, answered. Collapsing the two is the claim
+ * that constant exists to prevent, made by the one path it could not reach.
+ */
+export type Refused = 'unreadable' | 'too-complex';
+
+/**
+ * What one `withMol` produced: a value, or the reason there is none.
+ *
+ * A union rather than `T | null` because the reason has nowhere else to go. `rdkitAvailable()` is
+ * the shape this module prefers for a negative it can explain — a cheap predicate the surfaces
+ * consult *after* the fact — and it works there because "the toolkit never loaded" is a property
+ * of the page, true for every string, still true a tick later. A stack exhaustion is none of
+ * those: it is about this string on this thread at this depth, several canonicalisations run
+ * concurrently, and a module-scoped "the last one overflowed" flag would answer about whichever
+ * call happened to finish last. So this one value is threaded, and it is threaded exactly as far
+ * as the two surfaces that make a claim off it.
+ */
+type Attempt<T> = { readonly value: T } | { readonly refused: Refused };
+
+/** The two refusals, named once so the shape is not rebuilt at six call sites. */
+const UNREADABLE = { refused: 'unreadable' } as const;
+const TOO_COMPLEX = { refused: 'too-complex' } as const;
+
+/**
  * Run `fn` over a parsed molecule, always freeing it.
  *
  * `get_mol` returns `null` for input RDKit cannot read — and throws for some of it, which is why
- * this catches as well as null-checks. Either way the answer is "not a molecule", which is exactly
- * what a recogniser needs to hear.
+ * this catches as well as null-checks. Most of the time the answer is "not a molecule", which is
+ * exactly what a recogniser needs to hear; the exception is the stack exhaustion `Refused`
+ * describes, which is the one throw that is not about the string.
  */
-function withMol<T>(rdkit: RDKitModule, smiles: string, fn: (mol: JSMol) => T): T | null {
+function withMol<T>(rdkit: RDKitModule, smiles: string, fn: (mol: JSMol) => T): Attempt<T> {
   let mol: JSMol | null = null;
   try {
     mol = rdkit.get_mol(smiles);
-    if (!mol || !mol.is_valid()) return null;
-    return fn(mol);
+    if (!mol || !mol.is_valid()) return UNREADABLE;
+    return { value: fn(mol) };
   } catch (error) {
     // **A stack exhaustion is a fact about this thread, not about this molecule**, and on a worker
     // there is a thread that can do better. RDKit's canonical ranking recurses over the molecule,
@@ -203,8 +246,17 @@ function withMol<T>(rdkit: RDKitModule, smiles: string, fn: (mol: JSMol) => T): 
     // that answer is a lie about every string. Rather than distinguish them by the shape of the
     // throw, which is Emscripten's business and not a contract, ask the module whether it is still
     // alive.
-    if (!stillAlive(rdkit)) poisoned = true;
-    return null;
+    if (!stillAlive(rdkit)) {
+      poisoned = true;
+      return UNREADABLE;
+    }
+    // Alive, and it threw a `RangeError`: the stack ran out, not the heap. The liveness probe runs
+    // **first** rather than the throw being classified by its type, because the shape of the throw
+    // is exactly what cannot be relied on — the aborted-runtime case raises whatever Emscripten
+    // raises, and `tests/rdkitTrap.test.ts` models it as a `RangeError` for that reason. A dead
+    // runtime is "unavailable" and is already handled above; what is left here is a live module
+    // that could not finish the recursion, which is the only `too-complex` this file will mint.
+    return error instanceof RangeError ? TOO_COMPLEX : UNREADABLE;
   } finally {
     mol?.delete();
   }
@@ -266,30 +318,61 @@ function stillAlive(rdkit: RDKitModule): boolean {
  * construction. Nothing in that range poisons the heap and nothing takes long enough to freeze a
  * tab, which is what a bound here would be for. There is none, deliberately.
  */
-function withSmilesMol<T>(rdkit: RDKitModule, smiles: string, fn: (mol: JSMol) => T): T | null {
-  if (smiles.length > MAX_PARSED_SMILES_CHARS) return null;
+function withSmilesMol<T>(rdkit: RDKitModule, smiles: string, fn: (mol: JSMol) => T): Attempt<T> {
+  // `unreadable` rather than a third refusal of its own, deliberately: the length cap is already
+  // answered at the surfaces by `tooLongToParse`, which is synchronous, pure and consulted *before*
+  // the negative is shown. Minting a `too-large` here would give the two surfaces two ways to
+  // reach one sentence, and the one they have does not need RDKit to be asked at all.
+  if (smiles.length > MAX_PARSED_SMILES_CHARS) return UNREADABLE;
   return withMol(rdkit, smiles, fn);
 }
 
+/** A canonical name, or which of the two `Refused` reasons there is none. */
+export type CanonicalRead =
+  { readonly status: 'named'; readonly canonical: string } | { readonly status: Refused };
+
 /**
- * The canonical SMILES for `smiles`, or `null` if it is not a readable molecule.
+ * What RDKit made of `smiles`: its canonical name, or why there is none.
  *
- * This is the entity key. Two spellings of one molecule must collapse to one string here or the
- * entity rail shows the same compound twice and can never join a computed value to the structure
- * it was computed for.
+ * `named` carries the entity key. Two spellings of one molecule must collapse to one string here
+ * or the entity rail shows the same compound twice and can never join a computed value to the
+ * structure it was computed for.
+ *
+ * The other two are `Refused`, and they are told apart here rather than at a call site because
+ * this is the only place that still can. `src/chem/rdkit.ts` narrows this back to `string | null`
+ * for every caller that only wants a key, which is all of them but two.
+ *
+ * **A toolkit that never loaded reads as `unreadable`, not as a third status**, which is not a
+ * hedge: it is what every one of these helpers has always answered for it, and the surfaces
+ * already ask `rdkitAvailable()` before they say anything about a negative. Giving it a status
+ * here would put the same question in two places and let them disagree.
  */
-export async function canonicalSmiles(smiles: string): Promise<string | null> {
+export async function readCanonicalSmiles(smiles: string): Promise<CanonicalRead> {
   const rdkit = await loadRDKit();
-  if (!rdkit) return null;
-  return withSmilesMol(rdkit, smiles, (mol) => mol.get_smiles() || null);
+  if (!rdkit) return { status: 'unreadable' };
+  const attempt = withSmilesMol(rdkit, smiles, (mol) => mol.get_smiles());
+  if ('refused' in attempt) return { status: attempt.refused };
+  // An empty SMILES is a handle with no atoms, which is not a structure.
+  return attempt.value ? { status: 'named', canonical: attempt.value } : { status: 'unreadable' };
 }
 
-/** Whether RDKit can read `smiles` as a molecule. The gate a recogniser's guess must pass before
- *  anything is drawn from it. */
+/**
+ * Whether RDKit can read `smiles` as a molecule. The gate a recogniser's guess must pass before
+ * anything is drawn from it.
+ *
+ * **This deliberately does not carry the `too-complex` distinction, and that is a measurement
+ * rather than an omission.** The recursion that exhausts the stack is in the canonical ranking —
+ * `get_smiles` — and this never calls it: run `node scripts/measure-rdkit-rangeerror.mjs`, whose
+ * `isMolecule` column answers `true` at every length it sweeps, including the ones where
+ * `canonicalSmiles` comes back `null` through the same seam on the same page. So there is no case
+ * to distinguish. A `too-complex` out of `get_mol` itself would fall to `false`, which is the
+ * negative this already gives and the one the surfaces already qualify with `tooLongToParse` and
+ * `rdkitAvailable`.
+ */
 export async function isMolecule(smiles: string): Promise<boolean> {
   const rdkit = await loadRDKit();
   if (!rdkit) return false;
-  return withSmilesMol(rdkit, smiles, () => true) ?? false;
+  return 'value' in withSmilesMol(rdkit, smiles, () => true);
 }
 
 /**
@@ -311,7 +394,16 @@ export async function canonicalSmilesFromMolblock(molblock: string): Promise<str
   // An empty canvas exported from a sketcher is a syntactically valid molblock with zero atoms,
   // and RDKit reads it happily — as the empty SMILES. That is not a structure, so it fails here
   // rather than being inserted into a message as nothing at all.
-  return withMol(rdkit, molblock, (mol) => mol.get_smiles() || null);
+  const attempt = withMol(rdkit, molblock, (mol) => mol.get_smiles());
+  // **`too-complex` is collapsed into the ordinary negative here, deliberately and not for free.**
+  // It is reachable — `withSmilesMol`'s docstring records a 999-atom V2000 chain raising exactly
+  // this `RangeError` with the runtime still alive — so a record that is a molecule is counted by
+  // `moleculesFromMolfile` as one RDKit "could not read". What stops that being threaded in this
+  // change is that the surface it reaches is a *count over a file* ("12 of 15 records were
+  // readable") rather than a verdict about the one string a chemist is looking at, and carrying it
+  // means a fourth field on `MolfileRecords`, two sentence builders and the sketcher's own
+  // refusal. That is its own change, and it is recorded as one in `ISSUES.md`.
+  return 'value' in attempt && attempt.value ? attempt.value : null;
 }
 
 /**
@@ -347,7 +439,13 @@ export async function drawSvg(smiles: string, opts: DrawOptions): Promise<string
   const rdkit = await loadRDKit();
   if (!rdkit) return null;
 
-  return withSmilesMol(rdkit, smiles, (mol) => {
+  // `too-complex` folds into `null` here for the reason the measurement gives rather than for
+  // convenience: `scripts/measure-rdkit-rangeerror.mjs`'s `moleculeSvg` column answers at every
+  // length it sweeps — including the ones where `canonicalSmiles` answers `null` through the same
+  // seam — because the depiction path does not canonically rank. `Molecule.tsx`
+  // already distinguishes three reasons for an undrawn structure; a fourth that nothing can
+  // produce would be furniture that looks like a control.
+  const attempt = withSmilesMol(rdkit, smiles, (mol) => {
     mol.normalize_depiction(1);
     mol.straighten_depiction();
 
@@ -362,6 +460,7 @@ export async function drawSvg(smiles: string, opts: DrawOptions): Promise<string
 
     return mol.get_svg_with_highlights(JSON.stringify(details)) || null;
   });
+  return 'value' in attempt ? attempt.value : null;
 }
 
 /**
@@ -391,7 +490,7 @@ export async function toolkitLoads(): Promise<boolean> {
 export const operations = {
   available: rdkitAvailable,
   toolkitLoads,
-  canonicalSmiles,
+  readCanonicalSmiles,
   isMolecule,
   canonicalSmilesFromMolblock,
   drawSvg,

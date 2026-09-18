@@ -96,6 +96,10 @@ type PasteCheck = {
   | { status: 'refused' }
   /** RDKit itself never loaded, so nothing here is a claim about the string. */
   | { status: 'unavailable' }
+  /** RDKit read it as a molecule and ran out of stack naming it. Not a refusal about the
+   *  chemistry, and not about the toolkit being absent either — see `Refused` in
+   *  `src/chem/rdkit.engine.ts`. */
+  | { status: 'too-complex' }
 );
 
 /**
@@ -202,6 +206,16 @@ function PasteConfirmation({
           <p className="text-xs text-warn-ink">
             The structure toolkit could not be loaded, so nothing pasted here can be checked. This
             is not a verdict about what you pasted.
+          </p>
+        )}
+        {pasted.status === 'too-complex' && (
+          // The panel's own wording again, for the same reason the refusal shares its: one string
+          // must not get two different sentences from the two surfaces that check pastes.
+          <p className="text-xs text-warn-ink">
+            Pasted <span className="font-mono break-all text-ink">{shortly(pasted.raw)}</span> —
+            RDKit read this as a molecule and then ran out of stack naming it, so it is too complex
+            to name here. Nothing is wrong with it as chemistry; it is a limit of the browser this
+            is running in, and the message carries your spelling unchanged.
           </p>
         )}
         {differs && pasted.status === 'read' && (
@@ -607,6 +621,13 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     const at = caret + (clip.length - clip.trimStart().length);
 
     void readStructure(token).then(async (read) => {
+      // Before `refusal`, and before `mightBeStructure`: the toolkit is present and the token is
+      // structure-shaped, so both of those would pass and the strip would say "RDKit could not
+      // read this as a molecule" about one it just read.
+      if (read?.kind === 'too-complex') {
+        show({ status: 'too-complex', raw: token, at });
+        return;
+      }
       if (read) {
         if (read.kind === 'molecule') {
           void useEntityStore.getState().ingestUserStructure(conversationId, read.raw, 'paste');

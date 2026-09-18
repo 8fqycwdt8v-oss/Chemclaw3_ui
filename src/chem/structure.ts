@@ -31,16 +31,33 @@
  * `kind` is what tells a caller not to treat it as an identity.
  */
 
-import { canonicalSmiles, isMolecule } from './rdkit.ts';
+import { isMolecule, readCanonicalSmiles } from './rdkit.ts';
 import { looksLikeReactionSmiles, looksLikeSmiles } from './recognise.ts';
 
-export interface ReadStructure {
-  kind: 'molecule' | 'reaction';
-  /** What was read. For a molecule, RDKit's canonical form; for a reaction, the input unchanged. */
-  canonical: string;
-  /** The string as it was given, so a caller can show a chemist their own spelling beside ours. */
-  raw: string;
-}
+/**
+ * What a structure-shaped string turned out to be.
+ *
+ * Three kinds rather than two, and the third is not a kind of chemistry. `too-complex` is a
+ * molecule RDKit read and then could not name, because canonical ranking recursed past this
+ * thread's stack (`rdkit.engine.ts`'s `Refused`). It is here rather than folded into the `null`
+ * beside it because `null` means "not a structure" and a caller renders that as silence, while
+ * this one has to be said out loud: the string on screen *is* a structure and the sentence a
+ * surface would otherwise reach for is "RDKit could not read this as a molecule".
+ *
+ * It carries no `canonical`, which is the point — there is no name, so nothing downstream can key
+ * it, and the compiler is what enforces that rather than a comment.
+ */
+export type ReadStructure =
+  | {
+      kind: 'molecule' | 'reaction';
+      /** What was read. For a molecule, RDKit's canonical form; for a reaction, the input
+       *  unchanged. */
+      canonical: string;
+      /** The string as it was given, so a caller can show a chemist their own spelling beside
+       *  ours. */
+      raw: string;
+    }
+  | { kind: 'too-complex'; raw: string };
 
 /**
  * What `text` is, or `null` if it is not a structure at all.
@@ -48,6 +65,11 @@ export interface ReadStructure {
  * The syntactic check runs first and is what keeps the WASM out of the hot path: an answer full of
  * ordinary prose asks RDKit nothing. A token that passes it is then handed to RDKit, whose answer
  * is final — the recogniser proposes, RDKit disposes.
+ *
+ * **A reaction cannot come back `too-complex`**, and that is measured rather than assumed: its
+ * components go through `isMolecule`, which never asks for a canonical name and therefore never
+ * reaches the recursion that overflows (see `isMolecule` in `rdkit.engine.ts`). So the third kind
+ * is only ever a molecule, which is also the only kind that has a name to lose.
  */
 export async function readStructure(text: string): Promise<ReadStructure | null> {
   const raw = text.trim();
@@ -66,8 +88,9 @@ export async function readStructure(text: string): Promise<ReadStructure | null>
   }
 
   if (!looksLikeSmiles(raw)) return null;
-  const canonical = await canonicalSmiles(raw);
-  return canonical ? { kind: 'molecule', canonical, raw } : null;
+  const read = await readCanonicalSmiles(raw);
+  if (read.status === 'named') return { kind: 'molecule', canonical: read.canonical, raw };
+  return read.status === 'too-complex' ? { kind: 'too-complex', raw } : null;
 }
 
 /**

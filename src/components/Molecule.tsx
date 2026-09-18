@@ -287,7 +287,12 @@ export function InlineSmiles({ smiles }: { smiles: string }): React.JSX.Element 
     };
   }, [smiles]);
 
-  if (!read) return <code className="font-mono">{smiles}</code>;
+  // `too-complex` renders exactly like "not a structure" here, and that is deliberate: this
+  // surface makes no claim in either case. It shows the code span the answer already contained and
+  // offers no ⌬ button, which says "nothing to draw" without saying anything about the string. The
+  // two surfaces that *do* make a claim — the structure panel and the composer's paste strip — are
+  // where the distinction is worth a sentence, and they have one.
+  if (!read || read.kind === 'too-complex') return <code className="font-mono">{smiles}</code>;
 
   const shown = always || open;
 

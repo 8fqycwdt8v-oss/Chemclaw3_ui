@@ -189,6 +189,39 @@ const workflowSteps = (): { name: string; text: string }[] =>
     .slice(1)
     .map((text) => ({ name: /^\s*- name:\s*(.+)/m.exec(text)?.[1]?.trim() ?? '(unnamed)', text }));
 
+/**
+ * Every shell script the workflow runs, as one string per `run:` block.
+ *
+ * Here so `siblingCheckouts` can apply the `git clone` pattern to the workflow as well as to the
+ * Jenkinsfile. Written as a scan rather than as one regular expression because a `run:` takes two
+ * shapes — the rest of its own line, or a block scalar of every following line indented past the
+ * key — and a single pattern that tries to cover both is how the first version of this silently
+ * matched neither.
+ */
+const workflowShell = (): string[] => {
+  const lines = workflow.split('\n');
+  const blocks: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    const run = /^(\s*)(?:- )?run:[ \t]*(.*)$/.exec(line);
+    if (!run) continue;
+    const indent = (run[1] ?? '').length;
+    const collected = [(run[2] ?? '').replace(/^[|>]-?[ \t]*/, '')];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const next = lines[j] ?? '';
+      if (next.trim() === '') {
+        collected.push('');
+        continue;
+      }
+      if ((/^\s*/.exec(next)?.[0] ?? '').length <= indent) break;
+      collected.push(next);
+      i = j;
+    }
+    blocks.push(collected.join('\n'));
+  }
+  return blocks;
+};
+
 /** The workflow's checkout steps that name a repository other than this one. */
 const siblingSteps = (): { name: string; text: string }[] =>
   workflowSteps().filter(
@@ -226,17 +259,28 @@ const siblingCheckouts = (): { where: string; dir: string }[] => {
   // A `git clone` writes into its last argument. Continuations are joined first, because this
   // pipeline's clone is written across two lines and a per-line read would take the URL for the
   // target.
-  for (const block of shellBlocks) {
+  //
+  // **Every shell either pipeline runs, not just the Jenkinsfile's.** The first version of this
+  // derivation read `actions/checkout` out of the workflow and `git clone` out of the Jenkinsfile,
+  // one pattern per file — so a `run: git clone` in the workflow was invisible to both halves and
+  // the whole suite stayed green with an unignored sibling tree in the workspace. That is the
+  // first-match-class blind spot this function was written to close, reappearing inside the
+  // closing of it: the fix is not a third pattern, it is applying both patterns to both files.
+  const scripts: { where: string; text: string }[] = [
+    ...shellBlocks.map((text) => ({ where: 'Jenkinsfile', text })),
+    ...workflowShell().map((text) => ({ where: '.github/workflows/ci.yml', text })),
+  ];
+  for (const { where, text: block } of scripts) {
     for (const match of block.replace(/\\\n\s*/g, ' ').matchAll(/\bgit clone\b([^\n]*)/g)) {
       const tokens = (match[1] ?? '').trim().split(/\s+/).filter(Boolean);
       const dir = tokens.at(-1) ?? '';
       expect(
         /^[.\w][\w./-]*$/.test(dir),
-        `a \`git clone\` in the Jenkinsfile writes to "${dir}", which this derivation cannot read ` +
+        `a \`git clone\` in ${where} writes to "${dir}", which this derivation cannot read ` +
           'as a workspace directory — write the target as a plain relative path, or this check ' +
           'silently stops covering it',
       ).toBe(true);
-      found.push({ where: 'Jenkinsfile', dir: dir.replace(/^\.\//, '') });
+      found.push({ where, dir: dir.replace(/^\.\//, '') });
     }
   }
 

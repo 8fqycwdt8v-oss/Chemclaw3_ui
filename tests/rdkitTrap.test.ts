@@ -25,19 +25,41 @@
  * place before the first import.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-/** How the WASM behaves when it has been aborted: everything throws, for ever. */
-const wasm = vi.hoisted(() => ({ dead: false, parses: 0 }));
+/**
+ * How the WASM behaves when it has been aborted: everything throws, for ever.
+ *
+ * `overflows` and `freeThrows` are the two *recoverable* failures beside it, because the point of
+ * every assertion here is telling those apart from the abort. A stack exhaustion leaves the runtime
+ * alive; a free that refuses says nothing about the runtime at all.
+ */
+const wasm = vi.hoisted(() => ({
+  dead: false,
+  parses: 0,
+  /** A SMILES whose *canonicalisation* overflows the JS stack, the runtime staying alive. */
+  overflows: null as string | null,
+  /** Whether `delete()` refuses, which a dead runtime does and `withMol`'s `finally` must survive. */
+  freeThrows: false,
+}));
 
 vi.mock('@rdkit/rdkit', () => {
   const mol = (smiles: string) => ({
     is_valid: () => true,
-    get_smiles: () => smiles,
+    get_smiles: () => {
+      // Only the canonical ranking recurses, which is why this and not `get_mol` is where a
+      // stack exhaustion is modelled — the same property `tests/stubs/rdkit.ts` carries.
+      if (wasm.overflows !== null && smiles === wasm.overflows) {
+        throw new RangeError('Maximum call stack size exceeded');
+      }
+      return smiles;
+    },
     normalize_depiction: () => {},
     straighten_depiction: () => {},
     get_svg_with_highlights: () => '<svg />',
-    delete: () => {},
+    delete: () => {
+      if (wasm.freeThrows) throw new Error('cannot free on a dead runtime');
+    },
   });
   return {
     default: async () => ({
@@ -58,8 +80,16 @@ vi.mock('@rdkit/rdkit', () => {
 beforeEach(() => {
   wasm.dead = false;
   wasm.parses = 0;
+  wasm.overflows = null;
+  wasm.freeThrows = false;
   vi.resetModules();
 });
+
+/** The one thing `rdkit.engine.ts` knows about its own placement, read at module scope. */
+const asAWorker = (on: boolean): void => {
+  if (on) (globalThis as { WorkerGlobalScope?: unknown }).WorkerGlobalScope = class {};
+  else delete (globalThis as { WorkerGlobalScope?: unknown }).WorkerGlobalScope;
+};
 
 describe('a SMILES longer than the toolkit survives', () => {
   it('is refused without being handed to the parser', async () => {
@@ -127,5 +157,98 @@ describe('a trap that happens anyway', () => {
 
     expect(await canonicalSmiles('CCO')).toBe('CCO');
     expect(await rdkitAvailable()).toBe(true);
+  });
+});
+
+/**
+ * The same trap, on the thread that owns the heap.
+ *
+ * **The placement that was never driven, and the one where the ordering inside `withMol` decides
+ * the answer.** `rdkit.engine.ts` runs in two places: in-process on the page, and on a worker,
+ * which is where every real call goes when the browser has one. Every case above runs the page
+ * copy — happy-dom has no `Worker` — so the worker's own branch, `if (error instanceof RangeError
+ * && OFF_MAIN_THREAD) throw error`, had no test at all.
+ *
+ * It sat *in front of* the liveness probe while the comment beside it said the probe runs first,
+ * "because the shape of the throw is exactly what cannot be relied on — `tests/rdkitTrap.test.ts`
+ * models [an abort] as a `RangeError`". Which this file does, deliberately, because Emscripten's
+ * throw shape is not a contract. So on a worker an aborted runtime was rethrown as an escalation
+ * rather than recognised: the worker never poisoned itself, its `available` went on answering
+ * `true`, and the page copy re-ran the call and poisoned instead — the honest answer arriving from
+ * the wrong module, and only because there happened to be a second one.
+ *
+ * Both directions are here, because a fix that just deleted the rethrow would pass the first.
+ */
+describe('a trap on the worker copy', () => {
+  beforeEach(() => asAWorker(true));
+  afterEach(() => asAWorker(false));
+
+  it('poisons this copy rather than escalating a runtime that is gone', async () => {
+    const engine = await import('../src/chem/rdkit.engine.ts');
+
+    expect(await engine.readCanonicalSmiles('CCO')).toEqual({ status: 'named', canonical: 'CCO' });
+    expect(await engine.rdkitAvailable()).toBe(true);
+
+    wasm.dead = true;
+    // Not a rejection: the seam's contract is a three-valued answer, and an escalation of this is
+    // a claim that the page can do better, which it cannot — the heap is gone in both.
+    await expect(engine.readCanonicalSmiles('CCO')).resolves.toEqual({ status: 'unreadable' });
+    // The assertion that matters, and the one the shipped order could not satisfy on this thread:
+    // the surfaces ask this before they say anything, and `true` here is how "not a molecule"
+    // about ethanol reaches a chemist.
+    expect(await engine.rdkitAvailable()).toBe(false);
+  });
+
+  it('still escalates a stack exhaustion, because that runtime is alive', async () => {
+    const engine = await import('../src/chem/rdkit.engine.ts');
+
+    const chain = 'C'.repeat(500);
+    wasm.overflows = chain;
+    // Rethrown, not answered: `rdkit.client.ts` reads a worker failure as "run it on the page",
+    // whose stack is bigger. Swallowing it here is the one answer that must not be given.
+    await expect(engine.readCanonicalSmiles(chain)).rejects.toThrow(RangeError);
+    // And the probe that now runs first did not condemn the module for it.
+    expect(await engine.rdkitAvailable()).toBe(true);
+    expect(await engine.readCanonicalSmiles('CCO')).toEqual({ status: 'named', canonical: 'CCO' });
+  });
+});
+
+/**
+ * A free that refuses, which is the same sentence `stillAlive` already carries over its own.
+ *
+ * `withMol` ends in `finally { mol?.delete() }`, and its neighbour four lines down wraps exactly
+ * that call in a `try` with the comment "A dead runtime can refuse the free as well." Unguarded,
+ * a throw out of the `finally` **replaces** the answer the function had already decided on: the
+ * `return` is discarded and the promise rejects instead.
+ *
+ * Where that lands is what makes it worth a test rather than a tidy-up. The two callers on the
+ * surfaces' path are `void readStructure(...)` in `Composer`/`Molecule` and
+ * `void readCanonicalSmiles(...)` in `StructureInput`, and neither has a `.catch` — so the panel
+ * stays on "Checking…" for the life of the tab and the paste strip never appears. The handle is
+ * lost either way; a verdict need not be.
+ */
+describe('a free the runtime refuses', () => {
+  it('does not turn a decided answer into an unhandled rejection', async () => {
+    const { readCanonicalSmiles } = await import('../src/chem/rdkit.ts');
+
+    expect(await readCanonicalSmiles('CCO')).toEqual({ status: 'named', canonical: 'CCO' });
+
+    // The realistic pairing: the runtime went away between the parse and the free.
+    wasm.freeThrows = true;
+    await expect(readCanonicalSmiles('CCO')).resolves.toEqual({
+      status: 'named',
+      canonical: 'CCO',
+    });
+  });
+
+  it('answers the refusal it had already decided on when the call itself threw', async () => {
+    const { readCanonicalSmiles, rdkitAvailable } = await import('../src/chem/rdkit.ts');
+
+    expect(await rdkitAvailable()).toBe(true);
+    // Both halves at once — the module is gone, so the canonicalisation throws *and* the free
+    // does. This is the path where the discarded `return` was `UNREADABLE`.
+    wasm.overflows = 'CCO';
+    wasm.freeThrows = true;
+    await expect(readCanonicalSmiles('CCO')).resolves.toEqual({ status: 'too-complex' });
   });
 });

@@ -12,3 +12,16 @@ tsconfig.tsbuildinfo
 # agent here; they are transient copies of this repo, never source. Only `worktrees/`
 # is ignored, so a `.claude/skills/<name>/SKILL.md` is still committable.
 .claude/worktrees/
+
+# Sibling checkouts this repository's own pipelines make *inside the workspace*, so that
+# `tests/backendContract.test.ts` gates rather than warns. `.chemclaw3` is
+# `.github/workflows/ci.yml`'s full checkout of Chemclaw3; `.jenkins-lib` is `Jenkinsfile`'s
+# sparse one, which carries `src/chemclaw/api` and therefore the same `static/app.js` that
+# reddened the first push-lane run. Neither is source here, and an agent or a developer who runs
+# either lane locally would otherwise be offered another repository's tree to commit.
+#
+# Four surfaces have to agree about each of these — this file, `.dockerignore`, `.prettierignore`
+# and `eslint.config.js` — and `tests/delivery.test.ts` derives the directories from the two
+# pipelines rather than reading a list anybody typed here.
+.chemclaw3/
+.jenkins-lib/

@@ -134,8 +134,17 @@ function molblockSmiles(input: string): string | null {
  * molecule", so the fake has to be able to produce it. `get_mol` accepts this string; only
  * `get_smiles` throws, which is where the real recursion lives — the depiction path is measured
  * not to hit it.
+ *
+ * **580 because that is the measured subject, and this was 500.** The sweep behind Issue 11
+ * (`scripts/measure-rdkit-rangeerror.mjs`, lengths 200…600, a fresh page each) answered at every
+ * length up to 570 and refused at 580, 590 and 600 — so at 500 this stub modelled a page
+ * overflowing where the measurement says it does not, while `rdkit.engine.ts`'s `Refused`
+ * docstring, the engine's `withMol` comment and `tests/rdkitTooComplex.test.tsx`'s own header all
+ * cite 580. Four statements of one number with nothing reconciling them, and the odd one out was
+ * the only one a test could see. Still inside `MAX_PARSED_SMILES_CHARS`, which is what makes the
+ * refusal a claim rather than this module's own cap, and still past the worker's smaller stack.
  */
-export const CANONICALISATION_OVERFLOWS = 'C'.repeat(500);
+export const CANONICALISATION_OVERFLOWS = 'C'.repeat(580);
 
 interface StubMol {
   is_valid(): boolean;

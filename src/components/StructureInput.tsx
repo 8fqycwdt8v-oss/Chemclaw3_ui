@@ -50,6 +50,7 @@ import {
   readCanonicalSmiles,
   tooLongToParse,
   type MolfileRecords,
+  type NotAChemicalVerdict,
 } from '../chem/rdkit.ts';
 import { looksLikeCompoundName, looksLikeMolblock } from '../chem/recognise.ts';
 import type { UserStructureSource } from '../chem/entities.ts';
@@ -72,7 +73,11 @@ import { Molecule } from './Molecule.tsx';
  */
 interface Verdict {
   of: string;
-  status: 'ok' | 'name' | 'invalid' | 'unavailable' | 'too-large' | 'too-complex';
+  /** The last member is `NotAChemicalVerdict` rather than a literal, so a refusal added in
+   *  `rdkit.engine.ts` is one declaration rather than a fourth copy of `'too-complex'` — see
+   *  `Refused` there, and the `never` binding in the effect that is what actually refuses to
+   *  compile when one is not answered. */
+  status: 'ok' | 'name' | 'invalid' | 'unavailable' | 'too-large' | NotAChemicalVerdict;
   canonical?: string;
 }
 
@@ -91,8 +96,9 @@ type Check =
   | { status: 'too-large' }
   /** Inside the cap, read as a molecule, and RDKit ran out of stack producing its canonical name.
    *  The third refusal that is not about the chemistry, and the only one that could not be
-   *  predicted from the string: see `Refused` in `src/chem/rdkit.engine.ts`. */
-  | { status: 'too-complex' };
+   *  predicted from the string: see `Refused` in `src/chem/rdkit.engine.ts`. Derived from there
+   *  rather than restated, for the reason `NotAChemicalVerdict` gives. */
+  | { status: NotAChemicalVerdict };
 
 function checkOf(raw: string, verdict: Verdict | null): Check {
   const text = raw.trim();
@@ -108,6 +114,32 @@ function checkOf(raw: string, verdict: Verdict | null): Check {
 const DEBOUNCE_MS = 180;
 
 export const FIELD_PLACEHOLDER = 'Paste SMILES, drop a .mol or .sdf, or draw it';
+
+/**
+ * What both surfaces say about a molecule RDKit read and could not name.
+ *
+ * **Exported because the claim that they "say the same words" was prose, and it was false.**
+ * `Composer.tsx`'s own comment said one string must not get two different sentences from the two
+ * surfaces that check pastes — while the two diverged in both tails, and
+ * `tests/rdkitTooComplex.test.tsx` matched a 25-character fragment of the head, which is the
+ * shape of guard this repository already refuses elsewhere. One constant is the reconciliation;
+ * each surface then appends the one clause that is genuinely its own (this panel has nothing to
+ * file it under, the composer is sending the spelling on regardless), which is a difference about
+ * the surface rather than about the string. Same argument as `SKETCHER_ALTERNATIVE` below.
+ *
+ * **"at the moment of the check" is load-bearing and replaced "this is running in".** The
+ * measurement behind this sentence (`scripts/measure-rdkit-rangeerror.mjs`, Issue 11) is that the
+ * *same string at the same length* refused through the seam and answered from a shallower stack in
+ * the same page milliseconds later — so the limit is the JavaScript stack at the instant of the
+ * call, not a property of the browser that a chemist could reason about. Copy that named the
+ * browser read as a stable verdict and asserted the opposite of what was measured. What neither
+ * surface does yet is offer the retry that follows from it; that gap is recorded in `ISSUES.md`
+ * under _Still not done_ rather than implied away by a sentence.
+ */
+export const TOO_COMPLEX_EXPLANATION =
+  'RDKit read this as a molecule and then ran out of stack naming it, so it is too complex to ' +
+  'name here. Nothing is wrong with it as chemistry: it is a limit of the JavaScript stack at ' +
+  'the moment of the check rather than of the structure.';
 
 /**
  * What the sketcher dialog says it is not.
@@ -259,17 +291,29 @@ export function StructureInput({
         // The await crossed a keystroke: a later string may already be in the field, and letting
         // this answer land would report on text nobody can see any more.
         if (cancelled) return;
-        if (read.status === 'named') {
-          setVerdict({ of: text, status: 'ok', canonical: read.canonical });
-          return;
-        }
-        // Asked before `tooLongToParse` and before the toolkit, because it is the narrowest of the
-        // three and the only one the other two would answer wrongly: the string is inside the cap
-        // and the toolkit is right here, so both of those checks pass and the panel would fall
-        // through to "not a molecule" about a molecule.
-        if (read.status === 'too-complex') {
-          setVerdict({ of: text, status: 'too-complex' });
-          return;
+        switch (read.status) {
+          case 'named':
+            setVerdict({ of: text, status: 'ok', canonical: read.canonical });
+            return;
+          // Asked before `tooLongToParse` and before the toolkit, because it is the narrowest of
+          // the three and the only one the other two would answer wrongly: the string is inside
+          // the cap and the toolkit is right here, so both of those checks pass and the panel
+          // would fall through to "not a molecule" about a molecule.
+          case 'too-complex':
+            setVerdict({ of: text, status: 'too-complex' });
+            return;
+          // The chemical negative, which the three checks below are allowed to qualify.
+          case 'unreadable':
+            break;
+          default: {
+            // **Exhaustiveness, and this is the surface it protects.** Everything past this switch
+            // ends in "RDKit could not read this as a molecule" or in one of the three sentences
+            // that qualify it — so a refusal added to `Refused` and not answered above would be
+            // shown to a chemist as a claim about their string that nothing here made. `never` is
+            // what makes that fail to compile; driven before it, a third member built clean.
+            const unanswered: never = read;
+            return unanswered;
+          }
         }
         // "Not a molecule" is a claim about the string, and it is only ours to make if the toolkit
         // that would have read it is here at all. It was not, once, and this panel told a chemist
@@ -568,13 +612,13 @@ export function StructureInput({
           </span>
         )}
         {check.status === 'too-complex' && (
-          // Warn rather than danger, and the wording is about this browser rather than about the
+          // Warn rather than danger, and the wording is about this thread rather than about the
           // molecule: RDKit read it, and then ran out of stack working out its canonical name.
-          // "Too complex to name here" is the honest scope — a claim about the renderer.
+          // "Too complex to name here" is the honest scope — a claim about the renderer. The
+          // sentence itself is `TOO_COMPLEX_EXPLANATION`, shared verbatim with the composer's paste
+          // strip; what follows it is this panel's own consequence and nobody else's.
           <span className="text-warn-ink">
-            RDKit read this as a molecule and then ran out of stack naming it, so it is too complex
-            to name here — and without that name there is nothing to file it under. Nothing is wrong
-            with it as chemistry; it is a limit of the browser this is running in.
+            {TOO_COMPLEX_EXPLANATION} Without that name there is nothing to file it under.
           </span>
         )}
       </p>

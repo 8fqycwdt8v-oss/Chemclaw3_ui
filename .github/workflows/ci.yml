@@ -16,6 +16,13 @@ on:
   # been queued yet") nor re-run, and the PR simply had no route to a verdict while every other
   # branch's CI drained normally. `Chemclaw3`'s own ci.yml added this trigger for the same reason.
   workflow_dispatch:
+    inputs:
+      chemclaw3_ref:
+        description: >-
+          The Chemclaw3 revision the contract check reads. Empty falls back to the repository
+          variable CHEMCLAW3_REF, and empty again to `main`. A branch, a tag or a full SHA.
+        required: false
+        type: string
 
 # A second push to a PR supersedes the first; there is no value in finishing a run for a commit
 # nobody will merge.
@@ -61,10 +68,27 @@ jobs:
       # would be a second declaration of it with nothing reconciling the two — the defect that file
       # exists to prevent — so this names no paths at all and cannot drift from the reader.
       # No credential: every repository in this family is public, so `contents: read` reaches it.
+      #
+      # **`ref:` is named, and without it this lane's verdict was not a function of its inputs.**
+      # `actions/checkout` defaults to the *default branch's HEAD at the moment the job runs* for
+      # any repository but this one, so the same UI commit was green one day and red the next with
+      # nothing changed here, and re-running an old pull request silently judged it against today's
+      # Chemclaw3. The cost recorded for this checkout — "reds on a rename merged in another
+      # repository" — understated that: a rename reds a build, an unpinned ref makes the build
+      # unrepeatable, which is a different and worse property.
+      #
+      # The default still tracks `main`, so a real rename still reds loudly, which is what this
+      # check is for. What the variable buys is a remedy that is not "edit the guard": a pull
+      # request blocked by an unrelated upstream change is unblocked by pointing
+      # `vars.CHEMCLAW3_REF` at the last agreeing revision — a repository setting with an audit
+      # trail — rather than by weakening what is asserted. `Jenkinsfile` already declares
+      # `CHEMCLAW3_BRANCH` for its own clone of the same repository; this is that fact in the other
+      # lane, and `tests/delivery.test.ts` holds both lanes to naming one.
       - name: The Chemclaw3 checkout the contract check reads
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: 8fqycwdt8v-oss/Chemclaw3
+          ref: ${{ inputs.chemclaw3_ref || vars.CHEMCLAW3_REF || 'main' }}
           path: .chemclaw3
           fetch-depth: 1
 

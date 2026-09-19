@@ -197,6 +197,25 @@ export async function rdkitAvailable(): Promise<boolean> {
 export type Refused = 'unreadable' | 'too-complex';
 
 /**
+ * The refusals that are **not** a verdict about the string, and therefore owe a sentence of their
+ * own at every surface that makes a claim.
+ *
+ * **This exists because `Refused` was a dead export with three unreconciled copies under it.** It
+ * had no type consumer at all: `src/chem/structure.ts` restated `'too-complex'` as a literal,
+ * `StructureInput.tsx` restated it again in its own union, and `Composer.tsx` a third time — so
+ * adding a third member to `Refused` compiled clean (`npx tsc -b`, exit 0, driven) and was folded
+ * into the `null` that means "not a molecule" at all three, which is exactly the defect Issue 11
+ * closed arriving by the one route nothing watched.
+ *
+ * Deriving from it is what makes the compiler the control rather than a reviewer's memory: a third
+ * member lands in `ReadStructure['kind']`, which `Molecule.tsx` and `Composer.tsx` narrow and then
+ * read `canonical` off, so both stop compiling. The two places that narrow a `CanonicalRead`
+ * itself — `structure.ts` and `StructureInput.tsx` — carry a `never` binding for the same reason,
+ * because a *widening* union is silent in a `switch` that has no default.
+ */
+export type NotAChemicalVerdict = Exclude<Refused, 'unreadable'>;
+
+/**
  * What one `withMol` produced: a value, or the reason there is none.
  *
  * A union rather than `T | null` because the reason has nowhere else to go. `rdkitAvailable()` is
@@ -229,36 +248,52 @@ function withMol<T>(rdkit: RDKitModule, smiles: string, fn: (mol: JSMol) => T): 
     if (!mol || !mol.is_valid()) return UNREADABLE;
     return { value: fn(mol) };
   } catch (error) {
-    // **A stack exhaustion is a fact about this thread, not about this molecule**, and on a worker
-    // there is a thread that can do better. RDKit's canonical ranking recurses over the molecule,
-    // so a long chain needs stack proportional to its length, and a worker's is smaller than the
-    // page's: measured in Chromium through this module, `C`*400 canonicalises on both and `C`*500
-    // canonicalises only on the page. Swallowing that into `null` is the one answer that must not
-    // be given — it is "that is not a molecule" about a chain the very next call draws — so it is
-    // rethrown, the worker reports it as a failure, and `rdkit.client.ts` runs the same call on
-    // the page. In-process there is no better placement, so it stays `null` there: that is the
-    // 999-atom molblock this module's `withSmilesMol` docstring already records.
-    if (error instanceof RangeError && OFF_MAIN_THREAD) throw error;
-    // Two very different things arrive here and they used to be answered identically. A C++
-    // exception out of the depiction code is ordinary — measured, a 1050-character chain throws
-    // one, `delete()` still works and the next molecule parses fine — and "not a molecule" is the
-    // right answer for it. A `RuntimeError` out of the WASM is the runtime aborting, after which
-    // that answer is a lie about every string. Rather than distinguish them by the shape of the
-    // throw, which is Emscripten's business and not a contract, ask the module whether it is still
-    // alive.
+    // **Liveness first, on every placement, and the ordering is the whole control.** Two very
+    // different things arrive here and they used to be answered identically. A C++ exception out
+    // of the depiction code is ordinary — measured, a 1050-character chain throws one, `delete()`
+    // still works and the next molecule parses fine — and "not a molecule" is the right answer for
+    // it. A `RuntimeError` out of the WASM is the runtime aborting, after which that answer is a
+    // lie about every string. Rather than distinguish them by the shape of the throw, which is
+    // Emscripten's business and not a contract, ask the module whether it is still alive.
+    //
+    // **That ordering shipped stated and not written**: the worker clause below stood in front of
+    // this probe while the comment beside it said the probe runs first, "because the shape of the
+    // throw is exactly what cannot be relied on". On a worker — which is where the heap this
+    // module owns actually lives — a `RangeError` therefore never reached it, so a genuinely
+    // aborted runtime was rethrown as an escalation, the page copy re-ran the same call and
+    // poisoned *itself*, and the worker's own `available` went on answering `true` for the life of
+    // the thread. Driven, and `tests/rdkitTrap.test.ts` now drives the worker placement too: that
+    // file models an abort as a `RangeError` precisely because Emscripten's throw shape is not a
+    // contract, which is the same reason the probe has to come first.
     if (!stillAlive(rdkit)) {
       poisoned = true;
       return UNREADABLE;
     }
-    // Alive, and it threw a `RangeError`: the stack ran out, not the heap. The liveness probe runs
-    // **first** rather than the throw being classified by its type, because the shape of the throw
-    // is exactly what cannot be relied on — the aborted-runtime case raises whatever Emscripten
-    // raises, and `tests/rdkitTrap.test.ts` models it as a `RangeError` for that reason. A dead
-    // runtime is "unavailable" and is already handled above; what is left here is a live module
-    // that could not finish the recursion, which is the only `too-complex` this file will mint.
+    // **Alive, and a stack exhaustion is a fact about this thread rather than about this
+    // molecule** — and on a worker there is a thread that can do better. RDKit's canonical ranking
+    // recurses over the molecule, so a long chain needs stack proportional to its length, and a
+    // worker's is smaller than the page's: measured in Chromium through this module, `C`*400
+    // canonicalises on both and `C`*500 canonicalises only on the page. Swallowing that into
+    // `null` is the one answer that must not be given — it is "that is not a molecule" about a
+    // chain the very next call draws — so it is rethrown, the worker reports it as a failure, and
+    // `rdkit.client.ts` runs the same call on the page. In-process there is no better placement,
+    // so it stays `null` there: that is the 999-atom molblock this module's `withSmilesMol`
+    // docstring already records.
+    if (error instanceof RangeError && OFF_MAIN_THREAD) throw error;
+    // What is left is a live module that could not finish the recursion, which is the only
+    // `too-complex` this file will mint.
     return error instanceof RangeError ? TOO_COMPLEX : UNREADABLE;
   } finally {
-    mol?.delete();
+    try {
+      mol?.delete();
+    } catch {
+      // **A dead runtime can refuse the free as well** — the same sentence `stillAlive` carries
+      // over its own probe, and this neighbour was unguarded. Driven: a `delete()` that throws
+      // discards the answer this function had already decided on and rejects instead, and the two
+      // callers on the surfaces' path are `void readStructure(...)` and `void
+      // readCanonicalSmiles(...)`, neither of which has a `.catch` — so the panel stays on
+      // "Checking…" for the life of the tab. The handle is lost either way; a verdict need not be.
+    }
   }
 }
 

@@ -10,6 +10,26 @@ deleted, because a gap that was real and got fixed is worth being able to find a
 
 ---
 
+## Open: a maintainer's `CHEMCLAW3_REF` pin may not survive a fork PR
+
+`.github/workflows/ci.yml` resolves the sibling checkout's ref as
+`${{ inputs.chemclaw3_ref || vars.CHEMCLAW3_REF || 'main' }}`. The chain is correct — an
+unpopulated context evaluates falsy in a GitHub expression, so `inputs` outside
+`workflow_dispatch` falls through and an unset variable lands on `'main'`, which is what a run
+without either actually does.
+
+What is **not** verified here is whether `vars` is populated for `pull_request` runs from a fork.
+If it is not, a maintainer who pinned `CHEMCLAW3_REF` to hold the gate against a known-good
+Chemclaw3 revision silently gets `main` for exactly the pull requests that most need a fixed base,
+and nothing says so: `tests/delivery.test.ts` asserts only that a `ref:` is _named_, which is true
+either way. Driving it needs a fork and a run, which is outside what this repository's suite can
+reach, so it is a row rather than an assertion.
+
+The remedy if it turns out to be true is an echo of the resolved ref in the gate step, so a run's
+log says which revision it checked out rather than leaving it to be inferred from the expression.
+
+---
+
 ## Closed: happy-dom blocked by the Replit security policy (was Issue 1)
 
 `happy-dom` is pinned at `^15.11.7` and `vitest` is back in devDependencies. The 403 was on

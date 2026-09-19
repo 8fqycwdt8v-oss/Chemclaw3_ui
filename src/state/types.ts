@@ -23,7 +23,8 @@ export type TraceKind =
   | 'job_failed'
   | 'question'
   | 'note_proposed'
-  | 'approval_request';
+  | 'approval_request'
+  | 'handoff';
 
 /**
  * One entry in the "show your work" panel, in arrival order.
@@ -181,6 +182,16 @@ export interface TraceEntry {
   question?: { question: string; options: string[] };
   note?: { noteId: string; reference: string };
   approval?: { prompt: string };
+  /**
+   * The conversation moved from one peer agent to another.
+   *
+   * **There is no hand-back half, unlike the version of this that was deleted.** That one was an
+   * enter/exit pair around a specialist's work, and rendering only the entry left a trace showing
+   * a turn permanently inside a specialist it had already left. A peer handoff has no exit:
+   * control stays where it went unless another handoff moves it, so one entry is the whole event
+   * and both agents are named on it.
+   */
+  handoff?: { from: string; to: string; reason: string };
 }
 
 export interface UserMessage {

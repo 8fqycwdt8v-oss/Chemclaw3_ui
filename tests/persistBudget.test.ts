@@ -187,6 +187,75 @@ describe('the persisted payload', () => {
   });
 });
 
+describe('the claimed-mailbox lists', () => {
+  /** One digest per index, distinct in the `(query, note ids)` identity the store dedups on. */
+  const digest = (n: number) => ({
+    query: `standing query ${n}`,
+    note_ids: [`note-${n}`],
+    disputed: [],
+    headlines: { [`note-${n}`]: `what note ${n} says, at about the length the service sends` },
+  });
+
+  it('bounds the digests, as the job feed and the check-ins already are', async () => {
+    // The one persisted list with no count bound: `jobFeed` is capped at 50 and `checkIns` at 200,
+    // and this was held only by a 7-day age cutoff. Unbounded it takes transcript persistence down
+    // with it rather than itself — `shedOldest` cannot shed a digest, because the read is the
+    // consume and this card is the only copy — so a long enough list ends in `null`,
+    // `storageWritable = false`, and history silently stopping. Each card also got bigger the day
+    // `headlines` started being read.
+    const { useChatStore } = await freshStore();
+    const { fake } = budgeted(5_000_000);
+    vi.stubGlobal('localStorage', fake);
+
+    useChatStore.getState().addDigests(Array.from({ length: 250 }, (_, i) => digest(i)));
+
+    const held = useChatStore.getState().digests;
+    expect(held).toHaveLength(200);
+    // The newest end is the end kept: a claim arrives newest-first and an old finding is history.
+    expect(held[0]?.query).toBe('standing query 0');
+    expect(held.at(-1)?.query).toBe('standing query 199');
+  });
+
+  it('does not restore trimmed digests from the other tab on the next write', async () => {
+    // The bound has to hold at both places a digest enters the list, or the merge puts back what
+    // the cap just dropped — the same defect the check-in age cutoff had, one field over.
+    const { useChatStore, flushChatPersistence } = await freshStore();
+    const { fake, store } = budgeted(5_000_000);
+    vi.stubGlobal('localStorage', fake);
+    store.set(
+      KEY,
+      JSON.stringify({
+        version: 3,
+        state: {
+          conversations: {},
+          order: [],
+          activeId: null,
+          drafts: {},
+          jobFeed: [],
+          digests: Array.from({ length: 150 }, (_, i) => ({
+            query: `the other tab's query ${i}`,
+            noteIds: [`note-other-${i}`],
+            disputed: [],
+            headlines: {},
+            receivedAt: Date.now(),
+            dismissed: false,
+          })),
+          checkIns: [],
+          notifyOnJobComplete: false,
+        },
+      }),
+    );
+
+    useChatStore.getState().addDigests(Array.from({ length: 150 }, (_, i) => digest(i)));
+    flushChatPersistence();
+
+    const written = JSON.parse(store.get(KEY) ?? '{}') as {
+      state: { digests: { query: string }[] };
+    };
+    expect(written.state.digests).toHaveLength(200);
+  });
+});
+
 describe('two tabs on one account', () => {
   it('does not erase a conversation the other tab wrote', async () => {
     const { useChatStore, flushChatPersistence } = await freshStore();

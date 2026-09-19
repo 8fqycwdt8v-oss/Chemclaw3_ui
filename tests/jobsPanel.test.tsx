@@ -61,6 +61,8 @@ const RECORD: JobRecordSummary = {
   rationale: 'Decide whether 2-MeTHF or CPME favours the coupling.',
   summary: '4 solvents ranked by ΔG.',
   note_id: '',
+  plan_step: '',
+  state: 'completed',
   completed_at: '2026-08-01T09:00:00Z',
 };
 
@@ -70,17 +72,22 @@ const STATUS: DurableJobStatus = {
   summary: null,
   result: {},
   rationale: RECORD.rationale,
+  calc_refs: [],
 };
 
 let restore: (() => void) | null = null;
 const deletes: string[] = [];
 let searched = '';
+/** The `after` cursors this panel asked for, in order — empty string for the first page. */
+const pagesAsked: string[] = [];
+/** What the registry advertises as the next cursor, per `after` it was asked with. */
+let cursors: Record<string, string> = {};
 
 /** How many times the job read has been asked for, and whether it is currently failing. */
 let jobReads = 0;
 let jobReadFails = false;
 
-function serve(records = [RECORD]): void {
+function serve(records = [RECORD], status: DurableJobStatus = STATUS): void {
   const stub = stubFetch((url, init) => {
     if (init?.method === 'DELETE') {
       deletes.push(url);
@@ -98,15 +105,20 @@ function serve(records = [RECORD]): void {
           headers: { 'content-type': 'application/json' },
         });
       }
-      return new Response(JSON.stringify(STATUS), {
+      return new Response(JSON.stringify(status), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });
     }
-    searched = new URL(url, 'http://x').searchParams.get('text') ?? '';
-    return new Response(JSON.stringify(searched ? [] : records), {
+    const query = new URL(url, 'http://x').searchParams;
+    searched = query.get('text') ?? '';
+    const after = query.get('after') ?? '';
+    pagesAsked.push(after);
+    const next = cursors[after] ?? '';
+    return new Response(JSON.stringify(searched ? [] : records.filter((r) => r.job_id !== after)), {
       status: 200,
-      headers: { 'content-type': 'application/json' },
+      // The registry advertises the cursor only when the store saw a further row.
+      headers: { 'content-type': 'application/json', ...(next ? { 'x-next-cursor': next } : {}) },
     });
   });
   restore = stub.restore;
@@ -116,6 +128,8 @@ beforeEach(() => {
   cleanup();
   deletes.length = 0;
   searched = '';
+  pagesAsked.length = 0;
+  cursors = {};
   jobReads = 0;
   jobReadFails = false;
   mode.current = 'dev';
@@ -252,6 +266,8 @@ describe('JobsPanel', () => {
       rationale: 'Push the amination past 85% without losing selectivity.',
       summary: '12 rounds, best 88.1%.',
       note_id: 'bo-candidate-7c31',
+      plan_step: '',
+      state: 'completed',
       completed_at: null,
     };
     serve([campaign, RECORD]);
@@ -269,6 +285,125 @@ describe('JobsPanel', () => {
     fireEvent.click(row);
     expect(await screen.findByText('optimisation campaign')).toBeTruthy();
     expect(screen.getByText(/hours rather than the minutes/)).toBeTruthy();
+  });
+
+  it('says a failed run failed, instead of rendering it as one more finished job', async () => {
+    // `job_records.state` exists for exactly this row: a failing job raises before
+    // `ConnectorJobWorkflow._finish`, so a failure used to write no row at all, and the column that
+    // fixed that is the one this list has to read. Without it a failed run sits in the registry
+    // beside the successful ones with an empty summary and nothing saying it failed — which the
+    // service's own model calls "a worse answer than the one that omitted it" — and both rows say
+    // *finished*, which is a claim about the run rather than about the clock.
+    const failed: JobRecordSummary = {
+      ...RECORD,
+      job_id: 'calc-1b40',
+      job: 'search_conformers',
+      rationale: 'Get the accessible conformers before the scan.',
+      summary: '',
+      state: 'failed',
+    };
+    serve([failed, { ...RECORD, summary: '' }]);
+    mountJobs();
+
+    const row = await screen.findByRole('button', { name: /search_conformers/ });
+    expect(within(row).getByText('failed')).toBeTruthy();
+    expect(within(row).queryByText(/^finished/)).toBeNull();
+    // The successful run beside it carries no state badge at all, which is what makes one mean
+    // something: every row in a registry of finished work would otherwise wear the same word.
+    const completed = screen.getByRole('button', { name: /compare_solvents/ });
+    expect(within(completed).queryByText('failed')).toBeNull();
+    expect(within(completed).queryByText('completed')).toBeNull();
+    expect(within(completed).getByText(/^finished/)).toBeTruthy();
+  });
+
+  it('says which plan step a run served, as the live trace already does', async () => {
+    // The service puts the step in the *listing* so "which step was this for" needs no second
+    // lookup, and the live trace badges it — so a reloaded or searched-for run losing it is the
+    // same fact rendered two ways in one app.
+    serve([{ ...RECORD, plan_step: 'Estimate the pKa of the aniline' }]);
+    mountJobs();
+
+    const row = await screen.findByRole('button', { name: /compare_solvents/ });
+    expect(within(row).getByText(/Estimate the pKa of the aniline/)).toBeTruthy();
+  });
+
+  it('names the calculations a run rested on', async () => {
+    // `calc_refs` is what `record_knowledge_note` takes, and the reason a note drafted from a
+    // calculation the agent had just run could not cite it. They are a sibling of the result
+    // envelope rather than part of it, so the `Result` dump below does not carry them.
+    serve([RECORD], {
+      ...STATUS,
+      status: 'completed',
+      calc_refs: ['xtb:9ac1f0', 'crest:41b2c7'],
+    });
+    mountJobs();
+    fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
+    await screen.findByText('completed');
+
+    expect(screen.getByText(/xtb:9ac1f0/)).toBeTruthy();
+    expect(screen.getByText(/crest:41b2c7/)).toBeTruthy();
+  });
+
+  it('offers the older runs the search cap cut off, and follows the cursor', async () => {
+    // `job_record_search_limit` is 20 in the shipped config and the service advertises
+    // `X-Next-Cursor` when it saw a row beyond the page. Nothing read it, so run 21 was not below a
+    // fold — it was never fetched, and the listing looked complete, on the one panel whose purpose
+    // is not paying twice for a run that already happened.
+    const older: JobRecordSummary = {
+      ...RECORD,
+      job_id: 'calc-0001',
+      job: 'search_conformers_older',
+      rationale: 'The run from three months ago.',
+    };
+    cursors = { '': RECORD.job_id };
+    serve([RECORD, older]);
+    mountJobs();
+    await screen.findByText('compare_solvents');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load older runs' }));
+
+    expect(await screen.findByText('search_conformers_older')).toBeTruthy();
+    // The cursor the service advertised, sent back as `after` — not a page number of our own.
+    expect(pagesAsked).toEqual(['', RECORD.job_id]);
+  });
+
+  it('offers nothing further when the registry advertised no cursor', async () => {
+    // The control has to be absent rather than disabled: a button that says there may be more when
+    // the service said there is not is the same false completeness inverted.
+    serve();
+    mountJobs();
+    await screen.findByText('compare_solvents');
+
+    expect(screen.queryByRole('button', { name: 'Load older runs' })).toBeNull();
+  });
+
+  it('renders a service that sends none of the three new fields', async () => {
+    // The older-service direction, which is the same defect class as the note sheet's
+    // `confidence: null`: `state` and `plan_step` are absent rather than empty from a service that
+    // predates them, and `calc_refs` likewise — so a badge rendered off `!== 'completed'` prints an
+    // empty pill and `calc_refs.length` throws inside the sheet.
+    serve(
+      [
+        {
+          ...RECORD,
+          state: undefined as unknown as string,
+          plan_step: undefined as unknown as string,
+        },
+      ],
+      { ...STATUS, calc_refs: undefined as unknown as string[] },
+    );
+    mountJobs();
+
+    const row = await screen.findByRole('button', { name: /compare_solvents/ });
+    // One badge — the connector — and no empty pill beside it: `!== 'completed'` is true of
+    // `undefined`, so a badge keyed on inequality renders a bordered blank.
+    expect(within(row).getByText(/^finished/)).toBeTruthy();
+    const badges = [...row.querySelectorAll('[data-slot="badge"]')];
+    expect(badges.map((b) => b.textContent)).toEqual(['calc']);
+
+    fireEvent.click(row);
+    expect(await screen.findByText('running')).toBeTruthy();
+    expect(screen.queryByText('Calculations it rested on')).toBeNull();
   });
 
   it('distinguishes an empty registry from an empty search', async () => {

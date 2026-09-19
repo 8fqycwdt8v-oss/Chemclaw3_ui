@@ -6,12 +6,13 @@
  */
 
 import { api } from '../api/client.ts';
+import type { TranscriptMessage } from '../api/client.ts';
 import { config } from '../env.ts';
 import { prefetchMarkdown } from '../components/LazyMarkdown.tsx';
 import { ApiError } from '../api/errors.ts';
 import { streamTurn, TURN_STALL_MS } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
-import type { Banner, ComposerLock } from './types.ts';
+import type { Banner, ChatMessage, ComposerLock } from './types.ts';
 import { useChatStore } from './chatStore.ts';
 import { useEntityStore } from '../chem/entities.ts';
 import { announceStatus, describeAnswer } from './announce.ts';
@@ -152,13 +153,11 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   if (!text.trim()) return;
 
   // Snapshotted before `appendUserMessage` — which now runs inside the `try` below — adds this
-  // turn's own copy, so a repeated identical question can still be told apart from its own prior
-  // appearances once detach recovery has to find it in the *backend's* transcript by text alone
-  // (see `recoverDetachedAnswer`). It stays out here because it is a read: it is the store
-  // *writes* that had to move inside the `try`, and this one must happen before them either way.
-  const priorOccurrences = (store.conversations[conversationId]?.messages ?? []).filter(
-    (m) => m.role === 'user' && m.text === text,
-  ).length;
+  // turn's own message, so detach recovery can tell an answer written for this turn from one that
+  // was already in the transcript when it started (see `recoverDetachedAnswer`). It stays out here
+  // because it is a read: it is the store *writes* that had to move inside the `try`, and this one
+  // must happen before them either way.
+  const heldAnswer = newestHeldAnswer(store.conversations[conversationId]?.messages ?? []);
 
   const abort = new AbortController();
 
@@ -559,7 +558,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         const recovered = await recoverDetachedAnswer(
           sessionId,
           opts.text,
-          priorOccurrences,
+          heldAnswer,
           abort.signal,
           auth,
         );
@@ -706,18 +705,34 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
  * Read a detached turn's answer back from the transcript, or `null` when it never appears.
  *
  * The detached turn writes its exchange to `session_messages` at its true end, so the recovery
- * signal is an assistant entry following the transcript entry that carries this turn's own
- * question. Bounded — the server's turn deadline is 600 s, and polling much past it would wait
+ * signal is the transcript's newest question-and-answer pair turning into this turn's. Bounded — the server's turn deadline is 600 s, and polling much past it would wait
  * on a turn that can no longer exist — and abandoned early if the user presses Stop, whose
  * `stop()` both cancels the server turn and flips this signal.
  *
  * The wire carries no turn id, so the question text is all there is to match on — but a chemist
  * retrying an identical failed question (the banner's own "Retry" refills the same text) makes
- * that text non-unique. `priorOccurrences` is how many times this exact question already sat in
- * the transcript *before this turn started*; skipping that many matches finds this turn's own
- * copy instead of an older, already-answered one. Until the backend commits this turn's copy,
- * that many occurrences is all there is, so the search correctly keeps polling rather than
- * returning a stale answer.
+ * that text non-unique, and an answer bound to the wrong copy is this app's worst output: a
+ * three-week-old "no alerts fired" presented as this turn's answer to a genotoxicity question.
+ *
+ * Two facts decide which copy is this turn's, and both are read off the transcript this loop
+ * already fetches. The service writes a turn's exchange **once, when the answer exists**
+ * (`api/runner._record_transcript`), and a session runs one turn at a time — so this turn's
+ * question and answer are the *last* pair in the transcript, or the service has not written it yet
+ * and nothing of this turn is there at all. `heldAnswer` is what tells those two apart: the newest
+ * answer this client already holds, so an unchanged last pair is the one that was already there
+ * and a changed one is this turn's.
+ *
+ * **It is one scalar rather than a count, and that is the whole point.** This used to skip
+ * `priorOccurrences` matches while walking the transcript — a count taken over
+ * `conversation.messages`, which is not the population being walked: `partialize` persists only the
+ * newest `MAX_PERSISTED_MESSAGES` and `shedOldest` halves a conversation on a quota refusal, which
+ * is precisely the reload path `resumeInterruptedTurn` exists for. Driven: a transcript holding the
+ * question twice against a local list the trim had shortened undercounted by one, stopped at the
+ * older copy, and bound *that* turn's answer into this turn's bubble. A single answer read from the
+ * message next to this turn cannot come apart that way — every path that shortens a conversation
+ * keeps its *tail*, so the turn's own neighbour survives whatever the head loses. A turn id on the
+ * wire would be better still, and there is none: `session_messages.correlation_id` exists and
+ * `GET /sessions/{id}/messages` does not return it.
  *
  * **The cadence is backed off with jitter, and the reason is the trigger.** This loop starts on
  * any dropped turn stream, and the thing that drops every turn stream at once is a backend rolling
@@ -738,12 +753,20 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
 export async function recoverDetachedAnswer(
   sessionId: string,
   question: string,
-  priorOccurrences: number,
+  heldAnswer: string | null,
   signal: AbortSignal,
   auth: AuthProvider,
 ): Promise<string | null> {
   const deadline = Date.now() + 630_000;
   let attempt = 0;
+  /**
+   * The answer this turn's own must differ from.
+   *
+   * `null` on the way in means this client cannot say what the session's newest answer is — the
+   * previous turn left none here, and the service may hold one it never saw — so the first read
+   * becomes the anchor and only an answer that appears *after* recovery started can be this turn's.
+   */
+  let held = heldAnswer;
   while (Date.now() < deadline && !signal.aborted) {
     attempt += 1;
     await backoff(attempt, signal);
@@ -763,24 +786,64 @@ export async function recoverDetachedAnswer(
       });
       continue;
     }
-    let seen = 0;
-    let asked = -1;
-    for (let i = 0; i < transcript.length; i += 1) {
-      const entry = transcript[i];
-      if (!entry || entry.role !== 'user' || entry.text !== question) continue;
-      if (seen === priorOccurrences) {
-        asked = i;
-        break;
-      }
-      seen += 1;
+    const newest = newestExchange(transcript);
+    if (held === null) {
+      // The anchor this client could not supply, taken from the same population the search runs on.
+      // An empty transcript anchors on `''`, which is the honest reading: nothing was there.
+      held = newest?.answer ?? '';
+      continue;
     }
-    if (asked === -1) continue; // this turn's own copy has not committed yet
-    const answer = transcript
-      .slice(asked + 1)
-      .find((m) => m.role === 'assistant' && m.text.trim() !== '');
-    if (answer) return answer.text;
+    if (!newest || newest.question !== question) continue; // not this turn's exchange
+    if (newest.answer !== held) return newest.answer;
+    // The last pair is still the one we already hold, so the service has not written this turn's.
   }
   return null;
+}
+
+/**
+ * The newest question-and-answer pair in a stored transcript, or `null` when it holds none.
+ *
+ * Searched from the end because that is where the newest turn is: the transcript is a conversation
+ * in order, and a session runs one turn at a time, so nothing is written after the pair at the end
+ * until the next turn finishes. An assistant entry with no text is skipped — a turn whose record is
+ * its work alone is not an answer anybody is waiting on — and so is a stored `system` entry, by
+ * looking back for a `user` role rather than for the entry immediately before.
+ */
+function newestExchange(
+  transcript: TranscriptMessage[],
+): { question: string; answer: string } | null {
+  for (let i = transcript.length - 1; i >= 0; i -= 1) {
+    const answer = transcript[i];
+    if (!answer || answer.role !== 'assistant' || answer.text.trim() === '') continue;
+    for (let j = i - 1; j >= 0; j -= 1) {
+      const asked = transcript[j];
+      if (asked?.role === 'user') return { question: asked.text, answer: answer.text };
+    }
+    return null; // an answer to nothing: not a pair, and not something to bind a turn to
+  }
+  return null;
+}
+
+/**
+ * The newest answer this client already holds, as detach recovery's anchor.
+ *
+ * `''` when `messages` carries no turn at all, which for the two callers means this turn is the
+ * conversation's first: there is no older copy of anything to confuse its answer with. `null` when
+ * the newest turn left no answer here — an aborted or failed one, whose answer the service may
+ * hold anyway (a detach whose recovery gave up is exactly that case), so an answer already in the
+ * transcript might be *its* and recovery must wait for the transcript to move rather than adopt it.
+ *
+ * Only `finalText` counts. A partially streamed answer is a prefix of what the service stored, so
+ * treating it as the anchor would make the previous turn's *whole* answer look like a new one.
+ */
+function newestHeldAnswer(messages: ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || message.role !== 'assistant') continue;
+    const answer = message.finalText ?? '';
+    return answer.trim() ? answer : null;
+  }
+  return '';
 }
 
 /**
@@ -822,11 +885,10 @@ export function resumeInterruptedTurn(
   if (!message || message.role !== 'assistant') return undefined;
   if (!question || question.role !== 'user') return undefined;
 
-  // Which copy of a repeated question this was, counted the same way the live path counts it —
-  // a chemist who asks the same thing twice must not be handed the first answer for the second.
-  const priorOccurrences = conversation.messages
-    .slice(0, index - 1)
-    .filter((m) => m.role === 'user' && m.text === question.text).length;
+  // What this conversation already held when the turn started, read the same way the live path
+  // reads it — a chemist who asks the same thing twice must not be handed the first answer for the
+  // second, and the local list this is read from may be a trim of the real one.
+  const heldAnswer = newestHeldAnswer(conversation.messages.slice(0, index - 1));
 
   const abort = new AbortController();
   const messageId = message.id;
@@ -834,7 +896,7 @@ export function resumeInterruptedTurn(
     const recovered = await recoverDetachedAnswer(
       sessionId,
       question.text,
-      priorOccurrences,
+      heldAnswer,
       abort.signal,
       auth,
     );

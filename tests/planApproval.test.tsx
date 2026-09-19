@@ -43,10 +43,12 @@ async function decideVia(triggerName: RegExp): Promise<void> {
 const planStatus = (
   hash: string,
   plan: string[] = ['Run xTB on the aryl bromide'],
+  scope: string[] = ['compute_pka', 'record_knowledge_note'],
 ): PlanStatus => ({
   session_id: SID,
   plan_hash: hash,
   plan,
+  scope,
   mode: 'plan_only',
   approved: false,
   decided_by: null,
@@ -172,8 +174,9 @@ describe('the plan the card shows', () => {
     // Completion state reaches a screen reader, not only the strikethrough.
     expect(screen.getByText('Done:')).toBeTruthy();
     expect(screen.getByText('To do:')).toBeTruthy();
-    // Still no round trip: the stream carried both halves.
-    expect(getPlan).not.toHaveBeenCalled();
+    // The steps came off the stream: the read this card makes is for the scope, and nothing it
+    // answers is allowed to re-render a step. `PlanItems` is fed the streamed list either way.
+    expect(getPlan).toHaveBeenCalledTimes(1);
   });
 
   // The fetch fallback returns bare step text with no status, and a checkbox drawn for it would
@@ -189,12 +192,14 @@ describe('the plan the card shows', () => {
 });
 
 describe('the plan the stream already carried', () => {
-  it('binds to the streamed hash without a second read', async () => {
+  it('binds to the streamed hash, and never to what a read answered', async () => {
     // The service puts `plan_hash` on the `plan` event precisely so a client does not have to ask
-    // again — and the ask is not merely a round trip, it races the revision the hash exists to
-    // catch: between rendering the plan and fetching its identity the agent may revise it, and the
-    // fetch answers with what is current rather than with what this card is showing.
-    const getPlan = vi.spyOn(api, 'getPlan');
+    // again for the *binding* — and the ask is not merely a round trip, it races the revision the
+    // hash exists to catch: between rendering the plan and reading its identity the agent may
+    // revise it, and the read answers with what is current rather than with what this card is
+    // showing. So what this pins is the binding rather than the absence of a read: the scope below
+    // needs one, and the hash it posts still comes from the stream.
+    const getPlan = vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('a-newer-hash'));
     const decide = vi.spyOn(api, 'decidePlan').mockResolvedValue();
     render(
       <ApprovalPrompt
@@ -210,7 +215,67 @@ describe('the plan the stream already carried', () => {
     await waitFor(() =>
       expect(decide).toHaveBeenCalledWith(SID, true, 'streamed-hash', expect.anything()),
     );
-    expect(getPlan).not.toHaveBeenCalled();
+    expect(getPlan).toHaveBeenCalledTimes(1);
+  });
+
+  it('names the tools an approval authorises, which the steps do not say', async () => {
+    // `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool` §3: "a surface that
+    // rendered the steps alone would be collecting a yes to something it had not displayed". The
+    // gate enforces the scope — a state-changing tool no step declared is refused even under a live
+    // approval — so the scope is the half of the plan a person is deciding about that the steps do
+    // not state, and it is only on the plan *route*.
+    vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('streamed-hash'));
+    render(
+      <ApprovalPrompt
+        prompt="Approve this plan?"
+        sessionId={SID}
+        planTodos={['Run xTB on the aryl bromide']}
+        planHash="streamed-hash"
+      />,
+    );
+
+    expect(await screen.findByText(/compute_pka/)).toBeTruthy();
+    expect(screen.getByText(/record_knowledge_note/)).toBeTruthy();
+  });
+
+  it('shows no scope read off a plan it is not displaying', async () => {
+    // The race the streamed hash exists to catch, applied to the scope: if the service has moved on
+    // to another revision, its tool list is that revision's. Naming those tools over these steps
+    // would be the disclosure defect inverted — a scope the approval does not authorise.
+    vi.spyOn(api, 'getPlan').mockResolvedValue(
+      planStatus('a-newer-hash', ['Something else entirely'], ['delete_everything']),
+    );
+    render(
+      <ApprovalPrompt
+        prompt="Approve this plan?"
+        sessionId={SID}
+        planTodos={['Run xTB on the aryl bromide']}
+        planHash="streamed-hash"
+      />,
+    );
+
+    expect(await screen.findByText('Run xTB on the aryl bromide')).toBeTruthy();
+    expect(screen.queryByText(/delete_everything/)).toBeNull();
+  });
+
+  it('says nothing about scope against a service that sends none', async () => {
+    // An older service has no `scope` on the plan route at all, which must read as "unknown" and
+    // never as "this authorises nothing".
+    vi.spyOn(api, 'getPlan').mockResolvedValue({
+      ...planStatus('streamed-hash'),
+      scope: undefined as unknown as string[],
+    });
+    render(
+      <ApprovalPrompt
+        prompt="Approve this plan?"
+        sessionId={SID}
+        planTodos={['Run xTB on the aryl bromide']}
+        planHash="streamed-hash"
+      />,
+    );
+
+    expect(await screen.findByText('Run xTB on the aryl bromide')).toBeTruthy();
+    expect(screen.queryByText(/authorises/)).toBeNull();
   });
 
   it('falls back to the fetch when the service sent no hash', async () => {

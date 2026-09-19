@@ -27,7 +27,6 @@
 
 import { visit, SKIP } from 'unist-util-visit';
 import type { Node, Parent } from 'unist';
-import type { KnownTool } from '../../shared/events.ts';
 import type { TraceEntry } from '../state/types.ts';
 
 interface TextNode extends Node {
@@ -316,10 +315,25 @@ const LEDGER = 'Calibration ledger';
 const STORE = 'Calculation store';
 const RETRIEVAL = 'Knowledge-graph retrieval';
 
-/** Keyed on `KnownTool` — the tool list in `shared/events.ts` — so a method attributed to a tool
- *  the backend does not have will not compile. Partial, because a tool with no sourced method
- *  belongs here as an absence: `methodFor` returns null and no badge renders. */
-const TOOL_METHOD: Partial<Record<KnownTool, ToolMethod>> = {
+/**
+ * Keyed on the tool name as the wire spells it, and an absent tool is an absence rather than an
+ * error: `methodFor` returns null and no badge renders.
+ *
+ * **It used to be keyed on a `KnownTool` union, on the argument that "a method attributed to a tool
+ * the backend does not have will not compile".** That bar was measured against the fleet and does
+ * not hold: the authoritative surface is `registry.enabled()` in a deployment's connector set — 100
+ * tools and jobs with the fleet wired, against 58 names in the union — so it admitted a subset of
+ * the real surface and could never prove a name wrong. What it did do is refuse a sourced method for
+ * any of the other 64 (`props`, `kinetics`, `unitops`, `thermalsafety`, `suitability` and `pyexec`
+ * were absent entirely), which is the opposite of what it was for. Nothing read the list at runtime
+ * — `toolLabel` derives its label from the name — so the union was a bar and not a lookup, and the
+ * list's own docstring claiming it picked an icon was stale as well.
+ *
+ * What still governs what goes in here is the rule below the interface: every method and caveat is
+ * quoted or compressed from the backend's own manifest, and a tool whose manifest says nothing gets
+ * no entry. A list of names cannot enforce that, and a widened key does not weaken it.
+ */
+const TOOL_METHOD: Record<string, ToolMethod> = {
   // calc — inline GFN2-xTB calculators. Bundle manifest: "Fast cached property calculators …
   // Every method here is semiempirical (GFN2-xTB via tblite, CREST) — there is no DFT tier."
   compute_xtb_energy: {

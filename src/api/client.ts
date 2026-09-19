@@ -296,18 +296,64 @@ export interface JobRecordSummary {
   rationale: string;
   summary: string;
   note_id: string;
+  /**
+   * The plan step the run served, or empty when it was not launched from one.
+   *
+   * In the *listing* upstream so that "which step was this for" needs no second lookup — and the
+   * live trace badges the same fact from `job_started.plan_step`, so dropping it here made one
+   * fact render two ways in one app depending on whether the page had been reloaded.
+   */
+  plan_step: string;
+  /**
+   * How the run ended: `completed` or `failed`.
+   *
+   * Defaulted to `completed` upstream because that is what every row written before the column is,
+   * not because a caller may omit it. It exists for one failure and it is this surface's: a failing
+   * job raises before the workflow's `_finish`, so until this column a failed run wrote no row at
+   * all, and the model's own docstring says that without it "a failed run appears in
+   * `find_past_jobs` beside the successful ones with an empty summary and nothing saying it
+   * failed, which is a worse answer than the one that omitted it". `failure_reason` is deliberately
+   * not here: the listing says *that* a run failed, and opening the record says why.
+   */
+  state: string;
   completed_at: string | null;
+}
+
+/**
+ * One page of the durable-run registry, with the cursor for the next.
+ *
+ * The cursor is a `job_id` rather than an opaque token, and the service says why: the anchor is a
+ * row the caller already holds, so nothing about the ordering is disclosed and the cursor survives
+ * the ordering gaining a third component. It is advertised only when the store actually saw a
+ * further row, so following it never lands on an empty page.
+ */
+export interface JobPage {
+  jobs: JobRecordSummary[];
+  /** `''` when this page is the whole answer. */
+  next: string;
 }
 
 /**
  * One standing query's finding — what a watch turned up since it last reported.
  *
- * Two fields, and no timestamp: the service does not send one, so nothing here may imply when the
+ * Four fields, and no timestamp: the service does not send one, so nothing here may imply when the
  * notes were merged. `note_ids` resolve through the ordinary citation chip.
+ *
+ * **This declared the first two and dropped the other two, which are the ones a reader acts on.**
+ * Upstream's own model says `headlines` exists because "without it this route answers with note
+ * **ids** and a client can do nothing but print them" — which is what the card did. And `disputed`
+ * has been computed since `D-2026-08-27` and rendered by the outbound delivery channels, so a
+ * deployment with a channel configured saw it while one on the shipped default lost it on the only
+ * path a UI reads: "a chemist who happens to ask is told, and a chemist watching the subject is
+ * not", one layer below where that sentence was written.
  */
 export interface Digest {
   query: string;
   note_ids: string[];
+  /** Which of `note_ids` the corpus now disagrees with. A subset, and usually empty. */
+  disputed: string[];
+  /** Note id → one line of what it says. Empty for a note the service could not summarise. */
+  headlines: Record<string, string>;
 }
 
 /**
@@ -395,6 +441,25 @@ export interface PendingRequests {
    * over five rows would be describing a page as a total.
    */
   count: number;
+  /**
+   * Everything matching this caller's routing, before the page bound and before the gate.
+   *
+   * It can exceed `count` for two different reasons — rows the page did not reach, and rows this
+   * caller may not answer because they raised them — and `verdict` is the service saying which.
+   */
+  total_routed_to_you: number;
+  /** Whether waiting rows exist that this page did not carry. */
+  truncated: boolean;
+  /**
+   * What this page *is*, in the service's own sentence, for rendering above the list.
+   *
+   * A `computed_field` upstream rather than a client derivation, deliberately: the arithmetic has
+   * two independent reasons a total can exceed a page and the wording separates them. This client
+   * declared none of the three, so 35 waiting rows rendered as 20 as though that were the inbox —
+   * and the consequence the service records is a raised question that ages out because it appeared
+   * in nobody's inbox. Empty from a service that predates the field, which renders as nothing.
+   */
+  verdict: string;
 }
 
 /** One job's live status and structured result. */
@@ -403,6 +468,14 @@ export interface DurableJobStatus {
   status: string;
   summary: string | null;
   result: Record<string, unknown>;
+  /**
+   * The calculation keys this run rested on, as `record_knowledge_note` takes them.
+   *
+   * A sibling of the result envelope rather than part of it, so the sheet's `result` dump does not
+   * carry them. Empty for a run that recorded none — a report, or a run from before the refs were
+   * captured — which is the honest reading either way.
+   */
+  calc_refs: string[];
   rationale: string;
 }
 
@@ -423,15 +496,27 @@ export interface StoredToolResult {
   text: string;
 }
 
-/** A note's identity and provenance, without its body. Also what a neighbour is. */
+/**
+ * A note's identity and provenance, without its body. Also what a neighbour is.
+ *
+ * **Three of these are nullable upstream and were declared non-null here**, which is not a
+ * pedantic difference for `confidence`: four of the five note producers in the service's `memory/`
+ * package mint a note with none — a campaign, an interaction, an optimisation and a playbook — and
+ * only a recorded failure scores one. So `null` is the *ordinary* value over most of the corpus,
+ * and the badge that called `.toFixed(2)` on it threw, taking down the one panel whose whole job
+ * is letting a chemist check a citation.
+ */
 export interface NoteRef {
   id: string;
   type: string;
-  compound_smiles: string;
+  /** The structure the note is about, or null for a note that is not about one. */
+  compound_smiles: string | null;
   tags: string[];
   created_by: string;
-  source: string;
-  confidence: number;
+  /** Where it came from, or null when the producer recorded none. */
+  source: string | null;
+  /** The producer's own score, or null when it did not score the note. Most of the corpus. */
+  confidence: number | null;
   /** Bi-temporal validity. A note outside its window is excluded from retrieval but still
    *  readable here, which is the point of showing the dates rather than a boolean. */
   valid_from: string | null;
@@ -450,6 +535,21 @@ export interface PlanStatus {
   session_id: string;
   plan_hash: string;
   plan: string[];
+  /**
+   * What approving this plan would authorize: every tool its steps declare.
+   *
+   * The half of the plan a person is deciding about that the steps do not state, and the service
+   * puts it in the same payload for that reason —
+   * `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool` says in as many words that
+   * "a surface that showed the steps alone would be asking a person to approve a thing it had not
+   * shown them". The gate enforces it, so this is disclosure rather than decoration: a
+   * state-changing tool no step declared is refused even under a live approval.
+   *
+   * Absent — not empty — from a service that predates the field, which a reader must treat as
+   * "unknown" rather than as "this authorizes nothing". The `plan` *event* does not carry it at
+   * all, which is why the card reads it here.
+   */
+  scope: string[];
   /** `plan_only` until a human approves; `execute` afterwards. */
   mode: string;
   approved: boolean;
@@ -463,6 +563,10 @@ export interface PendingPlan {
   updated_at: string;
   plan_hash: string;
   plan: string[];
+  /** What approving it would authorize — see `PlanStatus.scope`. The inbox carries it for the same
+   *  reason the card does, and here it arrives in the same payload as the steps, so there is no
+   *  revision to check it against. */
+  scope: string[];
 }
 
 /**
@@ -950,6 +1054,57 @@ export const api = {
     if (options.connector) query.set('connector', options.connector);
     const suffix = query.toString() ? `?${query.toString()}` : '';
     return orEmpty('/jobs', () => request<JobRecordSummary[]>(`/jobs${suffix}`, getToken));
+  },
+
+  /**
+   * One page of durable runs, with the cursor for the next — the same shape `pageSessions` has.
+   *
+   * Separate from `listJobs` for the same reason that pair is separate, and needed for the same
+   * reason: the search is capped at `job_record_search_limit` (20 in the shipped config), the
+   * service advertises `X-Next-Cursor` when it saw a further row, and nothing here read it — so a
+   * chemist with more finished runs than the cap could not reach the older ones from any client and
+   * the listing looked complete. `send` rather than `request`, because the cursor is a header.
+   */
+  async pageJobs(
+    getToken: TokenGetter,
+    options: { text?: string; connector?: string; after?: string } = {},
+  ): Promise<JobPage> {
+    const query = new URLSearchParams();
+    if (options.text) query.set('text', options.text);
+    if (options.connector) query.set('connector', options.connector);
+    if (options.after) query.set('after', options.after);
+    const suffix = query.toString() ? `?${query.toString()}` : '';
+    try {
+      let res = await send(`/jobs${suffix}`, getToken, {});
+      // The one-shot 401 recovery every route gets, written out here for the same reason
+      // `pageSessions` writes it out: reaching a response header means not going through `request`.
+      if (res.status === 401 && (await recoverFrom(getToken))) {
+        res = await send(`/jobs${suffix}`, getToken, {});
+      }
+      if (!res.ok) {
+        const failure = await readFailure(res);
+        throw errorFromStatus(
+          res.status,
+          failure.detail,
+          res.headers.get('retry-after'),
+          failure.correlationId,
+          failure.code,
+        );
+      }
+      return {
+        jobs: (await res.json()) as JobRecordSummary[],
+        next: res.headers.get('x-next-cursor') ?? '',
+      };
+    } catch (err) {
+      // The registry's own degradation, unchanged from `listJobs`: a service without the route
+      // answers an empty page rather than an error, because this panel renders a failed search as
+      // an empty result deliberately.
+      if (err instanceof ApiError && err.kind === 'session_not_found') {
+        logger.warn('api.list_route_missing', { route: '/jobs' });
+        return { jobs: [], next: '' };
+      }
+      throw err;
+    }
   },
 
   getJob(jobId: string, getToken: TokenGetter): Promise<DurableJobStatus> {

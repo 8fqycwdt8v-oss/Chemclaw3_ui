@@ -112,11 +112,18 @@ export function NoteSheet({
             {note && (
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <Badge tone="neutral">{note.type}</Badge>
-                {/* A number without its scale is noise; the label says what 0.72 is a measure of. */}
-                <Badge tone={note.confidence >= 0.7 ? 'ok' : 'warn'}>
-                  <span className="font-mono tabular-nums">{note.confidence.toFixed(2)}</span>
-                  <span className="font-normal opacity-80">confidence</span>
-                </Badge>
+                {/* A number without its scale is noise; the label says what 0.72 is a measure of.
+                    And `null` is the ordinary case rather than the exception — four of the five
+                    producers in the service's `memory/` package score nothing — so the absence is
+                    stated instead of being rendered as a number or as a silent gap. */}
+                {note.confidence === null ? (
+                  <Badge tone="neutral">no confidence recorded</Badge>
+                ) : (
+                  <Badge tone={note.confidence >= 0.7 ? 'ok' : 'warn'}>
+                    <span className="font-mono tabular-nums">{note.confidence.toFixed(2)}</span>
+                    <span className="font-normal opacity-80">confidence</span>
+                  </Badge>
+                )}
                 {isExpired(note) && <Badge tone="warn">superseded</Badge>}
               </div>
             )}

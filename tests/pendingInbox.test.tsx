@@ -39,6 +39,12 @@ const REQUEST: PendingRequest = {
 };
 
 let requests: PendingRequest[] = [];
+/** What the service says this page *is* — its own `verdict`, which only it can compute. */
+let page = {
+  total_routed_to_you: 1,
+  truncated: false,
+  verdict: 'COMPLETE: every request waiting on you is shown.',
+};
 let answerStatus = 204;
 const posted: { url: string; body: unknown }[] = [];
 let restore: (() => void) | null = null;
@@ -62,7 +68,7 @@ function serve(): void {
       return Promise.resolve(json({ plans: [], gated: false, unread: 0 }));
     }
     if (/\/pending$/.test(url)) {
-      return Promise.resolve(json({ requests, count: requests.length }));
+      return Promise.resolve(json({ requests, count: requests.length, ...page }));
     }
     // Proposals and anything else.
     return Promise.resolve(json([]));
@@ -83,6 +89,11 @@ const mount = (): void => {
 beforeEach(() => {
   cleanup();
   requests = [REQUEST];
+  page = {
+    total_routed_to_you: 1,
+    truncated: false,
+    verdict: 'COMPLETE: every request waiting on you is shown.',
+  };
   answerStatus = 204;
   posted.length = 0;
   serve();
@@ -100,6 +111,37 @@ describe('a question the agent is holding work open for', () => {
 
     expect(await screen.findByText('Isolated yield for arm B3')).toBeTruthy();
     expect(screen.getByText(/cannot pick the next batch/)).toBeTruthy();
+  });
+
+  it('says what the page is when it is not the whole inbox', async () => {
+    // `count` is the length of the page and the store bounds the listing at 50 against 200 rows, so
+    // a client that renders the page alone renders a partial inbox as a complete one. The service's
+    // measured consequence is a raised question that ages out because it appeared in nobody's
+    // inbox. `verdict` is its own sentence about its own arithmetic — it separates "rows this page
+    // did not reach" from "rows you may not answer because you raised them" — so it is rendered as
+    // given rather than recomputed from the two counts beside it.
+    page = {
+      total_routed_to_you: 35,
+      truncated: true,
+      verdict:
+        'PARTIAL: 20 shown of 35 routed to you, soonest deadline first. The rest are still waiting — ask for a larger `limit`.',
+    };
+    mount();
+
+    expect(await screen.findByText(/PARTIAL: 20 shown of 35 routed to you/)).toBeTruthy();
+  });
+
+  it('says nothing about the page when the service sent no verdict', async () => {
+    // An older service has no such field, and an empty string must render as nothing rather than as
+    // an empty notice with a border round it.
+    page = { total_routed_to_you: 0, truncated: false, verdict: '' };
+    mount();
+    await screen.findByText('Isolated yield for arm B3');
+
+    expect(screen.queryByText(/shown of/)).toBeNull();
+    // And not as an empty notice with a border round it, which says less than no notice at all.
+    const blank = screen.queryAllByRole('status').filter((el) => !el.textContent?.trim());
+    expect(blank).toEqual([]);
   });
 
   it('sends a measured number as a number', async () => {

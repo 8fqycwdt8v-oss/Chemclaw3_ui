@@ -197,6 +197,14 @@ function PlanApprovalPrompt({
     'loading' | 'idle' | 'sending' | 'approved' | 'rejected' | 'failed' | 'unavailable'
   >(streamedPlan ? 'idle' : sessionId ? 'loading' : 'unavailable');
   const [error, setError] = useState<string | null>(null);
+  /**
+   * The tools approving this plan would authorize, or `null` when this card cannot say.
+   *
+   * `null` is "not known" — the read failed, or the service predates the field, or it answered
+   * about a different revision — and is rendered as nothing rather than as an empty list, which
+   * would claim the approval carries no tool authority at all.
+   */
+  const [scope, setScope] = useState<string[] | null>(null);
 
   // Through a ref, so the read below depends on the session alone. `useAuth()` hands back a fresh
   // object on every render, and an effect that listed it as a dependency re-read the plan on each
@@ -218,22 +226,34 @@ function PlanApprovalPrompt({
 
   useEffect(() => {
     if (!sessionId) return;
-    // Nothing to read: the stream already said what the plan is and what its identity is, so this
-    // card binds to what the message rendered and costs no round trip at all. The fetch is the
-    // fallback for a service that sent no hash, not the normal path.
-    if (planHash && planTodos) return;
+    // The stream carries the steps and the hash, so when it did this read decides nothing about
+    // what is shown or what is posted — it is here for the **scope**, which is the one part of the
+    // plan the `plan` event does not carry and the one part a person cannot infer from the steps.
+    // Before it, the early return meant the only payload holding the scope was never read on the
+    // path a current service takes, so the card collected a yes to a tool list it had not shown.
+    const streamed = Boolean(planHash && planTodos);
     let live = true;
     void (async () => {
       try {
         const status = await api.getPlan(sessionId, currentAuth);
         if (!live) return;
+        // Only when the service is describing the plan this card is showing. A scope read off a
+        // revision made since would name tools this approval does not authorize, which is the
+        // disclosure defect inverted — and the streamed hash is exactly how that is detectable.
+        // An older service sends no scope at all, and `undefined` stays `null` here: unknown, not
+        // "authorizes nothing".
+        if (!planHash || status.plan_hash === planHash) setScope(status.scope ?? null);
+        // The binding never comes from this read: between rendering the plan and reading it the
+        // agent may have revised it, and a decision must bind to what the human was shown.
+        if (streamed) return;
         setFetchedPlan({ hash: status.plan_hash, todos: status.plan });
         setState(status.approved ? 'approved' : 'idle');
       } catch {
         // Any failure here — a service without the route, an expired token, an unreachable pod —
         // leaves the chemist with a card they can still act on rather than one that cannot be
-        // answered at all.
-        if (live) setState('unavailable');
+        // answered at all. With the plan already streamed there is nothing to fall back to: the
+        // card stands, minus the scope it could not read.
+        if (live && !streamed) setState('unavailable');
       }
     })();
     return () => {
@@ -321,6 +341,21 @@ function PlanApprovalPrompt({
         <div className="mb-3">
           <PlanItems todos={plan.todos} />
         </div>
+      )}
+      {/* What the yes covers, under the steps it covers them for. The gate refuses a
+          state-changing tool no step declared even under a live approval, so this is the other half
+          of what is being decided — and an empty list is a plan that declared no tool, which is
+          worth saying as plainly as a populated one. */}
+      {scope !== null && (
+        <p className="mb-3 text-xs text-warn-ink">
+          Approving authorises{' '}
+          {scope.length === 0 ? (
+            'no tools beyond the read-only ones every turn has'
+          ) : (
+            <span className="font-mono">{scope.join(' · ')}</span>
+          )}
+          .
+        </p>
       )}
       <DecisionControls
         state={state}

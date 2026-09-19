@@ -33,6 +33,8 @@ const RECORD: JobRecordSummary = {
   rationale: 'Decide whether 2-MeTHF or CPME favours the coupling.',
   summary: '',
   note_id: '',
+  plan_step: '',
+  state: 'completed',
   completed_at: null,
 };
 
@@ -41,6 +43,7 @@ const STATUS: DurableJobStatus = {
   status: 'running',
   summary: null,
   result: {},
+  calc_refs: [],
   rationale: RECORD.rationale,
 };
 

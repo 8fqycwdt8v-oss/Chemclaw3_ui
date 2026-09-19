@@ -34,6 +34,7 @@
 import { useState } from 'react';
 import { ChevronRight, FlaskConical, Scissors, TriangleAlert, Unplug } from 'lucide-react';
 import type { AssistantMessage } from '../state/types.ts';
+import type { AnswerCheck } from '../../shared/events.ts';
 import { capabilityLoss, methodsUsed } from '../chem/provenance.ts';
 import { cn } from '@/lib/utils';
 
@@ -134,6 +135,17 @@ const VERIFIER_LABEL: Record<'judge' | 'citation-gate', string> = {
   'citation-gate': 'scored against this turn’s evidence',
 };
 
+/**
+ * What each answer check looked at, in a chemist's words rather than the gate's own name.
+ *
+ * One row per member of `AnswerCheck`, so a third check upstream is named here once. An unknown one
+ * falls through to its wire name, which is still more honest than dropping it.
+ */
+const CHECK_LABEL: Record<AnswerCheck, string> = {
+  verifier: 'citations',
+  'answer-shape': 'answer shape',
+};
+
 function confidenceTone(value: number): { tone: 'ok' | 'warn' | 'danger'; label: string } {
   if (value >= 0.8) return { tone: 'ok', label: 'high' };
   if (value >= 0.5) return { tone: 'warn', label: 'moderate' };
@@ -144,13 +156,18 @@ export function StatusStrip({ message }: { message: AssistantMessage }): React.J
   const { confidence, unsupportedClaims, verifiedBy, degradedConnectors } = message;
   const methods = methodsUsed(message.trace);
   const scored = confidence !== null ? confidenceTone(confidence) : null;
+  // Absent on a message persisted before this was read, which means the same as none — see
+  // `AssistantMessage.checksRun`.
+  const checksRun = message.checksRun ?? [];
 
   const hasBar = message.reviewRequired || message.partialReason !== null;
   const hasChip =
     degradedConnectors.length > 0 ||
     scored !== null ||
     methods.length > 0 ||
-    unsupportedClaims.length > 0;
+    unsupportedClaims.length > 0 ||
+    checksRun.length > 0 ||
+    message.challenged === true;
   if (!hasBar && !hasChip) return null;
 
   return (
@@ -214,6 +231,18 @@ export function StatusStrip({ message }: { message: AssistantMessage }): React.J
             />
           ))}
 
+          {message.challenged === true && (
+            <Chip
+              tone="warn"
+              label="challenged by a second pass"
+              detail={
+                message.reviewHoldId
+                  ? `A review is open on this answer: ${message.reviewHoldId}.`
+                  : 'A second pass disagreed with this answer. No review id was reported with it.'
+              }
+            />
+          )}
+
           {scored && confidence !== null && (
             <Chip
               tone={scored.tone}
@@ -224,6 +253,17 @@ export function StatusStrip({ message }: { message: AssistantMessage }): React.J
                 </>
               }
               detail={verifiedBy ? VERIFIER_LABEL[verifiedBy] : 'no verifier reported'}
+            />
+          )}
+
+          {/* What looked at this answer, which is a different fact from what it scored. An answer
+              with no chip here was not checked at all — and with both gates shipping off that is
+              the ordinary case, which is exactly why the two must not render the same. */}
+          {checksRun.length > 0 && (
+            <Chip
+              tone="ok"
+              label={`checked · ${checksRun.map((check) => CHECK_LABEL[check] ?? check).join(' · ')}`}
+              detail="A check that ran and found nothing is not the same as no check having run. An answer with nothing named here was not verified."
             />
           )}
 

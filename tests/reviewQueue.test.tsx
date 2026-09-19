@@ -56,6 +56,7 @@ const PENDING: PendingPlans = {
       updated_at: '2026-08-09T09:00:00Z',
       plan_hash: 'plan-hash-1',
       plan: ['screen the hazards of 2-MeTHF', 'record the comparison as a note'],
+      scope: ['screen_hazards', 'record_knowledge_note'],
     },
   ],
   considered: 4,
@@ -143,6 +144,18 @@ describe('the plan inbox', () => {
     expect(screen.getByText('screen the hazards of 2-MeTHF')).toBeTruthy();
     const link = screen.getByRole('link', { name: /Open the conversation/ });
     expect(link.getAttribute('href')).toBe(`/open/${'b'.repeat(32)}`);
+  });
+
+  it('names the tools each waiting plan would authorise', async () => {
+    // The inbox carries `scope` for the same reason the card does — it is the half of the plan the
+    // steps do not state — and here it arrives in the same payload as the steps, so there is no
+    // revision to check it against.
+    serve();
+    renderQueue();
+    await screen.findByText('Which solvent for the Suzuki step?');
+
+    expect(screen.getByText(/screen_hazards/)).toBeTruthy();
+    expect(screen.getByText(/record_knowledge_note/)).toBeTruthy();
   });
 
   it('offers no decision here, because the reasoning is in the conversation', async () => {

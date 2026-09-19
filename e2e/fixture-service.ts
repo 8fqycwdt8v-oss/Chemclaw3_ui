@@ -379,6 +379,7 @@ const PENDING_PLANS: PendingPlans = {
       updated_at: '2026-08-09T09:00:00Z',
       plan_hash: 'e2e-plan-hash',
       plan: ['screen the hazards of 2-MeTHF', 'record the comparison as a note'],
+      scope: ['screen_hazards', 'record_knowledge_note'],
     },
   ],
   considered: 1,
@@ -421,6 +422,8 @@ const JOB: JobRecordSummary = {
   rationale: 'Decide whether 2-MeTHF or CPME favours the coupling.',
   summary: '4 solvents ranked by ΔG.',
   note_id: '',
+  plan_step: 'Compare the two solvents at GFN2 level',
+  state: 'completed',
   completed_at: '2026-08-01T09:00:00Z',
 };
 
@@ -720,6 +723,7 @@ createServer(async (req, res) => {
       status: 'completed',
       summary: '4 solvents ranked by ΔG.',
       result: { best: '2-MeTHF' },
+      calc_refs: ['xtb:9ac1f0'],
       rationale: 'Decide whether 2-MeTHF or CPME favours the coupling.',
     };
     return json(res, 200, status);

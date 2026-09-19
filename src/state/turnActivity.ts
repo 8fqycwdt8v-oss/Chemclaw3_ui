@@ -219,6 +219,9 @@ const STEP_KINDS = new Set([
   'job_completed',
   'job_failed',
   'note_proposed',
+  // A handoff is work: it is the turn deciding which agent does the rest of it, and a summary
+  // that omitted it would show two agents' steps as one agent's.
+  'handoff',
 ]);
 
 /**

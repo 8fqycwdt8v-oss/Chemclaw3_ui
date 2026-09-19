@@ -72,6 +72,22 @@
  * the commit that wrote it, and renumbering prose every time the union moves is how the numbers in
  * it stop being checkable at all.)
  *
+ * **And then it came back, with the producer, which is what the pin asked for.** Chemclaw3's
+ * `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it` builds a turn
+ * graph whose nodes are several agents, and a `transfer_to_<peer>` tool moves the conversation
+ * between them; `api/graph_stream.py` constructs `HandoffEvent` in the same commit that declares
+ * it, which its own `tests/test_event_producers.py` now requires. The absence pins are deleted
+ * rather than defeated: an absence is the right assertion for a claim nothing can write, and
+ * keeping it once something can would forbid exactly the fix it was written to demand.
+ *
+ * **The shape is not the one that was deleted**, and that is worth knowing if you read the old
+ * pin: it was `{to, reason}`, where an empty `to` meant "handed back", because the deleted design
+ * bracketed a specialist's work with an enter/exit pair. A peer handoff has no exit — control does
+ * not come back unless another handoff sends it — so there is no hand-back to encode, and both
+ * agents are named. `from`/`to` would have been the obvious names; the service cannot serialise
+ * `from` as itself (it is a Python keyword, and its dump omits aliases), so the wire carries
+ * `from_agent`/`to_agent` and this mirror follows the wire.
+ *
  * ## This file used to say "keep it dependency-free", and now takes one
  *
  * It is imported by the SPA (bundled by Vite), by the mock backend (bundled by esbuild) and by the
@@ -756,6 +772,22 @@ const evidenceSourceEvent = v.object({
 });
 export type EvidenceSourceEvent = Loosen<v.InferOutput<typeof evidenceSourceEvent>, 'failed'>;
 
+const handoffEvent = v.object({
+  type: v.literal('handoff'),
+  /** The peer agent giving up control. Empty only if the backend could not name it — a peer is a
+   *  real node of the turn graph, so its name is on the stream, which is the difference between
+   *  this and a `task` helper (whose name is NOT in the namespace, the finding that deleted the
+   *  first version of this event). */
+  from_agent: text(),
+  /** The peer receiving control, and from here on the author of what the chemist reads. */
+  to_agent: text(),
+  /** The handing model's own stated reason, written to be read by the agent it hands to. Prose for
+   *  a human; nothing branches on it. It is the only account of the decision that exists —
+   *  inferring one from what the receiving agent then does would be a guess shown as a record. */
+  reason: text(),
+});
+export type HandoffEvent = v.InferOutput<typeof handoffEvent>;
+
 export type ChemclawEvent =
   | QueuedEvent
   | PlanEvent
@@ -769,6 +801,7 @@ export type ChemclawEvent =
   | ToolFailedEvent
   | ToolResultEvent
   | EvidenceSourceEvent
+  | HandoffEvent
   | QuestionEvent
   | NoteProposedEvent
   | ApprovalRequestEvent
@@ -799,6 +832,7 @@ const EVENT_MEMBERS = [
   toolFailedEvent,
   toolResultEvent,
   evidenceSourceEvent,
+  handoffEvent,
   questionEvent,
   noteProposedEvent,
   approvalRequestEvent,

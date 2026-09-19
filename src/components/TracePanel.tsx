@@ -575,6 +575,27 @@ function Row({
     // everyone the moment it is written, so telling a chemist it is "for review" promises them a
     // reviewer who does not exist. The literal stays because it is the SSE contract; the label a
     // person reads is the half that was making the false claim.
+    case 'handoff':
+      // The boundary rather than the speaker. What a reader needs from this row is that the prose
+      // after it comes from an agent with a different surface and a different brief; `reason` is
+      // the handing model's own account, which is the only record of the decision there is.
+      return (
+        <Step tone="idle">
+          <Line
+            label={
+              <>
+                <span className="font-medium">{entry.handoff?.from || 'the agent'}</span> handed to{' '}
+                <span className="font-medium">{entry.handoff?.to ?? 'another agent'}</span>
+              </>
+            }
+            badge={
+              entry.handoff?.reason ? (
+                <span className="text-2xs text-ink-subtle">— {entry.handoff.reason}</span>
+              ) : undefined
+            }
+          />
+        </Step>
+      );
     case 'note_proposed':
       return (
         <Step tone="idle">

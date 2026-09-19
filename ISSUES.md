@@ -663,11 +663,46 @@ everything next to it.
   accepted cost, taken deliberately: a check that silently verifies nothing is worse than one that
   occasionally fails loudly for a reason a reader can see.
 
+  **That statement of the cost was the cheap half, and both records gave only it.** The step
+  carried no `ref:`, and `actions/checkout` resolves a _different_ repository to its default
+  branch's HEAD **at the moment the job runs** — so the real cost was not "reds on a rename", it
+  was that this lane's verdict was not a function of the commits under test. The same UI commit was
+  green one day and red the next with nothing changed here; re-running an old pull request judged
+  it against that day's Chemclaw3; and a bisect over this repository's history could not be
+  reproduced. A rename reds a build for a reason a reader can see, which is the trade above; an
+  unpinned ref makes the red unanswerable, which is not a trade anybody took.
+  It is pinned now: `ref: ${{ inputs.chemclaw3_ref || vars.CHEMCLAW3_REF || 'main' }}`, plus a
+  `workflow_dispatch` input. The default still tracks `main`, so a real rename still reds loudly —
+  that is what the check is for — and what the variable buys is that a pull request blocked by an
+  unrelated upstream change is unblocked by moving a repository setting rather than by editing what
+  is asserted. `Jenkinsfile` has declared `CHEMCLAW3_BRANCH` for its own clone all along, so this
+  is the "two lanes, one fact" reconciliation rather than a new knob; `tests/delivery.test.ts`
+  holds both lanes to naming a revision.
+
   **And it shipped with a defect only the runner could show.** `actions/checkout` may write only
   inside the workspace, so the service's source lands at `.chemclaw3` where this repository's own
   lint and format globs reach it — the first run failed on 10 errors in another repository's
-  browser script. Both ignore files now cover it, reconciled against the workflow's declared path
-  by a test rather than kept in step by hand.
+  browser script.
+
+  **Two of the four surfaces were fixed and the record said all four.** `#94` added `.chemclaw3` to
+  `eslint.config.js` and `.prettierignore` and cited the `.claude/worktrees` precedent — which is
+  in `.gitignore` as well, and `.dockerignore` omits it while `Dockerfile` does `COPY . .`. Driven:
+  `git status --porcelain` showed `?? .chemclaw3/`, and a probe build found the directory present
+  in the build context. **And the same class was ignored nowhere at all one pipeline over**:
+  `Jenkinsfile`'s `Preflight` sparse-checkouts the same repository into `${WORKSPACE}/.jenkins-lib`
+  including `src/chemclaw/api`, which holds the very `static/app.js` that reddened the first
+  push-lane run, latent only because `RUN_GATE` ships `false` — a parameter this repository treats
+  as a supported flip. All four surfaces now cover both directories.
+
+  **The guard that was supposed to reconcile them could not see either.** It read
+  `/path:\s*([.\w/-]+)/` over the whole workflow — the **first** `path:` anywhere in the file, not
+  the Chemclaw3 step's — so a comment or a reordered step made it assert about `dist`, which every
+  surface already covers; driven, inserting one comment line moved its subject to `dist` and it
+  passed. It also read only the GitHub workflow, so `.jenkins-lib` was outside it whatever it
+  matched. It is replaced by a derivation over **both** pipelines: the workflow's checkout steps
+  that name another repository, anchored to the step rather than to the file, and every `git clone`
+  target in the Jenkins shell blocks; each derived directory is then asserted against all four
+  surfaces separately, and against what `git check-ignore` actually answers.
 
   **`CHEMCLAW_REPO` is in that list since 2026-09-18, and reading it is what closed a second
   answer to this question.** `tests/protocolStatusTransitions.test.ts` honoured that variable and
@@ -681,13 +716,19 @@ everything next to it.
   and no other file in the suite may read a checkout variable at all.
 
   **And the Jenkins lane it now runs in is opt-in, which this entry read as a gate.**
-  `RUN_GATE` defaults to `false`, so that stage runs only when somebody ticks the box on a run —
-  meaning no lane of either pipeline gates this check by default, and the two sentences above are
-  about where it _can_ run rather than where it does. Turning the parameter on is the decision
-  below in miniature, taken by the same owner: it buys the check in the lane that ships the image,
-  and it costs a build that can red on a rename made in another repository. `tests/delivery.test.ts`
-  holds this paragraph and `docs/production-readiness.md` §2 to the default the pipeline declares,
-  so flipping it fails the suite until both are rewritten.
+  `RUN_GATE` defaults to `false`, so that stage runs only when somebody ticks the box on a run.
+  What that meant before the push lane grew its own checkout was that **no** lane gated the check
+  by default; it is not what it means now, and this paragraph went on saying so — "no lane of
+  either pipeline gates this check by default" — in the same bullet whose first sentence already
+  read "the push lane now makes one". `docs/production-readiness.md` §2 was rewritten with the
+  change and this was not, which is how one record contradicts another that was edited in the same
+  commit. What is true: the push lane gates it on every pull request, and the Jenkins `Gate` stage
+  is a second, opt-in place it can run. Turning that parameter on is the decision below in
+  miniature, taken by the same owner: it buys the check in the lane that ships the image, and it
+  costs a build that can red on a rename made in another repository. `tests/delivery.test.ts` holds
+  this paragraph and `docs/production-readiness.md` §2 to the default the pipeline declares — as a
+  verbatim substring, so it saw the flip and was blind to the sentence around it, which is exactly
+  how the false clause survived a green suite.
 
   **The blocker this entry used to state was a credential, and it was wrong in both lanes.** The
   `Jenkinsfile` beside it falsified half of that on its own: `Preflight` clones `Chemclaw3`
@@ -901,6 +942,27 @@ registry; profile selection; tool calls surviving a reload.
   sketcher's own refusal — and `stillAlive()` runs once per refused record, which is a second
   parse per record on a file that can hold a thousand. Anchors: `canonicalSmilesFromMolblock` in
   `src/chem/rdkit.engine.ts`, `MolfileRecords` in `src/chem/rdkit.ts`.
+
+- **Neither surface offers the retry the measurement says would work, and the copy used to imply
+  there was none.** Issue 11's own sweep (`scripts/measure-rdkit-rangeerror.mjs`) is that the
+  refusal is a property of the JavaScript stack _at the instant of the call_, not of the string:
+  the same chain at the same length refused through the seam and answered from a shallower stack in
+  the same page milliseconds later. Two consequences neither surface handles. A chemist who pastes
+  the same structure twice can get two different answers to one question, with nothing on screen
+  saying that is possible; and the obvious remedy — a "try again" control, or one automatic
+  re-ask from a shallower frame — exists at neither. Both surfaces used to end "it is a limit of
+  the browser this is running in", which reads as a stable verdict a chemist can act on and is the
+  opposite of what was measured; that clause is now "a limit of the JavaScript stack at the moment
+  of the check rather than of the structure", which is honest about the _fact_ and still silent
+  about the _remedy_. **Softened rather than left alone, and recorded rather than only softened**:
+  the wording was making a claim the measurement contradicts, which is a defect and not a gap,
+  while the missing retry is a change with a design question in it — a re-ask that answers is
+  indistinguishable to a chemist from a flaky app unless the copy explains why the second attempt
+  is trusted, and an automatic one hides the non-determinism instead of naming it. **What would
+  close it:** a retry affordance on both surfaces with copy that says what changed between the two
+  attempts, or a decision that the honest answer is the refusal and the sentence should say the
+  next attempt may differ. Anchors: `TOO_COMPLEX_EXPLANATION` in `src/components/StructureInput.tsx`,
+  `Refused` in `src/chem/rdkit.engine.ts`.
 
 - **No browser test covers the "too complex to name here" wording, and none can here.** Issue 11's
   surfaces are held by `tests/rdkitTooComplex.test.tsx` against the behavioural stub, which is the

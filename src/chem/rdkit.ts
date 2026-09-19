@@ -127,7 +127,7 @@ import { call } from './rdkit.client.ts';
 import type { CanonicalRead, DrawOptions } from './rdkit.engine.ts';
 
 export { MAX_PARSED_SMILES_CHARS, tooLongToParse } from './rdkit.engine.ts';
-export type { CanonicalRead, DrawOptions, Refused } from './rdkit.engine.ts';
+export type { CanonicalRead, DrawOptions, NotAChemicalVerdict, Refused } from './rdkit.engine.ts';
 
 /**
  * Is the toolkit actually here?
@@ -157,10 +157,18 @@ export async function rdkitAvailable(): Promise<boolean> {
 /**
  * What RDKit made of `smiles`: its canonical name, or why there is none.
  *
- * The seam's only three-valued answer, and the two surfaces that make a claim about a string are
- * the only callers. `rdkit.engine.ts`'s `Refused` carries what the third value is and why it could
- * not be a predicate; what belongs here is what it costs the boundary, which is nothing — the
- * union is plain data and clones.
+ * The seam's only three-valued answer. `rdkit.engine.ts`'s `Refused` carries what the third value
+ * is and why it could not be a predicate; what belongs here is what it costs the boundary, which
+ * is nothing — the union is plain data and clones.
+ *
+ * **This said "the two surfaces that make a claim about a string are the only callers", and it was
+ * false about its own commit.** Three things call it: `StructureInput.tsx`, which is one of those
+ * surfaces; `src/chem/structure.ts`, which turns the union into `ReadStructure` for the *other*
+ * one and for `Molecule.tsx`; and `canonicalSmiles` four lines below, which narrows it back to
+ * `string | null` for everybody else. The claim the sentence was reaching for is the one that is
+ * actually true and worth keeping: the third value is threaded exactly as far as the two surfaces
+ * that make a claim, and no further — `canonicalSmiles` drops it, and every caller of *that* is a
+ * caller that wants a key or nothing.
  */
 export async function readCanonicalSmiles(smiles: string): Promise<CanonicalRead> {
   return call('readCanonicalSmiles', smiles);

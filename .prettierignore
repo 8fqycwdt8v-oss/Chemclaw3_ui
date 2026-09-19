@@ -9,8 +9,10 @@ package-lock.json
 # turns a working patch into one that fails to apply.
 BACKEND-SESSION-LISTING.md
 
-# The service checkout `.github/workflows/ci.yml` makes so the backend-contract check gates rather
-# than warns. `actions/checkout` may only write inside the workspace, so another repository's source
-# lands where this one's globs reach. Kept in step with `eslint.config.js` by a test that reads the
-# path out of the workflow rather than by both files being edited together.
+# The sibling checkouts this repository's pipelines make so the backend-contract check gates rather
+# than warns: `.chemclaw3` is `.github/workflows/ci.yml`'s, `.jenkins-lib` is `Jenkinsfile`'s.
+# Neither tool may write outside the workspace, so another repository's source lands where this
+# one's globs reach. Kept in step with the other three surfaces by `tests/delivery.test.ts`, which
+# derives both directories from the pipelines themselves rather than reading a list typed here.
 .chemclaw3
+.jenkins-lib

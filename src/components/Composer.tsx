@@ -60,13 +60,22 @@ import { Label, Switch } from '@/components/ui/misc';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Loading } from '@/components/chem/Feedback';
 import { useEntityStore } from '../chem/entities.ts';
-import { canonicalSmilesFromMolblock, rdkitAvailable } from '../chem/rdkit.ts';
+import {
+  canonicalSmilesFromMolblock,
+  rdkitAvailable,
+  type NotAChemicalVerdict,
+} from '../chem/rdkit.ts';
 import { looksLikeMolblock } from '../chem/recognise.ts';
 import { mightBeStructure, readStructure } from '../chem/structure.ts';
 import { Molecule } from './Molecule.tsx';
 // `STRUCTURE_FILE` from the panel itself: a file dropped here goes to the panel or to the
 // attachment route, and which one is the panel's rule about what it can read.
-import { STRUCTURE_FILE, StructureInput, type AcceptedStructure } from './StructureInput.tsx';
+import {
+  STRUCTURE_FILE,
+  StructureInput,
+  TOO_COMPLEX_EXPLANATION,
+  type AcceptedStructure,
+} from './StructureInput.tsx';
 
 /**
  * What a paste turned out to be, once RDKit had looked at it — and **where it landed**.
@@ -98,8 +107,10 @@ type PasteCheck = {
   | { status: 'unavailable' }
   /** RDKit read it as a molecule and ran out of stack naming it. Not a refusal about the
    *  chemistry, and not about the toolkit being absent either — see `Refused` in
-   *  `src/chem/rdkit.engine.ts`. */
-  | { status: 'too-complex' }
+   *  `src/chem/rdkit.engine.ts`. Derived from there rather than restated: this literal was the
+   *  third unreconciled copy of it, and a refusal added upstream compiled clean into the
+   *  `refused` branch above, which is the one sentence that must not be said about a molecule. */
+  | { status: NotAChemicalVerdict }
 );
 
 /**
@@ -210,12 +221,12 @@ function PasteConfirmation({
         )}
         {pasted.status === 'too-complex' && (
           // The panel's own wording again, for the same reason the refusal shares its: one string
-          // must not get two different sentences from the two surfaces that check pastes.
+          // must not get two different sentences from the two surfaces that check pastes. That was
+          // a comment and not a fact — the two diverged in both tails — so the sentence is now one
+          // exported constant both read, and only the clause after it is this surface's own.
           <p className="text-xs text-warn-ink">
-            Pasted <span className="font-mono break-all text-ink">{shortly(pasted.raw)}</span> —
-            RDKit read this as a molecule and then ran out of stack naming it, so it is too complex
-            to name here. Nothing is wrong with it as chemistry; it is a limit of the browser this
-            is running in, and the message carries your spelling unchanged.
+            Pasted <span className="font-mono break-all text-ink">{shortly(pasted.raw)}</span> —{' '}
+            {TOO_COMPLEX_EXPLANATION} The message carries your spelling unchanged.
           </p>
         )}
         {differs && pasted.status === 'read' && (

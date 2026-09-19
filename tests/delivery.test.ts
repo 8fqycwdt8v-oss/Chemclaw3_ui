@@ -176,6 +176,118 @@ const contractSourceDirs = (sources: string = contractReader()): string[] => {
 };
 
 /**
+ * Every step of the GitHub workflow, as `{ name, text }`.
+ *
+ * A step rather than the file, because the questions below are about *one* step and the file has
+ * several that answer them differently. The split is on a list item at the step indent — six
+ * spaces, which is where `jobs.<id>.steps` lands in this workflow — so a `path:` inside a step
+ * cannot be read as another step's, and neither can a `path:` written in a comment above one.
+ */
+const workflowSteps = (): { name: string; text: string }[] =>
+  workflow
+    .split(/\n(?= {6}- )/)
+    .slice(1)
+    .map((text) => ({ name: /^\s*- name:\s*(.+)/m.exec(text)?.[1]?.trim() ?? '(unnamed)', text }));
+
+/**
+ * Every shell script the workflow runs, as one string per `run:` block.
+ *
+ * Here so `siblingCheckouts` can apply the `git clone` pattern to the workflow as well as to the
+ * Jenkinsfile. Written as a scan rather than as one regular expression because a `run:` takes two
+ * shapes — the rest of its own line, or a block scalar of every following line indented past the
+ * key — and a single pattern that tries to cover both is how the first version of this silently
+ * matched neither.
+ */
+const workflowShell = (): string[] => {
+  const lines = workflow.split('\n');
+  const blocks: string[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i] ?? '';
+    const run = /^(\s*)(?:- )?run:[ \t]*(.*)$/.exec(line);
+    if (!run) continue;
+    const indent = (run[1] ?? '').length;
+    const collected = [(run[2] ?? '').replace(/^[|>]-?[ \t]*/, '')];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const next = lines[j] ?? '';
+      if (next.trim() === '') {
+        collected.push('');
+        continue;
+      }
+      if ((/^\s*/.exec(next)?.[0] ?? '').length <= indent) break;
+      collected.push(next);
+      i = j;
+    }
+    blocks.push(collected.join('\n'));
+  }
+  return blocks;
+};
+
+/** The workflow's checkout steps that name a repository other than this one. */
+const siblingSteps = (): { name: string; text: string }[] =>
+  workflowSteps().filter(
+    (step) =>
+      /uses:\s*actions\/checkout@/.test(step.text) && /^\s*repository:\s*\S/m.test(step.text),
+  );
+
+/**
+ * Every directory inside the workspace that one of this repository's pipelines fills with another
+ * repository's source, derived from the pipelines themselves.
+ *
+ * **Both of them, because the class is not the workflow's.** `.github/workflows/ci.yml` checks
+ * Chemclaw3 out at `.chemclaw3`; `Jenkinsfile`'s `Preflight` clones the *same repository* into
+ * `.jenkins-lib`, sparsely — and its sparse set includes `src/chemclaw/api`, which is where the
+ * `static/app.js` that reddened the first push-lane run lives. The second was ignored by nothing
+ * at all, and was latent only because `RUN_GATE` ships `false`, which this repository treats as a
+ * parameter somebody may tick rather than as a decision.
+ *
+ * Neither tool may write outside the workspace, so in both lanes another repository's tree lands
+ * where this one's globs, `git status` and `COPY . .` reach it.
+ */
+const siblingCheckouts = (): { where: string; dir: string }[] => {
+  const found: { where: string; dir: string }[] = [];
+
+  for (const step of siblingSteps()) {
+    const dir = /^\s*path:\s*([^\s#]+)/m.exec(step.text)?.[1];
+    expect(
+      dir,
+      `the workflow step "${step.name}" checks another repository out to no declared path, so ` +
+        'nothing below can know where its source landed',
+    ).toBeTruthy();
+    found.push({ where: '.github/workflows/ci.yml', dir: String(dir).replace(/^\.\//, '') });
+  }
+
+  // A `git clone` writes into its last argument. Continuations are joined first, because this
+  // pipeline's clone is written across two lines and a per-line read would take the URL for the
+  // target.
+  //
+  // **Every shell either pipeline runs, not just the Jenkinsfile's.** The first version of this
+  // derivation read `actions/checkout` out of the workflow and `git clone` out of the Jenkinsfile,
+  // one pattern per file — so a `run: git clone` in the workflow was invisible to both halves and
+  // the whole suite stayed green with an unignored sibling tree in the workspace. That is the
+  // first-match-class blind spot this function was written to close, reappearing inside the
+  // closing of it: the fix is not a third pattern, it is applying both patterns to both files.
+  const scripts: { where: string; text: string }[] = [
+    ...shellBlocks.map((text) => ({ where: 'Jenkinsfile', text })),
+    ...workflowShell().map((text) => ({ where: '.github/workflows/ci.yml', text })),
+  ];
+  for (const { where, text: block } of scripts) {
+    for (const match of block.replace(/\\\n\s*/g, ' ').matchAll(/\bgit clone\b([^\n]*)/g)) {
+      const tokens = (match[1] ?? '').trim().split(/\s+/).filter(Boolean);
+      const dir = tokens.at(-1) ?? '';
+      expect(
+        /^[.\w][\w./-]*$/.test(dir),
+        `a \`git clone\` in ${where} writes to "${dir}", which this derivation cannot read ` +
+          'as a workspace directory — write the target as a plain relative path, or this check ' +
+          'silently stops covering it',
+      ).toBe(true);
+      found.push({ where, dir: dir.replace(/^\.\//, '') });
+    }
+  }
+
+  return found;
+};
+
+/**
  * Whether the `Gate` stage runs unless somebody asks for it, read off the pipeline.
  *
  * `null` when the parameter is gone, which is a failure below rather than a quietly skipped
@@ -519,6 +631,13 @@ describe('the Jenkins pipeline', () => {
       null,
     );
     const claim = `\`RUN_GATE\` defaults to \`${declared}\``;
+    // **What this sees is the substring, and what it cannot see is the sentence around it.** The
+    // clause after this one in `ISSUES.md` Issue 14 went on reading "no lane of either pipeline
+    // gates this check by default" for a whole commit after the push lane grew a checkout — false,
+    // in the same bullet whose first sentence said the opposite, with this assertion green
+    // throughout because the substring never moved. That is the limit of a verbatim check and not
+    // a defect in it: it holds the *default*, which is the thing that changes under a pipeline
+    // edit. The prose around it is held by a reader, which is how that one was found.
     // Three documents, because three describe the parameter. `README.md` was outside this list
     // while saying `RUN_GATE` "is an opt-in", which is the same claim in words the verbatim check
     // could not see — so a flipped default would have left one of the three describing a pipeline
@@ -659,34 +778,33 @@ describe('the push lane', () => {
     ).toBe(true);
   });
 
-  it('keeps that checkout out of the globs that lint and format this repository', () => {
-    // **The defect this lane shipped with, and it could only fail on the runner.**
-    // `actions/checkout` may write only inside the workspace, so the service's source lands where
-    // this repository's own globs reach. Driven: the first push-lane run failed on 10
-    // `no-undef`/`no-unused-vars` errors in `.chemclaw3/src/chemclaw/api/static/app.js` — another
-    // repository's browser script, judged by rules written for this one. A local run pointing
-    // `CHEMCLAW3_DIR` at a checkout *outside* the workspace passes, which is exactly why it got
-    // through: the local and the runner layouts differ in the one way that matters.
+  it('pins the revision it reads, so a verdict is a function of two commits', () => {
+    // **Without a `ref:`, `actions/checkout` takes the other repository's default branch at the
+    // moment the job runs** — so the same UI commit was green one day and red the next with
+    // nothing changed here, and re-running an old pull request judged it against today's
+    // Chemclaw3. Both records framed the cost of this checkout as "reds on a rename", which is a
+    // build that fails for a reason a reader can see; an unpinned ref is a build that is not
+    // repeatable, which is a different property and the one that makes a red unanswerable.
     //
-    // The path is read out of the workflow rather than written here, so renaming the checkout
-    // directory in one file and not the others reds instead of quietly re-exposing the tree.
-    // `.claude/worktrees/**` is the same shape already solved the same way.
-    const dir = /path:\s*([.\w/-]+)/.exec(workflow)?.[1];
-    expect(dir, 'the push lane checks out Chemclaw3 to no declared path').toBeTruthy();
-    const bare = String(dir).replace(/^\.\//, '');
+    // The assertion is that a ref is *named*, not which one: the default still tracks `main`, so a
+    // real rename still reds. What must not come back is the absence.
+    const step = siblingSteps().find((s) => /repository:/.test(s.text));
+    expect(step, 'the push lane checks out no other repository at all').toBeTruthy();
+    expect(
+      /^\s*ref:\s*\S/m.test(String(step?.text)),
+      "the Chemclaw3 checkout names no `ref:`, so it takes that repository's moving default " +
+        "branch and this lane's verdict is not a function of the two commits under test",
+    ).toBe(true);
 
+    // And the two lanes name the same fact rather than one of them knowing it. `Jenkinsfile`
+    // already parameterised its own clone; a workflow that hardcoded `main` while the other lane
+    // took a parameter would be the "two declarations, nothing reconciling them" defect with the
+    // reconciliation left to whoever remembers.
     expect(
-      readFileSync('eslint.config.js', 'utf8').includes(`'${bare}/**'`),
-      `eslint.config.js does not ignore ${bare}/**, so lint judges the service's source by this ` +
-        "repository's rules — which is a red build about a file nobody here can edit",
-    ).toBe(true);
-    expect(
-      readFileSync('.prettierignore', 'utf8')
-        .split('\n')
-        .some((line) => line.trim() === bare),
-      `.prettierignore does not list ${bare}, so the format check reports a diff in another ` +
-        'repository',
-    ).toBe(true);
+      pipeline,
+      'the Jenkinsfile stopped declaring which Chemclaw3 revision it clones, so the two lanes no ' +
+        'longer name one fact',
+    ).toContain("string(name: 'CHEMCLAW3_BRANCH'");
   });
 
   it('names no Chemclaw3 source directory, so it cannot drift from the reader', () => {
@@ -708,5 +826,105 @@ describe('the push lane', () => {
       'the push lane names Chemclaw3 source directories, which is a second copy of the sparse ' +
         'list the Jenkinsfile derives — take the full checkout instead, or reconcile the two',
     ).toEqual([]);
+  });
+});
+
+describe('the sibling checkouts this repository’s pipelines make', () => {
+  /**
+   * The four surfaces that decide what a directory in this workspace is, and what each one costs
+   * when it does not know.
+   *
+   * They are separate assertions rather than one, because each failure is a different, real
+   * outcome and a reader of a red build should be told which one it is.
+   */
+  const surfaces: { file: string; covers: (dir: string) => boolean; cost: string }[] = [
+    {
+      file: '.gitignore',
+      covers: (dir) =>
+        readFileSync('.gitignore', 'utf8')
+          .split('\n')
+          .some((line) => line.trim() === dir || line.trim() === `${dir}/`),
+      cost:
+        '`git status` offers another repository’s whole tree as untracked, and a `git add -A` ' +
+        'commits it',
+    },
+    {
+      file: '.dockerignore',
+      covers: (dir) =>
+        readFileSync('.dockerignore', 'utf8')
+          .split('\n')
+          .some((line) => line.trim() === dir || line.trim() === `${dir}/`),
+      cost:
+        '`Dockerfile` does `COPY . .`, so an image built after that lane has run carries another ' +
+        'repository’s source and re-layers on its every commit',
+    },
+    {
+      file: '.prettierignore',
+      covers: (dir) =>
+        readFileSync('.prettierignore', 'utf8')
+          .split('\n')
+          .some((line) => line.trim() === dir),
+      cost: 'the format check reports a diff in a file nobody here can edit',
+    },
+    {
+      file: 'eslint.config.js',
+      covers: (dir) => readFileSync('eslint.config.js', 'utf8').includes(`'${dir}/**'`),
+      cost:
+        'lint judges another repository’s source by this repository’s rules — driven, the first ' +
+        'push-lane run failed on 10 `no-undef`/`no-unused-vars` errors in ' +
+        '`.chemclaw3/src/chemclaw/api/static/app.js`',
+    },
+  ];
+
+  it('are derived from both pipelines rather than listed here', () => {
+    // Guard the guard, and it is the assertion the check this replaces did not have. That one read
+    // `/path:\s*([.\w/-]+)/` over the **whole** workflow — the first `path:` anywhere in the file,
+    // not the Chemclaw3 step’s — so a comment containing `path: dist` above the step, or a
+    // reordered step, made it assert about `dist`, which every one of these surfaces already
+    // covers. It passed, and it checked nothing. It also read only the workflow, so it could never
+    // have seen `.jenkins-lib` no matter what it matched.
+    const dirs = siblingCheckouts();
+    expect(
+      dirs.map((d) => d.where),
+      'no sibling checkout was derived from one of the two pipelines, so every assertion below ' +
+        'would pass for the wrong reason',
+    ).toEqual(expect.arrayContaining(['.github/workflows/ci.yml', 'Jenkinsfile']));
+    // Every derived directory is inside the workspace, which is the whole reason they need
+    // covering: an absolute path or a `..` would be somebody else's problem and not this check's.
+    for (const { where, dir } of dirs) {
+      expect(
+        dir.startsWith('/') || dir.startsWith('..'),
+        `${where} clones outside the workspace`,
+      ).toBe(false);
+    }
+  });
+
+  it.each(surfaces)('are ignored by $file', ({ file, covers, cost }) => {
+    for (const { where, dir } of siblingCheckouts()) {
+      expect(
+        covers(dir),
+        `${file} does not cover \`${dir}\`, which ${where} fills with another repository's ` +
+          `source: ${cost}`,
+      ).toBe(true);
+    }
+  });
+
+  it('is what `git check-ignore` actually answers, not only what the file says', () => {
+    // The textual check above is what a reader can follow; this is what git does. They are both
+    // here because either alone is satisfiable without the other — a line in the wrong section of
+    // `.gitignore`, or a global exclude that covers it on one machine and not on the runner.
+    for (const { dir } of siblingCheckouts()) {
+      // A path *inside* the directory, which is what git is really asked about: these are
+      // checkouts, and what `git status` offers is their files. It is also the only spelling that
+      // answers the same whether or not the checkout happens to exist in this working tree — a
+      // bare `.jenkins-lib` against a `.jenkins-lib/` rule answers "not ignored" when the
+      // directory is absent, because git cannot know a name it cannot stat is a directory, and
+      // this assertion passed and failed by whether an earlier probe had left one behind.
+      const seen = spawnSync('git', ['check-ignore', '-q', '--no-index', '--', `${dir}/probe`]);
+      expect(
+        seen.status,
+        `git does not ignore \`${dir}/\`, whatever \`.gitignore\` appears to say about it`,
+      ).toBe(0);
+    }
   });
 });

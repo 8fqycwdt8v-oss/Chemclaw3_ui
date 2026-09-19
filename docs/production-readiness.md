@@ -115,6 +115,27 @@ indistinguishable from one that does not work — and this repository has produc
   has nothing to do with the contract. The judgement is that a check which silently verifies
   nothing is worse than one that occasionally fails loudly for a reason a reader can see.
 
+  **That was the cheap half of the cost and it was the only half either record gave.** The step
+  carried no `ref:`, and `actions/checkout` takes a _different_ repository's default branch at the
+  moment the job runs — so the same commit here was green one day and red the next with nothing
+  changed, and a re-run of an old pull request judged it against that day's service. A rename reds
+  a build for a reason a reader can see; an unpinned ref makes the verdict not a function of the
+  commits under test, which is a different property and is not a trade anybody took. The checkout
+  now names `ref: ${{ inputs.chemclaw3_ref || vars.CHEMCLAW3_REF || 'main' }}` with a
+  `workflow_dispatch` input beside it: the default still tracks `main` so a real rename still reds,
+  and a pull request blocked by an unrelated upstream change is unblocked by moving a repository
+  variable rather than by weakening the check. `Jenkinsfile` already declared `CHEMCLAW3_BRANCH`
+  for its own clone, so the two lanes now name one fact; `tests/delivery.test.ts` holds both to it.
+
+  **Both lanes make that checkout _inside_ the workspace, and all four surfaces that decide what a
+  directory here is now know about both.** `actions/checkout` and `git clone` may only write into
+  the workspace, so `.chemclaw3` and `Jenkinsfile`'s `.jenkins-lib` land where this repository's
+  lint, format, `git status` and `COPY . .` reach them. Two of the four covered only the first and
+  the record said otherwise; `.jenkins-lib` was covered by none, latent behind `RUN_GATE`'s
+  default. The reconciling guard read the first `path:` in the workflow rather than the Chemclaw3
+  step's — satisfiable by a comment, and structurally unable to see the other pipeline — and is now
+  a derivation over both pipelines asserted against each surface separately.
+
   The Jenkins `Gate` stage also sets both variables against the checkout its `Preflight` stage
   makes, but that stage is behind a parameter: `RUN_GATE` defaults to `false`, so it gates there
   only in a run somebody ticked the box on, and that lane builds and ships an image rather than

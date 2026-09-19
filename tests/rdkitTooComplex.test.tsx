@@ -23,8 +23,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { FIELD_PLACEHOLDER, StructureInput } from '../src/components/StructureInput.tsx';
+import {
+  FIELD_PLACEHOLDER,
+  StructureInput,
+  TOO_COMPLEX_EXPLANATION,
+} from '../src/components/StructureInput.tsx';
 import { Composer } from '../src/components/Composer.tsx';
 import {
   canonicalSmiles,
@@ -54,8 +59,17 @@ const field = (): HTMLInputElement =>
 
 /** The sentence that must never be said about this string. */
 const CHEMICAL_VERDICT = /could not read this as a molecule/i;
-/** The sentence that says whose limit it is. */
-const RENDERER_LIMIT = /too complex to name here/i;
+/**
+ * The sentence that says whose limit it is — the **whole** shared claim, not a fragment of it.
+ *
+ * This used to be `/too complex to name here/i`, 25 characters of a 200-character sentence, while
+ * `Composer.tsx`'s comment beside its copy said one string must not get two different sentences
+ * from the two surfaces that check pastes. Measured: they diverged in *both* tails, and this
+ * matched anyway. A guard satisfied by the prose describing it is not a guard, so the invariant is
+ * now the constant both surfaces read, asserted whole and asserted to be one object rather than
+ * two strings that happen to agree today.
+ */
+const RENDERER_LIMIT = TOO_COMPLEX_EXPLANATION;
 
 beforeEach(() => {
   cleanup();
@@ -108,11 +122,54 @@ describe('the structure panel', () => {
 
     fireEvent.change(field(), { target: { value: LONG } });
 
-    expect(await screen.findByText(RENDERER_LIMIT)).toBeTruthy();
+    // `exact: false`, because each surface appends the one clause that is genuinely its own —
+    // this panel has nothing to file the molecule under. What must be identical is the sentence.
+    expect(await screen.findByText(RENDERER_LIMIT, { exact: false })).toBeTruthy();
     expect(screen.queryByText(CHEMICAL_VERDICT)).toBeNull();
     // And nothing is insertable: there is no canonical form to insert, and the panel's whole
     // contract is that a chemist sends a structure this app has read back to them.
     expect(screen.queryByText('Insert')).toBeNull();
+  });
+});
+
+describe('the number this file is about', () => {
+  it('is the one the measurement produced, in the stub and in the prose', () => {
+    // **Two declarations of one fact, and only one of them was a thing a test could see.** The
+    // sweep (`scripts/measure-rdkit-rangeerror.mjs`) answered up to 570 and refused at 580; the
+    // engine's `Refused` docstring, its `withMol` comment and this file's own header all cite 580;
+    // the stub drove 500. A reader checking the prose against the tests found them disagreeing
+    // about the subject, which is the state this assertion exists to end.
+    expect(LONG.length).toBe(580);
+    expect(
+      readFileSync('src/chem/rdkit.engine.ts', 'utf8').includes('chain of 580 characters'),
+      'the engine no longer cites the length this suite drives, so the two have drifted again',
+    ).toBe(true);
+  });
+});
+
+describe('the two surfaces', () => {
+  it('reach one sentence rather than two that agree today', () => {
+    // **The invariant the fragment match could not see.** Both surfaces render
+    // `TOO_COMPLEX_EXPLANATION` — the same object, not two string literals — so a reword is one
+    // edit and cannot land on one surface only. Driven against the source rather than the DOM,
+    // because that is where the duplication was: the tails that diverged were in the JSX.
+    const surfaces = ['src/components/StructureInput.tsx', 'src/components/Composer.tsx'] as const;
+    for (const file of surfaces) {
+      const text = readFileSync(file, 'utf8');
+      expect(
+        text.includes('{TOO_COMPLEX_EXPLANATION}'),
+        `${file} does not render the shared sentence, so the two surfaces can drift again`,
+      ).toBe(true);
+      // And neither *renders* a copy beside it. The head was identical when the two diverged, so
+      // a second copy would satisfy every assertion above while the tails said different things.
+      // Comments are stripped first: a docstring describing the sentence is not a second edition
+      // of it, and both files legitimately carry one.
+      const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+      const copies = code.split('ran out of stack naming it').length - 1;
+      expect(copies, `${file} renders the sentence as a literal instead of reading it`).toBe(
+        file.endsWith('StructureInput.tsx') ? 1 : 0,
+      );
+    }
   });
 });
 
@@ -123,7 +180,9 @@ describe('the composer', () => {
     pasteInto(screen.getByLabelText('Message') as HTMLTextAreaElement, LONG, 0);
 
     const strip = await screen.findByRole('alert');
-    expect(strip.textContent).toMatch(RENDERER_LIMIT);
+    // `toContain` on the whole shared sentence, which is what "the same words" means. A regex over
+    // a fragment of it passed while the two tails said different things.
+    expect(strip.textContent).toContain(RENDERER_LIMIT);
     // The two surfaces must not reach two different sentences about one string.
     expect(strip.textContent).not.toMatch(CHEMICAL_VERDICT);
   });

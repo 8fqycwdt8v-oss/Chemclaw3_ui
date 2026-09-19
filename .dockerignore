@@ -8,3 +8,11 @@ test-results
 *.md
 .env
 .env.local
+
+# The sibling checkouts the pipelines make inside the workspace. `Dockerfile` does `COPY . .`, so
+# without these a build that runs after `.github/workflows/ci.yml`'s checkout (or after
+# `Jenkinsfile`'s `Preflight`, whose `.jenkins-lib` is only removed in `post`) ships another
+# repository's source into the build stage and invalidates the layer cache on its every commit.
+# Derived and held against the pipelines by `tests/delivery.test.ts`.
+.chemclaw3
+.jenkins-lib

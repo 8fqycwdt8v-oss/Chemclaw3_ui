@@ -31,7 +31,7 @@
  * `kind` is what tells a caller not to treat it as an identity.
  */
 
-import { isMolecule, readCanonicalSmiles } from './rdkit.ts';
+import { isMolecule, readCanonicalSmiles, type NotAChemicalVerdict } from './rdkit.ts';
 import { looksLikeReactionSmiles, looksLikeSmiles } from './recognise.ts';
 
 /**
@@ -57,7 +57,13 @@ export type ReadStructure =
        *  ours. */
       raw: string;
     }
-  | { kind: 'too-complex'; raw: string };
+  | {
+      /** Derived from `Refused` rather than restated, so a refusal added there cannot be folded
+       *  into the `null` beside it without the compiler saying so here and at both surfaces that
+       *  read this — see `NotAChemicalVerdict`. */
+      kind: NotAChemicalVerdict;
+      raw: string;
+    };
 
 /**
  * What `text` is, or `null` if it is not a structure at all.
@@ -89,8 +95,23 @@ export async function readStructure(text: string): Promise<ReadStructure | null>
 
   if (!looksLikeSmiles(raw)) return null;
   const read = await readCanonicalSmiles(raw);
-  if (read.status === 'named') return { kind: 'molecule', canonical: read.canonical, raw };
-  return read.status === 'too-complex' ? { kind: 'too-complex', raw } : null;
+  switch (read.status) {
+    case 'named':
+      return { kind: 'molecule', canonical: read.canonical, raw };
+    case 'too-complex':
+      return { kind: 'too-complex', raw };
+    case 'unreadable':
+      return null;
+    default: {
+      // **Exhaustiveness, and it is the assertion rather than the comment.** `null` here means
+      // "not a structure", which every caller renders as silence or as "not a molecule" — so a
+      // refusal added to `Refused` and not answered above would make a false chemical claim about
+      // a string this module declined for a reason of its own. The binding is what stops that
+      // compiling; before it, a third member went through `npx tsc -b` at exit 0.
+      const unanswered: never = read;
+      return unanswered;
+    }
+  }
 }
 
 /**

@@ -45,9 +45,16 @@ export default tseslint.config(
   // this config does not apply to it. A local run pointing `CHEMCLAW3_DIR` at a checkout *outside*
   // the workspace cannot see that, which is why it reached CI.
   //
-  // The name is not free to change here alone: `tests/delivery.test.ts` reads the path out of the
-  // workflow and asserts both this list and `.prettierignore` cover it, because two declarations
-  // of one directory with nothing reconciling them is how the next lane grows a blind spot.
+  // `.jenkins-lib/**` is the *same repository* one pipeline over, and it was ignored nowhere.
+  // `Jenkinsfile`'s `Preflight` sparse-checkouts Chemclaw3 into `${WORKSPACE}/.jenkins-lib`
+  // including `src/chemclaw/api` — which holds that very `static/app.js`. It is latent only
+  // because `RUN_GATE` ships `false`, and that parameter is a supported flip rather than a
+  // decision: ticking the box reds the lane that ships the image, on another repository's file.
+  //
+  // Neither name is free to change here alone: `tests/delivery.test.ts` derives every in-workspace
+  // sibling checkout from *both* pipelines and asserts all four surfaces cover each one — this
+  // list, `.prettierignore`, `.gitignore` and `.dockerignore` — because two declarations of one
+  // directory with nothing reconciling them is how the next lane grows a blind spot.
   {
     ignores: [
       'dist/**',
@@ -56,6 +63,7 @@ export default tseslint.config(
       'test-results/**',
       '.claude/worktrees/**',
       '.chemclaw3/**',
+      '.jenkins-lib/**',
     ],
   },
 

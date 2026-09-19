@@ -21,7 +21,7 @@ import { Search, Server } from 'lucide-react';
 import { useAuth, useIsReviewer } from '../auth/AuthContext.tsx';
 import { api, type DurableJobStatus } from '../api/client.ts';
 import { useNewestRead } from '../hooks/useNewestRead.ts';
-import { useApiQuery } from '../api/queryClient.ts';
+import { useApiInfiniteQuery } from '../api/queryClient.ts';
 import { jobsQuery } from '../api/queries.ts';
 import { relativeTime } from '../lib/format.ts';
 import { Badge } from '@/components/ui/badge';
@@ -180,6 +180,19 @@ function JobSheet({
 
               {status.summary && <p className="text-sm text-ink-muted">{status.summary}</p>}
 
+              {status.calc_refs?.length ? (
+                <div>
+                  <h3 className="mb-1 text-2xs font-medium tracking-wide text-ink-subtle uppercase">
+                    Calculations it rested on
+                  </h3>
+                  {/* The keys themselves, because they are what a note cites: a count would say
+                      how many there were and leave a reader with nothing to quote. */}
+                  <p className="font-mono text-2xs break-all text-ink-muted">
+                    {status.calc_refs.join(' · ')}
+                  </p>
+                </div>
+              ) : null}
+
               <div>
                 <h3 className="mb-1 text-2xs font-medium tracking-wide text-ink-subtle uppercase">
                   Result
@@ -244,7 +257,10 @@ export function JobsPanel(): React.JSX.Element {
   // A failure still renders as an empty list rather than as a banner, unchanged: this panel is a
   // search over a durable-run archive, and a chemist who searched and found nothing is not misled
   // the way one told "nothing is waiting on you" would be.
-  const { data, isError } = useApiQuery({ ...jobsQuery(submitted, auth), enabled: ready });
+  const { data, isError, fetchNextPage, hasNextPage, isFetchingNextPage } = useApiInfiniteQuery({
+    ...jobsQuery(submitted, auth),
+    enabled: ready,
+  });
   // **`null` is "still reading" and `[]` is "nothing matched", and a failure is the second.** The
   // catch this replaces answered `setLoaded({ query, list: [] })`, and `data` on a failed query is
   // `undefined` — so defaulting it to `null` left the spinner on screen for ever, which is
@@ -254,7 +270,7 @@ export function JobsPanel(): React.JSX.Element {
   // An empty list rather than a banner is unchanged and deliberate: this is a search over a
   // durable-run archive, and a chemist who searched and found nothing is not misled the way one
   // told "nothing is waiting on you" would be.
-  const jobs = data ?? (isError ? [] : null);
+  const jobs = data ? data.pages.flatMap((page) => page.jobs) : isError ? [] : null;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -321,12 +337,26 @@ export function JobsPanel(): React.JSX.Element {
                         campaign is belongs in the sheet, where it is read once rather than
                         repeated down every row of a search result. */}
                     {job.job === CAMPAIGN_JOB && <Badge tone="brand">campaign</Badge>}
+                    {/* Only when the run did not complete. Every row in a registry of finished
+                        work would otherwise wear the same word, which is how the one that
+                        matters stops being read. */}
+                    {job.state && job.state !== 'completed' && (
+                      <Badge tone={STATUS_TONE[job.state] ?? 'danger'}>{job.state}</Badge>
+                    )}
                     {job.completed_at && (
                       <span className="text-2xs text-ink-subtle">
-                        finished {relativeTime(new Date(job.completed_at).getTime())}
+                        {/* "finished" is a claim about the run, not about the clock: a failed run
+                            stopped at this time, and it did not finish anything. */}
+                        {job.state === 'failed' ? 'failed' : 'finished'}{' '}
+                        {relativeTime(new Date(job.completed_at).getTime())}
                       </span>
                     )}
                   </div>
+                  {/* The step the run served, read off the listing rather than looked up — and
+                      worded the way the trace's own launch row words it. */}
+                  {job.plan_step && (
+                    <p className="mt-1 truncate text-2xs text-ink-muted">for {job.plan_step}</p>
+                  )}
                   {/* The rationale before the id: it is the only part a reader can act on. */}
                   {job.rationale && <p className="mt-1 text-sm">{job.rationale}</p>}
                   {job.summary && <p className="mt-1 text-xs text-ink-muted">{job.summary}</p>}
@@ -335,6 +365,21 @@ export function JobsPanel(): React.JSX.Element {
               </li>
             ))}
           </ul>
+        )}
+
+        {/* Only when the service said there is a further row — it asks the store for one beyond the
+            page to know, so this is evidence rather than "a full page might mean more". Before it,
+            the cap was invisible: run 21 was not below a fold, it was never fetched, and a chemist
+            searching for a run they had done read "No run matches that". */}
+        {hasNextPage && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isFetchingNextPage}
+            onClick={() => void fetchNextPage()}
+          >
+            {isFetchingNextPage ? 'Loading…' : 'Load older runs'}
+          </Button>
         )}
 
         {openId !== null && (

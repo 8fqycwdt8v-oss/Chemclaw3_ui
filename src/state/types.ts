@@ -9,7 +9,7 @@
  */
 
 import type { ApiErrorKind } from '../api/errors.ts';
-import type { JobSummary, RefusalReason } from '../../shared/events.ts';
+import type { AnswerCheck, JobSummary, RefusalReason } from '../../shared/events.ts';
 
 export type TurnStatus = 'streaming' | 'done' | 'error' | 'aborted';
 
@@ -123,6 +123,8 @@ export interface TraceEntry {
   toolFailure?: {
     tool: string;
     message: string;
+    /** The specialist that made the call; absent or empty is the main agent — as on `toolCall`. */
+    agent?: string;
     /**
      * Which gate refused this call, or absent/null for an ordinary failure.
      *
@@ -228,6 +230,29 @@ export interface AssistantMessage {
    * reader to compare scores that are not comparable.
    */
   verifiedBy: 'judge' | 'citation-gate' | null;
+  /**
+   * Which answer checks actually ran on this turn. **Empty means none did.**
+   *
+   * The field that makes the three above readable, and the reason it is here rather than only on
+   * the wire: both honesty gates ship off, so a checked-and-clean answer and one nothing looked at
+   * are identical in `confidence`, `review_required` and `unsupportedClaims` — and a surface that
+   * flags on those shows the same unflagged answer for both. `shared/events.ts` says the rule for
+   * every reader: an empty array is *unverified*, never *clean*.
+   *
+   * Optional because it is absent from every message persisted before this build read it, and an
+   * absent one means exactly what an empty one does — the same reading `endedAt` takes.
+   */
+  checksRun?: AnswerCheck[];
+  /**
+   * Whether a second pass challenged this answer, and the durable hold it opened.
+   *
+   * Both permanently at their defaults upstream today (`agent/verifier.py` has assigned neither
+   * since D-2026-08-15), and carried anyway for the reason the mirror carries them: reviving them
+   * is a coordinated three-repo cut, and a store that dropped them would make the cut arrive as
+   * nothing happening. Optional for the same reason as `checksRun`.
+   */
+  challenged?: boolean;
+  reviewHoldId?: string | null;
   /**
    * Connectors that were unreachable for this turn, so their tools were absent from it.
    *

@@ -103,6 +103,33 @@ describe('CitationChip', () => {
     expect(screen.getByText('0.82')).toBeTruthy();
   });
 
+  it('opens a note the corpus minted with no confidence at all', async () => {
+    // Four of the five note producers in core's `memory/` pass no confidence — a campaign, an
+    // interaction, an optimisation and a playbook all mint `confidence: None`; only a recorded
+    // failure scores one — and the wire model has been `float | None` throughout. This client
+    // declared `number`, so the badge called `.toFixed(2)` on `null` and the sheet threw: the one
+    // panel whose whole purpose is letting a chemist check a citation, unopenable for most of the
+    // corpus. `source` and `compound_smiles` are the same lie and are already guarded.
+    serve(note({ confidence: null, source: null, compound_smiles: null }));
+    openChip();
+
+    expect(await screen.findByText('Ran in 2-MeTHF at 70 °C, 92% isolated.')).toBeTruthy();
+    // And it says so rather than printing a number it does not have.
+    expect(screen.getByText(/no confidence recorded/)).toBeTruthy();
+  });
+
+  it('shows a zero score as a score, not as an absence', async () => {
+    // The same distinction `checks_run` exists for, one surface over: 0.00 is the strongest thing a
+    // producer can say against a note, and "nobody scored it" is a different claim. A falsy guard
+    // collapses the two and reports the worst-scored note in the corpus as unscored.
+    serve(note({ confidence: 0 }));
+    openChip();
+    await screen.findByText('Ran in 2-MeTHF at 70 °C, 92% isolated.');
+
+    expect(screen.getByText('0.00')).toBeTruthy();
+    expect(screen.queryByText(/no confidence recorded/)).toBeNull();
+  });
+
   it('warns when the note’s validity window has closed', async () => {
     // The case a reader cannot see for themselves: the graph would no longer retrieve this note,
     // but an answer written last year cited it while it still held.

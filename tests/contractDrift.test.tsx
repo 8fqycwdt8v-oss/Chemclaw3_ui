@@ -16,6 +16,15 @@
  *  - `TranscriptToolCall.result_ref`. The service does a *second* read purely to populate it,
  *    whose docstring calls it "the one path on which the ref never reached a surface". It did not,
  *    because the interface here declared three fields of four.
+ *
+ * Two more, one layer in: a field can be mirrored, decoded, validated — and then dropped by the
+ * store, which is where the mirror stops being a contract and starts being a decoration.
+ * `shared/events.ts` mirrors all eight `AnswerEvent` fields and `applyEvent` wrote five of them, so
+ * `checks_run` — the field that exists precisely so a surface can tell "we looked and it was fine"
+ * from "nobody looked", both gates shipping off — could not be read by anything. `challenged` and
+ * `review_hold_id` went the same way. And `tool_failed.agent` was decoded and logged while
+ * `tool_call` put its own `agent` on the trace row, so a specialist's failed call was attributed to
+ * nobody.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -23,6 +32,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { SidebarBody } from '../src/components/Sidebar.tsx';
 import { transcriptToMessages } from '../src/state/transcript.ts';
+import { answerEvent } from './helpers.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
 import type { SessionSummary, TranscriptMessage } from '../src/api/client.ts';
 
@@ -243,5 +253,72 @@ describe('a rehydrated tool call', () => {
     const call = assistant?.role === 'assistant' ? assistant.trace[0]?.toolCall : undefined;
 
     expect(call?.resultRef).toBeUndefined();
+  });
+});
+
+describe('an answer event', () => {
+  /** A fresh conversation with one assistant message, ready for an event. */
+  const turn = (): { cid: string; mid: string } => {
+    const cid = useChatStore.getState().createConversation();
+    useChatStore.getState().appendUserMessage(cid, 'q');
+    return { cid, mid: useChatStore.getState().startAssistantMessage(cid) };
+  };
+
+  const settled = (cid: string, mid: string) => {
+    const m = useChatStore.getState().conversations[cid]?.messages.find((x) => x.id === mid);
+    return m?.role === 'assistant' ? m : null;
+  };
+
+  it('lands every field it carries, not the five the store used to write', () => {
+    // `checks_run` is the one with a consequence: with both gates off an ungated answer and a
+    // checked-and-clean one are byte-identical on the wire but for this array, so a store that
+    // drops it makes the distinction unreachable by any surface — which is the ambiguity the
+    // field was added to end, repeated one layer up.
+    const { cid, mid } = turn();
+    useChatStore.getState().applyEvent(
+      cid,
+      mid,
+      answerEvent({
+        text: 'an answer',
+        checks_run: ['answer-shape'],
+        challenged: true,
+        review_hold_id: 'hold-7f1',
+      }),
+    );
+
+    expect(settled(cid, mid)).toMatchObject({
+      checksRun: ['answer-shape'],
+      challenged: true,
+      reviewHoldId: 'hold-7f1',
+    });
+  });
+
+  it('records an unchecked answer as unchecked rather than as clean', () => {
+    const { cid, mid } = turn();
+    useChatStore.getState().applyEvent(cid, mid, answerEvent({ text: 'an answer' }));
+
+    expect(settled(cid, mid)).toMatchObject({ checksRun: [], challenged: false });
+  });
+});
+
+describe('a failed tool call', () => {
+  it('is attributed to the specialist that made it, as a successful one already is', () => {
+    // `tool_call` puts `agent` on the row and `tool_failed` did not, so a helper's failed call read
+    // as the main agent's. The service defaults the field, so empty — not absent — is what says
+    // "the main agent", and the row has to be able to say the other thing.
+    const cid = useChatStore.getState().createConversation();
+    useChatStore.getState().appendUserMessage(cid, 'q');
+    const mid = useChatStore.getState().startAssistantMessage(cid);
+    useChatStore.getState().applyEvent(cid, mid, {
+      type: 'tool_failed',
+      tool: 'screen_hazards',
+      message: 'the connector was unreachable',
+      reason: null,
+      agent: 'subagent',
+    });
+
+    const m = useChatStore.getState().conversations[cid]?.messages.find((x) => x.id === mid);
+    const row = m?.role === 'assistant' ? m.trace.find((e) => e.kind === 'tool_failed') : undefined;
+    expect(row?.toolFailure).toMatchObject({ tool: 'screen_hazards', agent: 'subagent' });
   });
 });

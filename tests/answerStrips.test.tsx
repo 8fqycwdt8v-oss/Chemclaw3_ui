@@ -91,6 +91,31 @@ describe('the status strip ranks by what the reader has to do', () => {
     fireEvent.click(screen.getByRole('button', { name: /0.91/ }));
     expect(screen.getByText(/scored against this turn/)).toBeTruthy();
   });
+
+  it('says which checks ran, because "it was fine" is not "nobody looked"', () => {
+    // Both honesty gates ship off, and an ungated answer and a checked-and-clean one differ on the
+    // wire in `checks_run` and nowhere else: `confidence: null`, `review_required: false`,
+    // `unsupported_claims: []` either way. A strip that cannot show this is showing the same
+    // unflagged answer for both, which is the ambiguity the field was added to end.
+    render(<StatusStrip message={message({ checksRun: ['verifier', 'answer-shape'] })} />);
+    fireEvent.click(screen.getByRole('button', { name: /answer shape/ }));
+    expect(screen.getByText(/not the same as no check having run/)).toBeTruthy();
+  });
+
+  it('claims no check for a turn that had none', () => {
+    // Over a strip that is rendering other chips, not over an empty one: the chip row is skipped
+    // wholesale when there is nothing to put in it, so an empty strip would pass this whatever the
+    // chip's own condition says.
+    render(<StatusStrip message={message({ confidence: 0.91, verifiedBy: 'citation-gate' })} />);
+    expect(screen.getByRole('button', { name: /0.91/ })).toBeTruthy();
+    expect(screen.queryByText(/checked/)).toBeNull();
+  });
+
+  it('gives a chip to an answer a second pass challenged', () => {
+    render(<StatusStrip message={message({ challenged: true, reviewHoldId: 'hold-7f1' })} />);
+    fireEvent.click(screen.getByRole('button', { name: /challenged/ }));
+    expect(screen.getByText(/hold-7f1/)).toBeTruthy();
+  });
 });
 
 describe('the plan strip', () => {

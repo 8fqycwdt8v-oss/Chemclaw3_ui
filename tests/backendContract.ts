@@ -304,13 +304,49 @@ export function pydanticFields(source: string, className: string): PydanticField
   return fields;
 }
 
-/** A model by name, searched across `api/` — the six request models live in two different files. */
+/**
+ * The module an `api/` source imports `className` from, `src/chemclaw`-relative, or `null`.
+ *
+ * What this exists for: three of the models this client declares are *returned* by an `api/` route
+ * and *defined* outside the package — `JobRecordSummary` and `DurableJobStatus` in `durable/` and
+ * `agent/` — and `modelFields` searched `api/` only, so the comparison below listed them as
+ * unreadable and checked nothing. `JobRecordSummary.state` and `.plan_step` and
+ * `DurableJobStatus.calc_refs` all reached this client's blind spot that way.
+ *
+ * **Following the import is not the "invented pairing" the refusal was about.** That refusal is
+ * against reaching into another package to find a class that happens to share a name; this reads
+ * the returning module's own `from chemclaw.… import …`, which is the service stating which class
+ * it means. A name nothing imports still resolves to nothing.
+ */
+function importedModule(root: string, className: string): string | null {
+  const imports = /^from\s+chemclaw\.([A-Za-z0-9_.]+)\s+import\s+(\([\s\S]*?\)|[^\n]*)/gm;
+  for (const { text } of apiSources(root)) {
+    for (const match of text.matchAll(imports)) {
+      const names = (match[2] ?? '').replace(/[()\s]/g, '').split(',');
+      if (names.includes(className)) return `${(match[1] as string).replace(/\./g, '/')}.py`;
+    }
+  }
+  return null;
+}
+
+/**
+ * A model by name: searched across `api/` — the six request models live in two different files —
+ * and then in the module an `api/` source imports the name from.
+ */
 export function modelFields(root: string, className: string): PydanticField[] | null {
   for (const { text } of apiSources(root)) {
     const fields = pydanticFields(text, className);
     if (fields !== null) return fields;
   }
-  return null;
+  const elsewhere = importedModule(root, className);
+  if (elsewhere === null) return null;
+  try {
+    return pydanticFields(readPy(root, elsewhere), className);
+  } catch {
+    // A module this reader cannot open is a model it cannot read, which is the answer it already
+    // gives for a name nothing imports — never a comparison against a shape it guessed.
+    return null;
+  }
 }
 
 /** The members of a `Name = Literal["a", "b"]`, wherever it is declared. */
@@ -445,7 +481,12 @@ export function returnAnnotationOf(root: string, route: BackendRoute): string | 
 export function responseModelOf(root: string, route: BackendRoute): string | null {
   const annotation = returnAnnotationOf(root, route);
   if (annotation === null) return null;
-  const single = /^list\[([A-Za-z_][A-Za-z0-9_]*)\]$/.exec(annotation)?.[1] ?? annotation;
+  // `X | Response` is one shape and an escape hatch, not two shapes: the handler returns a bare
+  // `Response` for the 404 it would otherwise have to fake a model for, and every 200 on the route
+  // is an `X`. Two routes were listed as "not one model by name" for that — including
+  // `GET /notes/{id}`, whose `NoteRef` had three fields nothing here compared.
+  const shape = /^([A-Za-z_][A-Za-z0-9_]*)\s*\|\s*Response$/.exec(annotation)?.[1] ?? annotation;
+  const single = /^list\[([A-Za-z_][A-Za-z0-9_]*)\]$/.exec(shape)?.[1] ?? shape;
   return /^[A-Z][A-Za-z0-9_]*$/.test(single) ? single : null;
 }
 
@@ -746,14 +787,25 @@ function declaredResponseType(node: ts.Node, file: ts.SourceFile): string | null
 }
 
 /**
+ * Where a response interface this client declares may be written.
+ *
+ * `REQUEST_SOURCES` plus the hand-written contract mirror: `shared/protocols.ts` holds the
+ * experiment-design shapes, and `DesignDiff` — which `client.ts` returns and re-exports — is
+ * declared there. Searching the request files alone reported it as unreadable, so the one
+ * response in this client whose fields live outside `api/` was listed rather than compared, on both
+ * sides at once (see `modelFields`). Not the same list as the request walk's: that one is the files
+ * that *send*, and a mirror sends nothing.
+ */
+const RESPONSE_SOURCES = [...REQUEST_SOURCES, 'shared/protocols.ts'];
+
+/**
  * The property names of an interface this client declares, or `null` if it declares no such one.
  *
- * Only the files that build requests are searched, which is where every response interface in this
- * client is written today. A type imported from elsewhere reads as `null` — not compared rather
+ * A type declared in neither the request files nor the mirror reads as `null` — not compared rather
  * than compared against nothing, which is the same refusal `responseModelOf` makes upstream.
  */
 export function clientInterfaceFields(name: string): string[] | null {
-  for (const relative of REQUEST_SOURCES) {
+  for (const relative of RESPONSE_SOURCES) {
     const file = parse(relative);
     let found: string[] | null = null;
     const visit = (node: ts.Node): void => {

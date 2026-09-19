@@ -184,6 +184,15 @@ function PlanInbox(): React.JSX.Element {
                 <li key={`${index}-${step}`}>{step}</li>
               ))}
             </ol>
+            {/* What deciding it would authorise. On the row rather than only in the conversation,
+                because a chemist triaging an inbox is choosing which one to open, and "this one
+                writes to the graph" is the fact that decides it. Absent from an older service,
+                which reads as unknown and prints nothing. */}
+            {pending.scope?.length > 0 && (
+              <p className="mt-2 text-xs text-ink-muted">
+                Approving authorises <span className="font-mono">{pending.scope.join(' · ')}</span>.
+              </p>
+            )}
             <div className="mt-3">
               <Button asChild size="sm" variant="outline">
                 {/* `/open/:sessionId` adopts the server session into a local conversation, which
@@ -233,37 +242,81 @@ function Digests(): React.JSX.Element | null {
         service does not keep a second copy, so these stay here until you dismiss them.
       </p>
       <ul className="flex flex-col gap-2">
-        {visible.map(({ digest, index }) => (
-          <li
-            key={`${digest.receivedAt}-${index}`}
-            className="rounded-lg border border-border-subtle bg-surface-raised p-3"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div className="min-w-0">
-                <p className="text-sm">
-                  <span className="text-ink-muted">watching </span>
-                  <span className="font-medium">{digest.query || 'a saved query'}</span>
-                </p>
-                {/* "Seen", not "found": the service sends no timestamp for the merge, and a card
-                    that implied one would be inventing it — the same rule `JobFeed` follows. */}
-                <p className="mt-0.5 text-2xs text-ink-subtle">
-                  seen {relativeTime(digest.receivedAt)} · {digest.noteIds.length}{' '}
-                  {digest.noteIds.length === 1 ? 'note' : 'notes'}
-                </p>
+        {visible.map(({ digest, index }) => {
+          // Defaulted here rather than at every use: both are absent from cards claimed before
+          // this build read them, and an absent one means the same as an empty one.
+          const disputed = digest.disputed ?? [];
+          const headlines = digest.headlines ?? {};
+          return (
+            <li
+              key={`${digest.receivedAt}-${index}`}
+              className="rounded-lg border border-border-subtle bg-surface-raised p-3"
+            >
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-sm">
+                    <span className="text-ink-muted">watching </span>
+                    <span className="font-medium">{digest.query || 'a saved query'}</span>
+                  </p>
+                  {/* "Seen", not "found": the service sends no timestamp for the merge, and a card
+                      that implied one would be inventing it — the same rule `JobFeed` follows. */}
+                  <p className="mt-0.5 text-2xs text-ink-subtle">
+                    seen {relativeTime(digest.receivedAt)} · {digest.noteIds.length}{' '}
+                    {digest.noteIds.length === 1 ? 'note' : 'notes'}
+                    {/* Only when the service reported one: "0 of 2 disagree" would be a claim
+                        about a corpus nobody consulted. The wording is the service's own. */}
+                    {disputed.length > 0 &&
+                      ` · ${disputed.length} of ${digest.noteIds.length} disagree with something already in the graph`}
+                  </p>
+                </div>
+                <Button size="xs" variant="ghost" onClick={() => dismiss(index)}>
+                  Dismiss
+                </Button>
               </div>
-              <Button size="xs" variant="ghost" onClick={() => dismiss(index)}>
-                Dismiss
-              </Button>
-            </div>
-            <div className="mt-2 flex flex-wrap gap-1.5">
-              {digest.noteIds.map((noteId) => (
-                <CitationChip key={noteId} kind="note" id={noteId} />
-              ))}
-            </div>
-          </li>
-        ))}
+              {/* One line per note rather than a row of bare ids. The service sends `headlines`
+                  for exactly this reason — without it "a client can do nothing but print them" —
+                  and the dispute is marked on the note as well as counted above, because a reader
+                  scanning two findings has to see which one the graph argues with. */}
+              <ul className="mt-2 flex flex-col gap-1.5">
+                {digest.noteIds.map((noteId) => (
+                  <li key={noteId} className="flex flex-wrap items-baseline gap-1.5 text-sm">
+                    <CitationChip kind="note" id={noteId} />
+                    {disputed.includes(noteId) && <Badge tone="warn">disputed</Badge>}
+                    {headlines[noteId] && (
+                      <span className="min-w-0 text-ink-muted">{headlines[noteId]}</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </li>
+          );
+        })}
       </ul>
     </section>
+  );
+}
+
+/**
+ * What the page of waiting questions *is*, in the service's own sentence.
+ *
+ * Rendered as given rather than derived from the two counts beside it: the service computes it from
+ * both reasons its total can exceed the page — rows this page did not reach, and rows this caller
+ * may not answer because they raised them — and those are different things to tell somebody. Empty
+ * from a service that predates the field, and an empty notice with a border round it says less than
+ * no notice at all.
+ *
+ * Above the list in both directions, including over the empty state, because "nothing is waiting on
+ * you" is the one sentence on this screen a partial page could contradict.
+ */
+function PageVerdict({ verdict }: { verdict: string }): React.JSX.Element | null {
+  if (!verdict) return null;
+  return (
+    <p
+      role="status"
+      className="rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-xs text-ink-muted"
+    >
+      {verdict}
+    </p>
   );
 }
 
@@ -363,15 +416,19 @@ function PendingInbox(): React.JSX.Element {
   const waiting = view.requests.filter((r) => r.state === 'waiting');
   if (waiting.length === 0) {
     return (
-      <EmptyState icon={<Inbox className="size-5" />} title="Nothing is waiting on you">
-        A question appears here when the agent holds work open for an answer only a person can give
-        — a measured yield, a decision about a batch, a value off an instrument.
-      </EmptyState>
+      <div className="flex flex-col gap-3">
+        <PageVerdict verdict={view.verdict} />
+        <EmptyState icon={<Inbox className="size-5" />} title="Nothing is waiting on you">
+          A question appears here when the agent holds work open for an answer only a person can
+          give — a measured yield, a decision about a batch, a value off an instrument.
+        </EmptyState>
+      </div>
     );
   }
 
   return (
     <div className="flex flex-col gap-3">
+      <PageVerdict verdict={view.verdict} />
       {notice && (
         <p
           role="status"

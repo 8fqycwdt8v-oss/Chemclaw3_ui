@@ -27,7 +27,7 @@
 
 import { api } from './client.ts';
 import { IMMUTABLE, PENDING_PLANS_STALE_MS, keys } from './queryClient.ts';
-import type { TokenGetter } from './client.ts';
+import type { JobPage, TokenGetter } from './client.ts';
 import type { DesignStatus } from '../../shared/protocols.ts';
 
 /** One stored tool result. Content-addressed: the URL changes whenever the bytes do. */
@@ -59,11 +59,21 @@ export const profilesQuery = (auth: TokenGetter) => ({
   staleTime: Infinity,
 });
 
-/** Durable runs matching a search. The search text is the key, so a stale list is never shown
- *  under a new query — which is what `JobsPanel`'s `loaded.query === submitted` derivation did. */
+/**
+ * Durable runs matching a search, one page at a time.
+ *
+ * The search text is the key, so a stale list is never shown under a new query — which is what
+ * `JobsPanel`'s `loaded.query === submitted` derivation did. Paged because the service caps the
+ * search at `job_record_search_limit` and advertises `X-Next-Cursor` when it saw a further row:
+ * unpaged, a chemist with more finished runs than the cap could not reach the older ones from any
+ * client, and the listing looked complete.
+ */
 export const jobsQuery = (text: string, auth: TokenGetter) => ({
   queryKey: keys.jobs(text),
-  queryFn: () => api.listJobs(auth, { text }),
+  queryFn: ({ pageParam }: { pageParam: string }) =>
+    api.pageJobs(auth, { text, ...(pageParam ? { after: pageParam } : {}) }),
+  initialPageParam: '',
+  getNextPageParam: (page: JobPage) => page.next || undefined,
 });
 
 /** Experiment designs under a status/project filter, keyed the same way and for the same reason. */

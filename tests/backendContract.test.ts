@@ -417,6 +417,21 @@ export function responseDrift(
   };
 }
 
+/**
+ * Response fields the service sends that this client deliberately does not declare, and why.
+ *
+ * Empty, and that is the point at which a ratchet is cheapest to fit: the two entries that would
+ * have been here (`Digest.disputed`, `Digest.headlines`) were both fields the UI had a surface for,
+ * and both are read now. An entry is a sentence, not a name — "not needed" is not a reason anybody
+ * can check a year later.
+ *
+ * **A field from a route whose read is a destructive claim may not be exempted at all.**
+ * `GET /digests` and `GET /check-ins` consume the rows they return, so a field dropped there is
+ * gone rather than deferred: there is no later read to pick it up, and "a note for later" is a
+ * description of a field that can be fetched again.
+ */
+const NOT_READ: Record<string, string> = {};
+
 describe('the response drift this client can be held to', () => {
   it('fails a property nobody sends and lists a field nobody reads', () => {
     // Both directions and neither empty, because the two real pairs agree today: a loop over them
@@ -867,12 +882,24 @@ if (root === null) {
         'this client declares these properties on a response and no model upstream sends them — ' +
           'every one arrives `undefined`, which is the confident blank this axis exists to catch',
       ).toEqual([]);
-      if (unread.length > 0) {
-        console.log(
-          `\n  ${unread.length} response field(s) the service sends and this client does not declare:\n` +
-            unread.map((field) => `      ${field}`).join('\n'),
-        );
-      }
+      // **The other direction is asserted too now, against an argued list rather than printed.**
+      // A client is entitled not to read a field, which is why this was a `console.log` — and what
+      // that spent was the only notice anybody got: `Digest.disputed` and `Digest.headlines` were
+      // printed by this line for as long as the card rendered bare note ids, and the service's own
+      // model says `headlines` exists because without it "a client can do nothing but print them".
+      // A print nobody reads is not the control it looks like. So an entitlement has to be written
+      // down: `NOT_READ` carries the reason per field, and the list is held in both directions —
+      // an entry that has stopped drifting fails too, because a stale exemption reads as a live
+      // one.
+      expect(
+        unread.filter((field) => !(field in NOT_READ)),
+        'the service sends these and this client declares none of them — read the field or add it ' +
+          'to `NOT_READ` with the reason it is not worth reading',
+      ).toEqual([]);
+      expect(
+        Object.keys(NOT_READ).filter((field) => !unread.includes(field)),
+        'these are exempted from being read and are no longer missing — delete the exemption',
+      ).toEqual([]);
     });
   });
 

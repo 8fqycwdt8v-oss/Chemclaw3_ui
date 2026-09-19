@@ -16,7 +16,7 @@ import type { ApiErrorKind } from '../api/errors.ts';
 // Type-only, so this adds no edge to the module graph: the wire shape of a check-in is declared
 // where every other wire shape is, and restating it here would be a second definition of one
 // contract.
-import type { CheckIn } from '../api/client.ts';
+import type { CheckIn, Digest } from '../api/client.ts';
 import type {
   AssistantMessage,
   Banner,
@@ -90,6 +90,15 @@ interface PersistedState {
 export interface DigestCard {
   query: string;
   noteIds: string[];
+  /**
+   * Which of `noteIds` the corpus now disagrees with, and one line of what each note says.
+   *
+   * Optional because they are absent from every card persisted before they were read at all, and an
+   * absent one is indistinguishable from an empty one — the same reason `migratePersisted` takes
+   * `digests` itself as an additive field rather than a version bump. Every reader defaults them.
+   */
+  disputed?: string[];
+  headlines?: Record<string, string>;
   /** When WE claimed it. The service sends no timestamp, so nothing here may imply one. */
   receivedAt: number;
   dismissed: boolean;
@@ -299,6 +308,20 @@ const JOB_FEED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_CHECK_INS = 200;
 
 /**
+ * How many claimed digests are kept, and why it is the check-ins' number rather than the feed's.
+ *
+ * This was the one persisted list with no count bound at all — held only by the 7-day age cutoff in
+ * `partialize`, and `shedOldest` cannot help: it sheds conversations and then messages, and a
+ * digest is the only copy there is (the read is the consume), so shedding one would destroy a
+ * finding the service will never send again. Unbounded, therefore, a long enough list does not cost
+ * itself, it costs the *transcript*: the payload cannot be made to fit, `shedOldest` returns `null`,
+ * `storageWritable` latches false and history silently stops being saved. The same arithmetic as
+ * `MAX_CHECK_INS` — same mailbox, same once-per-page claim, and a card of the same order of size
+ * now that `headlines` is read — so the same number.
+ */
+const MAX_DIGESTS = 200;
+
+/**
  * A check-in's identity, and the reason it is not simply `request_id`.
  *
  * `CheckIn`'s docstring states that every field is defaulted upstream and so is "always present
@@ -486,7 +509,14 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
       return {
         ...base,
         kind: 'tool_failed',
-        toolFailure: { tool: event.tool, message: event.message, reason: event.reason ?? null },
+        toolFailure: {
+          tool: event.tool,
+          message: event.message,
+          reason: event.reason ?? null,
+          // As on the `tool_call` row: the service defaults it, so empty is "the main agent" and
+          // the row has to be able to say the other thing.
+          agent: event.agent,
+        },
       };
     // Every source, not only the failures. This used to keep the raised ones and drop the rest,
     // on the argument that a source asked and silent "belongs in an evidence summary, not in a
@@ -739,7 +769,7 @@ export interface ChatState {
    * service, but a second tab claiming concurrently, or a StrictMode double-effect, can both reach
    * this — and a duplicated finding reads as two findings.
    */
-  addDigests: (digests: { query: string; note_ids: string[] }[]) => void;
+  addDigests: (digests: Digest[]) => void;
   dismissDigest: (index: number) => void;
   /**
    * Record the check-ins this page claimed, and mark the claim answered.
@@ -1069,7 +1099,7 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
     next.digests ?? [],
     stored.digests,
     (d) => `${d.query}\u0000${d.noteIds.join(',')}`,
-  );
+  ).slice(0, MAX_DIGESTS);
   // Keyed by the service's own request id, which a digest does not have: two tabs claiming the
   // same blocked question fold to one card rather than to two notices about one question.
   // **Aged out on both sides.** `partialize` drops a card older than the cutoff, and this fold
@@ -1635,6 +1665,12 @@ export const useChatStore = create<ChatState>()(
               unsupportedClaims: event.unsupported_claims,
               reviewRequired: event.review_required,
               verifiedBy: event.verified_by,
+              // The three the mirror decoded and this branch used to drop. `checksRun` is the one
+              // with a reader: it is the only field that separates "we looked and it was fine" from
+              // "nobody looked", both gates shipping off.
+              checksRun: event.checks_run,
+              challenged: event.challenged,
+              reviewHoldId: event.review_hold_id,
             })),
           );
           return;
@@ -1953,10 +1989,14 @@ export const useChatStore = create<ChatState>()(
             .map((d) => ({
               query: d.query,
               noteIds: d.note_ids,
+              disputed: d.disputed,
+              headlines: d.headlines,
               receivedAt: Date.now(),
               dismissed: false,
             }));
-          return additions.length > 0 ? { digests: [...additions, ...s.digests] } : {};
+          return additions.length > 0
+            ? { digests: [...additions, ...s.digests].slice(0, MAX_DIGESTS) }
+            : {};
         });
       },
 

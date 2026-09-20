@@ -103,6 +103,7 @@ export function transcriptToMessages(remote: TranscriptMessage[]): ChatMessage[]
       trace: traceFrom(calls, key, at),
       latestPlan: null,
       latestPlanHash: null,
+      latestPlanScope: null,
       error: null,
     });
   }

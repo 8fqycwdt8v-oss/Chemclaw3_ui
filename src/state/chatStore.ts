@@ -387,6 +387,7 @@ function newAssistantMessage(): AssistantMessage {
     trace: [],
     latestPlan: null,
     latestPlanHash: null,
+    latestPlanScope: null,
     endedAt: null,
     correlationId: '',
     stalled: false,
@@ -718,6 +719,7 @@ export interface ChatState {
     todos: string[],
     planHash: string,
     awaitingApproval?: boolean,
+    scope?: string[] | null,
   ) => void;
 
   appendUserMessage: (conversationId: string, text: string) => string;
@@ -1542,7 +1544,7 @@ export const useChatStore = create<ChatState>()(
         });
       },
 
-      attachPlan(conversationId, todos, planHash, awaitingApproval = false) {
+      attachPlan(conversationId, todos, planHash, awaitingApproval = false, scope = null) {
         // The session's current plan, read back after a reload. `latestPlan` is stream-only state
         // — the transcript stores the messages, not the plan — so a rehydrated conversation lost
         // its checklist while the session, per `GET /sessions/{id}/plan`, was still proposing one.
@@ -1587,7 +1589,13 @@ export const useChatStore = create<ChatState>()(
                   },
                 ]
               : target.trace;
-          messages[index] = { ...target, latestPlan: todos, latestPlanHash: planHash, trace };
+          messages[index] = {
+            ...target,
+            latestPlan: todos,
+            latestPlanHash: planHash,
+            latestPlanScope: scope ?? target.latestPlanScope,
+            trace,
+          };
           return {
             conversations: {
               ...s.conversations,
@@ -1769,6 +1777,15 @@ export const useChatStore = create<ChatState>()(
               // The hash of the plan as rendered, so the approval card can bind a decision to
               // exactly what was shown without a second round trip that races the next revision.
               latestPlanHash: event.type === 'plan' ? event.plan_hash : m.latestPlanHash,
+              // The scope travels with the hash it belongs to, so the card shows the tool
+              // list for the plan it is rendering and not for a later revision. An older
+              // service sends none; `null` there means "go and fetch it", never "none".
+              latestPlanScope:
+                event.type === 'plan'
+                  ? event.scope.length > 0
+                    ? event.scope
+                    : null
+                  : m.latestPlanScope,
             };
           }),
         );

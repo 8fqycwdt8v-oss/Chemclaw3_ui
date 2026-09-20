@@ -730,14 +730,36 @@ if (root === null) {
         wrong,
         'normalizeEvent reads these keys and no model on the wire has them — every one renders as an empty default',
       ).toEqual([]);
-      if (unread.length > 0) {
-        console.log(
-          `\n  ${unread.length} field(s) the service sends and this client ignores:\n` +
-            unread.map((field) => `      ${field}`).join('\n'),
-        );
-      }
+      // **An assertion, not a print.** This axis reported its finding through `console.log` inside
+      // a green run — and the sibling axis below had already been converted for exactly that
+      // reason, with the sentence "A print nobody reads is not the control it looks like". The very
+      // next event field the service added, `plan.scope`, landed in the hole: it was printed here
+      // for a whole wave while the approval card went on collecting a yes to a tool list it had not
+      // been shown, and nothing was red.
+      //
+      // `EVENT_NOT_READ` is the argued exemption, and it is **empty** — the cheapest state for a
+      // ratchet to be fitted in. An entry here says "this client deliberately ignores that field",
+      // which is a claim a reviewer can check; `test_no_event_exemption_is_stale` then fails on one
+      // the service no longer sends, so the map cannot outlive its subjects either.
+      expect(
+        unread.filter((field) => !EVENT_NOT_READ.has(field)),
+        'fields the service sends on an event that `normalizeEvent` drops on the floor. Read them, ' +
+          'or add them to EVENT_NOT_READ with the reason this client does not need them.',
+      ).toEqual([]);
+      expect(
+        [...EVENT_NOT_READ].filter((field) => !unread.includes(field)),
+        'EVENT_NOT_READ exempts event fields the service no longer sends: delete them. An ' +
+          'exemption nobody can trip is a claim that a control exists.',
+      ).toEqual([]);
     });
   });
+
+  //: Event fields the service sends that `normalizeEvent` deliberately does not read, each with the
+  //: reason. Empty today, and that is the point: it was fitted while there was nothing to exempt, so
+  //: the first entry anybody adds is a decision somebody has to write down rather than a print in a
+  //: green log. A field on a **destructive-read** route may not be exempted at all — there is no
+  //: later read, so "a note for later" is false by construction.
+  const EVENT_NOT_READ = new Set<string>();
 
   describe('the closed sets this client mirrors', () => {
     const literal = (relative: string, name: string): string[] => {

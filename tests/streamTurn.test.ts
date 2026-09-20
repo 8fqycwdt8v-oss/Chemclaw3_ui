@@ -38,7 +38,7 @@ const collect = async (
 };
 
 const HAPPY: ChemclawEvent[] = [
-  { type: 'plan', todos: ['gather evidence', 'answer'], plan_hash: 'h' },
+  { type: 'plan', todos: ['gather evidence', 'answer'], plan_hash: 'h', scope: [] },
   { type: 'token', text: 'Acetic ' },
   { type: 'tool_call', tool: 'gather_evidence', arguments: '{"query": "acetic acid pKa"' },
   { type: 'token', text: 'acid has a pKa of 4.76.' },

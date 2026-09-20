@@ -277,6 +277,19 @@ const planEvent = v.object({
    * service degrades to the round trip rather than to a wrong answer.
    */
   plan_hash: text(),
+  /**
+   * The state-changing tools this plan's steps declare — what approving it actually authorizes.
+   *
+   * `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool` states the requirement: "a
+   * surface that rendered the steps alone would be collecting a yes to something it had not
+   * displayed". It was on `GET /sessions/{id}/plan` only, and since `plan_hash` is on *this* event
+   * precisely so a client need not fetch, the card returned early and the one path carrying the
+   * scope was never called — the field existed and nothing consumed it.
+   *
+   * Empty means "this event predates the field", exactly as `plan_hash` empty does, so a consumer
+   * falls back to the fetch rather than to "this plan authorizes nothing".
+   */
+  scope: textList(),
 });
 export type PlanEvent = v.InferOutput<typeof planEvent>;
 

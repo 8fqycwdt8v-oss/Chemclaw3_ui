@@ -51,6 +51,7 @@ const message = (over: Partial<AssistantMessage> = {}): AssistantMessage =>
     trace: [],
     latestPlan: null,
     latestPlanHash: null,
+    latestPlanScope: null,
     error: null,
     ...over,
   }) as AssistantMessage;

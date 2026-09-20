@@ -297,6 +297,7 @@ const AssistantBubble = memo(function AssistantBubble({
             // `plan` event, so passing them straight through does not re-run the card's effect.
             planTodos={message.latestPlan}
             planHash={message.latestPlanHash}
+            planScope={message.latestPlanScope}
           />
         )}
       </div>

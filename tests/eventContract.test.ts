@@ -127,7 +127,7 @@ const full: Array<[string, Record<string, unknown>]> = [
   // exactly the case this fixture exists to catch, and an absent member cannot catch it. Found by
   // the declaration check below on its first run.
   ['queued', {}],
-  ['plan', { todos: ['step one'], plan_hash: 'abc123' }],
+  ['plan', { todos: ['step one'], plan_hash: 'abc123', scope: ['record_knowledge_note'] }],
   ['tool_call', { tool: 'find_notes', arguments: '{"q":1}', agent: 'safety' }],
   // `agent` is load-bearing on this one: the backend stamps every token with it and says a
   // consumer "concatenates only the unattributed ones", so a dropped field here splices a
@@ -221,6 +221,16 @@ describe('the event contract carries every field of every member', () => {
     // that as "go and fetch it". The value it must never be is one that looks answerable.
     const parsed = normalizeEvent({ type: 'plan', todos: ['a'] });
     expect(parsed).toMatchObject({ plan_hash: '' });
+  });
+
+  it('reads a missing plan scope as absent rather than as "authorizes nothing"', () => {
+    // The sibling of the assertion above, and the same distinction: a frame from a service that
+    // predates `scope` carries none, and an empty list must send the card to the fetch rather than
+    // let it display a tool list it does not have. `[]` at the schema and `null` at the store is
+    // what keeps those two readings apart — a card told "no tools" would be a false reassurance
+    // about what approving this plan authorizes.
+    const parsed = normalizeEvent({ type: 'plan', todos: ['a'], plan_hash: 'h' });
+    expect(parsed).toMatchObject({ scope: [] });
   });
 });
 

@@ -199,7 +199,7 @@ dispatch already exist, so each is a renderer rather than a feature.
 | **F6** | Chemist: be told my own work is still blocked, before it expires          | Chase the person who owes the answer while there is still time to                     | `GET /check-ins` → `[{request_id, subject, rationale, asked_of, open_days, days_left}]`                     | **`SERVED`** |
 | **F7** | Chemist: decide a procedure the agent worked out and wants to keep        | Judgment that reshapes every later answer is mine to accept, and I see the document   | `GET /proposals` → `{proposals}`; `POST /proposals/{kind}/{name}` bound to `content_hash`                   | **`SERVED`** |
 | **F8** | Chemist: see what judgment is acting on my answers, and remove it         | The condition the stored skills tiers hold their exemption from review under          | `GET /skills/mine`, `DELETE /skills/mine/{name}`, `GET /skills/org` — read both tiers, remove my own        | **`SERVED`** |
-| **F9** | Administrator: publish judgment to everyone, and put back what worked     | A bad deployment-wide skill is a rollback, not a re-authoring                          | `POST /skills/org`, `GET /skills/org/{name}/versions`, `POST /skills/org/{name}/revert`                     | **`SERVED`** |
+| **F9** | Administrator: publish judgment to everyone, and put back what worked     | A bad deployment-wide skill is a rollback, not a re-authoring                         | `POST /skills/org`, `GET /skills/org/{name}/versions`, `POST /skills/org/{name}/revert`                     | **`SERVED`** |
 
 **F2 is what this frontend is for, and F1 no longer exists.** The plan decision is bound to the
 hash of the plan that was actually rendered, fetched on card mount so the two cannot drift; a 409

@@ -937,7 +937,7 @@ behaviour-proposal queue.
   revert and the role gate), and the cross-repo contract lane covers every route they call — but
   `e2e/` has no fixture for `/proposals`, `/skills/mine` or `/skills/org`, so nothing exercises the
   rendering in a real browser. That matters more here than for most screens: these are the surfaces
-  `D-2026-09-05` makes the *condition* of the stored skills tiers' exemption from review, so a page
+  `D-2026-09-05` makes the _condition_ of the stored skills tiers' exemption from review, so a page
   that renders blank in production is a control that silently stops existing. Adding it means three
   fixture rows and a new `/skills` a11y snapshot, so it is its own change rather than a line in
   somebody else's.

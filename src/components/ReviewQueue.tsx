@@ -44,6 +44,7 @@ import { api, type PendingRequest, type PendingPlans as PendingPlansView } from 
 import { ApiError } from '../api/errors.ts';
 import { relativeTime } from '../lib/format.ts';
 import { checkInKey, useChatStore } from '../state/chatStore.ts';
+import { BehaviourProposals } from './BehaviourProposals.tsx';
 import { CitationChip } from './CitationChip.tsx';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -669,6 +670,26 @@ export function ReviewQueue(): React.JSX.Element {
         </section>
 
         <Digests />
+
+        {/* **The third section this page has carried, and the first that can be decided here.**
+            The two before it were deleted for describing decisions that could not occur, and the
+            docstring above says what that cost. This one is different in the way that matters: the
+            service returns the whole document precisely so nobody approves something unseen, so
+            the reasoning is not one click away in a conversation — it is on the card. */}
+        <section aria-labelledby="proposals-heading">
+          <h2 id="proposals-heading" className="mb-1 text-lg font-semibold tracking-tight">
+            Skills the agent has proposed
+          </h2>
+          <p className="mb-3 text-sm text-ink-muted">
+            Procedures a turn worked out and thinks are worth keeping. Nothing it proposes acts on
+            anything until you accept it, and what you accept acts on your turns alone —{' '}
+            <Link className="underline" to="/skills">
+              the skills screen
+            </Link>{' '}
+            is where you see and remove what is acting.
+          </p>
+          <BehaviourProposals />
+        </section>
 
         <section aria-labelledby="pending-heading">
           <h2 id="pending-heading" className="mb-1 text-lg font-semibold tracking-tight">

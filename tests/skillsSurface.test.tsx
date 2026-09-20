@@ -1,0 +1,326 @@
+/**
+ * The half of a bargain the service has been claiming, from the browser.
+ *
+ * `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` grants the two stored skills tiers their
+ * exemption from per-use review *on the condition* that the people they act on can see what they
+ * say and get rid of them. Until these screens existed the only thing that could exercise that was
+ * `curl`, so `ARCHITECTURE.md` and `SECURITY.md` were describing a control nobody could reach.
+ *
+ * **Two things this file is really about.**
+ *
+ * The first is the failure this page has had twice: *an empty list must never read as "nothing is
+ * waiting on you" unless that is what the service said.* Both deleted sections got it wrong the
+ * same way — a list route 404s, the client folds it into `[]`, and a confident empty queue ships
+ * for a release. The proposals tier answers **503** where a deployment keeps no store, which is a
+ * different fact from an empty queue, so both are driven separately here.
+ *
+ * The second is that a **revert puts back the bytes that stood before** rather than whatever
+ * somebody retypes. The service holds the history for exactly that reason, and a surface that
+ * showed the hashes without the bodies would be asking for a decision about something unseen.
+ */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
+import { BehaviourProposals } from '../src/components/BehaviourProposals.tsx';
+import { SkillsPanel } from '../src/components/SkillsPanel.tsx';
+import { stubFetch } from './helpers.ts';
+import { resetQueryCache } from '../src/api/queryClient.ts';
+
+const mode = { current: 'dev' as 'dev' | 'msal', roles: [] as string[] };
+
+vi.mock('../src/auth/AuthContext.tsx', async () => {
+  const { config } = await import('../src/env.ts');
+  const auth = {
+    getAccessToken: async () => null,
+    get mode() {
+      return mode.current;
+    },
+    get account() {
+      return { id: 'u', username: 'u', name: 'u', roles: mode.roles };
+    },
+  };
+  const value = { auth, ready: true, revision: 0 };
+  return {
+    useAuth: () => value,
+    // The real implementation over the stub above, for `reviewQueue.test.tsx`'s reason: mocking
+    // the gate away would test nothing, and this file's last case is about the gate.
+    useIsReviewer: () =>
+      mode.current === 'dev' || config.reviewerRoles.some((r) => mode.roles.includes(r)),
+  };
+});
+
+const BODY = '---\nname: my-workup\ndescription: how I work up a Suzuki\n---\n\nQuench cold.\n';
+const OLDER = '---\nname: house-workup\ndescription: the one that worked\n---\n\nQuench cold.\n';
+const NEWER = '---\nname: house-workup\ndescription: the one that did not\n---\n\nQuench hot.\n';
+
+let restore: (() => void) | null = null;
+
+/** Every route these screens touch, answered from one place so a test changes one line. */
+function serve(
+  routes: Record<string, () => Response>,
+  onCall?: (url: string, init?: RequestInit) => void,
+): { calls: { url: string; init?: RequestInit }[] } {
+  const stub = stubFetch((url, init) => {
+    onCall?.(url, init);
+    // Longest match first: `/skills/org` is a prefix of `/skills/org/<name>/versions`, and
+    // `reviewQueue.test.tsx` records what answering the short one first costs.
+    const key = Object.keys(routes)
+      .sort((a, b) => b.length - a.length)
+      .find((route) => url.includes(route));
+    if (key) return routes[key]!();
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  restore = stub.restore;
+  return stub;
+}
+
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+beforeEach(() => {
+  cleanup();
+  mode.current = 'dev';
+  mode.roles = [];
+  resetQueryCache();
+});
+
+afterEach(() => {
+  restore?.();
+  restore = null;
+});
+
+describe('proposals waiting on a person', () => {
+  it('shows the whole document, because that is what is being decided', async () => {
+    serve({
+      '/proposals': () =>
+        json({
+          proposals: [
+            {
+              kind: 'skill',
+              name: 'my-workup',
+              content_hash: 'hash-1',
+              content: BODY,
+              rationale: 'This went wrong the same way twice.',
+              state: 'open',
+              session_id: 'a'.repeat(32),
+            },
+          ],
+        }),
+    });
+    render(
+      <MemoryRouter>
+        <BehaviourProposals />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('my-workup')).toBeTruthy();
+    expect(screen.getByText('This went wrong the same way twice.')).toBeTruthy();
+    // The body itself, not a summary of it: the service returns it whole so nobody approves
+    // something unseen, and a screen that hid it would give that away.
+    expect(screen.getByText(/Quench cold\./)).toBeTruthy();
+  });
+
+  it('binds the decision to the document it showed', async () => {
+    const seen: RequestInit[] = [];
+    serve(
+      {
+        '/proposals': () =>
+          json({
+            proposals: [
+              {
+                kind: 'skill',
+                name: 'my-workup',
+                content_hash: 'hash-1',
+                content: BODY,
+                rationale: 'why',
+                state: 'open',
+                session_id: '',
+              },
+            ],
+          }),
+      },
+      (url, init) => {
+        if (init?.method === 'POST' && url.includes('/proposals/')) seen.push(init);
+      },
+    );
+    render(
+      <MemoryRouter>
+        <BehaviourProposals />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /Keep this skill/ }));
+
+    await waitFor(() => expect(seen).toHaveLength(1));
+    // `content_hash` is the point: a decision naming only the name would authorize whatever that
+    // name currently holds, and the proposer can supersede between the read and the click.
+    expect(JSON.parse(String(seen[0]!.body))).toMatchObject({
+      content_hash: 'hash-1',
+      accepted: true,
+    });
+  });
+
+  it('says a deployment keeps no proposals rather than showing an empty queue', async () => {
+    serve({ '/proposals': () => json({ detail: 'no store' }, 503) });
+    render(
+      <MemoryRouter>
+        <BehaviourProposals />
+      </MemoryRouter>,
+    );
+
+    // The failure this page has shipped twice, in the one place it could ship again.
+    expect(await screen.findByText(/keeps no proposals/i)).toBeTruthy();
+    expect(screen.queryByText(/Nothing proposed/i)).toBeNull();
+    expect(screen.getByText(/CHEMCLAW_AGENT_MEMORY_ENABLED/)).toBeTruthy();
+  });
+
+  it('says nothing is proposed when that is what the service said', async () => {
+    serve({ '/proposals': () => json({ proposals: [] }) });
+    render(
+      <MemoryRouter>
+        <BehaviourProposals />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/Nothing proposed/i)).toBeTruthy();
+    expect(screen.queryByText(/keeps no proposals/i)).toBeNull();
+  });
+});
+
+describe('what is acting on a chemist', () => {
+  function serveSkills(extra: Record<string, () => Response> = {}): void {
+    serve({
+      '/skills/mine': () => json({ skills: ['my-workup'] }),
+      '/skills/org': () => json({ skills: ['house-workup'] }),
+      ...extra,
+    });
+  }
+
+  it('lists both tiers and says which reaches whom', async () => {
+    serveSkills();
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('my-workup')).toBeTruthy();
+    expect(await screen.findByText('house-workup')).toBeTruthy();
+    // The two bargains named, because a reader who cannot tell them apart cannot use either.
+    expect(screen.getByText(/Acting on your turns and nobody else's/i)).toBeTruthy();
+    expect(screen.getByText(/every turn every chemist here takes/i)).toBeTruthy();
+  });
+
+  it('removes one of the chemist’s own, which is the condition the tier is exempted under', async () => {
+    const deletes: string[] = [];
+    serve(
+      {
+        '/skills/mine': () => json({ skills: ['my-workup'] }),
+        '/skills/org': () => json({ skills: [] }),
+      },
+      (url, init) => {
+        if (init?.method === 'DELETE') deletes.push(url);
+      },
+    );
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /Remove/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Remove$/ }));
+
+    await waitFor(() => expect(deletes.some((url) => url.includes('/skills/mine/'))).toBe(true));
+  });
+
+  it('offers a revert that names the bytes it would put back', async () => {
+    const posts: { url: string; body: unknown }[] = [];
+    serve(
+      {
+        '/skills/mine': () => json({ skills: [] }),
+        '/skills/org': () => json({ skills: ['house-workup'] }),
+        '/skills/org/house-workup/versions': () =>
+          json({
+            versions: [
+              {
+                content_hash: 'hash-new',
+                body: NEWER,
+                activated_by: 'u-admin',
+                activated_at: '2026-09-20T09:00:00Z',
+              },
+              {
+                content_hash: 'hash-old',
+                body: OLDER,
+                activated_by: 'u-admin',
+                activated_at: '2026-09-19T09:00:00Z',
+              },
+            ],
+          }),
+      },
+      (url, init) => {
+        if (init?.method === 'POST') posts.push({ url, body: JSON.parse(String(init.body)) });
+      },
+    );
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText(/What it used to say/i));
+
+    // The bodies are on screen, not just their hashes: a revert decided from a digest alone is a
+    // decision about something unseen, which is the shape the service's own schema refuses.
+    expect(await screen.findByText(/Quench cold\./)).toBeTruthy();
+    expect(screen.getByText(/Quench hot\./)).toBeTruthy();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Put this back/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Revert$/ }));
+
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]!.url).toContain('/skills/org/house-workup/revert');
+    // The *older* hash, which is the one whose body the reader was shown.
+    expect(posts[0]!.body).toMatchObject({ content_hash: 'hash-old' });
+  });
+
+  it('does not offer the write half to somebody without the role', async () => {
+    mode.current = 'msal';
+    mode.roles = [];
+    serve({
+      '/skills/mine': () => json({ skills: [] }),
+      '/skills/org': () => json({ skills: ['house-workup'] }),
+    });
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+
+    // Reads stay open — deliberately, because this tier acts on people who did not approve it.
+    expect(await screen.findByText('house-workup')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Retire/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Publish$/ })).toBeNull();
+  });
+
+  it('says a deployment keeps no stored skills rather than showing an empty tier', async () => {
+    serve({
+      '/skills/mine': () => json({ detail: 'no store' }, 503),
+      '/skills/org': () => json({ detail: 'no store' }, 503),
+    });
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findAllByText(/CHEMCLAW_AGENT_MEMORY_ENABLED/)).toHaveLength(2);
+    expect(screen.queryByText(/You keep none/i)).toBeNull();
+    expect(screen.queryByText(/Nothing published/i)).toBeNull();
+  });
+});

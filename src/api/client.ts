@@ -579,6 +579,51 @@ export interface PendingPlan {
  * waiting on you". The deleted holds inbox rendered every one of them as the last — see the note
  * at the top of `ReviewQueue.tsx`.
  */
+/**
+ * One change to what the agent does, waiting on the person it would act on.
+ *
+ * The **body is here and is not optional**, which is the service's decision and the reason this
+ * screen can decide in place where the plan section deliberately cannot. A plan is approved on the
+ * strength of the reasoning that produced it, which lives in a conversation; a skill *is* the
+ * document, and the service returns it whole precisely so nobody is asked to approve something
+ * unseen (`api/routes/proposals.ProposalOut`).
+ */
+export interface BehaviourProposal {
+  /** `skill` or `profile`. Only `skill` has a destination a route can write. */
+  kind: string;
+  name: string;
+  /** The identity of this exact document — a decision is bound to it, not to the name. */
+  content_hash: string;
+  /** The whole `SKILL.md`, frontmatter included. */
+  content: string;
+  /** Why the agent thinks it is worth keeping, in its own words. */
+  rationale: string;
+  state: string;
+  /** The conversation it came out of, so a reader can go and look at the work. */
+  session_id: string;
+  decided_by?: string;
+  reason?: string;
+}
+
+/**
+ * One skill a chemist keeps, or one the organisation publishes.
+ *
+ * The same shape for both tiers because it is the same document; what differs is who may change it
+ * and how far it reaches, which is the caller's business rather than the type's.
+ */
+export interface SkillDocument {
+  name: string;
+  body: string;
+}
+
+/** One body that was once the organisation's active judgment, and who made it so. */
+export interface OrgSkillVersion {
+  content_hash: string;
+  body: string;
+  activated_by: string;
+  activated_at: string;
+}
+
 export interface PendingPlans {
   plans: PendingPlan[];
   /** Sessions of the caller's the service looked at — the same set `GET /sessions` lists. */
@@ -697,6 +742,125 @@ function upload(
 }
 
 export const api = {
+  /**
+   * What is waiting on this person to decide about the agent's own behaviour.
+   *
+   * **Deliberately not wrapped in `orEmpty`, and that is the whole lesson of this page's history.**
+   * `ReviewQueue.tsx` has had to delete two inboxes for decisions that could not occur, and both
+   * times the failure was identical and quiet: a list route 404s, the client folds it into `[]`,
+   * and the section renders a confident permanently-empty queue that reads as "you are up to
+   * date". This tier answers **503** where a deployment keeps no proposals
+   * (`CHEMCLAW_AGENT_MEMORY_ENABLED` off, or an in-memory session store), and that is a different
+   * fact from "nothing is waiting". It is allowed to throw so the screen can say which.
+   */
+  listProposals(getToken: TokenGetter, state = 'open'): Promise<BehaviourProposal[]> {
+    return request<{ proposals: BehaviourProposal[] }>(
+      `/proposals?state=${encodeURIComponent(state)}`,
+      getToken,
+    ).then((page) => page.proposals ?? []);
+  },
+
+  /**
+   * Accept or decline one proposal, bound to the document that was shown.
+   *
+   * `content_hash` is required by the service and is the point: a decision naming only the skill
+   * would authorize whatever that name currently holds, and the proposer can supersede an open
+   * proposal between the read and the click.
+   */
+  decideProposal(
+    getToken: TokenGetter,
+    kind: string,
+    name: string,
+    contentHash: string,
+    accepted: boolean,
+    reason = '',
+  ): Promise<BehaviourProposal> {
+    return request<BehaviourProposal>(
+      `/proposals/${encodeURIComponent(kind)}/${encodeURIComponent(name)}`,
+      getToken,
+      {
+        method: 'POST',
+        body: JSON.stringify({ content_hash: contentHash, accepted, reason }),
+      },
+    );
+  },
+
+  /** The names of the skills acting on this chemist's own turns. Throws on 503, for `listProposals`' reason. */
+  listMySkills(getToken: TokenGetter): Promise<string[]> {
+    return request<{ skills: string[] }>('/skills/mine', getToken).then(
+      (page) => page.skills ?? [],
+    );
+  },
+
+  /** One of this chemist's own skills, verbatim — the body a turn is actually given. */
+  readMySkill(getToken: TokenGetter, name: string): Promise<SkillDocument> {
+    return request<SkillDocument>(`/skills/mine/${encodeURIComponent(name)}`, getToken);
+  },
+
+  /**
+   * Stop one of this chemist's own skills acting.
+   *
+   * The half that makes the rest worth having: `D-2026-09-05` grants the personal tier its
+   * exemption from review on the condition that its owner can see what is acting on them *and
+   * remove it*, and until this screen existed the only thing that could exercise that was `curl`.
+   */
+  forgetMySkill(getToken: TokenGetter, name: string): Promise<string[]> {
+    return request<{ skills: string[] }>(`/skills/mine/${encodeURIComponent(name)}`, getToken, {
+      method: 'DELETE',
+    }).then((page) => page.skills ?? []);
+  },
+
+  /** The names of the skills acting on every turn in this deployment. Open to any caller. */
+  listOrgSkills(getToken: TokenGetter): Promise<string[]> {
+    return request<{ skills: string[] }>('/skills/org', getToken).then((page) => page.skills ?? []);
+  },
+
+  /** One organisation skill, verbatim. */
+  readOrgSkill(getToken: TokenGetter, name: string): Promise<SkillDocument> {
+    return request<SkillDocument>(`/skills/org/${encodeURIComponent(name)}`, getToken);
+  },
+
+  /**
+   * Every body ever activated under this name, newest first.
+   *
+   * The blame half of a rollback story for a tier with no commit log, and open to everyone rather
+   * than to administrators: this tier acts on people who did not approve it, so all of them can
+   * see what it says and what it replaced.
+   */
+  listOrgSkillVersions(getToken: TokenGetter, name: string): Promise<OrgSkillVersion[]> {
+    return request<{ versions: OrgSkillVersion[] }>(
+      `/skills/org/${encodeURIComponent(name)}/versions`,
+      getToken,
+    ).then((page) => page.versions ?? []);
+  },
+
+  /** Publish one skill to the whole deployment. 403 without the privileged role. */
+  publishOrgSkill(getToken: TokenGetter, body: string): Promise<SkillDocument> {
+    return request<SkillDocument>('/skills/org', getToken, {
+      method: 'POST',
+      body: JSON.stringify({ body }),
+    });
+  },
+
+  /**
+   * Make a body this tier already holds the active one again.
+   *
+   * A hash the service does not hold is a 404 — the pointer can only point at history, which is
+   * what makes this a rollback rather than a write.
+   */
+  revertOrgSkill(getToken: TokenGetter, name: string, contentHash: string): Promise<SkillDocument> {
+    return request<SkillDocument>(`/skills/org/${encodeURIComponent(name)}/revert`, getToken, {
+      method: 'POST',
+      body: JSON.stringify({ content_hash: contentHash }),
+    });
+  },
+
+  /** Stop one organisation skill acting, keeping its history. 403 without the privileged role. */
+  retireOrgSkill(getToken: TokenGetter, name: string): Promise<string[]> {
+    return request<{ skills: string[] }>(`/skills/org/${encodeURIComponent(name)}`, getToken, {
+      method: 'DELETE',
+    }).then((page) => page.skills ?? []);
+  },
   async health(): Promise<boolean> {
     try {
       await request<{ status: string }>('/healthz', async () => null);

@@ -104,6 +104,24 @@ const RESULT_REF = '([0-9a-f]{64})';
  */
 const DESIGN = '(design-[0-9a-f]{12})';
 
+/**
+ * A skill's name, which is also its directory and its store key.
+ *
+ * Narrower than `JOB` because this one *is* constrained in principle and the service says how:
+ * `local_skills.validated_skill` refuses a name containing `/`, one starting with `.`, and any
+ * whitespace or control character, and bounds it at deepagents' own `MAX_SKILL_NAME_LENGTH`. So
+ * the closed set here is the intersection a name can survive — no `%`, because a percent-encoded
+ * `/` is the one thing that would let a path segment stop being a segment.
+ *
+ * 128 rather than the spec's exact bound, for `JOB`'s reason inverted: pinning a proxy to a number
+ * another repository owns is how a route spends a release 404-ing names the service accepts. The
+ * cap is here to bound the string, and the service is what decides the name.
+ */
+const SKILL = '([A-Za-z0-9][A-Za-z0-9._-]{0,127})';
+
+/** What a proposal proposes. Two values, because the service's `ProposalKind` has exactly two. */
+const KIND = '(skill|profile)';
+
 export interface Route {
   method: string;
   pattern: RegExp;
@@ -278,6 +296,61 @@ export const ROUTES: readonly Route[] = [
     method: 'DELETE',
     pattern: new RegExp(`^/api/jobs/${JOB}$`),
     target: (m) => `/jobs/${m[1]}`,
+    sse: false,
+  },
+
+  // What is waiting on a person to decide about the agent's own behaviour, and the two stored
+  // skills tiers that decision writes into.
+  //
+  // The write half of `/skills/org` is role-gated upstream and is whitelisted here anyway, for the
+  // reason the jobs block above gives: hiding a control the caller is entitled to use is the
+  // frontend's job, and refusing to proxy it would break the caller who *is* entitled.
+  { method: 'GET', pattern: /^\/api\/proposals$/, target: () => '/proposals', sse: false },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/proposals/${KIND}/${SKILL}$`),
+    target: (m) => `/proposals/${m[1]}/${m[2]}`,
+    sse: false,
+  },
+
+  { method: 'GET', pattern: /^\/api\/skills\/mine$/, target: () => '/skills/mine', sse: false },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/skills/mine/${SKILL}$`),
+    target: (m) => `/skills/mine/${m[1]}`,
+    sse: false,
+  },
+  {
+    method: 'DELETE',
+    pattern: new RegExp(`^/api/skills/mine/${SKILL}$`),
+    target: (m) => `/skills/mine/${m[1]}`,
+    sse: false,
+  },
+
+  { method: 'GET', pattern: /^\/api\/skills\/org$/, target: () => '/skills/org', sse: false },
+  { method: 'POST', pattern: /^\/api\/skills\/org$/, target: () => '/skills/org', sse: false },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/skills/org/${SKILL}$`),
+    target: (m) => `/skills/org/${m[1]}`,
+    sse: false,
+  },
+  {
+    method: 'DELETE',
+    pattern: new RegExp(`^/api/skills/org/${SKILL}$`),
+    target: (m) => `/skills/org/${m[1]}`,
+    sse: false,
+  },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/skills/org/${SKILL}/versions$`),
+    target: (m) => `/skills/org/${m[1]}/versions`,
+    sse: false,
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/skills/org/${SKILL}/revert$`),
+    target: (m) => `/skills/org/${m[1]}/revert`,
     sse: false,
   },
 

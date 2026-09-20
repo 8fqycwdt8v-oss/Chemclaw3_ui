@@ -109,6 +109,7 @@ describe('a result block during a long turn', () => {
           type: 'plan',
           todos: [`[x] step ${i}`, '[ ] next'],
           plan_hash: `hash-${i}`,
+          scope: [],
         });
       });
     }

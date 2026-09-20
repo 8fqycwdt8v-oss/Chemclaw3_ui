@@ -162,6 +162,7 @@ function PlanApprovalPrompt({
   sessionId,
   planTodos,
   planHash,
+  planScope,
 }: {
   sessionId: string | null;
   /** The plan this message rendered, from its own `plan` event. */
@@ -180,6 +181,20 @@ function PlanApprovalPrompt({
    * previous behaviour, kept for exactly that case.
    */
   planHash?: string | null;
+  /**
+   * The state-changing tools this plan declares, as the same event stated them.
+   *
+   * Preferred over the fetch for the same reason `planHash` is, and this closes the half the
+   * previous fix left open: core put `scope` on the `plan` event precisely so this card would need
+   * no round trip, and the card read it from `GET /sessions/{id}/plan` anyway — so the field had no
+   * consumer, the race the hash exists to catch was still run once per plan card, and the comment
+   * beside the fetch told the next reader that the event did not carry it.
+   *
+   * Null for a service that predates the field, which still falls back to the fetch. Never `[]` as
+   * a stand-in for unknown: a card displaying "no tools" for a plan whose scope it had not read
+   * would be a false reassurance about what approving it authorizes.
+   */
+  planScope?: string[] | null;
 }): React.JSX.Element {
   const { auth } = useAuth();
   // What the turn's own `plan` event carried, when it carried a hash. Derived during render rather
@@ -204,7 +219,12 @@ function PlanApprovalPrompt({
    * about a different revision — and is rendered as nothing rather than as an empty list, which
    * would claim the approval carries no tool authority at all.
    */
-  const [scope, setScope] = useState<string[] | null>(null);
+  const [fetchedScope, setFetchedScope] = useState<string[] | null>(null);
+  // Derived during render, not copied into state by the effect — the same reason `streamedPlan`
+  // above is: `planScope` is a prop, so storing it would be one more thing that can disagree with
+  // its source, and React rightly objects to a `setState` that only mirrors one. The fetch wins
+  // when there is one, and there is one only where the event carried no scope or after a 409.
+  const scope = fetchedScope ?? planScope ?? null;
 
   // Through a ref, so the read below depends on the session alone. `useAuth()` hands back a fresh
   // object on every render, and an effect that listed it as a dependency re-read the plan on each
@@ -226,12 +246,15 @@ function PlanApprovalPrompt({
 
   useEffect(() => {
     if (!sessionId) return;
-    // The stream carries the steps and the hash, so when it did this read decides nothing about
-    // what is shown or what is posted — it is here for the **scope**, which is the one part of the
-    // plan the `plan` event does not carry and the one part a person cannot infer from the steps.
-    // Before it, the early return meant the only payload holding the scope was never read on the
-    // path a current service takes, so the card collected a yes to a tool list it had not shown.
+    // The stream carries the steps, the hash **and** the scope, so on a current service this read
+    // decides nothing and does not run. This comment used to say the `plan` event "does not carry"
+    // the scope; core shipped the field the same day, so it was false on arrival — and the fetch it
+    // justified was the round trip `plan_hash` exists to remove, run once per plan card.
     const streamed = Boolean(planHash && planTodos);
+    // A current service puts the scope on the event too, so there is nothing left for this read to
+    // decide and it does not run. It stays for the two cases that still need it: a service old
+    // enough to send no `scope`, and the 409 re-read further down.
+    if (streamed && planScope != null) return;
     let live = true;
     void (async () => {
       try {
@@ -242,7 +265,7 @@ function PlanApprovalPrompt({
         // disclosure defect inverted — and the streamed hash is exactly how that is detectable.
         // An older service sends no scope at all, and `undefined` stays `null` here: unknown, not
         // "authorizes nothing".
-        if (!planHash || status.plan_hash === planHash) setScope(status.scope ?? null);
+        if (!planHash || status.plan_hash === planHash) setFetchedScope(status.scope ?? null);
         // The binding never comes from this read: between rendering the plan and reading it the
         // agent may have revised it, and a decision must bind to what the human was shown.
         if (streamed) return;
@@ -259,7 +282,7 @@ function PlanApprovalPrompt({
     return () => {
       live = false;
     };
-  }, [sessionId, currentAuth, planHash, planTodos]);
+  }, [sessionId, currentAuth, planHash, planTodos, planScope]);
 
   const decide = async (approved: boolean): Promise<void> => {
     if (!sessionId || !plan) return;
@@ -371,6 +394,7 @@ export function ApprovalPrompt({
   sessionId,
   planTodos,
   planHash,
+  planScope,
 }: {
   prompt: string;
   /** The server session this conversation is bound to — the plan gate is per session, and
@@ -380,6 +404,8 @@ export function ApprovalPrompt({
    *  binds to what was shown rather than to a second read that races it. */
   planTodos?: string[] | null;
   planHash?: string | null;
+  /** And the tools it declares, which the card displays rather than merely collecting a yes to. */
+  planScope?: string[] | null;
 }): React.JSX.Element {
   return (
     <div className="mt-3 rounded-lg border border-warn/40 bg-warn-soft p-3.5">
@@ -390,7 +416,12 @@ export function ApprovalPrompt({
           {prompt}
         </span>
       </p>
-      <PlanApprovalPrompt sessionId={sessionId} planTodos={planTodos} planHash={planHash} />
+      <PlanApprovalPrompt
+        sessionId={sessionId}
+        planTodos={planTodos}
+        planHash={planHash}
+        planScope={planScope}
+      />
     </div>
   );
 }

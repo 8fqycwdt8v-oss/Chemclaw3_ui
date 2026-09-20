@@ -315,6 +315,19 @@ export interface AssistantMessage {
    */
   latestPlanHash: string | null;
   /**
+   * The state-changing tools `latestPlan` declares, as the same event stated them.
+   *
+   * What the approval card must *display*, per
+   * `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`: the steps alone would be
+   * collecting a yes to something the chemist had not been shown. The service put it on the `plan`
+   * event for exactly the reason `latestPlanHash` is there — so the card needs no round trip — and
+   * this field is what carries it that far.
+   *
+   * Null when the event did not name one, which an older service will not: the card then falls back
+   * to the fetch rather than rendering "authorizes nothing", which would be a false reassurance.
+   */
+  latestPlanScope: string[] | null;
+  /**
    * When the turn stopped, however it stopped — answered, aborted or failed.
    *
    * What makes the summary line able to say how long the turn took. Deliberately *our* clock and

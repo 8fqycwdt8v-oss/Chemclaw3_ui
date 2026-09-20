@@ -48,6 +48,7 @@ function answer(trace: TraceEntry[]): AssistantMessage {
     queued: false,
     partialReason: null,
     latestPlanHash: null,
+    latestPlanScope: null,
     trace,
     latestPlan: null,
     error: null,

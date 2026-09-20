@@ -189,6 +189,10 @@ const TURN: readonly Frame[] = [
       // frame without one cannot be approved without a second fetch that races the revision the
       // hash exists to catch.
       plan_hash: 'e2e-plan-hash-1',
+      // The tools approving this plan authorizes, which the card must display and not merely
+      // collect a yes to. Named here so the e2e fixture exercises the field a current service
+      // sends rather than the empty fallback an older one degrades to.
+      scope: ['record_knowledge_note'],
     },
     40,
   ],

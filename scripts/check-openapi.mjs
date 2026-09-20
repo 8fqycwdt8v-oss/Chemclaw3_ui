@@ -115,6 +115,8 @@ const SAMPLES = [
   'approval-Suzuki(A)', // a model-authored approval hold id
   '0123456789abcdef'.repeat(4), // a sha256 digest, as a content-addressed ref
   'design-0123456789ab', // an experiment design id: `design-` plus twelve lowercase hex
+  'house-workup', // a skill name: lowercase and hyphens, the shape both stored tiers store under
+  'skill', // what a behaviour proposal proposes — the other value is `profile`
 ];
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];

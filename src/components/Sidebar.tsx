@@ -17,6 +17,7 @@ import { useEffect, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useLocation, useNavigate } from 'react-router';
 import {
+  BookOpen,
   FileCheck2,
   FlaskConical,
   GitBranch,
@@ -660,6 +661,14 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           </SidebarLink>
           <SidebarLink to="/jobs" icon={<Server />} onNavigate={onNavigate}>
             Durable runs
+          </SidebarLink>
+          {/* Judgment outlives every conversation it came out of, and a skill nobody can find is
+              the half of a bargain the service has been claiming: the stored tiers are exempt from
+              per-use review *on the condition* that the people they act on can see what they say
+              and remove them (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). A route
+              with no way in leaves that condition exercisable only with `curl`. */}
+          <SidebarLink to="/skills" icon={<BookOpen />} onNavigate={onNavigate}>
+            Skills
           </SidebarLink>
         </nav>
 

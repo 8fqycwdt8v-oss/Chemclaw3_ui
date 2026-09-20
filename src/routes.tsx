@@ -74,6 +74,8 @@ import { Button } from '@/components/ui/button';
  */
 const loadReviewQueue = () =>
   import('./components/ReviewQueue.tsx').then((m) => ({ default: m.ReviewQueue }));
+const loadSkillsPanel = () =>
+  import('./components/SkillsPanel.tsx').then((m) => ({ default: m.SkillsPanel }));
 const loadJobsPanel = () =>
   import('./components/JobsPanel.tsx').then((m) => ({ default: m.JobsPanel }));
 const loadProtocolsPanel = () =>
@@ -82,6 +84,7 @@ const loadProtocolDocument = () =>
   import('./components/ProtocolDocument.tsx').then((m) => ({ default: m.ProtocolDocument }));
 
 const ReviewQueue = lazy(loadReviewQueue);
+const SkillsPanel = lazy(loadSkillsPanel);
 const JobsPanel = lazy(loadJobsPanel);
 const ProtocolsPanel = lazy(loadProtocolsPanel);
 const ProtocolDocument = lazy(loadProtocolDocument);
@@ -331,6 +334,20 @@ export function AppRoutes(): React.JSX.Element {
           <AppShell>
             <Panel what="Opening the review queue…">
               <ReviewQueue />
+            </Panel>
+          </AppShell>
+        }
+      />
+      {/* The half of a bargain the service has been claiming: `D-2026-09-05` grants the two stored
+          skills tiers their exemption from per-use review *on the condition* that the people they
+          act on can see what they say and remove them, and until this route existed the only thing
+          that could exercise it was `curl`. */}
+      <Route
+        path="/skills"
+        element={
+          <AppShell>
+            <Panel what="Opening the skills screen…">
+              <SkillsPanel />
             </Panel>
           </AppShell>
         }

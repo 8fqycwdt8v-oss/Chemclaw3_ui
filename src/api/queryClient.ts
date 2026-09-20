@@ -180,6 +180,12 @@ export const keys = {
   protocol: (designId: string, at: number | undefined) =>
     ['protocol', designId, at ?? 'head'] as const,
   profiles: ['profiles'] as const,
+  /** What is waiting on this person to decide about the agent's own behaviour. */
+  proposals: ['proposals', 'open'] as const,
+  /** The skills acting on this chemist's own turns, and on everybody's. Two keys, two tiers. */
+  mySkills: ['skills', 'mine'] as const,
+  orgSkills: ['skills', 'org'] as const,
+  orgSkillVersions: (name: string) => ['skills', 'org', name, 'versions'] as const,
   health: ['health'] as const,
 } as const;
 

@@ -927,9 +927,20 @@ Closed since the first version of this section: long-transcript windowing with
 `warmSession`; a durable, cross-conversation job feed with a title badge and opt-in notifications;
 path routing with a working Back button; conversation search; upload progress and cancellation;
 `@axe-core/playwright` in the e2e suite; the review queue for holds and proposals; the durable-run
-registry; profile selection; tool calls surviving a reload.
+registry; profile selection; tool calls surviving a reload; the skills screen and the
+behaviour-proposal queue.
 
 **Still not done:**
+
+- **No browser test opens the skills screen or the behaviour-proposal queue.** The unit lane covers
+  both (`tests/skillsSurface.test.tsx` drives the three emptinesses, the decision binding, the
+  revert and the role gate), and the cross-repo contract lane covers every route they call — but
+  `e2e/` has no fixture for `/proposals`, `/skills/mine` or `/skills/org`, so nothing exercises the
+  rendering in a real browser. That matters more here than for most screens: these are the surfaces
+  `D-2026-09-05` makes the _condition_ of the stored skills tiers' exemption from review, so a page
+  that renders blank in production is a control that silently stops existing. Adding it means three
+  fixture rows and a new `/skills` a11y snapshot, so it is its own change rather than a line in
+  somebody else's.
 
 - **No browser test asserts on a digest card.** `/digests` is served by the e2e fixture (Issue 17)
   so the _request_ path is exercised and the log is quiet, and nothing exercises the _rendering_ —

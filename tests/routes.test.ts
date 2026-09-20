@@ -95,21 +95,32 @@ describe('proxy route whitelist', () => {
     }
   });
 
-  it('does not proxy the deleted knowledge-proposal routes', () => {
-    // The same shape as the approval holds above, one gate later. Chemclaw3 deleted the PR gate
-    // and its `GET /proposals`, `GET /proposals/{id}` and `POST /proposals/{id}/decision`
+  it('does not proxy the deleted knowledge-proposal routes, whose name is now something else', () => {
+    // The same shape as the approval holds above, one gate later. Chemclaw3 deleted the PR gate and
+    // its `GET /proposals/{id}` and `POST /proposals/{id}/decision`
     // (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): knowledge is written directly and
-    // corrected, so there is nothing left to approve. This repo deleted the client half first and
-    // left the three whitelist rows behind, which is the worst half to keep — the proxy still
-    // resolves them, so whoever writes the next consumer gets a route that forwards cleanly to a
-    // 404 rather than a resolver that says no.
+    // corrected, so there is nothing left to approve.
+    //
+    // **`/proposals` itself came back for a different subject and that is the interesting part.**
+    // It now lists *behaviour* proposals — a skill the agent suggests, decided by the person it
+    // would act on (`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`) — so the
+    // collection is live while the two id-shaped routes under it stay dead. What keeps them dead is
+    // the decision route's `kind` segment being a closed two-value set rather than a free id: an
+    // old `POST /proposals/42/decision` cannot match `POST /proposals/{kind}/{name}`, so a stale
+    // caller still gets a resolver that says no rather than a clean forward to a 404.
     for (const [method, path] of [
-      ['GET', '/api/proposals'],
       ['GET', '/api/proposals/42'],
       ['POST', '/api/proposals/42/decision'],
+      ['POST', '/api/proposals/notakind/my-workup'],
     ] as const) {
       expect(resolveRoute(method, path), `${method} ${path}`).toBeNull();
     }
+
+    expect(resolveRoute('GET', '/api/proposals'), 'the behaviour queue is live').not.toBeNull();
+    expect(
+      resolveRoute('POST', '/api/proposals/skill/my-workup'),
+      'deciding a behaviour proposal is live',
+    ).not.toBeNull();
   });
 
   it('refuses a malformed session id, which also blocks traversal', () => {

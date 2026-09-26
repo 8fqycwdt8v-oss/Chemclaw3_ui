@@ -44,10 +44,10 @@ import { Dialog } from 'radix-ui';
 import { ChevronLeft, ChevronRight, FileUp, PenLine, Sparkles, X } from 'lucide-react';
 import {
   MAX_PARSED_SMILES_CHARS,
-  canonicalSmilesFromMolblock,
   moleculesFromMolfile,
   rdkitAvailable,
   readCanonicalSmiles,
+  readCanonicalSmilesFromMolblock,
   tooLongToParse,
   type MolfileRecords,
   type NotAChemicalVerdict,
@@ -140,6 +140,58 @@ export const TOO_COMPLEX_EXPLANATION =
   'RDKit read this as a molecule and then ran out of stack naming it, so it is too complex to ' +
   'name here. Nothing is wrong with it as chemistry: it is a limit of the JavaScript stack at ' +
   'the moment of the check rather than of the structure.';
+
+/** `n record` / `n records`. */
+const recordCount = (n: number): string => `${n} record${n === 1 ? '' : 's'}`;
+
+/**
+ * What a read file that produced **no** structure says about its records.
+ *
+ * Two refusals, counted apart, because only one of them is about the file: `unreadable` is RDKit
+ * reading a record and finding no molecule, `tooComplex` is RDKit reading a molecule and running
+ * out of stack naming it (`NotAChemicalVerdict`). Folded together — which is what this sentence
+ * did until the count carried the difference — a `.sdf` of long chains was reported as holding
+ * records "none of which RDKit could read as a structure", about molecules.
+ *
+ * Exported so the wording is driven rather than read (`tests/rdkitTooComplex.test.tsx`).
+ */
+export function noStructureNote(fileName: string, unreadable: number, tooComplex: number): string {
+  if (tooComplex === 0) {
+    return unreadable > 0
+      ? `${fileName} holds ${recordCount(unreadable)}, none of which RDKit could read as a structure.`
+      : `No structure found in ${fileName}.`;
+  }
+  const complex =
+    `${recordCount(tooComplex)} RDKit read as ${tooComplex === 1 ? 'a molecule' : 'molecules'} but ` +
+    'could not name here — a limit of the JavaScript stack at the moment of the check, not of ' +
+    'the structure';
+  return unreadable > 0
+    ? `${fileName} holds ${recordCount(unreadable)} RDKit could not read as a structure, and ${complex}.`
+    : `${fileName} holds ${complex}.`;
+}
+
+/**
+ * The summary line for a read file that produced at least one structure.
+ *
+ * `too complex to name here` is its own clause rather than part of the `unreadable` one for the
+ * reason `noStructureNote` gives, and the "past the first N" clause counts every record that was
+ * *read* — named, unreadable and too complex alike — because that is what the cap bounds.
+ */
+export function recordsNote(
+  fileName: string,
+  { smiles, unreadable, tooComplex, skipped }: Omit<MolfileRecords, 'unavailable'>,
+): string {
+  const read = smiles.length + unreadable + tooComplex;
+  return [
+    `${fileName}: ${smiles.length} structure${smiles.length === 1 ? '' : 's'}`,
+    unreadable > 0 ? `, ${recordCount(unreadable)} unreadable` : '',
+    tooComplex > 0 ? `, ${recordCount(tooComplex)} too complex to name here` : '',
+    // Named rather than dropped: a file read down to its cap and a file read whole are different
+    // facts, and only one of them means "this is everything in it".
+    skipped > 0 ? `, ${skipped} past the first ${read} not read` : '',
+    smiles.length > 1 ? '. One goes into the message at a time.' : '.',
+  ].join('');
+}
 
 /**
  * What the sketcher dialog says it is not.
@@ -386,7 +438,7 @@ export function StructureInput({
       setFileNote(`Could not read ${file.name}.`);
       return;
     }
-    const { smiles, unreadable, skipped, unavailable } = outcome.records;
+    const { smiles, unreadable, tooComplex, unavailable } = outcome.records;
 
     if (unavailable) {
       // Not "none of which RDKit could read": RDKit read nothing at all, and the file is very
@@ -405,11 +457,7 @@ export function StructureInput({
       if (source.current === 'file') setRaw('');
       // Named rather than generic: a `.csv` dropped on a molfile target and a corrupt `.mol` are
       // different mistakes, and the count is what distinguishes them.
-      setFileNote(
-        unreadable > 0
-          ? `${file.name} holds ${unreadable} record${unreadable === 1 ? '' : 's'}, none of which RDKit could read as a structure.`
-          : `No structure found in ${file.name}.`,
-      );
+      setFileNote(noStructureNote(file.name, unreadable, tooComplex));
       return;
     }
 
@@ -418,16 +466,7 @@ export function StructureInput({
     setRecords(smiles.length > 1 ? { load: loads.current, smiles } : null);
     setInserted([]);
     setRaw(smiles[0] ?? '');
-    setFileNote(
-      [
-        `${file.name}: ${smiles.length} structure${smiles.length === 1 ? '' : 's'}`,
-        unreadable > 0 ? `, ${unreadable} record${unreadable === 1 ? '' : 's'} unreadable` : '',
-        // Named rather than dropped: a file read down to its cap and a file read whole are
-        // different facts, and only one of them means "this is everything in it".
-        skipped > 0 ? `, ${skipped} past the first ${smiles.length + unreadable} not read` : '',
-        smiles.length > 1 ? '. One goes into the message at a time.' : '.',
-      ].join(''),
-    );
+    setFileNote(recordsNote(file.name, outcome.records));
   };
 
   const takeFile = async (file: File): Promise<void> => {
@@ -451,8 +490,15 @@ export function StructureInput({
   const takeMolblock = async (molblock: string): Promise<void> => {
     const mine = (claim.current += 1);
     setFileNote('Reading the pasted molfile…');
-    const canonical = await canonicalSmilesFromMolblock(molblock);
-    if (!canonical) {
+    const read = await readCanonicalSmilesFromMolblock(molblock);
+    if (read.status === 'too-complex') {
+      // Before `rdkitAvailable`, which would pass — RDKit is here and read it — and the sentence
+      // below would then call a molecule unreadable.
+      if (mine !== claim.current) return;
+      setFileNote(TOO_COMPLEX_EXPLANATION);
+      return;
+    }
+    if (read.status !== 'named') {
       const available = await rdkitAvailable();
       if (mine !== claim.current) return;
       setFileNote(
@@ -462,6 +508,7 @@ export function StructureInput({
       );
       return;
     }
+    const canonical = read.canonical;
     if (mine !== claim.current) return;
     // 'file' rather than 'paste': what lands in the field is RDKit's canonical form, not a
     // spelling the chemist typed, which is exactly the distinction `raw` carries out of here.
@@ -888,15 +935,21 @@ function SketcherBody({
     }
     // Not the sketcher's own SMILES export: one toolkit decides what a molecule is here, and it is
     // the same one that decides everywhere else in this application.
-    const canonical = await canonicalSmilesFromMolblock(molblock);
-    if (!canonical) {
+    const read = await readCanonicalSmilesFromMolblock(molblock);
+    if (read.status === 'too-complex') {
+      // A drawing RDKit read as a molecule and could not name is not "nothing on the canvas", and
+      // the chemist who drew it knows that — the sentence below would be the one that is wrong.
+      setProblem(TOO_COMPLEX_EXPLANATION);
+      return;
+    }
+    if (read.status !== 'named') {
       // Covers the empty canvas too — a sketcher exports that as a valid molblock with no atoms,
       // and RDKit reads it as the empty SMILES. The panel does not need to tell "empty" from
       // "unreadable", because the only thing it is entitled to say is that there is no structure.
       setProblem('Nothing on the canvas that RDKit can read as a molecule.');
       return;
     }
-    onDrawn(canonical);
+    onDrawn(read.canonical);
   };
 
   return (

@@ -16,7 +16,7 @@
  * never read, in a codebase whose whole rule is that RDKit is the arbiter. A molblock is a
  * connectivity table, not an interpretation; handing that to RDKit and taking its canonical SMILES
  * means one toolkit decides what the molecule is, and it is the same one that decides everywhere
- * else. `canonicalSmilesFromMolblock` is the gate.
+ * else. `readCanonicalSmilesFromMolblock` is the gate.
  *
  * ## Why the loader looks like `loadRDKit`
  *

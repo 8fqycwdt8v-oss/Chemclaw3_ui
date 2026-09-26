@@ -107,17 +107,21 @@ const DESIGN = '(design-[0-9a-f]{12})';
 /**
  * A skill's name, which is also its directory and its store key.
  *
- * Narrower than `JOB` because this one *is* constrained in principle and the service says how:
- * `local_skills.validated_skill` refuses a name containing `/`, one starting with `.`, and any
- * whitespace or control character, and bounds it at deepagents' own `MAX_SKILL_NAME_LENGTH`. So
- * the closed set here is the intersection a name can survive — no `%`, because a percent-encoded
- * `/` is the one thing that would let a path segment stop being a segment.
+ * `NOTE`'s closed set, and for `NOTE`'s reason: the name is one this repo does not own, and the
+ * service's rule for it is a *refusal list* rather than an alphabet. `local_skills.validated_skill`
+ * refuses a `/`, a leading `.`, whitespace and non-printable characters, and nothing else — so
+ * `löslichkeit-workup`, `pd(OAc)2-removal` and `_draft` are all names the service stores. An
+ * ASCII-alphanumeric pattern 404'd every one of them here, for read, delete, versions, revert and
+ * the proposal decision alike: a skill that acts on every turn could not be deleted from the UI.
  *
- * 128 rather than the spec's exact bound, for `JOB`'s reason inverted: pinning a proxy to a number
- * another repository owns is how a route spends a release 404-ing names the service accepts. The
- * cap is here to bound the string, and the service is what decides the name.
+ * The set is what `encodeURIComponent` emits (`src/api/client.ts` encodes every name with it),
+ * and `isTraversal` — run on every capture — is what refuses an encoded `/` or `\`, a bare `..`
+ * and a malformed escape. The length cap is measured against the ENCODED segment, which is why it
+ * is wider than `NOTE`'s: the service bounds a name in characters, and one character can cost
+ * twelve here (four UTF-8 bytes, three per escape), so a name the service accepts in full reaches
+ * past 512. The cap bounds the URL; it does not restate a number another repository owns.
  */
-const SKILL = '([A-Za-z0-9][A-Za-z0-9._-]{0,127})';
+const SKILL = "([A-Za-z0-9._:~!*'()%-]{1,1024})";
 
 /** What a proposal proposes. Two values, because the service's `ProposalKind` has exactly two. */
 const KIND = '(skill|profile)';
@@ -131,6 +135,14 @@ export interface Route {
   sse: boolean;
   /** True for the one route that carries a file, and so a much larger body cap than the rest. */
   upload?: boolean;
+  /**
+   * What each capture group is called in the route's metrics/log template, in group order.
+   *
+   * Omitted for a route with one capture, which is labelled `{id}`. A route that captures twice
+   * names both, because two different things read as one in a log otherwise — and the upstream's
+   * own path template is the spelling to copy.
+   */
+  labels?: readonly string[];
 }
 
 export const ROUTES: readonly Route[] = [
@@ -211,6 +223,7 @@ export const ROUTES: readonly Route[] = [
     method: 'GET',
     pattern: new RegExp(`^/api/sessions/${SID}/tool-results/${RESULT_REF}$`),
     target: (m) => `/sessions/${m[1]}/tool-results/${m[2]}`,
+    labels: ['{id}', '{ref}'],
     sse: false,
   },
 
@@ -310,6 +323,7 @@ export const ROUTES: readonly Route[] = [
     method: 'POST',
     pattern: new RegExp(`^/api/proposals/${KIND}/${SKILL}$`),
     target: (m) => `/proposals/${m[1]}/${m[2]}`,
+    labels: ['{kind}', '{name}'],
     sse: false,
   },
 
@@ -411,23 +425,30 @@ export interface ResolvedRoute {
  *
  * The template is derived by calling the route's own `target` with these rather than being
  * declared a second time per route, because a second declaration is a thing that drifts: `target`
- * IS the route's shape, so a route that changes shape changes its label in the same edit. Two
- * names, not one repeated: exactly one route captures twice, and it captures a session and a
- * result ref, which are different things and read as different things in a log.
+ * IS the route's shape, so a route that changes shape changes its label in the same edit. A route
+ * that captures more than once says what each capture is (`Route.labels`) — positional defaults
+ * labelled a proposal's kind and name as `{id}` and `{ref}`, a shape the service does not have.
  */
-const TEMPLATE_GROUPS = ['', '{id}', '{ref}'] as unknown as RegExpMatchArray;
+function templateGroups(route: Route): RegExpMatchArray {
+  return ['', ...(route.labels ?? ['{id}'])] as unknown as RegExpMatchArray;
+}
 
 /**
  * Whether a matched segment would traverse if the next hop decoded it — in which case this
  * resolver refuses it, whatever route matched.
  *
- * `NOTE`, `JOB` and `PENDING` admit `.` and `%` deliberately — their ids embed a model-written
- * slug or a Temporal workflow id — so `..%2F..%2Fmetrics` and `%2e%2e%2f%2e%2e%2fmetrics` both
+ * `NOTE`, `JOB`, `PENDING` and `SKILL` admit `.` and `%` deliberately — their ids embed a
+ * model-written slug, a Temporal workflow id or a name a person chose — so `..%2F..%2Fmetrics` and `%2e%2e%2f%2e%2e%2fmetrics` both
  * match. Neither is a legitimate id, and neither costs anything to refuse. Decoding *once* is
  * what the next hop does, so it is what this asks about: a value that becomes a path separator or
  * a parent reference when decoded once is refused, and a malformed escape — which
  * `encodeURIComponent` cannot emit, so no client of this app produces one — is refused with it,
  * because what a normalising proxy does with `%zz` is its own business.
+ *
+ * A bare `.` (or `%2e`) is refused beside `..`: a normalising hop removes a current-directory
+ * segment, so `/skills/org/./revert` would reach `/skills/org/revert` and `DELETE /skills/mine/.`
+ * would reach `DELETE /skills/mine/` — routes other than the one the whitelist matched. No
+ * legitimate id is a lone dot; the service refuses a leading `.` in a skill name outright.
  *
  * The narrow segments (`SID`, `RESULT_REF`, `DESIGN`) cannot fail this and are checked anyway: a
  * rule applied to every capture is one nobody has to remember to apply to the next route.
@@ -439,7 +460,7 @@ function isTraversal(segment: string): boolean {
   } catch {
     return true;
   }
-  return decoded.includes('/') || decoded.includes('\\') || decoded === '..';
+  return decoded.includes('/') || decoded.includes('\\') || decoded === '..' || decoded === '.';
 }
 
 /** Resolve a request to an upstream path, or `null` if it is not whitelisted. */
@@ -455,7 +476,7 @@ export function resolveRoute(method: string, path: string): ResolvedRoute | null
         path: route.target(match),
         sse: route.sse,
         upload: route.upload === true,
-        template: route.target(TEMPLATE_GROUPS),
+        template: route.target(templateGroups(route)),
       };
     }
   }

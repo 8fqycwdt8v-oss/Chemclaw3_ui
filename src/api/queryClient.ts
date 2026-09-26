@@ -186,6 +186,13 @@ export const keys = {
   mySkills: ['skills', 'mine'] as const,
   orgSkills: ['skills', 'org'] as const,
   orgSkillVersions: (name: string) => ['skills', 'org', name, 'versions'] as const,
+  /**
+   * One skill's body, nested under its tier's list key on purpose: a write to a tier invalidates
+   * that tier's prefix, which then reaches the list, every open body and every open history at
+   * once. An ad-hoc key outside that prefix is how an open body went on showing text a revert had
+   * already replaced.
+   */
+  skillBody: (tier: 'mine' | 'org', name: string) => ['skills', tier, name, 'body'] as const,
   health: ['health'] as const,
 } as const;
 

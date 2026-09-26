@@ -27,7 +27,7 @@ import { SkillsPanel } from '../src/components/SkillsPanel.tsx';
 import { stubFetch } from './helpers.ts';
 import { resetQueryCache } from '../src/api/queryClient.ts';
 
-const mode = { current: 'dev' as 'dev' | 'msal', roles: [] as string[] };
+const mode = { current: 'dev' as 'dev' | 'msal', roles: [] as string[], ready: true };
 
 vi.mock('../src/auth/AuthContext.tsx', async () => {
   const { config } = await import('../src/env.ts');
@@ -40,7 +40,13 @@ vi.mock('../src/auth/AuthContext.tsx', async () => {
       return { id: 'u', username: 'u', name: 'u', roles: mode.roles };
     },
   };
-  const value = { auth, ready: true, revision: 0 };
+  const value = {
+    auth,
+    get ready() {
+      return mode.ready;
+    },
+    revision: 0,
+  };
   return {
     useAuth: () => value,
     // The real implementation over the stub above, for `reviewQueue.test.tsx`'s reason: mocking
@@ -86,6 +92,7 @@ beforeEach(() => {
   cleanup();
   mode.current = 'dev';
   mode.roles = [];
+  mode.ready = true;
   resetQueryCache();
 });
 
@@ -412,5 +419,166 @@ describe('what is acting on a chemist', () => {
     expect(await screen.findAllByText(/CHEMCLAW_AGENT_MEMORY_ENABLED/)).toHaveLength(2);
     expect(screen.queryByText(/You keep none/i)).toBeNull();
     expect(screen.queryByText(/Nothing published/i)).toBeNull();
+  });
+});
+
+describe('reads that wait for a token', () => {
+  it('does not ask before auth is ready, and loads once it is', async () => {
+    // Mounted before the token existed, every read here failed `token_unavailable` and — with
+    // `retry: false` and a key auth does not change — stayed failed until the page was left.
+    mode.ready = false;
+    const { calls } = serve({
+      '/skills/mine': () => json({ skills: ['my-workup'] }),
+      '/skills/org': () => json({ skills: ['house-workup'] }),
+      '/proposals': () => json({ proposals: [] }),
+    });
+    // A fresh element each time: re-rendering the same one lets React bail out, and the flip of
+    // `ready` below would then never reach the components.
+    const tree = () => (
+      <MemoryRouter>
+        <SkillsPanel />
+        <BehaviourProposals />
+      </MemoryRouter>
+    );
+    const { rerender } = render(tree());
+    await Promise.resolve();
+    expect(calls).toHaveLength(0);
+    expect(screen.queryByText(/You keep none/i)).toBeNull();
+    expect(screen.queryByText(/Nothing proposed/i)).toBeNull();
+
+    mode.ready = true;
+    rerender(tree());
+
+    expect(await screen.findByText('my-workup')).toBeTruthy();
+    expect(await screen.findByText('house-workup')).toBeTruthy();
+    expect(await screen.findByText(/Nothing proposed/i)).toBeTruthy();
+  });
+});
+
+describe('a write refreshes what the page is showing about it', () => {
+  it('replaces an open body after a revert', async () => {
+    let active = NEWER;
+    serve({
+      '/skills/mine': () => json({ skills: [] }),
+      '/skills/org': () => json({ skills: ['house-workup'] }),
+      '/skills/org/house-workup': () => json({ name: 'house-workup', body: active }),
+      '/skills/org/house-workup/versions': () =>
+        json({
+          versions: [
+            {
+              content_hash: 'hash-new',
+              body: NEWER,
+              activated_by: 'u-admin',
+              activated_at: '2026-09-20T09:00:00Z',
+            },
+            {
+              content_hash: 'hash-old',
+              body: OLDER,
+              activated_by: 'u-admin',
+              activated_at: '2026-09-19T09:00:00Z',
+            },
+          ],
+        }),
+      '/skills/org/house-workup/revert': () => {
+        active = OLDER;
+        return json({ name: 'house-workup', body: OLDER });
+      },
+    });
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText(/Read what it tells the agent/i));
+    await waitFor(() => expect(screen.getAllByText(/Quench hot\./)).toHaveLength(1));
+    fireEvent.click(await screen.findByText(/What it used to say/i));
+    fireEvent.click(await screen.findByRole('button', { name: /Put this back/ }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Revert$/ }));
+
+    // The open body now says what acts: the older text twice (body and held version), the newer
+    // only in the history where it is kept.
+    await waitFor(() => expect(screen.getAllByText(/Quench cold\./)).toHaveLength(2));
+    expect(screen.getAllByText(/Quench hot\./)).toHaveLength(1);
+  });
+
+  it('publishes once however quickly the button is pressed twice', async () => {
+    const posts: string[] = [];
+    serve(
+      {
+        '/skills/mine': () => json({ skills: [] }),
+        '/skills/org': () => json({ skills: [] }),
+      },
+      (url, init) => {
+        if (init?.method === 'POST') posts.push(url);
+      },
+    );
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+    fireEvent.change(await screen.findByPlaceholderText(/house-workup/), {
+      target: { value: OLDER },
+    });
+    const button = screen.getByRole('button', { name: /^Publish$/ });
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    await waitFor(() => expect(posts).toHaveLength(1));
+  });
+});
+
+describe('the reviewer-only publish box', () => {
+  it('has an accessible name, as the write-your-own box beside it does', async () => {
+    // A placeholder is not a name, and the e2e axe scan never renders this block: dev auth there
+    // carries no reviewer role. So the name is held here, where the reviewer branch does render.
+    serve({
+      '/skills/mine': () => json({ skills: [] }),
+      '/skills/org': () => json({ skills: [] }),
+    });
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+    expect(
+      await screen.findByRole('textbox', {
+        name: 'Organisation skill to publish, as a whole SKILL.md',
+      }),
+    ).toBeTruthy();
+  });
+});
+
+describe('a proposal that is a record rather than a skill', () => {
+  it('does not tell a chemist a profile will act on their turns', async () => {
+    serve({
+      '/proposals': () =>
+        json({
+          proposals: [
+            {
+              kind: 'profile',
+              name: 'kinetics-helper',
+              content_hash: 'hash-p',
+              content: 'name: kinetics-helper\n',
+              rationale: 'Asked for three times this week.',
+              state: 'open',
+              session_id: '',
+            },
+          ],
+        }),
+    });
+    render(
+      <MemoryRouter>
+        <BehaviourProposals />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('kinetics-helper')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /Record that you want it/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Keep this skill/ })).toBeNull();
+    expect(screen.getByText(/Read the whole profile/)).toBeTruthy();
+    expect(screen.getByText(/reviewed commit to data\/profiles\//)).toBeTruthy();
+    expect(screen.queryByText(/act on your turns from the next one/)).toBeNull();
   });
 });

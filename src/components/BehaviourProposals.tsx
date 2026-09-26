@@ -65,6 +65,11 @@ function Proposal({
   const [busy, setBusy] = useState<'accept' | 'decline' | null>(null);
   const [failed, setFailed] = useState<string>('');
   const description = described(proposal.content);
+  // A `profile` proposal is a *record*: the service keeps an accepted one and writes nothing,
+  // because a profile changes only through a reviewed commit to `data/profiles/`. Skill copy on it
+  // ("Keep this skill", "acts on your turns from the next one") told a chemist something now acted
+  // on their turns when nothing did.
+  const isSkill = proposal.kind === 'skill';
 
   async function decide(accepted: boolean): Promise<void> {
     setBusy(accepted ? 'accept' : 'decline');
@@ -103,7 +108,8 @@ function Proposal({
 
       <details className="mt-3">
         <summary className="cursor-pointer text-sm text-ink-muted">
-          Read the whole skill ({proposal.content.length.toLocaleString()} characters)
+          Read the whole {isSkill ? 'skill' : 'profile'} ({proposal.content.length.toLocaleString()}{' '}
+          characters)
         </summary>
         {/* Preformatted rather than rendered: a `SKILL.md` is a document whose frontmatter is part
             of what is being approved, and rendering it would hide the half that decides where it
@@ -127,7 +133,13 @@ function Proposal({
 
       <div className="mt-3 flex gap-2">
         <Button size="sm" disabled={busy !== null} onClick={() => void decide(true)}>
-          {busy === 'accept' ? 'Keeping…' : 'Keep this skill'}
+          {busy === 'accept'
+            ? isSkill
+              ? 'Keeping…'
+              : 'Recording…'
+            : isSkill
+              ? 'Keep this skill'
+              : 'Record that you want it'}
         </Button>
         <ConfirmDialog
           trigger={
@@ -136,14 +148,20 @@ function Proposal({
             </Button>
           }
           title={`Decline ${proposal.name}?`}
-          description="A decision is final: the same text cannot be proposed again. If you want it later, write it yourself on the skills screen."
+          description={
+            isSkill
+              ? 'A decision is final: the same text cannot be proposed again. If you want it later, write it yourself on the skills screen.'
+              : 'A decision is final: the same text cannot be proposed again.'
+          }
           confirmLabel="Decline"
           variant="destructive"
           onConfirm={() => void decide(false)}
         />
       </div>
       <p className="mt-2 text-xs text-ink-muted">
-        Keeping it makes it act on your turns from the next one, and on nobody else's.
+        {isSkill
+          ? "Keeping it makes it act on your turns from the next one, and on nobody else's."
+          : 'Accepting only records that you want it. A profile takes effect through a reviewed commit to data/profiles/, so nothing changes on your turns until somebody makes that change.'}
       </p>
     </li>
   );
@@ -151,13 +169,18 @@ function Proposal({
 
 /** The section. */
 export function BehaviourProposals(): React.JSX.Element {
-  const { auth } = useAuth();
-  const { data, error, isLoading, refetch } = useApiQuery({
+  // Gated on `ready`: mounted before the token existed, this read failed `token_unavailable` on a
+  // cold load and — with `retry: false` and a key auth does not change — stayed failed until the
+  // reader left the page. `isPending` rather than `isLoading`, because a disabled query is pending
+  // without fetching, and `isLoading` would render the empty queue in that gap.
+  const { auth, ready } = useAuth();
+  const { data, error, isPending, refetch } = useApiQuery({
     queryKey: keys.proposals,
     queryFn: () => api.listProposals(auth),
+    enabled: ready,
   });
 
-  if (isLoading) return <Loading>Loading what the agent has proposed…</Loading>;
+  if (isPending) return <Loading>Loading what the agent has proposed…</Loading>;
 
   if (error) {
     // The three readings of "nothing here", kept apart. 503 is a *configuration* fact and says so

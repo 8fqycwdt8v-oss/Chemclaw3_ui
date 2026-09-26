@@ -115,7 +115,12 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
       // so a read placed after it would always be discarded. Silent on any failure: an older
       // service has no plan route, and a session with no plan is the ordinary case, not an
       // error worth a banner.
-      let plan: { todos: string[]; hash: string; awaitingApproval: boolean } | null = null;
+      let plan: {
+        todos: string[];
+        hash: string;
+        awaitingApproval: boolean;
+        scope: string[] | null;
+      } | null = null;
       try {
         const status = await api.getPlan(sessionId, auth);
         // `approved` is the EFFECTIVE state — the route folds `consumed_at` in, so a plan that was
@@ -127,6 +132,9 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
             todos: status.plan,
             hash: status.plan_hash,
             awaitingApproval: !status.approved,
+            // The same payload names what an approval authorizes, and dropping it cost the card a
+            // second read of this route on every reload. Absent from an older service: unknown.
+            scope: status.scope ?? null,
           };
         }
       } catch {
@@ -137,7 +145,7 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
       if (plan) {
         useChatStore
           .getState()
-          .attachPlan(conversationId, plan.todos, plan.hash, plan.awaitingApproval);
+          .attachPlan(conversationId, plan.todos, plan.hash, plan.awaitingApproval, plan.scope);
       }
     })();
     return () => {

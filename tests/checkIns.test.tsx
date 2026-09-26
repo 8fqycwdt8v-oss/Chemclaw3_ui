@@ -186,6 +186,15 @@ describe('the check-in store', () => {
     expect(persisted).not.toHaveProperty('checkInClaim');
   });
 
+  it('a reset keeps the outcome of the claim this page already made', () => {
+    // The claim runs once per page, so a reset to `pending` could never be moved off again: the
+    // section read "Reading what you are waiting on…" until a full reload.
+    useChatStore.getState().addCheckIns([row()]);
+    useChatStore.getState().clearAll();
+    expect(useChatStore.getState().checkIns).toEqual([]);
+    expect(useChatStore.getState().checkInClaim).toBe('ready');
+  });
+
   it('does not drop a card for being unread', () => {
     // Aged out on the same clock as the digest feed, never on having been seen: an unread check-in
     // is exactly the one whose loss the sweep exists to prevent.
@@ -461,13 +470,80 @@ describe('what a check-in does on the way to disk', () => {
     // rehydrated on the next load, dropped, and written again, for ever. A stale digest is a stale
     // finding; a stale check-in says a deadline that is a week wrong.
     const { store, useChatStore, flushChatPersistence } = await freshStore();
-    onDisk(store, [stored({ requestId: 'old', receivedAt: Date.now() - WEEK - 1_000 })]);
+    const stale = Date.now() - WEEK - 1_000;
+    onDisk(store, [stored({ requestId: 'old', receivedAt: stale, refreshedAt: stale })]);
 
     const id = useChatStore.getState().createConversation();
     useChatStore.getState().appendUserMessage(id, 'q');
     flushChatPersistence();
 
     expect(store.get(KEY) ?? '').not.toContain('"requestId":"old"');
+  });
+
+  it('keeps a question first claimed over a week ago that is still being refreshed', async () => {
+    // A refresh keeps `receivedAt` (it orders the list) and moves only `refreshedAt`, so ageing on
+    // the first arrival dropped a question the sweep re-sends every night a week after it opened —
+    // and the claim that refreshed it had already been consumed, so the card was gone for good.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const now = Date.now();
+    const firstArrived = now - WEEK - 86_400_000;
+    onDisk(store, [
+      stored({ requestId: 'theirs', subject: 'Still open elsewhere', receivedAt: firstArrived }),
+    ]);
+    useChatStore.setState({
+      checkIns: [
+        {
+          ...stored({ subject: 'Still open here', receivedAt: firstArrived, refreshedAt: now }),
+          kind: 'measurement',
+          sessionId: 'conv-7',
+          truncated: false,
+        },
+      ],
+    });
+    flushChatPersistence();
+
+    const written = store.get(KEY) ?? '';
+    expect(written).toContain('Still open here');
+    expect(written).toContain('Still open elsewhere');
+  });
+
+  it('keeps a fresh card persisted before `refreshedAt` existed', async () => {
+    // Nothing migrates the field onto an older row, and `undefined > cutoff` is false — so without
+    // the fallback to `receivedAt` every such card would be dropped on the first flush.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const { refreshedAt: _absent, ...legacy } = stored({ subject: 'Stored before the field' });
+    onDisk(store, [{ ...legacy, requestId: 'legacy' }]);
+
+    const id = useChatStore.getState().createConversation();
+    useChatStore.getState().appendUserMessage(id, 'q');
+    flushChatPersistence();
+
+    expect(store.get(KEY) ?? '').toContain('Stored before the field');
+  });
+
+  it('keeps what the other tab claimed when this one is at the cap', async () => {
+    // The fold appended the other tab's rows and then sliced to the cap, so at the cap it cut
+    // exactly the rows the service had just consumed and kept this tab's oldest.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const now = Date.now();
+    onDisk(store, [stored({ requestId: 'theirs', subject: 'Claimed in the other window' })]);
+    useChatStore.setState({
+      checkIns: Array.from({ length: 200 }, (_, i) => ({
+        ...stored({ requestId: `mine-${i}`, receivedAt: now - i, refreshedAt: now - i }),
+        kind: 'measurement',
+        sessionId: '',
+        truncated: false,
+      })),
+    });
+    flushChatPersistence();
+
+    const written = JSON.parse(store.get(KEY) ?? '{}') as {
+      state: { checkIns: { requestId: string }[] };
+    };
+    const ids = written.state.checkIns.map((c) => c.requestId);
+    expect(ids).toHaveLength(200);
+    expect(ids).toContain('theirs');
+    expect(ids).not.toContain('mine-199');
   });
 
   it('carries a card the other tab claimed and this one has never seen', async () => {
@@ -552,5 +628,116 @@ describe('what a check-in does on the way to disk', () => {
     };
     expect(written.state.checkIns).toHaveLength(1);
     expect(written.state.checkIns[0]?.daysLeft).toBe(4);
+  });
+
+  it('keeps a dismissal the other tab made, whichever copy is fresher', async () => {
+    // `dismissCheckIn` does not move `refreshedAt`, so two copies of one question tie and "mine
+    // wins" put this tab's undismissed copy back on disk — the card returned on the next reload.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const now = Date.now();
+    onDisk(store, [stored({ refreshedAt: now, receivedAt: now, dismissed: true })]);
+    const [row] = [stored({ refreshedAt: now, receivedAt: now })];
+    useChatStore.setState({
+      checkIns: [{ ...row, kind: 'measurement', sessionId: 'conv-7', truncated: false }],
+    });
+    flushChatPersistence();
+
+    const written = JSON.parse(store.get(KEY) ?? '{}') as {
+      state: { checkIns: { dismissed: boolean }[] };
+    };
+    expect(written.state.checkIns[0]?.dismissed).toBe(true);
+  });
+});
+
+describe('what a reader did to a job card or a digest, on the way to disk', () => {
+  const KEY = 'chemclaw3.chat.v2.anon';
+
+  async function freshStore() {
+    vi.resetModules();
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      length: 0,
+      key: () => null,
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    });
+    return { store, ...(await import('../src/state/chatStore.ts')) };
+  }
+
+  const job = (over: Record<string, unknown> = {}) => ({
+    event: { type: 'job_failed', job_id: 'qm-1', reason: 'did not converge' },
+    sessionId: 'a'.repeat(32),
+    conversationId: null,
+    receivedAt: Date.now(),
+    seen: false,
+    dismissed: false,
+    ...over,
+  });
+  const digest = (over: Record<string, unknown> = {}) => ({
+    query: 'aryl bromide pKa',
+    noteIds: ['n-1'],
+    receivedAt: Date.now(),
+    dismissed: false,
+    ...over,
+  });
+
+  const onDisk = (store: Map<string, string>, jobFeed: unknown[], digests: unknown[]): void => {
+    store.set(
+      KEY,
+      JSON.stringify({
+        version: 3,
+        state: {
+          conversations: {},
+          order: [],
+          activeId: null,
+          drafts: {},
+          jobFeed,
+          digests,
+          checkIns: [],
+          notifyOnJobComplete: false,
+        },
+      }),
+    );
+  };
+
+  const written = (store: Map<string, string>) =>
+    JSON.parse(store.get(KEY) ?? '{}') as {
+      state: {
+        jobFeed: { dismissed: boolean; seen: boolean }[];
+        digests: { dismissed: boolean }[];
+      };
+    };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps a dismissal the other tab made rather than this tab's untouched copy", async () => {
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    onDisk(
+      store,
+      [job({ dismissed: true, seen: true, dismissedChangedAt: Date.now() })],
+      [digest({ dismissed: true })],
+    );
+    useChatStore.setState({ jobFeed: [job()] as never, digests: [digest()] as never });
+    flushChatPersistence();
+
+    expect(written(store).state.jobFeed[0]).toMatchObject({ dismissed: true, seen: true });
+    expect(written(store).state.digests[0]?.dismissed).toBe(true);
+  });
+
+  it('keeps a restore this tab made after the dismissal on disk', async () => {
+    // A job card, unlike a digest or a check-in, can be put back — so "dismissed wins" would undo
+    // the restore on the next flush. The later change wins instead.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const now = Date.now();
+    onDisk(store, [job({ dismissed: true, seen: true, dismissedChangedAt: now - 5_000 })], []);
+    useChatStore.setState({
+      jobFeed: [job({ dismissed: false, seen: true, dismissedChangedAt: now })] as never,
+    });
+    flushChatPersistence();
+
+    expect(written(store).state.jobFeed[0]).toMatchObject({ dismissed: false, seen: true });
   });
 });

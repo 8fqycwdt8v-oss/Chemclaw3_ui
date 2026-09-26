@@ -54,6 +54,7 @@ export default defineConfig({
     // workers fail to start — loudly, not by quietly reverting to Node's storage.
     // `tests/webStorage.test.ts` holds it, including on a Node 22 runner (see its docstring).
     pool: 'forks',
-    poolOptions: { forks: { execArgv: ['--no-experimental-webstorage'] } },
+    // Vitest 4 reads worker flags from `execArgv` directly; its `poolOptions` is gone.
+    execArgv: ['--no-experimental-webstorage'],
   },
 });

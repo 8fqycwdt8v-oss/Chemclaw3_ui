@@ -187,6 +187,18 @@ describe('tool_failed', () => {
     expect(screen.getByText('2 failures')).toBeTruthy();
   });
 
+  it('names somebody on a handoff whose target the frame left empty', () => {
+    // `to_agent` parses to '' when absent, so a `??` fallback never fired and the row read
+    // "the agent handed to" followed by nothing.
+    render(
+      <TracePanel
+        trace={[{ id: 'h1', at: 0, kind: 'handoff', handoff: { from: '', to: '', reason: '' } }]}
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: /The agent’s work/ }));
+    expect(screen.getByText('another agent')).toBeTruthy();
+  });
+
   it('says nothing about failures on a turn that had none', () => {
     render(
       <TracePanel

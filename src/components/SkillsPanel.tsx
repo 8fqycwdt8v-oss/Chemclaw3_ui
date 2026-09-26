@@ -35,7 +35,7 @@
 import { useState } from 'react';
 import { BookOpen, Building2, Trash2, Undo2, User } from 'lucide-react';
 import { useAuth, useIsReviewer } from '../auth/AuthContext.tsx';
-import { keys, useApiQuery } from '../api/queryClient.ts';
+import { keys, queryClient, useApiQuery } from '../api/queryClient.ts';
 import { api, type OrgSkillVersion } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { relativeTime } from '../lib/format.ts';
@@ -61,6 +61,19 @@ function unavailableCopy(error: unknown): string | null {
   return error instanceof ApiError && error.status === 503
     ? 'This deployment keeps no stored skills: it needs the durable memory store (CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store).'
     : null;
+}
+
+/**
+ * Re-read everything this screen holds about one tier after a write to it.
+ *
+ * The list, every open body and every open history share the tier's key prefix, so one
+ * invalidation reaches all of them. Refetching only the list is what left an open body showing the
+ * text a revert or a save-over had just replaced — a page describing a skill that no longer acts.
+ */
+function invalidateTier(tier: 'mine' | 'org'): void {
+  void queryClient.invalidateQueries({
+    queryKey: tier === 'mine' ? keys.mySkills : keys.orgSkills,
+  });
 }
 
 /**
@@ -90,13 +103,14 @@ function Disclosure({
 
 /** One skill's body, fetched only when somebody asks to read it. */
 function SkillBody({ tier, name }: { tier: 'mine' | 'org'; name: string }): React.JSX.Element {
-  const { auth } = useAuth();
-  const { data, error, isLoading } = useApiQuery({
-    queryKey: ['skill-body', tier, name],
+  const { auth, ready } = useAuth();
+  const { data, error, isPending } = useApiQuery({
+    queryKey: keys.skillBody(tier, name),
     queryFn: () => (tier === 'mine' ? api.readMySkill(auth, name) : api.readOrgSkill(auth, name)),
+    enabled: ready,
   });
 
-  if (isLoading) return <Loading size="xs">Loading the skill…</Loading>;
+  if (isPending) return <Loading size="xs">Loading the skill…</Loading>;
   if (error) {
     return <p className="text-sm text-danger">Could not read {name}.</p>;
   }
@@ -111,14 +125,18 @@ function SkillBody({ tier, name }: { tier: 'mine' | 'org'; name: string }): Reac
 
 /** The chemist's own tier: read and remove, which is the whole of the bargain. */
 function MySkills(): React.JSX.Element {
-  const { auth } = useAuth();
-  const { data, error, isLoading, refetch } = useApiQuery({
+  // Gated on `ready`, as every other authenticated read here is: on a cold load under MSAL these
+  // mounted before the token existed, failed `token_unavailable`, and — with `retry: false` and a
+  // key that does not change when auth resolves — stayed failed until the page was left.
+  const { auth, ready } = useAuth();
+  const { data, error, isPending } = useApiQuery({
     queryKey: keys.mySkills,
     queryFn: () => api.listMySkills(auth),
+    enabled: ready,
   });
   const [failed, setFailed] = useState('');
 
-  if (isLoading) return <Loading>Loading your skills…</Loading>;
+  if (isPending) return <Loading>Loading your skills…</Loading>;
   if (error) {
     const unavailable = unavailableCopy(error);
     return (
@@ -139,7 +157,7 @@ function MySkills(): React.JSX.Element {
           When a turn works out a procedure worth keeping, it can propose one — you decide on the
           review screen, and what you accept appears here.
         </EmptyState>
-        <WriteMine onSaved={() => void refetch()} />
+        <WriteMine onSaved={() => invalidateTier('mine')} />
       </>
     );
   }
@@ -148,7 +166,7 @@ function MySkills(): React.JSX.Element {
     setFailed('');
     try {
       await api.forgetMySkill(auth, name);
-      void refetch();
+      invalidateTier('mine');
     } catch (err) {
       setFailed(err instanceof Error ? err.message : `Could not remove ${name}.`);
     }
@@ -181,7 +199,7 @@ function MySkills(): React.JSX.Element {
           </li>
         ))}
       </ul>
-      <WriteMine onSaved={() => void refetch()} />
+      <WriteMine onSaved={() => invalidateTier('mine')} />
     </>
   );
 }
@@ -247,22 +265,17 @@ function WriteMine({ onSaved }: { onSaved: () => void }): React.JSX.Element {
 }
 
 /** One organisation skill's history — the blame half, open to everybody it acts on. */
-function OrgHistory({
-  name,
-  onReverted,
-}: {
-  name: string;
-  onReverted: () => void;
-}): React.JSX.Element {
-  const { auth } = useAuth();
+function OrgHistory({ name }: { name: string }): React.JSX.Element {
+  const { auth, ready } = useAuth();
   const isReviewer = useIsReviewer();
-  const { data, error, isLoading, refetch } = useApiQuery({
+  const { data, error, isPending } = useApiQuery({
     queryKey: keys.orgSkillVersions(name),
     queryFn: () => api.listOrgSkillVersions(auth, name),
+    enabled: ready,
   });
   const [failed, setFailed] = useState('');
 
-  if (isLoading) return <Loading size="xs">Loading what it used to say…</Loading>;
+  if (isPending) return <Loading size="xs">Loading what it used to say…</Loading>;
   if (error) return <p className="text-sm text-danger">Could not read the history of {name}.</p>;
 
   const versions = data ?? [];
@@ -272,8 +285,7 @@ function OrgHistory({
     setFailed('');
     try {
       await api.revertOrgSkill(auth, name, version.content_hash);
-      void refetch();
-      onReverted();
+      invalidateTier('org');
     } catch (err) {
       setFailed(
         err instanceof ApiError && err.status === 403
@@ -324,17 +336,21 @@ function OrgHistory({
 
 /** The organisation's tier: everybody reads, the privileged role changes. */
 function OrgSkills(): React.JSX.Element {
-  const { auth } = useAuth();
+  const { auth, ready } = useAuth();
   const isReviewer = useIsReviewer();
-  const { data, error, isLoading, refetch } = useApiQuery({
+  const { data, error, isPending } = useApiQuery({
     queryKey: keys.orgSkills,
     queryFn: () => api.listOrgSkills(auth),
+    enabled: ready,
   });
   const [draft, setDraft] = useState('');
   const [failed, setFailed] = useState('');
   const [published, setPublished] = useState('');
+  // Publishing is a write every turn in the deployment reads, so a second click while the first is
+  // in flight must not send it twice — the guard `WriteMine` already has.
+  const [busy, setBusy] = useState(false);
 
-  if (isLoading) return <Loading>Loading the organisation's skills…</Loading>;
+  if (isPending) return <Loading>Loading the organisation's skills…</Loading>;
   if (error) {
     const unavailable = unavailableCopy(error);
     return (
@@ -348,11 +364,12 @@ function OrgSkills(): React.JSX.Element {
   }
 
   async function act(run: () => Promise<unknown>, done = ''): Promise<void> {
+    setBusy(true);
     setFailed('');
     setPublished('');
     try {
       await run();
-      void refetch();
+      invalidateTier('org');
       if (done) setPublished(done);
     } catch (err) {
       setFailed(
@@ -362,6 +379,8 @@ function OrgSkills(): React.JSX.Element {
             ? err.message
             : 'That did not go through.',
       );
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -388,7 +407,7 @@ function OrgSkills(): React.JSX.Element {
                       </Button>
                     }
                     title={`Retire ${name}?`}
-                    description="It stops acting on everybody's turns. Its history is kept, so it can be put back."
+                    description="It stops acting on everybody's turns. Its history is kept on the service, so an administrator can restore it by name — but a retired skill leaves this list, and with it this screen's revert."
                     confirmLabel="Retire"
                     variant="destructive"
                     onConfirm={() => void act(() => api.retireOrgSkill(auth, name))}
@@ -399,7 +418,7 @@ function OrgSkills(): React.JSX.Element {
                 <SkillBody tier="org" name={name} />
               </Disclosure>
               <Disclosure summary="What it used to say, and who changed it">
-                <OrgHistory name={name} onReverted={() => void refetch()} />
+                <OrgHistory name={name} />
               </Disclosure>
             </li>
           ))}
@@ -418,6 +437,7 @@ function OrgSkills(): React.JSX.Element {
             refuses and nothing changes.
           </p>
           <textarea
+            aria-label="Organisation skill to publish, as a whole SKILL.md"
             className="mt-2 h-40 w-full rounded border border-line bg-surface p-2 font-mono text-xs"
             placeholder={'---\nname: house-workup\ndescription: how we work one up here\n---\n\n…'}
             value={draft}
@@ -428,7 +448,7 @@ function OrgSkills(): React.JSX.Element {
           <Button
             className="mt-2"
             size="sm"
-            disabled={!draft.trim()}
+            disabled={busy || !draft.trim()}
             onClick={() =>
               void act(async () => {
                 const saved = await api.publishOrgSkill(auth, draft);
@@ -437,7 +457,7 @@ function OrgSkills(): React.JSX.Element {
               }, 'Published. Every turn in this deployment reads it from the next one.')
             }
           >
-            Publish
+            {busy ? 'Publishing…' : 'Publish'}
           </Button>
         </div>
       )}

@@ -15,7 +15,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import { parse, toGamut, wcagContrast } from 'culori';
+import { clampGamut, parse, toGamut, wcagContrast } from 'culori';
 
 const CSS = new URL('../src/index.css', import.meta.url);
 
@@ -42,14 +42,25 @@ const CSS = new URL('../src/index.css', import.meta.url);
  *   • CSS Color 4 gamut mapping, `toGamut('rgb', 'oklch')` — 2/46 pairs move, by at most +0.22
  *     (dark `danger-ink` on `danger-soft`, 8.83 → 9.05). Nothing crosses a threshold.
  *
- * The third is what is used here, because it is what the browser does with an out-of-gamut
- * `oklch()` and therefore the only one of the three that is a claim about a chemist's screen. It
- * is also the one that costs nothing to state, which the clip did not: the old `Math.min/max` read
- * as a defensive guard and was in fact a colour-appearance decision taken in a `.map()`.
+ * Neither the first nor the third is "what the screen shows" on its own. CSS Color 4 *recommends*
+ * the gamut mapping, and this file used to claim it was what the browser does; shipping browsers
+ * clip per channel on sRGB output. Nor is either consistently the worse: measured, they differ on
+ * two dark-theme pairs and in opposite directions — the mapping reads `danger-ink` on
+ * `danger-soft` at 9.05 against the clip's 8.83, and `brand-ink` on `brand-soft` at 8.80 against
+ * 8.82. Taking the mapping alone, a token tuned just over 4.5:1 could sit below it on the clipped
+ * colour a real sRGB display shows — optimistic in the direction a gate must never be.
+ *
+ * So a pair is measured under both and held to the worse. That is a claim that survives either
+ * rendering, and it costs one extra `wcagContrast` per pair.
  */
 
-/** sRGB-mapped per CSS Color 4 — chroma reduction in OKLCH, not a clip. */
-const intoGamut = toGamut('rgb', 'oklch');
+/** The two treatments a browser may apply to an out-of-gamut colour: clip, or CSS Color 4 map. */
+const TREATMENTS = [clampGamut('rgb'), toGamut('rgb', 'oklch')];
+
+/** The pair's contrast under whichever treatment is worse for it. */
+function worstContrast(fg, bg) {
+  return Math.min(...TREATMENTS.map((into) => wcagContrast(into(fg), into(bg))));
+}
 
 /* ── Parse the palette ────────────────────────────────────────────────────── */
 
@@ -70,7 +81,7 @@ function parseBlock(css, selector) {
     if (!decl) continue;
     const colour = parse(decl[2].trim());
     if (!colour) continue; // not a colour — `--radius`, and anything else non-chromatic
-    tokens[decl[1]] = intoGamut(colour);
+    tokens[decl[1]] = colour;
   }
   return tokens;
 }
@@ -146,7 +157,7 @@ for (const [theme, tokens] of Object.entries(themes)) {
       continue;
     }
     checked += 1;
-    const ratio = wcagContrast(tokens[fg], tokens[bg]);
+    const ratio = worstContrast(tokens[fg], tokens[bg]);
     const ok = ratio >= min;
     if (!ok) failures += 1;
     const line = `${ratio.toFixed(2)}:1 (needs ${min})`.padEnd(22);

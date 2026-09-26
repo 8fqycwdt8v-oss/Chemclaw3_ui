@@ -105,6 +105,26 @@ describe('the plan inbox', () => {
     // on it and is looking straight at the list.
     expect(pendingPlanCalls()).toBe(2);
   });
+
+  it('re-reads an open inbox only after the decision has been written', async () => {
+    // Invalidating refetches an active observer at once, so an invalidation issued before the POST
+    // raced it: the read could be answered with the plan still pending and cached as fresh for the
+    // whole staleness window, with nothing left to invalidate it again.
+    const observer = new QueryObserver(queryClient, pendingPlansQuery(token));
+    const stop = observer.subscribe(() => undefined);
+    try {
+      await observer.refetch();
+      await api.decidePlan(SESSION, true, 'plan-hash', token);
+      await vi.waitFor(() => expect(pendingPlanCalls()).toBe(2));
+
+      const decision = calls.findIndex((c) => c.url.includes('/plan/decision'));
+      const reread = calls.findLastIndex((c) => c.url.includes('/plans/pending'));
+      expect(decision).toBeGreaterThanOrEqual(0);
+      expect(reread).toBeGreaterThan(decision);
+    } finally {
+      stop();
+    }
+  });
 });
 
 describe('the three behaviours a careless migration flattens', () => {

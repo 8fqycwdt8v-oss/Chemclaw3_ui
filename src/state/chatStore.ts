@@ -48,6 +48,14 @@ export interface JobFeedItem {
   receivedAt: number;
   seen: boolean;
   dismissed: boolean;
+  /**
+   * When `dismissed` last changed in this browser, so the cross-tab fold can tell a dismissal the
+   * other tab made from a restore this tab made after it. Unlike a check-in or a digest, a job card
+   * can be put back (`restoreJobItem`), so neither "ours wins" (which undid the other tab's
+   * dismissal) nor "dismissed wins" (which would undo this tab's restore) is right on its own.
+   * Absent on every row persisted before it existed, which reads as 0.
+   */
+  dismissedChangedAt?: number;
 }
 
 /** Exactly the slice `partialize` writes to localStorage, and what `migrate` must return. */
@@ -297,6 +305,18 @@ const MAX_PERSISTED_MESSAGES = 200;
 const MAX_JOB_FEED = 50;
 /** A completion older than this is history, not news. Bounds the persisted feed's size too. */
 const JOB_FEED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * When a check-in's countdown was last true, which is what ages it out.
+ *
+ * Not `receivedAt`: a refresh deliberately keeps that (it orders the list), so a question still
+ * open and re-sent every night was dropped from disk a week after it *first* arrived — and the
+ * claim that refreshed it had already been consumed, so the card was lost on the next reload.
+ * Falls back to `receivedAt` because nothing migrates `refreshedAt` onto a card persisted before
+ * the field existed, and `undefined > cutoff` is false, so such a card would otherwise be dropped.
+ */
+const checkInFreshAt = (card: Pick<CheckInCard, 'receivedAt'> & { refreshedAt?: number }): number =>
+  card.refreshedAt ?? card.receivedAt;
 
 /**
  * How many claimed check-ins are kept. The job feed has had a bound since it was written and this
@@ -1056,6 +1076,22 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
   if (!stored?.conversations || !Array.isArray(stored.order)) return next;
 
   /**
+   * **Ordered by each row's own `receivedAt`, newest first, because every caller slices to its cap
+   * after this** — the order `addDigests`, `addCheckIns` and the job feed keep in memory.
+   *
+   * Neither positional order is right. Appending the stored rows cut, at the cap, exactly the rows
+   * another tab had just claimed (which the service has already consumed) and kept this tab's
+   * oldest. Prepending them was worse in the commonest case there is — one tab — because the
+   * stored copy is then this tab's own previous write: a row it had just trimmed at the cap came
+   * back at the head as the newest notice, and the slice evicted a genuinely newer one beneath
+   * it, so disk and memory diverged on every flush past the cap. Sorting on the row's own clock
+   * answers both, since the slice then drops what is oldest wherever it came from.
+   *
+   * On a tie this tab's rows come first — see `union`, the one caller, for why.
+   */
+  const newestFirst = <T extends { receivedAt: number }>(rows: T[]): T[] =>
+    rows.sort((a, b) => b.receivedAt - a.receivedAt);
+  /**
    * The two slices whose rows a re-fetch cannot replace, folded back unconditionally.
    *
    * **This merge covered conversations, order and drafts, and those are the three that could be
@@ -1069,11 +1105,11 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
    * Folded ABOVE the `extra.length === 0` return, because the conversation half being unchanged
    * is exactly the common case in which the other tab has nonetheless claimed something.
    */
-  const union = <T>(
+  const union = <T extends { receivedAt: number }>(
     ours: T[],
     theirs: T[] | undefined,
     keyOf: (row: T) => string,
-    fresher?: (ours: T, theirs: T) => T,
+    fresher: (ours: T, theirs: T) => T,
   ): T[] => {
     if (!Array.isArray(theirs) || theirs.length === 0) return ours;
     const known = new Map(ours.map((row) => [keyOf(row), row]));
@@ -1085,22 +1121,49 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
     // already consumed both, so whichever is discarded is discarded for ever. Measured before
     // this argument existed: a tab open since yesterday overwrote this morning's refresh, showing
     // a deadline a day more generous than the truth, and undid a dismissal made in the other tab.
-    if (fresher) {
-      for (const row of theirs) {
-        const mine = known.get(keyOf(row));
-        if (mine !== undefined) known.set(keyOf(row), fresher(mine, row));
-      }
-      return [...known.values(), ...added];
+    for (const row of theirs) {
+      const mine = known.get(keyOf(row));
+      if (mine !== undefined) known.set(keyOf(row), fresher(mine, row));
     }
-    return added.length === 0 ? ours : [...ours, ...added];
+    // `sort` is stable and this tab's rows go in first, so on a tie they win. A tie is not rare —
+    // `addDigests` stamps a whole claimed batch with one `Date.now()` — and a stored row tied with
+    // rows this tab kept is, in one tab, a row this tab trimmed from that same batch; preferring it
+    // would reproduce the divergence `newestFirst` describes one batch at a time.
+    return newestFirst([...known.values(), ...added]);
   };
-  const jobFeed = union(next.jobFeed, stored.jobFeed, (j) => j.event.job_id).slice(0, MAX_JOB_FEED);
+  // **What a reader did to a row is folded too, not just the row.** Before `fresher`, "ours wins"
+  // kept this tab's undismissed copy over the other tab's dismissed one on every flush, so a card
+  // dismissed in one window came back on the next reload. `seen` only ever goes one way, so it is
+  // OR-ed; `dismissed` can be undone, so the later of the two changes wins, and a tie (two rows
+  // persisted before the stamp existed) keeps the dismissal rather than resurrecting a card.
+  // Every stored slice is aged on `partialize`'s own cutoff before it is folded, for the reason
+  // the check-in fold below gives: without it, the row `partialize` had just dropped for age was
+  // put straight back on disk by this fold, rehydrated, dropped, and written again, for ever.
+  const cutoff = Date.now() - JOB_FEED_MAX_AGE_MS;
+  const jobFeed = union(
+    next.jobFeed,
+    Array.isArray(stored.jobFeed) ? stored.jobFeed.filter((j) => j.receivedAt > cutoff) : [],
+    (j) => j.event.job_id,
+    (mine, theirs) => {
+      const mineAt = mine.dismissedChangedAt ?? 0;
+      const theirsAt = theirs.dismissedChangedAt ?? 0;
+      const decided = mineAt === theirsAt ? null : mineAt > theirsAt ? mine : theirs;
+      return {
+        ...mine,
+        seen: mine.seen || theirs.seen,
+        dismissed: decided ? decided.dismissed : mine.dismissed || theirs.dismissed,
+        dismissedChangedAt: Math.max(mineAt, theirsAt),
+      };
+    },
+  ).slice(0, MAX_JOB_FEED);
   // The same `(query, note ids)` identity `addDigests` dedups on, so a row claimed by both tabs
-  // folds to one rather than reading as two findings.
+  // folds to one rather than reading as two findings. Two copies of one key are the same finding,
+  // so ours wins — except for the dismissal, which nothing un-does and is therefore OR-ed.
   const digests = union(
     next.digests ?? [],
-    stored.digests,
+    Array.isArray(stored.digests) ? stored.digests.filter((d) => d.receivedAt > cutoff) : [],
     (d) => `${d.query}\u0000${d.noteIds.join(',')}`,
+    (mine, theirs) => (theirs.dismissed && !mine.dismissed ? { ...mine, dismissed: true } : mine),
   ).slice(0, MAX_DIGESTS);
   // Keyed by the service's own request id, which a digest does not have: two tabs claiming the
   // same blocked question fold to one card rather than to two notices about one question.
@@ -1109,12 +1172,16 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
   // that was just dropped returned, and rehydrated, for ever. A stale digest is a stale finding;
   // a stale check-in is a countdown that is days wrong, which is the one payload where that is
   // not harmless, and the comment added beside `partialize` claimed it did not happen.
-  const checkInCutoff = Date.now() - JOB_FEED_MAX_AGE_MS;
   const checkIns = union(
     next.checkIns ?? [],
-    (stored.checkIns ?? []).filter((c) => c.receivedAt > checkInCutoff),
+    (stored.checkIns ?? []).filter((c) => checkInFreshAt(c) > cutoff),
     checkInKey,
-    (mine, theirs) => (theirs.refreshedAt > mine.refreshedAt ? theirs : mine),
+    // The fresher countdown wins, but `dismissCheckIn` does not move `refreshedAt`, so a dismissal
+    // is carried across whichever copy that picks — nothing un-dismisses a check-in.
+    (mine, theirs) => {
+      const winner = theirs.refreshedAt > mine.refreshedAt ? theirs : mine;
+      return { ...winner, dismissed: mine.dismissed || theirs.dismissed };
+    },
   ).slice(0, MAX_CHECK_INS);
   const carried: PersistedState = { ...next, jobFeed, digests, checkIns };
 
@@ -1300,6 +1367,10 @@ const chatStorage: PersistStorage<PersistedState> = {
  * sign-out redirect is slow or blocked, and `persist.clearStorage` is what stops them coming back
  * on the next load. Ordered, too: `clearAll` writes a fresh state through the persist middleware,
  * so removing the key has to come second.
+ *
+ * "Reset app" is the other caller, and `clearAll` alone is not enough there either: the next write
+ * goes through `mergeWithStored`, which folds the stored digests, job endings and check-ins back
+ * onto disk, so the notices the dialog says it discards rehydrated on the next load.
  */
 export function forgetLocalHistory(): void {
   useChatStore.getState().clearAll();
@@ -1475,7 +1546,10 @@ export const useChatStore = create<ChatState>()(
             // Content too, and the most personal of the three: a check-in holds the previous
             // chemist's own subject line, their reason for asking, and who they are waiting on.
             checkIns: [],
-            checkInClaim: 'pending',
+            // `checkInClaim` is deliberately left as it was. The claim runs once per page
+            // (`useCheckIns` latches), so a reset to `pending` could never be moved off again and
+            // the section read "Reading what you are waiting on…" until a full reload. The
+            // outcome of the claim that did run on this page is still the true one.
             sessionProfiles: {},
             jobStreamsThrottled: false,
             jobStreamsThrottledElsewhere: false,
@@ -1593,7 +1667,10 @@ export const useChatStore = create<ChatState>()(
             ...target,
             latestPlan: todos,
             latestPlanHash: planHash,
-            latestPlanScope: scope ?? target.latestPlanScope,
+            // Never inherited from the message: a scope belongs to the revision it was read for,
+            // and a previous one kept under this hash would name another plan's tools under
+            // these steps. Unknown stays `null`, which the card fetches rather than rendering.
+            latestPlanScope: scope,
             trace,
           };
           return {
@@ -1923,7 +2000,9 @@ export const useChatStore = create<ChatState>()(
       restoreJobItem(jobId) {
         set((s) => ({
           jobFeed: s.jobFeed.map((j) =>
-            j.event.job_id === jobId ? { ...j, dismissed: false } : j,
+            j.event.job_id === jobId
+              ? { ...j, dismissed: false, dismissedChangedAt: Date.now() }
+              : j,
           ),
         }));
       },
@@ -2104,7 +2183,9 @@ export const useChatStore = create<ChatState>()(
         // would otherwise be a permanent deletion of the only copy — the backend's is consumed.
         set((s) => ({
           jobFeed: s.jobFeed.map((j) =>
-            j.event.job_id === jobId ? { ...j, dismissed: true, seen: true } : j,
+            j.event.job_id === jobId
+              ? { ...j, dismissed: true, seen: true, dismissedChangedAt: Date.now() }
+              : j,
           ),
         }));
       },
@@ -2193,11 +2274,13 @@ export const useChatStore = create<ChatState>()(
           // last month is history rather than news. Never dropped for being *unread* — the claim
           // that produced it cannot be repeated.
           digests: state.digests.filter((d) => d.receivedAt > cutoff),
-          // The same clock, for a slightly different reason: a check-in is a *dated* notice — it
-          // says how many days are left — so one claimed a week ago is not merely old, it is
-          // wrong. Aged out rather than recomputed, because there is no timestamp to recompute
-          // from. Never dropped for being unread: the claim that produced it cannot be repeated.
-          checkIns: state.checkIns.filter((c) => c.receivedAt > cutoff),
+          // The same cutoff, for a different reason: a check-in is a *dated* notice — it says how
+          // many days are left — so a countdown last refreshed a week ago is not merely old, it is
+          // wrong. So the age is the countdown's (`checkInFreshAt`), not the question's: one still
+          // open and refreshed nightly stays. Aged out rather than recomputed, because there is no
+          // timestamp to recompute from. Never dropped for being unread: the claim that produced
+          // it cannot be repeated.
+          checkIns: state.checkIns.filter((c) => checkInFreshAt(c) > cutoff),
           notifyOnJobComplete: state.notifyOnJobComplete,
         };
       },

@@ -779,22 +779,22 @@ describe('the push lane', () => {
     ).toBe(true);
   });
 
-  it('pins the revision it reads, so a verdict is a function of two commits', () => {
+  it('names the revision it reads, so pinning it is a repository setting rather than an edit', () => {
     // **Without a `ref:`, `actions/checkout` takes the other repository's default branch at the
-    // moment the job runs** — so the same UI commit was green one day and red the next with
-    // nothing changed here, and re-running an old pull request judged it against today's
-    // Chemclaw3. Both records framed the cost of this checkout as "reds on a rename", which is a
-    // build that fails for a reason a reader can see; an unpinned ref is a build that is not
-    // repeatable, which is a different property and the one that makes a red unanswerable.
+    // moment the job runs**, and the only way to judge a pull request against an older Chemclaw3
+    // was to edit the workflow — or the guard. Naming the ref behind `vars.CHEMCLAW3_REF` makes
+    // that remedy a setting with an audit trail.
     //
-    // The assertion is that a ref is *named*, not which one: the default still tracks `main`, so a
-    // real rename still reds. What must not come back is the absence.
+    // This does NOT make the default lane repeatable, and the test used to say it did: the
+    // resolved default is `main`, so re-running an old pull request still judges it against
+    // today's Chemclaw3, deliberately — a real rename should still red. The assertion is that a
+    // ref is *named*, not which one; what must not come back is the absence.
     const step = siblingSteps().find((s) => /repository:/.test(s.text));
     expect(step, 'the push lane checks out no other repository at all').toBeTruthy();
     expect(
       /^\s*ref:\s*\S/m.test(String(step?.text)),
-      "the Chemclaw3 checkout names no `ref:`, so it takes that repository's moving default " +
-        "branch and this lane's verdict is not a function of the two commits under test",
+      'the Chemclaw3 checkout names no `ref:`, so pinning it to a known-good revision means ' +
+        'editing the workflow rather than setting a repository variable',
     ).toBe(true);
 
     // And the two lanes name the same fact rather than one of them knowing it. `Jenkinsfile`

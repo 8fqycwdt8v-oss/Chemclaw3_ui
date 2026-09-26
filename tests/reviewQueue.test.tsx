@@ -15,7 +15,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 import { ReviewQueue } from '../src/components/ReviewQueue.tsx';
 import { stubFetch } from './helpers.ts';
@@ -158,6 +158,19 @@ describe('the plan inbox', () => {
     expect(screen.getByText(/record_knowledge_note/)).toBeTruthy();
   });
 
+  it('prints no scope from a service that predates the field, and does not crash on it', async () => {
+    // `scope` is optional on the wire — absent, not empty — and nothing validates the response,
+    // so the row has to read it as unknown rather than as a list it can `.join`.
+    const [plan] = PENDING.plans;
+    const { scope: _absent, ...older } = plan!;
+    pending = { ...PENDING, plans: [older] };
+    serve();
+    renderQueue();
+    await screen.findByText('Which solvent for the Suzuki step?');
+
+    expect(screen.queryByText(/Approving authorises/)).toBeNull();
+  });
+
   it('offers no decision here, because the reasoning is in the conversation', async () => {
     // The service binds a decision to the hash of the plan as displayed, so deciding from here
     // would be *safe*. It would not be informed — a plan is approved on the strength of the
@@ -264,5 +277,76 @@ describe('the plan inbox', () => {
 
     expect(await screen.findByText(/could not be asked which plans are waiting/)).toBeTruthy();
     expect(screen.queryByText(/No plan is waiting on you/)).toBeNull();
+  });
+});
+
+describe('the pending-request inbox while it re-reads', () => {
+  it('keeps the answer a chemist is typing when another question arrives', async () => {
+    // Every push off the `awaiting_answer` stream is a new query key, and a new key starts with no
+    // data — so the inbox used to swap itself for a spinner on every push, unmounting the answer
+    // box mid-sentence. The second read is held open here so the in-between state is observable.
+    const { useChatStore } = await import('../src/state/chatStore.ts');
+    const request = {
+      request_id: 'await-1',
+      kind: 'measurement',
+      subject: 'Measured yield for the 2-MeTHF arm',
+      rationale: '',
+      asked_of: '',
+      requested_by: 'u',
+      session_id: '',
+      state: 'waiting',
+      due_at: '',
+      created_at: '2026-09-25T09:00:00Z',
+    };
+    const answer = (): Response =>
+      new Response(
+        JSON.stringify({
+          requests: [request],
+          count: 1,
+          total_routed_to_you: 1,
+          truncated: false,
+          verdict: '',
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    let release: (() => void) | null = null;
+    let reads = 0;
+    const stub = stubFetch((url) => {
+      if (url.includes('/plans/pending')) {
+        return new Response(JSON.stringify({ ...PENDING, plans: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (/\/pending$/.test(url)) {
+        reads += 1;
+        if (reads === 1) return answer();
+        return new Promise<Response>((resolve) => {
+          release = () => resolve(answer());
+        });
+      }
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    restore = stub.restore;
+    renderQueue();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Answer' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Your answer' }), {
+      target: { value: '82' },
+    });
+
+    act(() => {
+      useChatStore.setState((s) => ({ awaitingRevision: s.awaitingRevision + 1 }));
+    });
+    await waitFor(() => expect(reads).toBe(2));
+
+    // Mid-read: the box is still there, still holding what was typed.
+    expect(screen.queryByText('Reading what is waiting…')).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Your answer' })).toHaveProperty('value', '82');
+
+    act(() => release?.());
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Your answer' })).toHaveProperty('value', '82'),
+    );
   });
 });

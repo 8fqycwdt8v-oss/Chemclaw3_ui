@@ -395,6 +395,7 @@ describe('sendMessage', () => {
       // "Connection lost — the turn is still running on the server; recovering the answer…" and
       // **210** poll attempts over **630 s**, for a turn nothing had sent. The error the poll was
       // hiding then surfaced anyway, ten and a half minutes late.
+      const appendUserMessage = useChatStore.getState().appendUserMessage;
       vi.useFakeTimers();
       try {
         let polls = 0;
@@ -417,8 +418,15 @@ describe('sendMessage', () => {
         // A session already exists — the second message in a conversation, which is what makes the
         // recovery branch reachable at all.
         useChatStore.getState().setSessionId(cid, 'q'.repeat(32), false);
-        vi.spyOn(useChatStore.getState(), 'appendUserMessage').mockImplementation(() => {
-          throw new DOMException('exceeded the quota', 'QuotaExceededError');
+        // Through `setState`, not `vi.spyOn(getState(), …)`. Every `set` copies the state object,
+        // so a spy installed on one snapshot is carried into the next as a plain property, and
+        // restoring the spy puts the original back only on the snapshot it was installed on. Under
+        // vitest 4, where a restore no longer resets the spy's implementation, the copy kept
+        // throwing into every later test in this file. Restored the same way, in `finally`.
+        useChatStore.setState({
+          appendUserMessage: () => {
+            throw new DOMException('exceeded the quota', 'QuotaExceededError');
+          },
         });
 
         const turn = sendMessage({ conversationId: cid, text: 'pKa?', auth: devAuth });
@@ -431,7 +439,7 @@ describe('sendMessage', () => {
         expect(useChatStore.getState().composerLock).toBe(false);
         expect(useChatStore.getState().banner?.kind).toBe('error');
       } finally {
-        vi.restoreAllMocks();
+        useChatStore.setState({ appendUserMessage });
         vi.useRealTimers();
       }
     }, 20_000);

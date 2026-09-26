@@ -266,6 +266,48 @@ describe('removing conversations does not strand live state', () => {
     expect(useChatStore.getState().composerLock).toBe(false);
     expect(Object.keys(useChatStore.getState().conversations)).toHaveLength(1);
   });
+
+  it('clearAll discards the notices held only in this browser, on disk as well', () => {
+    // Digests and check-ins are consumed by the read that claimed them and a job completion is
+    // only ever pushed, so the service cannot hand any of them back. The "Reset app" dialog says
+    // they are discarded; this is what makes that sentence true rather than hopeful.
+    seed();
+    const store = useChatStore.getState();
+    store.addDigests([{ query: 'q', note_ids: ['n1'], disputed: [], headlines: {} }]);
+    store.addCheckIns([
+      {
+        request_id: 'await-1',
+        kind: 'measurement',
+        subject: 's',
+        rationale: 'r',
+        asked_of: 'x',
+        open_days: 1,
+        days_left: 5,
+        session_id: 'a',
+        truncated: false,
+      },
+    ]);
+    store.pushJobFinished({ type: 'job_completed', job_id: 'qm-1', summary: {} }, 'a');
+    const before = useChatStore.getState();
+    expect([before.digests, before.checkIns, before.jobFeed].map((l) => l.length)).toEqual([
+      1, 1, 1,
+    ]);
+
+    useChatStore.getState().clearAll();
+
+    const after = useChatStore.getState();
+    expect(after.digests).toEqual([]);
+    expect(after.checkIns).toEqual([]);
+    expect(after.jobFeed).toEqual([]);
+    const persisted = useChatStore.persist.getOptions().partialize?.(after) as {
+      digests: unknown[];
+      checkIns: unknown[];
+      jobFeed: unknown[];
+    };
+    expect(persisted.digests).toEqual([]);
+    expect(persisted.checkIns).toEqual([]);
+    expect(persisted.jobFeed).toEqual([]);
+  });
 });
 
 describe('plan approval reaching the message', () => {
@@ -307,6 +349,26 @@ describe('plan approval reaching the message', () => {
     expect(assistantOf(cid, first).latestPlan).toBeNull();
     expect(assistantOf(cid, second).latestPlan).toEqual(['compute the pKa']);
     expect(assistantOf(cid, second).latestPlanHash).toBe('h-2');
+  });
+
+  it("attaches the scope read with the plan, and never keeps an older revision's", () => {
+    const cid = useChatStore.getState().createConversation();
+    const mid = useChatStore.getState().startAssistantMessage(cid);
+    useChatStore.getState().applyEvent(cid, mid, {
+      type: 'plan',
+      todos: ['a'],
+      plan_hash: 'h-1',
+      scope: ['compute_pka'],
+    });
+    useChatStore.getState().finishTurn(cid, mid, 'done');
+
+    useChatStore.getState().attachPlan(cid, ['b'], 'h-2', false, ['record_failure']);
+    expect(assistantOf(cid, mid).latestPlanScope).toEqual(['record_failure']);
+
+    // A read that could not say is unknown for the new hash — not the previous revision's list.
+    useChatStore.getState().attachPlan(cid, ['c'], 'h-3');
+    expect(assistantOf(cid, mid).latestPlanHash).toBe('h-3');
+    expect(assistantOf(cid, mid).latestPlanScope).toBeNull();
   });
 
   it('attaches no empty plan', () => {

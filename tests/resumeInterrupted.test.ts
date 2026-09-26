@@ -114,6 +114,83 @@ describe('a turn a reload interrupted', () => {
     expect(message?.role === 'assistant' && message.status).toBe('done');
   });
 
+  it('finds its answer by the turn id it recorded, even one identical to the answer before it', async () => {
+    // Text alone cannot: the held answer and this turn's are byte-identical, so "differs from
+    // what we hold" is never true. The id `setCorrelationId` recorded survives the reload.
+    const cid = useChatStore.getState().createConversation();
+    useChatStore.getState().setSessionId(cid, 'x'.repeat(32));
+    useChatStore.getState().appendUserMessage(cid, 'pKa of phenol?');
+    const first = useChatStore.getState().startAssistantMessage(cid);
+    useChatStore.getState().applyEvent(cid, first, {
+      type: 'answer',
+      text: 'about 10',
+      confidence: null,
+      unsupported_claims: [],
+      review_required: false,
+      verified_by: null,
+      challenged: false,
+      review_hold_id: null,
+      checks_run: [],
+    });
+    useChatStore.getState().finishTurn(cid, first, 'done');
+    const { mid } = (() => {
+      useChatStore.getState().appendUserMessage(cid, 'pKa of phenol?');
+      const m = useChatStore.getState().startAssistantMessage(cid);
+      useChatStore.getState().setCorrelationId(cid, m, 'b'.repeat(32));
+      useChatStore.setState((s) => ({
+        conversations: {
+          ...s.conversations,
+          [cid]: {
+            ...s.conversations[cid]!,
+            messages: s.conversations[cid]!.messages.map((x) =>
+              x.id === m
+                ? { ...x, status: 'aborted' as const, interruptedByReload: true as const }
+                : x,
+            ),
+          },
+        },
+      }));
+      return { mid: m };
+    })();
+    serveTranscript([
+      {
+        index: 0,
+        role: 'user',
+        text: 'pKa of phenol?',
+        tool_calls: [],
+        correlation_id: 'a'.repeat(32),
+      },
+      {
+        index: 1,
+        role: 'assistant',
+        text: 'about 10',
+        tool_calls: [],
+        correlation_id: 'a'.repeat(32),
+      },
+      {
+        index: 2,
+        role: 'user',
+        text: 'pKa of phenol?',
+        tool_calls: [],
+        correlation_id: 'b'.repeat(32),
+      },
+      {
+        index: 3,
+        role: 'assistant',
+        text: 'about 10',
+        tool_calls: [],
+        correlation_id: 'b'.repeat(32),
+      },
+    ]);
+
+    resumeInterruptedTurn(cid, auth);
+    await vi.advanceTimersByTimeAsync(3_500);
+
+    const message = useChatStore.getState().conversations[cid]?.messages.find((m) => m.id === mid);
+    expect(message?.role === 'assistant' && message.status).toBe('done');
+    expect(answerOf(cid, mid)).toBe('about 10');
+  });
+
   it('does not hand back the first answer when the same question was asked twice', async () => {
     // The occurrence index is counted the same way the live path counts it. Without that, a
     // chemist who re-asks a question gets the previous answer under the new turn.

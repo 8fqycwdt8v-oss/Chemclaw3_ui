@@ -28,6 +28,7 @@ import { createServer, type ServerResponse } from 'node:http';
 import type { ChemclawEvent } from '../shared/events.ts';
 import type {
   CheckIn,
+  Digest,
   DurableJobStatus,
   JobRecordSummary,
   NoteView,
@@ -419,6 +420,31 @@ const CHECK_INS: CheckIn[] = [
   },
 ];
 
+/**
+ * One standing query's finding, so `/review` renders a digest card.
+ *
+ * A row rather than `[]` for `CHECK_INS`'s reason, and because a spec now asserts on the card:
+ * `e2e/routing.spec.ts` reads a headline and the disputed count off it, and the a11y pass waits for
+ * it before scanning. Every field is stated — the service defaults them all, so it sends them all.
+ * Two notes, one disputed, so the page shows both marks the card can draw (the count in the
+ * summary line and the badge on the note) and axe sees the badge in both themes.
+ *
+ * `GET /digests` is a destructive claim upstream; this answers the same row every time for the
+ * reason given above `CHECK_INS`. The store dedups a re-claimed digest by content, so a reload
+ * inside one spec does not draw it twice.
+ */
+const DIGESTS: Digest[] = [
+  {
+    query: 'Suzuki couplings in 2-MeTHF',
+    note_ids: ['note-7f3a', 'note-7f3b'],
+    disputed: ['note-7f3b'],
+    headlines: {
+      'note-7f3a': 'Pd(dppf)Cl2 in 2-MeTHF gave 84% at 60 °C on the bromide.',
+      'note-7f3b': 'CPME outperformed 2-MeTHF for the chloride at the same loading.',
+    },
+  },
+];
+
 const JOB: JobRecordSummary = {
   job_id: 'calc-9f2c',
   connector: 'calc',
@@ -741,11 +767,8 @@ createServer(async (req, res) => {
   // warning in the log of every browser test — and `listDigests` swallows a 404 into `[]`, so the
   // lane could not tell "the service has no digests" from "the fixture never had the route".
   //
-  // **Empty rather than a row, unlike `/check-ins` above.** That one carries a row because a spec
-  // asserts on the card it draws. No spec asserts on a digest card, so a row here would change the
-  // `/review` a11y snapshot to exercise nothing — which is a different change from this one, and
-  // the uncovered rendering is recorded as a gap rather than papered over with a fixture.
-  if (path === '/digests' && req.method === 'GET') return json(res, 200, []);
+  // A row, like `/check-ins` above, now that a spec asserts on the card it draws (`DIGESTS`).
+  if (path === '/digests' && req.method === 'GET') return json(res, 200, DIGESTS);
 
   // The two stored skills tiers and the behaviour-proposal queue — the surfaces the stored tiers
   // hold their exemption from review under, so a page that renders blank is a control that stops

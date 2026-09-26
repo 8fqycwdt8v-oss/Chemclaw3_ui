@@ -945,6 +945,10 @@ rendering is unexercised by the browser lane — so a row here would have change
 snapshot in order to exercise nothing. The uncovered rendering is recorded in _Still not done_
 rather than papered over with a fixture that makes the lane look like it covers it.
 
+**Superseded 2026-09-26, by the change that paragraph asked for.** `/digests` now serves one row
+(`DIGESTS`), because `e2e/routing.spec.ts` now asserts on the card it draws — the _Known gaps_ row
+below is closed. The reasoning above still holds: the row arrived with the assertion, not before it.
+
 The original report follows.
 
 `e2e/fixture-service.ts` stands in for the service in the Playwright lane, and it did not serve
@@ -963,6 +967,48 @@ cases, and `listDigests` already swallows the second into the first — so the f
 the empty list rather than nothing, or the lane stops exercising the path it exists to exercise.
 
 Anchors: `e2e/fixture-service.ts`, its `/pending` comment, and `src/api/client.ts`'s `listDigests`.
+
+## Issue 18 (closed): on Node 25 the unit suite meets Node's `localStorage`, not the DOM's
+
+Closed 2026-09-26. `vitest.config.ts` starts its workers with `--no-experimental-webstorage`
+(`test.poolOptions.forks.execArgv`), so the global the tests see is happy-dom's again, on every Node
+`engines` admits. `npm test` and `npm run ci` are green on 25.8.2 with no `NODE_OPTIONS`.
+
+**The cause is one line of vitest's, and it is not a bug in either party.** vitest's environment
+setup copies a window property onto the global only when the global does not already have it
+(`getWindowKeys`: `if (k in global) return KEYS.includes(k)`), and `localStorage`,
+`sessionStorage` and `Storage` are not in its list — they never needed to be, because no Node had
+them. Node 25 turned Web Storage on by default, so all three are already on the global when the
+environment is populated, and happy-dom's are skipped without a word. What the tests then met was
+Node's storage, which without `--localstorage-file` has none of its methods:
+`localStorage.getItem is not a function`, `window.localStorage.clear is not a function`.
+`window` is the global under vitest, so `window.localStorage` was Node's too. Measured on 25.8.2:
+13 failures across `clientLogging`, `crashScreen`, `msalAuth`, `persistQuota` and `turnStall`.
+vitest 4.1 has the same line, so an upgrade would not have fixed it.
+
+**A flag rather than a pin, and the choice is the argument.** `package.json` says `>=22.6`, and
+pinning 22 with `.nvmrc` would have narrowed that range to hide a failure the range admits — the
+suite would still be wrong on 25, just unrun there. The flag makes the tests mean the same thing
+on every version: it has existed since 22.4, it is a no-op on 22 (checked on 22.6.0), and on 25 it
+removes exactly the three globals that were in the way. If a later Node drops the flag the workers
+fail to start, which is loud; the failure this closes was silent in CI.
+
+**Why CI never saw it, and what now does.** CI, the Dockerfile and Jenkins all run Node 22, which
+has no such global, so the gate was green while a laptop on a current Node was red — and the
+previous session's workaround was `NODE_OPTIONS=--no-experimental-webstorage`, which fixed one
+shell. `tests/webStorage.test.ts` holds both halves: that the flag reached the worker (the half
+that fails on a Node 22 runner too, because deleting the config line changes nothing else
+observable there), and that `localStorage` and `sessionStorage` are happy-dom's `Storage` and
+round-trip (the direct statement of what was broken, which fails on 25 by any other route back).
+
+The original report follows.
+
+On Node 25, five unit-test files that touch `localStorage` fail, because Node ships a built-in
+`localStorage` global that shadows the test environment's. The previous session got green only with
+`NODE_OPTIONS=--no-experimental-webstorage`. CI runs Node 22, so CI hides it.
+
+Anchors: `vitest.config.ts`, `tests/webStorage.test.ts`, and `getWindowKeys` in
+`node_modules/vitest/dist/chunks/index.*.js`.
 
 ---
 
@@ -993,15 +1039,15 @@ to be one this adds: `withMol` probes only on a _throw_, which it already did, a
 unreadable record returns `null` without one. `tests/rdkitTooComplex.test.tsx` drives the seam, the
 count, both sentences, the panel, the sketcher and the composer against a 580-atom V2000 chain.
 
-**Still not done:**
+**Closed 2026-09-26: a browser test asserts on a digest card.** `e2e/fixture-service.ts` serves one
+digest (`DIGESTS`: two notes with headlines, one of them disputed), and `e2e/routing.spec.ts`'s
+review-queue test reads the filled card inside its own region — the query, a headline, the
+"1 of 2 disagree" count and the single `disputed` badge — so a section that rendered its heading
+over an empty body fails, which is the blank-render class this row named. The a11y pass over
+`/review` waits for the card before scanning, so axe now covers it, badge included, in both
+themes. The request path was already exercised (Issue 17); the rendering now is too.
 
-- **No browser test asserts on a digest card.** `/digests` is served by the e2e fixture (Issue 17)
-  so the _request_ path is exercised and the log is quiet, and nothing exercises the _rendering_ —
-  `e2e/` mentions digests nowhere. The unit tests cover the store and the card; what is missing is
-  the lane that would catch a digest section that renders blank in a real browser, which is the
-  failure class the e2e suite exists for. Adding it means a fixture row and a new `/review`
-  assertion, and it changes that page's a11y snapshot, so it is its own change rather than a line
-  in somebody else's.
+**Still not done:**
 
 - **One intermittent browser test, seen once and not reproduced.**
   `e2e/protocols.spec.ts:55` (`an edit becomes a new revision and comes back on the next read`)

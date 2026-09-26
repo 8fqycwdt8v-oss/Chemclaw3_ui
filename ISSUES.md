@@ -800,8 +800,9 @@ everything next to it.
   default stays the conservative one rather than being an oversight. Same trade, same owner, and
   the lane that ships is the one where a red is most expensive.
 
-- **Response shapes are checked where the pairing is not a guess, which is a minority of them, and
-  this entry used to say they were not checked at all.** It also named the blocker wrongly: "the
+- **Response shapes are checked where the pairing is not a guess — a minority of them until
+  2026-09-26, every model-shaped read since — and this entry used to say they were not checked at
+  all.** It also named the blocker wrongly: "the
   handlers' return models being readable route-by-route, which is a shape the backend does not owe
   anybody today". Measured 2026-09-18 against the checkout, that is false — every route the
   service registers annotates its return, and `tests/backendContract.test.ts` now asserts _that_
@@ -821,17 +822,49 @@ everything next to it.
   rather than reached for, on the same argument. Beside all of it, `tests/contractDrift.test.tsx`
   still drives the three fields this has actually cost (`title`, `updated_at`, `result_ref`).
 
-  **Who decides:** whoever owns `src/api/client.ts`. **What would close the rest:** this client
-  declaring the wire shape and doing its reshaping downstream of a declared type, which is a
-  refactor of the API surface rather than a check — or the service publishing the envelope
-  relationship in a form a reader can follow, which nothing declares today.
+  **Closed on this side, 2026-09-26: the check now reads the declaration at the cast, and every
+  call declares the model by its own name there.** The remedy this bullet named was the right one
+  and needed two halves, because either alone leaves a quiet skip. `tests/backendContract.ts` reads
+  a call's wire shape from its type argument (`request<ProposalsOut>(…)`) before the enclosing
+  function's return, so a function that unwraps, narrows or pages is compared on what it cast
+  rather than on what it built; `src/api/client.ts` names every such cast after the service's model
+  — `ProposalsOut`, `LocalSkillsOut`, `OrgSkillVersionsOut`, `SessionOut`, `CheckInOut`,
+  `PendingRequestsOut`, `PlanStatusOut`, `PendingPlansOut`, `DesignListOut`, `DesignOut`,
+  `RevisionOut` — and reshapes after it, keeping the old names as aliases so no caller moved; and
+  `pageSessions`/`pageJobs` read their body and cursor through one `requestPage<T>` rather than two
+  inline casts. The other half is the new assertion `undeclaredReads`: a call reading a route that
+  answers one readable model and casting it to anything else **fails**, so an unpaired response is
+  no longer something this check can pass over. Pairs went from 7 to every model-shaped read. Two
+  reader defects surfaced on the way and are fixed: `orEmpty`'s route label was read as a second
+  `GET` declaring the reshaped type, and a `@computed_field` (`PendingRequestsOut.verdict`) was not
+  read as a field, so pairing that response would have called it a property nobody sends.
+  Driven over built sources: an envelope-unwrapping function with a misspelled envelope property
+  fails, and the same function with the envelope written inline fails — both passed before. Against
+  the tree, renaming `PlanStatusOut.plan_hash` fails; on `e687d6e`, `PlanStatus.planHash` passed.
+
+  **And it found one on first run.** `DesignListOut.total` and `.truncated` exist upstream because a
+  site with more designs than the page "rendered the newest 50 as the corpus" — and this client
+  unwraps to an array and draws exactly that. They are argued in `NOT_READ` rather than silently
+  declared, because reading them is copy on `ProtocolsPanel` ("50 of 212", or a nudge to filter),
+  which is a surface decision. **Who decides:** whoever owns that panel; deleting the two entries
+  is the contract half of the fix.
+
+  **What is still outside this axis:** an element type inside a response is compared only where
+  some route also returns it by name — `ProposalOut` is (via `POST /proposals/…`); `PendingRequest`,
+  `PendingPlan`, `DesignSummary`, `OrgSkillVersion`, `NoteRef` and `TranscriptToolCall` are not.
+  Following a field's annotation on both sides to its element model is the same reading one level
+  down and needs no guess, but it is a reader extension not done here. Responses that are not one
+  model (`dict[str, str]`, `list[str]`, a bare `Response`) are printed and not compared, and
+  `JobRecordSummary`'s `durable/` model is now read through the returning module's own import.
 
 - **It reads what the service declares, not what a deployment serves.** A service serving something
   other than its source says is exactly the difference between this check and
   `npm run check:openapi`, which asks a live service and is operator-run (see "Known gaps" below).
   Neither replaces the other and both docstrings now say which is which.
 
-Also outside it, and smaller: query parameters (dropped from every template on both sides), and
+Also outside it, and smaller: query parameters (dropped from every template on both sides — the
+class `getProtocolDiff`'s `from`/`to` for `from_revision`/`to_revision` was, which FastAPI answered
+with a silent 200 of the wrong diff), and
 the BFF's own routes — `POST /api/client-events` has no upstream at all, so `src/lib/logger.ts` is
 out of the reader's scope by name rather than by accident.
 

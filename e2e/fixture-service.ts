@@ -885,6 +885,7 @@ createServer(async (req, res) => {
       temperature = posted.document.base.setpoints.temperature_c ?? temperature;
       head += 1;
       const written: RevisionWritten = {
+        design_id: DESIGN_ID,
         revision: head,
         checks: PROTOCOL_RECEIPT.checks,
         changed_paths: ['base.setpoints.temperature_c'],

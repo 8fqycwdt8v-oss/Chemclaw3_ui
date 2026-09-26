@@ -291,7 +291,22 @@ export function pydanticFields(source: string, className: string): PydanticField
     } else if (line.trim()) logical.push(line);
   }
   const fields: PydanticField[] = [];
+  // A `@computed_field` is on the wire as surely as an annotated one — Pydantic serialises it — and
+  // it is not `name: annotation`, so reading annotations alone called `PendingRequestsOut.verdict`
+  // a property nobody sends the day that response was first paired. Never required: it is not an
+  // input, and no request model here declares one.
+  let computed = false;
   for (const line of logical) {
+    if (/^ {4}@computed_field\b/.test(line)) {
+      computed = true;
+      continue;
+    }
+    const method = /^ {4}(?:async\s+)?def\s+([a-z_][a-z0-9_]*)\s*\(/.exec(line);
+    if (method) {
+      if (computed) fields.push({ name: method[1] as string, required: false });
+      computed = false;
+      continue;
+    }
     const match = /^ {4}([a-z_][a-z0-9_]*)\s*:\s*(\S.*)$/.exec(line);
     if (!match || match[1] === 'model_config') continue;
     const rest = match[2] as string;
@@ -561,8 +576,16 @@ export function whitelistTemplate(target: (m: RegExpMatchArray) => string): stri
 const readLocal = (relative: string): string =>
   readFileSync(resolve(process.cwd(), relative), 'utf8');
 
-const parse = (relative: string): ts.SourceFile =>
-  ts.createSourceFile(relative, readLocal(relative), ts.ScriptTarget.ES2023, true);
+const parse = (relative: string, text: string = readLocal(relative)): ts.SourceFile =>
+  ts.createSourceFile(relative, text, ts.ScriptTarget.ES2023, true);
+
+/**
+ * Sources to read in place of the tree: `{ relative path: text }`.
+ *
+ * What lets the predicates over this client be driven over a file built to be wrong, which is the
+ * only way an assertion over a tree that agrees today is shown to be able to disagree.
+ */
+export type SourceOverride = Readonly<Record<string, string>>;
 
 /**
  * The wire names `normalizeEvent` admits, imported rather than scraped.
@@ -629,13 +652,21 @@ export interface ClientRequest {
    */
   bodyKeys: string[] | null;
   /**
-   * The type the enclosing API function declares it resolves to, with `Promise<>` and `[]`
-   * stripped — or `null` when that is not one interface by name.
+   * The wire shape this call declares its body to be, as one interface name — or `null` when that
+   * is not one interface by name.
    *
-   * `null` for `void`, for `{ session_id: string }` written inline, for a narrowed union like
-   * `CheckIn[] | 'absent'`, and for a call inside a helper that declares nothing. Those are the
-   * responses this client does **not** declare the wire shape of, and a checker that paired them
-   * with the model anyway would be inventing the relationship it then reports on.
+   * **Read where the body is cast, not where the API function returns.** The type argument of the
+   * call (`request<ProposalsOut>(…)`) when it has one; otherwise the nearest enclosing function
+   * that annotates its return, with `Promise<>` and `[]` stripped. It used to be only the second,
+   * and that is `ISSUES.md` Issue 14's second bullet: a function that unwrapped an envelope, or
+   * narrowed a union, *returned* something that is not the wire, so the check read the reshaped
+   * type, found no model of that name, and compared nothing — while the call site had declared the
+   * wire shape inline one line up. A declaration at the cast is the wire; a declaration at the
+   * return is what this client made of it.
+   *
+   * `null` for `void`, for `{ stopped: boolean }` written inline, and for a narrowed union. Where
+   * the route returns one readable model, `null` is no longer a quiet pass: see
+   * `undeclaredReads`.
    */
   responseType: string | null;
   file: string;
@@ -690,11 +721,18 @@ function pathTemplate(node: ts.Expression): string | null {
  * is the one call that puts its path second and its method first, and it is the attachment upload:
  * omitting it would leave the one route that carries a file outside the check.
  */
-export function clientRequests(): ClientRequest[] {
+export function clientRequests(override?: SourceOverride): ClientRequest[] {
   const out: ClientRequest[] = [];
-  for (const relative of REQUEST_SOURCES) {
-    const file = parse(relative);
+  for (const relative of override ? Object.keys(override) : REQUEST_SOURCES) {
+    const file = parse(relative, override?.[relative]);
     const visit = (node: ts.Node): void => {
+      // `orEmpty('/sessions', load)` names the route it degrades; the request is inside `load`.
+      // Read as a call of its own, the label was a second `GET` whose declared type was whatever
+      // the API function returned — the reshaped type, the one this reader no longer trusts.
+      if (ts.isCallExpression(node) && node.expression.getText(file) === 'orEmpty') {
+        node.arguments.slice(1).forEach(visit);
+        return;
+      }
       if (ts.isCallExpression(node)) {
         const isOpen = node.expression.getText(file).endsWith('.open');
         const pathArg = isOpen ? node.arguments[1] : node.arguments[0];
@@ -767,23 +805,36 @@ function requestShape(
  * not a bare identifier after unwrapping `Promise<>` and `[]` is `null` rather than a guess —
  * see `ClientRequest.responseType` for which shapes those are and why it matters.
  */
-function declaredResponseType(node: ts.Node, file: ts.SourceFile): string | null {
+function declaredResponseType(node: ts.CallExpression, file: ts.SourceFile): string | null {
+  const argument = node.typeArguments?.[0];
+  // A type argument is the declaration at the cast and is final either way: `request<void>` and
+  // `request<{ stopped: boolean }>` say "not a model" as plainly as `request<SessionOut>` names one.
+  if (argument !== undefined) return oneInterface(argument.getText(file));
   let current: ts.Node | undefined = node.parent;
   while (current) {
     if (
       ts.isMethodDeclaration(current) ||
       ts.isFunctionDeclaration(current) ||
-      ts.isArrowFunction(current)
+      ts.isArrowFunction(current) ||
+      ts.isFunctionExpression(current)
     ) {
       const annotation = current.type?.getText(file);
-      if (annotation === undefined) return null;
-      const resolved = /^Promise<([\s\S]*)>$/.exec(annotation.trim())?.[1] ?? annotation;
-      const single = resolved.trim().replace(/\[\]$/, '').trim();
-      return /^[A-Z][A-Za-z0-9_]*$/.test(single) ? single : null;
+      // An unannotated closure — the XHR upload's `new Promise((resolve, reject) => …)` executor —
+      // declares nothing either way; the function around it is the one that says what it resolves.
+      if (annotation !== undefined) {
+        const resolved = /^Promise<([\s\S]*)>$/.exec(annotation.trim())?.[1] ?? annotation;
+        return oneInterface(resolved);
+      }
     }
     current = current.parent;
   }
   return null;
+}
+
+/** `X` or `X[]` → `X`; anything else — a union, an inline object, `void` — → `null`. */
+function oneInterface(type: string): string | null {
+  const single = type.trim().replace(/\[\]$/, '').trim();
+  return /^[A-Z][A-Za-z0-9_]*$/.test(single) ? single : null;
 }
 
 /**
@@ -804,9 +855,9 @@ const RESPONSE_SOURCES = [...REQUEST_SOURCES, 'shared/protocols.ts'];
  * A type declared in neither the request files nor the mirror reads as `null` — not compared rather
  * than compared against nothing, which is the same refusal `responseModelOf` makes upstream.
  */
-export function clientInterfaceFields(name: string): string[] | null {
-  for (const relative of RESPONSE_SOURCES) {
-    const file = parse(relative);
+export function clientInterfaceFields(name: string, override?: SourceOverride): string[] | null {
+  for (const relative of override ? Object.keys(override) : RESPONSE_SOURCES) {
+    const file = parse(relative, override?.[relative]);
     let found: string[] | null = null;
     const visit = (node: ts.Node): void => {
       if (ts.isInterfaceDeclaration(node) && node.name.text === name) {

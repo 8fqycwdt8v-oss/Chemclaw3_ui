@@ -519,12 +519,40 @@ let connects = 0;
  */
 let live: string[] = [];
 let restoreFetch: (() => void) | null = null;
+/**
+ * What `GET /jobs/{id}` answers, per job id — the run registry a new leader reconciles against
+ * (`src/state/jobReconcile.ts`, `ISSUES.md` Issue 12). An id not listed is a 404, which is what
+ * the service answers for a job it has never heard of.
+ */
+let registry: Record<string, { status: string; summary?: string | null; result?: object }> = {};
+/** The job ids asked about, in order. Not counted in `connects`, which is about streams. */
+let jobReads: string[] = [];
 
 beforeEach(() => {
   connects = 0;
   live = [];
+  registry = {};
+  jobReads = [];
   const original = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const jobRead = /\/api\/jobs\/([^/?]+)$/.exec(String(input));
+    if (jobRead) {
+      const jobId = decodeURIComponent(jobRead[1]!);
+      jobReads.push(jobId);
+      const known = registry[jobId];
+      return Promise.resolve(
+        known
+          ? Response.json({
+              job_id: jobId,
+              summary: null,
+              result: {},
+              calc_refs: [],
+              rationale: '',
+              ...known,
+            })
+          : Response.json({ detail: 'no such job' }, { status: 404 }),
+      );
+    }
     connects += 1;
     const sessionId = String(input).replace(/^.*\/sessions\/([^/]+)\/events.*$/, '$1');
     live.push(sessionId);
@@ -612,6 +640,157 @@ describe('a tab that did not get the lock', () => {
       // One per watched session. Without this the whole feature is "the last tab to open watches
       // nothing", which is worse than the behaviour it replaced.
       expect(connects).toBe(1);
+    } finally {
+      unmount();
+    }
+  });
+});
+
+/* ── the ending a dead leader never relayed ───────────────────────────────── */
+
+/**
+ * `ISSUES.md` Issue 12. The service's claim on a job ending is at-most-once, so a frame the leader
+ * read and died before relaying is gone from the mailbox; the new leader cannot get it from any
+ * stream. What it can do is ask the run registry about every run this account saw launched and
+ * never saw end — `GET /jobs/{id}` answers `completed`/`failed`/… for a finished run — and publish
+ * what it hears. Driven here through the real hook, the real election and a real `api.getJob`
+ * against the stubbed network.
+ */
+describe('a leader that dies holding an ending it never relayed', () => {
+  /** A conversation whose last turn launched these runs, none of which this store has seen end. */
+  const seedLaunches = (jobIds: readonly string[]): void => {
+    useChatStore.setState({
+      conversations: {
+        c1: {
+          id: 'c1',
+          sessionId: SID,
+          title: 'x',
+          messages: [
+            { id: 'm1', role: 'user', text: 'run it' },
+            {
+              id: 'm2',
+              role: 'assistant',
+              trace: jobIds.map((jobId, index) => ({
+                id: `t${index}`,
+                at: Date.now() - index,
+                kind: 'job_started',
+                job: { jobId },
+              })),
+            },
+          ],
+          updatedAt: 1,
+        } as never,
+      },
+      activeId: 'c1',
+      jobStreamsThrottled: false,
+      jobStreamsFailing: [],
+      jobFeed: [],
+    });
+  };
+
+  it('is recovered by the next leader from the run registry, and only the runs that ended', async () => {
+    seedLaunches(['job-lost', 'job-still-running', 'job-registry-forgot']);
+    registry = {
+      'job-lost': { status: 'completed', result: { converged: true } },
+      'job-still-running': { status: 'running' },
+    };
+    const peer = openPeer('0000-leader');
+    await peer.lead();
+
+    const { unmount } = renderHook(() => useJobStreams());
+    try {
+      await wait(SETTLED_MS);
+      // A follower asks nothing: the leader is the one reading the streams, and reconciling is part
+      // of taking them.
+      expect(jobReads).toEqual([]);
+
+      // The leader dies without a word — the frame for `job-lost` went with it.
+      peer.release();
+
+      await vi.waitFor(
+        () =>
+          expect(useChatStore.getState().jobFeed.map((item) => item.event.job_id)).toEqual([
+            'job-lost',
+          ]),
+        { timeout: DEADLINE_MS },
+      );
+      expect([...jobReads].sort()).toEqual([
+        'job-lost',
+        'job-registry-forgot',
+        'job-still-running',
+      ]);
+      const [card] = useChatStore.getState().jobFeed;
+      expect(card?.event).toEqual({
+        type: 'job_completed',
+        job_id: 'job-lost',
+        summary: { converged: true },
+      });
+      expect(card?.sessionId).toBe(SID);
+      // And it is relayed, not only applied here: the other tabs are told the same way the stream
+      // would have told them.
+      await vi.waitFor(() =>
+        expect(peer.received).toContainEqual(
+          expect.objectContaining({
+            type: 'note',
+            note: expect.objectContaining({ kind: 'job', sessionId: SID }),
+          }),
+        ),
+      );
+    } finally {
+      unmount();
+    }
+  });
+
+  it('carries a failure as a failure, with the service’s reason or its state word', async () => {
+    seedLaunches(['job-failed', 'job-cancelled']);
+    registry = {
+      'job-failed': { status: 'failed', summary: 'SCF did not converge' },
+      'job-cancelled': { status: 'cancelled' },
+    };
+    const { unmount } = renderHook(() => useJobStreams());
+    try {
+      await vi.waitFor(() => expect(useChatStore.getState().jobFeed).toHaveLength(2), {
+        timeout: DEADLINE_MS,
+      });
+      const events = Object.fromEntries(
+        useChatStore.getState().jobFeed.map((item) => [item.event.job_id, item.event]),
+      );
+      expect(events['job-failed']).toEqual({
+        type: 'job_failed',
+        job_id: 'job-failed',
+        reason: 'SCF did not converge',
+      });
+      expect(events['job-cancelled']).toEqual({
+        type: 'job_failed',
+        job_id: 'job-cancelled',
+        reason: 'cancelled',
+      });
+    } finally {
+      unmount();
+    }
+  });
+
+  it('asks the registry nothing when no run is awaited', async () => {
+    // The ordinary takeover: every launch has a card already, or there were none. Reconciling must
+    // not turn each election into a round of reads.
+    seedLaunches(['job-already-told']);
+    useChatStore.setState({
+      jobFeed: [
+        {
+          event: { type: 'job_completed', job_id: 'job-already-told', summary: {} },
+          sessionId: SID,
+          conversationId: 'c1',
+          receivedAt: Date.now(),
+          seen: true,
+          dismissed: false,
+        },
+      ],
+    });
+    const { unmount } = renderHook(() => useJobStreams());
+    try {
+      await wait(SETTLED_MS);
+      expect(connects).toBe(1);
+      expect(jobReads).toEqual([]);
     } finally {
       unmount();
     }

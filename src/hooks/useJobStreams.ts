@@ -38,6 +38,7 @@ import { readEventStream } from '../lib/sse.ts';
 // otherwise, and the extracted `sleep` had dropped this one's abort-listener cleanup on the way.
 import { MAX_BACKOFF_MS, backoff, sleep } from '../lib/backoff.ts';
 import { createStreamLeader, type Note, type StreamLeader } from '../state/jobStreamLeader.ts';
+import { reconcileAfterTakeover } from '../state/jobReconcile.ts';
 
 /**
  * How many sessions to watch at once.
@@ -303,6 +304,13 @@ export function useJobStreams(): void {
           useChatStore.getState().setJobStreamFailing(sessionId, false);
         }
         publishHealth(joined);
+        // And ask the run registry how every run this account is waiting on ended. A leader that
+        // died between reading an ending off its stream and relaying it took the only copy with
+        // it — the service's claim is at-most-once (`ISSUES.md` Issue 12) — so the new leader
+        // cannot get it from the stream and asks `GET /jobs/{id}` instead. The first election at
+        // page load passes through here too, which covers the one-tab version of the same loss: a
+        // window killed mid-frame and opened again later.
+        void reconcileAfterTakeover(joined, useChatStore.getState(), auth);
       }
       held = joined.isLeader();
       for (const sessionId of [...open.keys()]) if (!wanted.includes(sessionId)) drop(sessionId);

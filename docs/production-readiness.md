@@ -121,8 +121,10 @@ indistinguishable from one that does not work — and this repository has produc
   changed, and a re-run of an old pull request judged it against that day's service. A rename reds
   a build for a reason a reader can see; an unpinned ref makes the verdict not a function of the
   commits under test, which is a different property and is not a trade anybody took. The checkout
-  now names `ref: ${{ inputs.chemclaw3_ref || vars.CHEMCLAW3_REF || 'main' }}` with a
-  `workflow_dispatch` input beside it: the default still tracks `main` so a real rename still reds,
+  now reads the dispatch input, then `vars.CHEMCLAW3_REF`, then `main` — resolved by
+  `scripts/chemclaw3-ref.mjs` in a step of its own, which prints the ref, which of the three it
+  came from and whether the run is a fork pull request, then hands it to the checkout as an output
+  and prints the commit that landed: the default still tracks `main` so a real rename still reds,
   and a pull request blocked by an unrelated upstream change is unblocked by moving a repository
   variable rather than by weakening the check. `Jenkinsfile` already declared `CHEMCLAW3_BRANCH`
   for its own clone, so the two lanes now name one fact; `tests/delivery.test.ts` holds both to it.
@@ -143,24 +145,24 @@ indistinguishable from one that does not work — and this repository has produc
   pipeline declares, so flipping the parameter fails here until the record is rewritten. Recorded
   in `ISSUES.md` Issue 14.
 
-- **Enforced.** Every route the service registers declares what it returns, and every response
-  this client declares the wire shape _of_ — the API function's return type is one interface and it
-  carries the model's own name — has its properties compared to that model's fields. A property
-  declared here and sent by nobody fails; a field sent and not declared is listed
-  (`tests/backendContract.test.ts`).
-- **Accepted.** That is a minority of the responses, because for most calls this client's declared
-  type is not the wire shape: it narrows a union, unwraps an envelope, reshapes a listing into a
-  page plus an `X-Next-Cursor` header, or resolves `void`. Those are listed rather than paired, and
-  a pair whose model is declared outside the service's `api/` package is listed too — reaching for
-  either would be the check inventing the relationship it then reports on. The three fields this
-  has actually cost are driven end to end (`tests/contractDrift.test.tsx`). **Who decides:**
-  whoever owns `src/api/client.ts`. **What would change it:** this client declaring the wire shape
-  and reshaping downstream of it. `ISSUES.md` Issue 14.
+- **Enforced.** Every route the service registers declares what it returns, and every call this
+  client makes to a route answering one readable model casts the body to that model's own name
+  (`request<PlanStatusOut>(…)`) and reshapes after the cast. The reader takes the declaration at
+  the cast, so the properties declared there are compared to the model's fields: a property
+  declared here and sent by nobody fails, a field sent and not declared fails unless `NOT_READ`
+  argues it, and a call that casts a model-shaped answer to anything else fails
+  (`undeclaredReads`, `tests/backendContract.test.ts`).
+- **Accepted.** Below the top level: an element type inside a response is compared only where some
+  route also returns it by name, and a response that is not one model (`dict[str, str]`,
+  `list[str]`, a bare `Response`) is printed rather than compared. `DesignListOut.total` and
+  `.truncated` are sent and not read — the protocols panel has no copy for a short listing yet —
+  and are argued in `NOT_READ`. The three fields drift has actually cost are driven end to end
+  (`tests/contractDrift.test.tsx`). `ISSUES.md` Issue 14.
 - **Accepted.** The check reads what the service **declares**, not what a deployment **serves**.
   `npm run check:openapi` is still the only thing that asks a running service, and it is
   operator-run (§1).
 
-## 3. Path encoding, and its two escapes
+## 3. Path encoding, one escape closed and one allowance held
 
 - **Enforced.** Every path-segment interpolation in a file that can reach the service is an
   `encodeURIComponent` call — as an invariant over the tree, parsed with the TypeScript compiler,
@@ -168,15 +170,18 @@ indistinguishable from one that does not work — and this repository has produc
   `const id = encodeURIComponent(raw)` recognised so that the cheapest way to green is not a double
   encode. Two behavioural tests drive the fetch seam and the XHR upload seam with a hostile id
   (`tests/pathEncoding.test.ts`).
-- **Measured — escape 1: a path assembled off a named constant is invisible to the rule.** Driven
-  on 2026-09-14: `const PROBE_BASE = '/api/jobs/'; fetch(PROBE_BASE + jobId)` in
-  `src/hooks/useOffline.ts` passed the whole rule, while the same URL written as
-  `fetch(\`/api/jobs/${jobId}\`)`in the same file failed it. The scan recognises a concatenation
-whose **left operand is a string literal** ending in`/`; an identifier holding that literal is a
-shape it does not see. Accepted rather than widened: chasing an identifier to its binding is a
-dataflow analysis, and the rule's value is that it holds for the shapes this codebase writes.
-`tests/pathEncoding.test.ts` is the rule; this paragraph is its boundary.
-- **Measured — escape 2: encoding is not a character policy.** Driven on 2026-09-14 through
+- **Closed — escape 1: a path assembled off a named constant.** Driven on 2026-09-14:
+  `const PROBE_BASE = '/api/jobs/'; fetch(PROBE_BASE + jobId)` in `src/hooks/useOffline.ts` passed
+  the whole rule, while the same URL written as a template failed it. The scan now resolves an
+  identifier to the compile-time string it is bound to — a `const` in the file, a concatenation or
+  substitution-free template of those, or a constant imported by a relative path — on the left of a
+  `+`, in a template span and at the URL's head. That was declined once as "a dataflow analysis",
+  and it is not one: a `const` bound to a string has one value, visible at its declaration.
+  Followed rather than inlined because inlining fixes the one site and leaves the shape open to the
+  next hook that hoists its base. Fixtures in `tests/pathEncoding.test.ts` drive each shape. **Still
+  outside it:** a base that is not a compile-time string (a `let`, a parameter, `config.apiBase`)
+  — whose own literal tail the scan already reads — and a re-export (`export { X } from`).
+- **Accepted, and now held by a test — encoding is not a character policy.** Driven on 2026-09-14 through
   `resolveRoute`: `/api/notes/note-a%00b` resolves and is forwarded as `/notes/note-a%00b`; so does
   the same id with `%0A`; so does `/api/jobs/qm%00-1`. A traversal does not — `/api/notes/..%2F..%2Fmetrics` is refused, by
   `isTraversal` rather than by the character class, and `tests/routes.test.ts` drives that in both
@@ -184,7 +189,9 @@ dataflow analysis, and the rule's value is that it holds for the shapes this cod
   repository does not own (a slug a model wrote, a Temporal workflow id), and narrowing them to
   exclude `%00` is a different change with a different blast radius than the traversal one that was
   measured. **Accepted**, and it is the upstream's `[^/]+` path parameter that makes it harmless
-  today, which is a property of somebody else's component.
+  today, which is a property of somebody else's component. `tests/routes.test.ts` now pins the
+  three forwards above, so the day this changes it is a diff somebody argued for — **what would
+  change it:** an ingress in front of this process that normalises before the service.
 
 ## 4. The BFF
 
@@ -397,14 +404,14 @@ control that existed, was believed, and did not do what it said.
 
 Every one of these is argued above and recorded in `ISSUES.md` with an anchor:
 
-| Accepted                                                                                                 | Where                     |
-| -------------------------------------------------------------------------------------------------------- | ------------------------- |
-| The access token is readable by any script on this origin; silent refresh runs on third-party cookies    | `ISSUES.md` Issue 8       |
-| No container-served deployment can draw a structure, so the RDKit worker's win is unobservable there     | `ISSUES.md` Issue 10      |
-| `canonicalSmiles` answers `null` for some legal long chains, depending on the JS stack                   | `ISSUES.md` Issue 11      |
-| A job ending read off a stream and not yet relayed dies with the tab                                     | `ISSUES.md` Issue 12      |
-| The old wire name `note_proposed` is still accepted, and must be, until the service ships the new one    | `ISSUES.md` Issue 13      |
-| The contract check verifies nothing where there is no sibling checkout, and never checks response shapes | `ISSUES.md` Issue 14      |
-| `check:live` is operator-run: `smoke` and `check:openapi` are on no schedule                             | `ISSUES.md`, "Known gaps" |
-| A path built off a named constant escapes the encoding scan; `%00` in an id is forwarded                 | `ISSUES.md` Issue 15      |
-| No screenshot baselines; no real MSAL redirect exercised; the sketcher canvas has no accessible path     | `ISSUES.md`, "Known gaps" |
+| Accepted                                                                                              | Where                     |
+| ----------------------------------------------------------------------------------------------------- | ------------------------- |
+| The access token is readable by any script on this origin; silent refresh runs on third-party cookies | `ISSUES.md` Issue 8       |
+| No container-served deployment can draw a structure, so the RDKit worker's win is unobservable there  | `ISSUES.md` Issue 10      |
+| `canonicalSmiles` answers `null` for some legal long chains, depending on the JS stack                | `ISSUES.md` Issue 11      |
+| A job ending read off a stream and not yet relayed dies with the tab                                  | `ISSUES.md` Issue 12      |
+| The old wire name `note_proposed` is still accepted, and must be, until the service ships the new one | `ISSUES.md` Issue 13      |
+| The contract check verifies nothing without a checkout, and compares no element type below a response | `ISSUES.md` Issue 14      |
+| `check:live` is operator-run: `smoke` and `check:openapi` are on no schedule                          | `ISSUES.md`, "Known gaps" |
+| `%00` / `%0A` in a wide-class id is forwarded encoded; a non-constant URL base is outside the scan    | `ISSUES.md` Issue 15      |
+| No screenshot baselines; no real MSAL redirect exercised; the sketcher canvas has no accessible path  | `ISSUES.md`, "Known gaps" |

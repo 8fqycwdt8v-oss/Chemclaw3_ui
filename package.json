@@ -23,6 +23,7 @@
     "test:e2e": "playwright test",
     "ci": "node scripts/ci.mjs",
     "ci:container": "node scripts/check-container.mjs",
+    "ci:chemclaw3-ref": "node scripts/chemclaw3-ref.mjs",
     "ci:all": "npm run ci && npm run ci:container",
     "check:audit": "npm audit --omit=dev --audit-level=high",
     "check:contrast": "node scripts/check-contrast.mjs",

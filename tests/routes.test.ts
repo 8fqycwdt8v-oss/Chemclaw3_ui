@@ -237,6 +237,24 @@ describe('proxy route whitelist', () => {
       }
     });
 
+    it('forwards an encoded control character verbatim, which is a decision and not a gap', () => {
+      // `ISSUES.md` Issue 15, the half that is accepted rather than fixed. Encoding is not a
+      // character policy: `%00` and `%0A` are neither a separator nor a parent reference once
+      // decoded, so `isTraversal` passes them and the wide classes admit them, and the segment
+      // reaches the service still encoded — where Starlette decodes it once into a `[^/]+` path
+      // parameter that no such character can widen. Held here so that the day this changes it is
+      // a diff somebody argued for (a character policy, because an ingress in front of this
+      // process started normalising) rather than a side effect of narrowing a class for some
+      // other reason — and so that the entry describing it cannot quietly stop being true.
+      for (const [method, path, upstream] of [
+        ['GET', '/api/notes/note-a%00b', '/notes/note-a%00b'],
+        ['GET', '/api/notes/note-a%0Ab', '/notes/note-a%0Ab'],
+        ['GET', '/api/jobs/qm%00-1', '/jobs/qm%00-1'],
+      ] as const) {
+        expect(resolveRoute(method, path), path).toMatchObject({ path: upstream });
+      }
+    });
+
     it('refuses a raw separator, an over-long id, and the wrong verb', () => {
       expect(resolveRoute('GET', '/api/notes/note-a/b')).toBeNull();
       expect(resolveRoute('GET', `/api/notes/${'n'.repeat(513)}`)).toBeNull();

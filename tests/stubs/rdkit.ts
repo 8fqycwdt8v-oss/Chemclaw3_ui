@@ -81,6 +81,12 @@ const MOLBLOCK_FORMULAE: Record<string, string> = {
   C6: 'c1ccccc1',
   O1: 'O',
   Br1C7O1: 'COc1ccc(Br)cc1',
+  // The measured subject below, as a molblock: a 580-carbon chain. Real RDKit reads a molblock
+  // through the same `get_mol` and ranks it through the same recursion — `withSmilesMol`'s
+  // docstring records a 999-atom V2000 chain raising exactly this `RangeError` — so the handle
+  // this makes throws from `get_smiles` like the SMILES does, and the molblock surfaces can be
+  // driven with a record that is a molecule and has no name on this thread.
+  C580: 'C'.repeat(580),
 };
 
 /**

@@ -570,3 +570,63 @@ is somebody else's repository and inventing any of the four here would be worse 
 real response model rather than skipping with a reason. Not run, and neither is skippable by
 choice: `npm run check:live` needs a live Chemclaw3, and `npm run ci:container` needs a container
 runtime. No count of the suite is written here; the run prints one.
+
+---
+
+## Three backlog rows: a legible Chemclaw3 base, the named-constant escape, and a molblock's third answer
+
+- [x] **Every run says which Chemclaw3 revision it read and why.** `scripts/chemclaw3-ref.mjs`
+      resolves the dispatch input → `vars.CHEMCLAW3_REF` → `main` in a step of its own, prints the
+      ref, its source and whether the run is a fork PR, and hands the ref to the checkout as an
+      output; a second call prints the commit that landed. `ISSUES.md`'s `CHEMCLAW3_REF` entry stays
+      open: the question is now answerable from one fork PR's log, and nobody has run one.
+- [x] **The path-encoding rule follows a `const`.** `tests/pathEncoding.test.ts` resolves an
+      identifier to the compile-time string it is bound to (in-file, composed, or imported), with
+      fixtures for each shape. The `%00` half of Issue 15 is accepted as that entry argued and now
+      pinned in `tests/routes.test.ts`. Issue 15 closed.
+- [x] **A molblock that is a molecule is not "unreadable".** `readCanonicalSmilesFromMolblock` is
+      three-valued like its SMILES sibling; `MolfileRecords.tooComplex`, `noStructureNote`,
+      `recordsNote` and the sketcher's refusal carry it, as do both molblock paste paths.
+      `tests/rdkitTooComplex.test.tsx` drives all of it. The _Known gaps_ row is closed.
+
+**Run:** `npm run ci` with `CHEMCLAW3_DIR` pointing at the sibling checkout. Not run:
+`npm run ci:container` and `npm run check:live`, for the reasons the section above gives.
+
+---
+
+## Two backlog rows: a digest card in the browser lane, and the suite on Node 25
+
+- [x] **A browser test asserts on a digest card.** `e2e/fixture-service.ts` serves one digest
+      (`DIGESTS`), `e2e/routing.spec.ts` reads the filled card — query, a headline, the disputed
+      count and the one badge — and the a11y pass over `/review` waits for it before scanning.
+      The _Known gaps_ row is closed; Issue 17's "empty rather than a row" is marked superseded.
+- [x] **The unit suite means the same thing on Node 22 and 25.** Node 25's default-on Web Storage
+      put `localStorage`/`sessionStorage`/`Storage` on the global before vitest populated it, and
+      vitest skips a window key the global already has, so happy-dom's storage never arrived.
+      `vitest.config.ts` starts its workers with `--no-experimental-webstorage`;
+      `tests/webStorage.test.ts` holds the flag (fails on 22 too if removed) and the storage
+      identity. Recorded as `ISSUES.md` Issue 18, closed.
+
+**Run:** `npm ci` then `npm run ci` on Node 25.8.2 with no `NODE_OPTIONS`. Not run:
+`npm run ci:container` and `npm run check:live`, for the reasons the sections above give.
+
+---
+
+## Issue 14's second bullet: the contract check reads the wire where the body is cast
+
+- [x] **The reader takes the declaration at the cast.** `tests/backendContract.ts` reads a call's
+      type argument (`request<ProposalsOut>`) before the enclosing function's return, so an
+      unwrapping, narrowing or paging function is compared on the wire shape rather than on what it
+      built. `orEmpty`'s route label is no longer read as a request, and `@computed_field` is read
+      as a field.
+- [x] **Every model-shaped read declares the model by name.** `src/api/client.ts` casts to the
+      service's model names and reshapes after them (old names kept as aliases);
+      `pageSessions`/`pageJobs` share `requestPage<T>`. `undeclaredReads` fails any call that
+      casts a model-shaped answer to anything else; driven over built sources in
+      `tests/backendContract.test.ts`.
+- [x] **One real drift found and argued, not hidden.** `DesignListOut.total`/`.truncated` are in
+      `NOT_READ`; surfacing them is a `ProtocolsPanel` copy decision. Issue 14 stays open for the
+      coupling decision, the declared-vs-served gap, element types and query parameters.
+
+**Run:** `npm ci` then `npm run ci` with `CHEMCLAW3_DIR` pointing at the sibling checkout. Not run:
+`npm run ci:container` and `npm run check:live`, for the reasons the sections above give.

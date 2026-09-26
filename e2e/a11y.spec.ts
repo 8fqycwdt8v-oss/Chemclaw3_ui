@@ -118,6 +118,10 @@ for (const theme of ['light', 'dark'] as const) {
       // section renders three different things depending on how its claim went, and a scan that
       // ran while it still said "Reading…" would be reporting on markup no chemist reads.
       await expect(page.getByText('Measured yield for the 2-MeTHF arm')).toBeVisible();
+      // And the digest card, which renders nothing at all until the shell's claim lands — so a
+      // scan that did not wait for it would pass over markup it never saw, including the
+      // `disputed` badge whose contrast is the one thing on that card axe can measure.
+      await expect(page.getByText('Suzuki couplings in 2-MeTHF')).toBeVisible();
       await scan(page);
     });
 

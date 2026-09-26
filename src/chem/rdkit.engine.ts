@@ -411,7 +411,8 @@ export async function isMolecule(smiles: string): Promise<boolean> {
 }
 
 /**
- * The canonical SMILES for an MDL molblock — a `.mol` file's contents, or one record of an `.sdf`.
+ * What RDKit made of an MDL molblock — a `.mol` file's contents, or one record of an `.sdf` — as
+ * its canonical SMILES, or which of the two `Refused` reasons there is none.
  *
  * `get_mol` is the same entry point as for SMILES; RDKit sniffs the format. So this is not here to
  * reach a different parser, it is here because **nothing outside this module may hold a `JSMol`**
@@ -422,23 +423,28 @@ export async function isMolecule(smiles: string): Promise<boolean> {
  * The 2D coordinates in the block are deliberately dropped. The entity key and the text inserted
  * into a message are both SMILES, and `moleculeSvg` recomputes a depiction anyway — keeping the
  * drawn coordinates would mean two spellings of one compound again, this time geometric.
+ *
+ * **Three-valued, like `readCanonicalSmiles`, and it used to be `string | null`.** A `too-complex`
+ * is reachable here — `withSmilesMol`'s docstring records a 999-atom V2000 chain raising exactly
+ * the canonical-ranking `RangeError` with the runtime still alive — and folding it into `null`
+ * made `moleculesFromMolfile` count a record that *is* a molecule as one RDKit "could not read",
+ * and the sketcher tell a chemist there was nothing on the canvas it could read (`ISSUES.md`,
+ * _Known gaps_). What was recorded as the cost of carrying it — a second parse per refused record,
+ * from `stillAlive` — is not one this adds: `withMol` only probes on a *throw*, which it already did
+ * before this returned the reason, and an ordinary unreadable record returns `null` without one.
+ *
+ * No length cap, unlike the SMILES path: see `withSmilesMol` for the measurement that says a
+ * molblock does not need one.
  */
-export async function canonicalSmilesFromMolblock(molblock: string): Promise<string | null> {
+export async function readCanonicalSmilesFromMolblock(molblock: string): Promise<CanonicalRead> {
   const rdkit = await loadRDKit();
-  if (!rdkit) return null;
+  if (!rdkit) return { status: 'unreadable' };
+  const attempt = withMol(rdkit, molblock, (mol) => mol.get_smiles());
+  if ('refused' in attempt) return { status: attempt.refused };
   // An empty canvas exported from a sketcher is a syntactically valid molblock with zero atoms,
   // and RDKit reads it happily — as the empty SMILES. That is not a structure, so it fails here
   // rather than being inserted into a message as nothing at all.
-  const attempt = withMol(rdkit, molblock, (mol) => mol.get_smiles());
-  // **`too-complex` is collapsed into the ordinary negative here, deliberately and not for free.**
-  // It is reachable — `withSmilesMol`'s docstring records a 999-atom V2000 chain raising exactly
-  // this `RangeError` with the runtime still alive — so a record that is a molecule is counted by
-  // `moleculesFromMolfile` as one RDKit "could not read". What stops that being threaded in this
-  // change is that the surface it reaches is a *count over a file* ("12 of 15 records were
-  // readable") rather than a verdict about the one string a chemist is looking at, and carrying it
-  // means a fourth field on `MolfileRecords`, two sentence builders and the sketcher's own
-  // refusal. That is its own change, and it is recorded as one in `ISSUES.md`.
-  return 'value' in attempt && attempt.value ? attempt.value : null;
+  return attempt.value ? { status: 'named', canonical: attempt.value } : { status: 'unreadable' };
 }
 
 /**
@@ -527,6 +533,6 @@ export const operations = {
   toolkitLoads,
   readCanonicalSmiles,
   isMolecule,
-  canonicalSmilesFromMolblock,
+  readCanonicalSmilesFromMolblock,
   drawSvg,
 } as const;

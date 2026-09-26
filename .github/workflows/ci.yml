@@ -70,7 +70,7 @@ jobs:
       # No credential: every repository in this family is public, so `contents: read` reaches it.
       #
       # **`ref:` is named, so pinning this lane is a setting — and pinning is opt-in.** With neither
-      # the dispatch input nor `vars.CHEMCLAW3_REF` set, the expression resolves to `main`, which
+      # the dispatch input nor `vars.CHEMCLAW3_REF` set, the step below resolves to `main`, which
       # `actions/checkout` reads as that branch's HEAD *at the moment the job runs*. So by default
       # this lane's verdict is still not a function of this repository's inputs alone: the same UI
       # commit can be green one day and red the next with nothing changed here, and re-running an
@@ -78,20 +78,42 @@ jobs:
       # upstream should red loudly, which is what this check is for — but it means the default lane
       # is not repeatable, and naming `ref:` did not change that.
       #
-      # What naming it buys is a remedy that is not "edit the guard": a pull request blocked by an
-      # unrelated upstream change is unblocked by pointing `vars.CHEMCLAW3_REF` (or the dispatch
-      # input) at the last agreeing revision — a repository setting with an audit trail — rather
-      # than by weakening what is asserted. Only a full SHA there makes a run repeatable; a branch
-      # or tag still moves. `Jenkinsfile` already declares `CHEMCLAW3_BRANCH` for its own clone of
-      # the same repository; this is that fact in the other lane, and `tests/delivery.test.ts`
-      # holds both lanes to naming one.
+      # What the variable buys is a remedy that is not "edit the guard": a pull request blocked by
+      # an unrelated upstream change is unblocked by pointing `vars.CHEMCLAW3_REF` at the last
+      # agreeing revision — a repository setting with an audit trail — rather than by weakening
+      # what is asserted. Only a full SHA there makes a run repeatable; a branch or tag still
+      # moves. `Jenkinsfile` already declares `CHEMCLAW3_BRANCH` for its own clone of the same
+      # repository; this is that fact in the other lane, and `tests/delivery.test.ts` holds both
+      # lanes to naming one.
+      #
+      # **Resolved in a step of its own, and printed, before anything uses it.** The precedence is
+      # the dispatch input, then `vars.CHEMCLAW3_REF`, then `main` — it used to be that expression
+      # inline in `ref:`, which worked and said nothing: whether a pull request from a fork is
+      # passed `vars` at all is unverified (`ISSUES.md`), and if it is not, a pinned gate silently
+      # reads `main` for exactly those runs. `scripts/chemclaw3-ref.mjs` prints the ref, which arm
+      # it came from and whether the run is a fork PR, and hands the ref on as an output, so the
+      # value in the log is the value checked out rather than a second evaluation of it. The values
+      # travel as `env`, never spliced into the command line.
+      - name: Which Chemclaw3 revision this run reads, and why
+        id: chemclaw3_ref
+        env:
+          CHEMCLAW3_REF_INPUT: ${{ inputs.chemclaw3_ref }}
+          CHEMCLAW3_REF_VARIABLE: ${{ vars.CHEMCLAW3_REF }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: node scripts/chemclaw3-ref.mjs
+
       - name: The Chemclaw3 checkout the contract check reads
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: 8fqycwdt8v-oss/Chemclaw3
-          ref: ${{ inputs.chemclaw3_ref || vars.CHEMCLAW3_REF || 'main' }}
+          ref: ${{ steps.chemclaw3_ref.outputs.ref }}
           path: .chemclaw3
           fetch-depth: 1
+
+      # The commit that ref named at this moment — a branch moves, so the ref alone does not say
+      # what was read. Into the log and the run summary beside the ref.
+      - name: The Chemclaw3 commit that landed
+        run: node scripts/chemclaw3-ref.mjs --checked-out .chemclaw3
 
       - run: npm ci
 

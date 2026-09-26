@@ -12,8 +12,8 @@ deleted, because a gap that was real and got fixed is worth being able to find a
 
 ## Open: a maintainer's `CHEMCLAW3_REF` pin may not survive a fork PR
 
-`.github/workflows/ci.yml` resolves the sibling checkout's ref as
-`${{ inputs.chemclaw3_ref || vars.CHEMCLAW3_REF || 'main' }}`. The chain is correct — an
+`.github/workflows/ci.yml` resolved the sibling checkout's ref as
+`${{ inputs.chemclaw3_ref || vars.CHEMCLAW3_REF || 'main' }}`. The chain was correct — an
 unpopulated context evaluates falsy in a GitHub expression, so `inputs` outside
 `workflow_dispatch` falls through and an unset variable lands on `'main'`, which is what a run
 without either actually does.
@@ -25,8 +25,26 @@ and nothing says so: `tests/delivery.test.ts` asserts only that a `ref:` is _nam
 either way. Driving it needs a fork and a run, which is outside what this repository's suite can
 reach, so it is a row rather than an assertion.
 
-The remedy if it turns out to be true is an echo of the resolved ref in the gate step, so a run's
-log says which revision it checked out rather than leaving it to be inferred from the expression.
+**Now observable, 2026-09-26; still open, because observable is not observed.** The remedy this
+entry named is in, one step earlier than it said: `scripts/chemclaw3-ref.mjs` resolves the same
+precedence in a step of its own _before_ the checkout, prints the ref, which arm it came from
+(`workflow_dispatch input` / `repository variable` / `default`), what `vars.CHEMCLAW3_REF` arrived
+as, and whether the run is a pull request from a fork — then hands the ref to `actions/checkout` as
+a step output, so the value in the log is the value used rather than a second evaluation that could
+disagree with it. A second invocation prints the commit that ref named at that moment, and both go
+into the run summary. `tests/delivery.test.ts` drives the script (precedence, the fork line, and a
+value with a newline refused before it can reach `$GITHUB_OUTPUT`) and holds the checkout to
+reading the step's output.
+
+What it still cannot do is answer the question by itself. An unset variable and one GitHub
+withheld both arrive as `''`; the script says "unset or not passed to this run" and, on a fork PR
+that fell through to `main`, says that if the setting is populated GitHub did not pass it. At the
+time of writing `gh variable list` shows no `CHEMCLAW3_REF` on this repository, so every run
+today takes `default` whichever way the answer goes. **What would close it:** one pull request from
+a fork, run while `CHEMCLAW3_REF` is set, and its first step's log read — `repository variable`
+closes this as a non-issue; `default` with the fork note confirms it, and the fix then moves to
+where a fork PR's base is decided (e.g. a `pull_request_target` preflight, which has its own
+security cost and is not a line to add casually).
 
 ---
 
@@ -782,8 +800,9 @@ everything next to it.
   default stays the conservative one rather than being an oversight. Same trade, same owner, and
   the lane that ships is the one where a red is most expensive.
 
-- **Response shapes are checked where the pairing is not a guess, which is a minority of them, and
-  this entry used to say they were not checked at all.** It also named the blocker wrongly: "the
+- **Response shapes are checked where the pairing is not a guess — a minority of them until
+  2026-09-26, every model-shaped read since — and this entry used to say they were not checked at
+  all.** It also named the blocker wrongly: "the
   handlers' return models being readable route-by-route, which is a shape the backend does not owe
   anybody today". Measured 2026-09-18 against the checkout, that is false — every route the
   service registers annotates its return, and `tests/backendContract.test.ts` now asserts _that_
@@ -803,23 +822,85 @@ everything next to it.
   rather than reached for, on the same argument. Beside all of it, `tests/contractDrift.test.tsx`
   still drives the three fields this has actually cost (`title`, `updated_at`, `result_ref`).
 
-  **Who decides:** whoever owns `src/api/client.ts`. **What would close the rest:** this client
-  declaring the wire shape and doing its reshaping downstream of a declared type, which is a
-  refactor of the API surface rather than a check — or the service publishing the envelope
-  relationship in a form a reader can follow, which nothing declares today.
+  **Closed on this side, 2026-09-26: the check now reads the declaration at the cast, and every
+  call declares the model by its own name there.** The remedy this bullet named was the right one
+  and needed two halves, because either alone leaves a quiet skip. `tests/backendContract.ts` reads
+  a call's wire shape from its type argument (`request<ProposalsOut>(…)`) before the enclosing
+  function's return, so a function that unwraps, narrows or pages is compared on what it cast
+  rather than on what it built; `src/api/client.ts` names every such cast after the service's model
+  — `ProposalsOut`, `LocalSkillsOut`, `OrgSkillVersionsOut`, `SessionOut`, `CheckInOut`,
+  `PendingRequestsOut`, `PlanStatusOut`, `PendingPlansOut`, `DesignListOut`, `DesignOut`,
+  `RevisionOut` — and reshapes after it, keeping the old names as aliases so no caller moved; and
+  `pageSessions`/`pageJobs` read their body and cursor through one `requestPage<T>` rather than two
+  inline casts. The other half is the new assertion `undeclaredReads`: a call reading a route that
+  answers one readable model and casting it to anything else **fails**, so an unpaired response is
+  no longer something this check can pass over. Pairs went from 7 to every model-shaped read. Two
+  reader defects surfaced on the way and are fixed: `orEmpty`'s route label was read as a second
+  `GET` declaring the reshaped type, and a `@computed_field` (`PendingRequestsOut.verdict`) was not
+  read as a field, so pairing that response would have called it a property nobody sends.
+  Driven over built sources: an envelope-unwrapping function with a misspelled envelope property
+  fails, and the same function with the envelope written inline fails — both passed before. Against
+  the tree, renaming `PlanStatusOut.plan_hash` fails; on `e687d6e`, `PlanStatus.planHash` passed.
+
+  **And it found one on first run.** `DesignListOut.total` and `.truncated` exist upstream because a
+  site with more designs than the page "rendered the newest 50 as the corpus" — and this client
+  unwraps to an array and draws exactly that. They are argued in `NOT_READ` rather than silently
+  declared, because reading them is copy on `ProtocolsPanel` ("50 of 212", or a nudge to filter),
+  which is a surface decision. **Who decides:** whoever owns that panel; deleting the two entries
+  is the contract half of the fix.
+
+  **What is still outside this axis:** an element type inside a response is compared only where
+  some route also returns it by name — `ProposalOut` is (via `POST /proposals/…`); `PendingRequest`,
+  `PendingPlan`, `DesignSummary`, `OrgSkillVersion`, `NoteRef` and `TranscriptToolCall` are not.
+  Following a field's annotation on both sides to its element model is the same reading one level
+  down and needs no guess, but it is a reader extension not done here. Responses that are not one
+  model (`dict[str, str]`, `list[str]`, a bare `Response`) are printed and not compared, and
+  `JobRecordSummary`'s `durable/` model is now read through the returning module's own import.
 
 - **It reads what the service declares, not what a deployment serves.** A service serving something
   other than its source says is exactly the difference between this check and
   `npm run check:openapi`, which asks a live service and is operator-run (see "Known gaps" below).
   Neither replaces the other and both docstrings now say which is which.
 
-Also outside it, and smaller: query parameters (dropped from every template on both sides), and
+Also outside it, and smaller: query parameters (dropped from every template on both sides — the
+class `getProtocolDiff`'s `from`/`to` for `from_revision`/`to_revision` was, which FastAPI answered
+with a silent 200 of the wrong diff), and
 the BFF's own routes — `POST /api/client-events` has no upstream at all, so `src/lib/logger.ts` is
 out of the reader's scope by name rather than by accident.
 
 ---
 
-## Issue 15: two shapes the path-encoding rule does not see, and one it deliberately allows
+## Issue 15 (closed): two shapes the path-encoding rule does not see, and one it deliberately allows
+
+Closed 2026-09-26. **The first shape is fixed at its root; the second is decided, and now held by a
+test rather than by this paragraph.**
+
+- **The named-constant escape is gone, by teaching the rule to follow a `const`, not by inlining
+  the constant.** `tests/pathEncoding.test.ts` resolves an identifier to the compile-time string it
+  is bound to — a `const` in the file, a concatenation or substitution-free template of those
+  (through `as const`), or a constant imported by a relative path from another file under `src/` —
+  wherever it used to read only a literal: the left side of a `+`, a template span, and the URL's
+  head. Inlining `PROBE_BASE` would have fixed the one site that was measured and left the shape
+  open for the next hook that hoists its base into a constant, which is ordinary tidy code. The
+  reason this was once declined — "a dataflow analysis rather than a syntactic rule" — does not
+  survive contact: a `const` bound to a string has exactly one value, visible at its declaration,
+  so there is nothing to flow. Scoping is ignored (names are looked up file-wide), which can only
+  make the scan see a segment that is not there, so it fails toward catching. Six fixtures drive
+  it: the recorded `PROBE_BASE + jobId`, the same through a template span, a constant built from
+  constants, one imported under an alias, the encoded forms passing without a second encode, and
+  the legitimately raw shapes (a query suffix, a query value) staying raw through a constant.
+  **Still outside it, and said so in the test's docstring:** a base that is not a compile-time
+  string (a `let`, a parameter, `config.apiBase` — whose own literal tail the scan already reads)
+  and a re-export.
+- **The NUL half is handled as this entry argued: accepted, not narrowed.** No character policy was
+  added, for the reason below — the wide classes exist for ids this repository does not mint, and
+  what keeps `%00` harmless is the upstream's `[^/]+` parameter. What changed is that the three
+  forwards this entry recorded (`note-a%00b`, `note-a%0Ab`, `qm%00-1`) are now a test in
+  `tests/routes.test.ts`, so the day the behaviour changes it is a diff somebody argued for — and
+  this entry cannot quietly stop being true. **What would reopen it** is unchanged: an ingress in
+  front of this process that normalises before the service.
+
+The original report follows.
 
 `tests/pathEncoding.test.ts` holds the rule that every interpolated path segment reaches the
 service encoded, as an invariant over the tree rather than as a list of call sites. Both escapes
@@ -897,6 +978,10 @@ rendering is unexercised by the browser lane — so a row here would have change
 snapshot in order to exercise nothing. The uncovered rendering is recorded in _Still not done_
 rather than papered over with a fixture that makes the lane look like it covers it.
 
+**Superseded 2026-09-26, by the change that paragraph asked for.** `/digests` now serves one row
+(`DIGESTS`), because `e2e/routing.spec.ts` now asserts on the card it draws — the _Known gaps_ row
+below is closed. The reasoning above still holds: the row arrived with the assertion, not before it.
+
 The original report follows.
 
 `e2e/fixture-service.ts` stands in for the service in the Playwright lane, and it did not serve
@@ -916,6 +1001,48 @@ the empty list rather than nothing, or the lane stops exercising the path it exi
 
 Anchors: `e2e/fixture-service.ts`, its `/pending` comment, and `src/api/client.ts`'s `listDigests`.
 
+## Issue 18 (closed): on Node 25 the unit suite meets Node's `localStorage`, not the DOM's
+
+Closed 2026-09-26. `vitest.config.ts` starts its workers with `--no-experimental-webstorage`
+(`test.poolOptions.forks.execArgv`), so the global the tests see is happy-dom's again, on every Node
+`engines` admits. `npm test` and `npm run ci` are green on 25.8.2 with no `NODE_OPTIONS`.
+
+**The cause is one line of vitest's, and it is not a bug in either party.** vitest's environment
+setup copies a window property onto the global only when the global does not already have it
+(`getWindowKeys`: `if (k in global) return KEYS.includes(k)`), and `localStorage`,
+`sessionStorage` and `Storage` are not in its list — they never needed to be, because no Node had
+them. Node 25 turned Web Storage on by default, so all three are already on the global when the
+environment is populated, and happy-dom's are skipped without a word. What the tests then met was
+Node's storage, which without `--localstorage-file` has none of its methods:
+`localStorage.getItem is not a function`, `window.localStorage.clear is not a function`.
+`window` is the global under vitest, so `window.localStorage` was Node's too. Measured on 25.8.2:
+13 failures across `clientLogging`, `crashScreen`, `msalAuth`, `persistQuota` and `turnStall`.
+vitest 4.1 has the same line, so an upgrade would not have fixed it.
+
+**A flag rather than a pin, and the choice is the argument.** `package.json` says `>=22.6`, and
+pinning 22 with `.nvmrc` would have narrowed that range to hide a failure the range admits — the
+suite would still be wrong on 25, just unrun there. The flag makes the tests mean the same thing
+on every version: it has existed since 22.4, it is a no-op on 22 (checked on 22.6.0), and on 25 it
+removes exactly the three globals that were in the way. If a later Node drops the flag the workers
+fail to start, which is loud; the failure this closes was silent in CI.
+
+**Why CI never saw it, and what now does.** CI, the Dockerfile and Jenkins all run Node 22, which
+has no such global, so the gate was green while a laptop on a current Node was red — and the
+previous session's workaround was `NODE_OPTIONS=--no-experimental-webstorage`, which fixed one
+shell. `tests/webStorage.test.ts` holds both halves: that the flag reached the worker (the half
+that fails on a Node 22 runner too, because deleting the config line changes nothing else
+observable there), and that `localStorage` and `sessionStorage` are happy-dom's `Storage` and
+round-trip (the direct statement of what was broken, which fails on 25 by any other route back).
+
+The original report follows.
+
+On Node 25, five unit-test files that touch `localStorage` fail, because Node ships a built-in
+`localStorage` global that shadows the test environment's. The previous session got green only with
+`NODE_OPTIONS=--no-experimental-webstorage`. CI runs Node 22, so CI hides it.
+
+Anchors: `vitest.config.ts`, `tests/webStorage.test.ts`, and `getWindowKeys` in
+`node_modules/vitest/dist/chunks/index.*.js`.
+
 ---
 
 ## Known gaps in the UI rebuild
@@ -931,15 +1058,29 @@ registry; profile selection; tool calls surviving a reload; the skills screen an
 behaviour-proposal queue, now opened in a real browser (`e2e/skills.spec.ts`, and `/skills` in the
 a11y pass) with a chemist's own write path beside them.
 
-**Still not done:**
+**Closed 2026-09-26: a molblock record that is a molecule is no longer counted as one RDKit could
+not read.** `canonicalSmilesFromMolblock` collapsed `too-complex` into the ordinary negative, so a
+dropped `.sdf` of long chains was reported as records "none of which RDKit could read as a
+structure". The engine now answers a molblock with the same three-valued `CanonicalRead` as a
+SMILES (`readCanonicalSmilesFromMolblock`), and the four surfaces this row named carry it:
+`MolfileRecords.tooComplex`, both sentence builders in `StructureInput` (now `noStructureNote` and
+`recordsNote`, whose "past the first N" also counts the too-complex records it read), and the
+sketcher's refusal, which says `TOO_COMPLEX_EXPLANATION` instead of "Nothing on the canvas". The
+two molblock _paste_ paths (the panel's and the composer's) collapsed the same way and carry it too.
+The cost this row recorded — `stillAlive()` as a second parse per refused record — turned out not
+to be one this adds: `withMol` probes only on a _throw_, which it already did, and an ordinary
+unreadable record returns `null` without one. `tests/rdkitTooComplex.test.tsx` drives the seam, the
+count, both sentences, the panel, the sketcher and the composer against a 580-atom V2000 chain.
 
-- **No browser test asserts on a digest card.** `/digests` is served by the e2e fixture (Issue 17)
-  so the _request_ path is exercised and the log is quiet, and nothing exercises the _rendering_ —
-  `e2e/` mentions digests nowhere. The unit tests cover the store and the card; what is missing is
-  the lane that would catch a digest section that renders blank in a real browser, which is the
-  failure class the e2e suite exists for. Adding it means a fixture row and a new `/review`
-  assertion, and it changes that page's a11y snapshot, so it is its own change rather than a line
-  in somebody else's.
+**Closed 2026-09-26: a browser test asserts on a digest card.** `e2e/fixture-service.ts` serves one
+digest (`DIGESTS`: two notes with headlines, one of them disputed), and `e2e/routing.spec.ts`'s
+review-queue test reads the filled card inside its own region — the query, a headline, the
+"1 of 2 disagree" count and the single `disputed` badge — so a section that rendered its heading
+over an empty body fails, which is the blank-render class this row named. The a11y pass over
+`/review` waits for the card before scanning, so axe now covers it, badge included, in both
+themes. The request path was already exercised (Issue 17); the rendering now is too.
+
+**Still not done:**
 
 - **One intermittent browser test, seen once and not reproduced.**
   `e2e/protocols.spec.ts:55` (`an edit becomes a new revision and comes back on the next read`)
@@ -951,19 +1092,6 @@ a11y pass) with a chemist's own write path beside them.
   machine, or the mobile sheet's open animation. **What would settle it:** the next occurrence, with
   the trace kept — `test-results/` holds an `error-context.md` per failure, and both runs above
   cleared it before anybody read it.
-
-- **A molblock record that is a molecule is still counted as one RDKit could not read.** Issue 11
-  threaded `too-complex` as far as the two surfaces that make a claim about one string a chemist is
-  looking at, and `canonicalSmilesFromMolblock` collapses it back into the ordinary negative — with
-  a comment saying so at the line that does it. It is reachable: `withSmilesMol`'s own docstring
-  records a 999-atom V2000 chain raising exactly that `RangeError` with the runtime still alive, so
-  a dropped `.sdf` can make `moleculesFromMolfile` report "12 of 15 records were readable" about a
-  file whose other three are molecules. **It is its own change rather than a line in that one**
-  because the surface is a count over a file rather than a verdict about a string: carrying it
-  means a fourth field on `MolfileRecords`, both sentence builders in `StructureInput`, and the
-  sketcher's own refusal — and `stillAlive()` runs once per refused record, which is a second
-  parse per record on a file that can hold a thousand. Anchors: `canonicalSmilesFromMolblock` in
-  `src/chem/rdkit.engine.ts`, `MolfileRecords` in `src/chem/rdkit.ts`.
 
 - **Neither surface offers the retry the measurement says would work, and the copy used to imply
   there was none.** Issue 11's own sweep (`scripts/measure-rdkit-rangeerror.mjs`) is that the

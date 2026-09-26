@@ -335,6 +335,12 @@ const TOOLING = new Set([
   // measurement — the behaviour it found is held by `tests/rdkitTooComplex.test.tsx`, which is in
   // the gate, and this prints a table and exits 0.
   'measure-rdkit-rangeerror.mjs',
+  // Reporting, not assertion: it resolves which Chemclaw3 revision the GitHub lane checks out and
+  // prints that with where it came from, so a run's base is in its log rather than inferred from
+  // an expression (`ISSUES.md`, the `CHEMCLAW3_REF` entry). It exits non-zero only on a value
+  // that cannot be a git ref, which is input hygiene for `$GITHUB_OUTPUT`, not a claim about the
+  // product. `tests/delivery.test.ts` holds its precedence and that the checkout reads its output.
+  'chemclaw3-ref.mjs',
 ]);
 
 /** Every `scripts/*.mjs` an npm script's command line names. */

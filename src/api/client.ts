@@ -137,6 +137,37 @@ async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {
 }
 
 /**
+ * `request`, for a listing whose continuation is a header: the body as declared, plus
+ * `X-Next-Cursor` (`''` when there is no next page).
+ *
+ * `pageSessions` and `pageJobs` each carried this inline, calling `send` directly to reach the
+ * header — and so each carried its own copy of the 401 recovery (`pageSessions` once shipped
+ * without it) and cast the body inside a function whose declared return is the page *it builds*.
+ * That last part is why this exists: the contract check reads the wire shape where the body is
+ * cast, and a cast buried in a reshaping function declared nothing it could read.
+ */
+async function requestPage<T>(path: string, auth: TokenGetter): Promise<{ body: T; next: string }> {
+  let res = await send(path, auth, {});
+  // Under MSAL `recoverFrom` is what *fires the sign-in redirect* — it always resolves `false`, and
+  // the retry is a side effect rather than the point — so a listing that skipped it 401'd quietly
+  // where every other route on the page asked the user to sign in.
+  if (res.status === 401 && (await recoverFrom(auth))) {
+    res = await send(path, auth, {});
+  }
+  if (!res.ok) {
+    const failure = await readFailure(res);
+    throw errorFromStatus(
+      res.status,
+      failure.detail,
+      res.headers.get('retry-after'),
+      failure.correlationId,
+      failure.code,
+    );
+  }
+  return { body: (await res.json()) as T, next: res.headers.get('x-next-cursor') ?? '' };
+}
+
+/**
  * `request`, for a route whose URL changes whenever its bytes do.
  *
  * All this does now is ask the browser to keep the answer: `send` sets `no-store` on everything by
@@ -393,7 +424,7 @@ export interface Digest {
  * digest has none either, and the card is stamped with when _we_ claimed it and says "claimed",
  * never "asked".
  */
-export interface CheckIn {
+export interface CheckInOut {
   request_id: string;
   /** What class of answer is wanted — the same vocabulary `PendingRequest.kind` is badged by. */
   kind: string;
@@ -422,6 +453,9 @@ export interface CheckIn {
   truncated: boolean;
 }
 
+/** What the check-in section renders: the wire row as it arrives. */
+export type CheckIn = CheckInOut;
+
 /** One question the agent is holding a workflow open for, as an inbox renders it. */
 export interface PendingRequest {
   request_id: string;
@@ -439,7 +473,7 @@ export interface PendingRequest {
   created_at: string;
 }
 
-export interface PendingRequests {
+export interface PendingRequestsOut {
   requests: PendingRequest[];
   /**
    * The length of `requests`, not a population.
@@ -468,6 +502,8 @@ export interface PendingRequests {
    */
   verdict: string;
 }
+
+export type PendingRequests = PendingRequestsOut;
 
 /** One job's live status and structured result. */
 export interface DurableJobStatus {
@@ -538,7 +574,7 @@ export interface NoteView {
 }
 
 /** The plan a session is proposing, and the hash a decision on it must be bound to. */
-export interface PlanStatus {
+export interface PlanStatusOut {
   session_id: string;
   plan_hash: string;
   plan: string[];
@@ -562,6 +598,8 @@ export interface PlanStatus {
   approved: boolean;
   decided_by: string | null;
 }
+
+export type PlanStatus = PlanStatusOut;
 
 /** One conversation whose plan nobody has decided, as the cross-session inbox lists it. */
 export interface PendingPlan {
@@ -595,7 +633,7 @@ export interface PendingPlan {
  * document, and the service returns it whole precisely so nobody is asked to approve something
  * unseen (`api/routes/proposals.ProposalOut`).
  */
-export interface BehaviourProposal {
+export interface ProposalOut {
   /** `skill` or `profile`. Only `skill` has a destination a route can write. */
   kind: string;
   name: string;
@@ -612,15 +650,41 @@ export interface BehaviourProposal {
   reason?: string;
 }
 
+export type BehaviourProposal = ProposalOut;
+
+/** `GET /proposals`: the envelope `listProposals` unwraps. */
+export interface ProposalsOut {
+  proposals: ProposalOut[];
+}
+
 /**
  * One skill a chemist keeps, or one the organisation publishes.
  *
  * The same shape for both tiers because it is the same document; what differs is who may change it
  * and how far it reaches, which is the caller's business rather than the type's.
  */
-export interface SkillDocument {
+export type SkillDocument = LocalSkillOut | OrgSkillOut;
+
+/** A personal skill on the wire. Two models upstream for one shape, so two names here. */
+export interface LocalSkillOut {
   name: string;
   body: string;
+}
+
+/** An organisation skill on the wire. */
+export interface OrgSkillOut {
+  name: string;
+  body: string;
+}
+
+/** `GET`/`DELETE /skills/mine`: the names, in the envelope the list and the forget both answer. */
+export interface LocalSkillsOut {
+  skills: string[];
+}
+
+/** `GET`/`DELETE /skills/org`: the same envelope for the organisation tier. */
+export interface OrgSkillsOut {
+  skills: string[];
 }
 
 /** One body that was once the organisation's active judgment, and who made it so. */
@@ -631,7 +695,17 @@ export interface OrgSkillVersion {
   activated_at: string;
 }
 
-export interface PendingPlans {
+/** `GET /skills/org/{name}/versions`: the envelope `listOrgSkillVersions` unwraps. */
+export interface OrgSkillVersionsOut {
+  versions: OrgSkillVersion[];
+}
+
+/** `POST /sessions` and `POST /sessions/{id}/fork`: the one field a new session is. */
+export interface SessionOut {
+  session_id: string;
+}
+
+export interface PendingPlansOut {
   plans: PendingPlan[];
   /** Sessions of the caller's the service looked at — the same set `GET /sessions` lists. */
   considered: number;
@@ -657,6 +731,20 @@ export interface PendingPlans {
   truncated?: boolean;
 }
 
+export type PendingPlans = PendingPlansOut;
+
+/**
+ * `GET /protocols`: the envelope `listProtocols` unwraps.
+ *
+ * `total` and `truncated` are on the wire and deliberately not declared here: nothing on this side
+ * reads them yet, and declaring a field nobody reads is how the contract check's "sent and not
+ * read" direction gets satisfied without anything being surfaced. They are argued in
+ * `tests/backendContract.test.ts`'s `NOT_READ` instead, which is where that gap is visible.
+ */
+export interface DesignListOut {
+  designs: DesignSummary[];
+}
+
 /**
  * One design at one revision, plus every revision of it — as `GET /protocols/{id}` returns them.
  *
@@ -678,12 +766,16 @@ export interface PendingPlans {
 export type ProtocolView = DesignOut;
 
 /** What `POST /protocols/{id}/revisions` answers with: the revision it wrote, re-checked. */
-export interface RevisionWritten {
+export interface RevisionOut {
+  /** The design written to — the one the caller posted against, echoed. */
+  design_id: string;
   revision: number;
   /** Re-run against the saved document, so an edit that introduced a blocker says so at once. */
   checks: ProtocolCheck[];
   changed_paths: string[];
 }
+
+export type RevisionWritten = RevisionOut;
 
 /**
  * POST one file to a session's attachment route, reporting progress.
@@ -761,10 +853,9 @@ export const api = {
    * fact from "nothing is waiting". It is allowed to throw so the screen can say which.
    */
   listProposals(getToken: TokenGetter, state = 'open'): Promise<BehaviourProposal[]> {
-    return request<{ proposals: BehaviourProposal[] }>(
-      `/proposals?state=${encodeURIComponent(state)}`,
-      getToken,
-    ).then((page) => page.proposals ?? []);
+    return request<ProposalsOut>(`/proposals?state=${encodeURIComponent(state)}`, getToken).then(
+      (page) => page.proposals ?? [],
+    );
   },
 
   /**
@@ -781,8 +872,8 @@ export const api = {
     contentHash: string,
     accepted: boolean,
     reason = '',
-  ): Promise<BehaviourProposal> {
-    return request<BehaviourProposal>(
+  ): Promise<ProposalOut> {
+    return request<ProposalOut>(
       `/proposals/${encodeURIComponent(kind)}/${encodeURIComponent(name)}`,
       getToken,
       {
@@ -794,14 +885,12 @@ export const api = {
 
   /** The names of the skills acting on this chemist's own turns. Throws on 503, for `listProposals`' reason. */
   listMySkills(getToken: TokenGetter): Promise<string[]> {
-    return request<{ skills: string[] }>('/skills/mine', getToken).then(
-      (page) => page.skills ?? [],
-    );
+    return request<LocalSkillsOut>('/skills/mine', getToken).then((page) => page.skills ?? []);
   },
 
   /** One of this chemist's own skills, verbatim — the body a turn is actually given. */
   readMySkill(getToken: TokenGetter, name: string): Promise<SkillDocument> {
-    return request<SkillDocument>(`/skills/mine/${encodeURIComponent(name)}`, getToken);
+    return request<LocalSkillOut>(`/skills/mine/${encodeURIComponent(name)}`, getToken);
   },
 
   /**
@@ -812,19 +901,19 @@ export const api = {
    * remove it*, and until this screen existed the only thing that could exercise that was `curl`.
    */
   forgetMySkill(getToken: TokenGetter, name: string): Promise<string[]> {
-    return request<{ skills: string[] }>(`/skills/mine/${encodeURIComponent(name)}`, getToken, {
+    return request<LocalSkillsOut>(`/skills/mine/${encodeURIComponent(name)}`, getToken, {
       method: 'DELETE',
     }).then((page) => page.skills ?? []);
   },
 
   /** The names of the skills acting on every turn in this deployment. Open to any caller. */
   listOrgSkills(getToken: TokenGetter): Promise<string[]> {
-    return request<{ skills: string[] }>('/skills/org', getToken).then((page) => page.skills ?? []);
+    return request<OrgSkillsOut>('/skills/org', getToken).then((page) => page.skills ?? []);
   },
 
   /** One organisation skill, verbatim. */
   readOrgSkill(getToken: TokenGetter, name: string): Promise<SkillDocument> {
-    return request<SkillDocument>(`/skills/org/${encodeURIComponent(name)}`, getToken);
+    return request<OrgSkillOut>(`/skills/org/${encodeURIComponent(name)}`, getToken);
   },
 
   /**
@@ -835,7 +924,7 @@ export const api = {
    * see what it says and what it replaced.
    */
   listOrgSkillVersions(getToken: TokenGetter, name: string): Promise<OrgSkillVersion[]> {
-    return request<{ versions: OrgSkillVersion[] }>(
+    return request<OrgSkillVersionsOut>(
       `/skills/org/${encodeURIComponent(name)}/versions`,
       getToken,
     ).then((page) => page.versions ?? []);
@@ -851,7 +940,7 @@ export const api = {
    * `SKILL.md` or is over the length cap — so the service's own sentence is what surfaces.
    */
   saveMySkill(getToken: TokenGetter, body: string): Promise<SkillDocument> {
-    return request<SkillDocument>('/skills/mine', getToken, {
+    return request<LocalSkillOut>('/skills/mine', getToken, {
       method: 'POST',
       body: JSON.stringify({ body }),
     });
@@ -859,7 +948,7 @@ export const api = {
 
   /** Publish one skill to the whole deployment. 403 without the privileged role. */
   publishOrgSkill(getToken: TokenGetter, body: string): Promise<SkillDocument> {
-    return request<SkillDocument>('/skills/org', getToken, {
+    return request<OrgSkillOut>('/skills/org', getToken, {
       method: 'POST',
       body: JSON.stringify({ body }),
     });
@@ -872,7 +961,7 @@ export const api = {
    * what makes this a rollback rather than a write.
    */
   revertOrgSkill(getToken: TokenGetter, name: string, contentHash: string): Promise<SkillDocument> {
-    return request<SkillDocument>(`/skills/org/${encodeURIComponent(name)}/revert`, getToken, {
+    return request<OrgSkillOut>(`/skills/org/${encodeURIComponent(name)}/revert`, getToken, {
       method: 'POST',
       body: JSON.stringify({ content_hash: contentHash }),
     });
@@ -880,7 +969,7 @@ export const api = {
 
   /** Stop one organisation skill acting, keeping its history. 403 without the privileged role. */
   retireOrgSkill(getToken: TokenGetter, name: string): Promise<string[]> {
-    return request<{ skills: string[] }>(`/skills/org/${encodeURIComponent(name)}`, getToken, {
+    return request<OrgSkillsOut>(`/skills/org/${encodeURIComponent(name)}`, getToken, {
       method: 'DELETE',
     }).then((page) => page.skills ?? []);
   },
@@ -900,8 +989,8 @@ export const api = {
    * running a research loop. The service 400s a name it does not know, which is why the picker
    * that supplies this reads `listProfiles` rather than carrying a list of its own.
    */
-  createSession(getToken: TokenGetter, profile?: string): Promise<{ session_id: string }> {
-    return request<{ session_id: string }>('/sessions', getToken, {
+  createSession(getToken: TokenGetter, profile?: string): Promise<SessionOut> {
+    return request<SessionOut>('/sessions', getToken, {
       method: 'POST',
       // Omitted rather than sent as null when there is no profile: the service's `SessionIn` is
       // optional in full, and an explicit null is a different thing from an absent field.
@@ -933,30 +1022,11 @@ export const api = {
   async pageSessions(getToken: TokenGetter, after?: string): Promise<SessionPage> {
     const query = after ? `?after=${encodeURIComponent(after)}` : '';
     try {
-      let res = await send(`/sessions${query}`, getToken, {});
-      // **The one route that skipped 401 recovery**, because it calls `send` directly to reach the
-      // `X-Next-Cursor` header rather than going through `request`. Under MSAL `recoverFrom` is
-      // what *fires the sign-in redirect* — it always resolves `false`, and the retry is a side
-      // effect rather than the point — so the first authenticated call on boot (`Sidebar`'s
-      // listing) 401'd, logged `sessions.list_failed`, showed "showing local conversations only",
-      // and never asked the user to sign in, while every other route on the page did.
-      if (res.status === 401 && (await recoverFrom(getToken))) {
-        res = await send(`/sessions${query}`, getToken, {});
-      }
-      if (!res.ok) {
-        const failure = await readFailure(res);
-        throw errorFromStatus(
-          res.status,
-          failure.detail,
-          res.headers.get('retry-after'),
-          failure.correlationId,
-          failure.code,
-        );
-      }
-      return {
-        sessions: (await res.json()) as SessionSummary[],
-        next: res.headers.get('x-next-cursor') ?? '',
-      };
+      // Through `requestPage`, which carries the 401 recovery this route once skipped: the first
+      // authenticated call on boot (`Sidebar`'s listing) 401'd, logged `sessions.list_failed`,
+      // showed "showing local conversations only", and never asked the user to sign in.
+      const page = await requestPage<SessionSummary[]>(`/sessions${query}`, getToken);
+      return { sessions: page.body, next: page.next };
     } catch (err) {
       if (err instanceof ApiError && err.kind === 'session_not_found') {
         logger.warn('api.list_route_missing', { route: '/sessions' });
@@ -1110,12 +1180,10 @@ export const api = {
    * child that resumes with holes), **501** this deployment has no durable session store so there
    * is no thread to copy, and **404** which is the service refusing to say whether the id exists.
    */
-  forkSession(sessionId: string, getToken: TokenGetter): Promise<{ session_id: string }> {
-    return request<{ session_id: string }>(
-      `/sessions/${encodeURIComponent(sessionId)}/fork`,
-      getToken,
-      { method: 'POST' },
-    );
+  forkSession(sessionId: string, getToken: TokenGetter): Promise<SessionOut> {
+    return request<SessionOut>(`/sessions/${encodeURIComponent(sessionId)}/fork`, getToken, {
+      method: 'POST',
+    });
   },
 
   /**
@@ -1179,7 +1247,7 @@ export const api = {
    */
   async listCheckIns(getToken: TokenGetter): Promise<CheckIn[] | 'absent'> {
     try {
-      return await request<CheckIn[]>('/check-ins', getToken);
+      return await request<CheckInOut[]>('/check-ins', getToken);
     } catch (err) {
       if (err instanceof ApiError && err.kind === 'session_not_found') {
         logger.warn('api.list_route_missing', { route: '/check-ins' });
@@ -1202,8 +1270,8 @@ export const api = {
    * opposite things to tell somebody whose bench work is blocked — the same argument
    * `listPendingPlans` makes, and the mistake the holds inbox made before it.
    */
-  listPendingRequests(getToken: TokenGetter): Promise<PendingRequests> {
-    return request<PendingRequests>('/pending', getToken);
+  listPendingRequests(getToken: TokenGetter): Promise<PendingRequestsOut> {
+    return request<PendingRequestsOut>('/pending', getToken);
   },
 
   /**
@@ -1250,7 +1318,7 @@ export const api = {
    * reason: the search is capped at `job_record_search_limit` (20 in the shipped config), the
    * service advertises `X-Next-Cursor` when it saw a further row, and nothing here read it — so a
    * chemist with more finished runs than the cap could not reach the older ones from any client and
-   * the listing looked complete. `send` rather than `request`, because the cursor is a header.
+   * the listing looked complete. `requestPage` rather than `request`, because the cursor is a header.
    */
   async pageJobs(
     getToken: TokenGetter,
@@ -1262,26 +1330,8 @@ export const api = {
     if (options.after) query.set('after', options.after);
     const suffix = query.toString() ? `?${query.toString()}` : '';
     try {
-      let res = await send(`/jobs${suffix}`, getToken, {});
-      // The one-shot 401 recovery every route gets, written out here for the same reason
-      // `pageSessions` writes it out: reaching a response header means not going through `request`.
-      if (res.status === 401 && (await recoverFrom(getToken))) {
-        res = await send(`/jobs${suffix}`, getToken, {});
-      }
-      if (!res.ok) {
-        const failure = await readFailure(res);
-        throw errorFromStatus(
-          res.status,
-          failure.detail,
-          res.headers.get('retry-after'),
-          failure.correlationId,
-          failure.code,
-        );
-      }
-      return {
-        jobs: (await res.json()) as JobRecordSummary[],
-        next: res.headers.get('x-next-cursor') ?? '',
-      };
+      const page = await requestPage<JobRecordSummary[]>(`/jobs${suffix}`, getToken);
+      return { jobs: page.body, next: page.next };
     } catch (err) {
       // The registry's own degradation, unchanged from `listJobs`: a service without the route
       // answers an empty page rather than an error, because this panel renders a failed search as
@@ -1309,8 +1359,8 @@ export const api = {
   },
 
   /** The plan a session is proposing, read for the hash that binds a decision to it. */
-  getPlan(sessionId: string, getToken: TokenGetter): Promise<PlanStatus> {
-    return request<PlanStatus>(`/sessions/${encodeURIComponent(sessionId)}/plan`, getToken);
+  getPlan(sessionId: string, getToken: TokenGetter): Promise<PlanStatusOut> {
+    return request<PlanStatusOut>(`/sessions/${encodeURIComponent(sessionId)}/plan`, getToken);
   },
 
   /**
@@ -1320,8 +1370,8 @@ export const api = {
    * `[]` and the screen said "nothing is waiting on you" for a release; a failure here reaches the
    * caller so the screen can say it could not ask.
    */
-  listPendingPlans(getToken: TokenGetter): Promise<PendingPlans> {
-    return request<PendingPlans>('/plans/pending', getToken);
+  listPendingPlans(getToken: TokenGetter): Promise<PendingPlansOut> {
+    return request<PendingPlansOut>('/plans/pending', getToken);
   },
 
   /**
@@ -1386,7 +1436,7 @@ export const api = {
     }
     const suffix = query.toString() ? `?${query.toString()}` : '';
     return orEmpty('/protocols', async () => {
-      const body = await request<{ designs: DesignSummary[] }>(`/protocols${suffix}`, getToken);
+      const body = await request<DesignListOut>(`/protocols${suffix}`, getToken);
       return body.designs;
     });
   },
@@ -1405,7 +1455,7 @@ export const api = {
       revision !== undefined && Number.isFinite(revision)
         ? `?revision=${encodeURIComponent(String(Math.trunc(revision)))}`
         : '';
-    return request<ProtocolView>(`/protocols/${encodeURIComponent(designId)}${suffix}`, getToken);
+    return request<DesignOut>(`/protocols/${encodeURIComponent(designId)}${suffix}`, getToken);
   },
 
   /**
@@ -1428,9 +1478,9 @@ export const api = {
     parentRevision: number,
     changeNote: string,
     getToken: TokenGetter,
-  ): Promise<RevisionWritten> {
+  ): Promise<RevisionOut> {
     try {
-      return await request<RevisionWritten>(
+      return await request<RevisionOut>(
         `/protocols/${encodeURIComponent(designId)}/revisions`,
         getToken,
         {

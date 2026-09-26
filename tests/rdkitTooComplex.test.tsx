@@ -29,19 +29,24 @@ import {
   FIELD_PLACEHOLDER,
   StructureInput,
   TOO_COMPLEX_EXPLANATION,
+  noStructureNote,
+  recordsNote,
 } from '../src/components/StructureInput.tsx';
 import { Composer } from '../src/components/Composer.tsx';
 import {
   canonicalSmiles,
   isMolecule,
   moleculeSvg,
+  moleculesFromMolfile,
   readCanonicalSmiles,
+  readCanonicalSmilesFromMolblock,
 } from '../src/chem/rdkit.ts';
 import { readStructure } from '../src/chem/structure.ts';
 import { entitiesOf, useEntityStore } from '../src/chem/entities.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { CANONICALISATION_OVERFLOWS, liveHandles, resetHandles } from './stubs/rdkit.ts';
-import { pasteInto } from './helpers.ts';
+import { molblock, pasteInto } from './helpers.ts';
+import { resetSketcherStub, setDrawing } from './stubs/sketcher.tsx';
 
 vi.mock('../src/auth/AuthContext.tsx', () => ({
   useAuth: () => ({ auth: { getAccessToken: async () => null, mode: 'dev' }, ready: true }),
@@ -74,6 +79,7 @@ const RENDERER_LIMIT = TOO_COMPLEX_EXPLANATION;
 beforeEach(() => {
   cleanup();
   resetHandles();
+  resetSketcherStub();
   useEntityStore.getState().clear();
   useChatStore.setState({ composerLock: false, streaming: null, drafts: {}, banner: null });
 });
@@ -202,5 +208,128 @@ describe('the composer', () => {
     expect(
       await useEntityStore.getState().ingestUserStructure('c-too-complex', LONG, 'paste'),
     ).toBeNull();
+  });
+});
+
+/**
+ * The same refusal, arriving as a molblock — `ISSUES.md` _Known gaps_, now closed.
+ *
+ * `canonicalSmilesFromMolblock` collapsed `too-complex` into the ordinary negative, with a comment
+ * saying so at the line that did it, so every surface built on it made the chemical claim about a
+ * molecule: a dropped `.sdf` of long chains was "N records, none of which RDKit could read as a
+ * structure", a file with one among good records was "1 record unreadable", and a long chain drawn
+ * in the sketcher was "Nothing on the canvas that RDKit can read as a molecule". The stub reads a
+ * 580-carbon V2000 chain as the measured subject, so each of those is driven here.
+ */
+describe('a molblock that is a molecule and has no name here', () => {
+  const LONG_BLOCK = molblock(Array<string>(580).fill('C'));
+  const ETHANOL = molblock(['C', 'C', 'O']);
+  /** The counts line promises three atoms and two are present. */
+  const TRUNCATED = ETHANOL.split('\n').slice(0, -2).join('\n');
+  const sdf = (records: string[]): string => records.map((r) => `${r}\n$$$$`).join('\n');
+  const molfile = (name: string, text: string): File =>
+    new File([text], name, { type: 'chemical/x-mdl-molfile' });
+  const fileNote = (name: string): Promise<HTMLElement> =>
+    screen.findByText((text) => text.startsWith(name) && !text.startsWith(`Reading ${name}`));
+
+  it('is told apart at the seam, and the handle is still freed', async () => {
+    expect(await readCanonicalSmilesFromMolblock(LONG_BLOCK)).toEqual({ status: 'too-complex' });
+    expect(await readCanonicalSmilesFromMolblock(TRUNCATED)).toEqual({ status: 'unreadable' });
+    expect(await readCanonicalSmilesFromMolblock(ETHANOL)).toEqual({
+      status: 'named',
+      canonical: 'CCO',
+    });
+    expect(liveHandles()).toBe(0);
+  });
+
+  it('is counted as too complex, not as unreadable', async () => {
+    const read = await moleculesFromMolfile(sdf([ETHANOL, LONG_BLOCK, TRUNCATED, LONG_BLOCK]));
+    expect(read).toEqual({
+      smiles: ['CCO'],
+      unreadable: 1,
+      tooComplex: 2,
+      skipped: 0,
+      unavailable: false,
+    });
+    expect(liveHandles()).toBe(0);
+  });
+
+  it('gets a sentence of its own when the file held nothing else', () => {
+    const only = noStructureNote('chains.sdf', 0, 3);
+    expect(only).toContain('3 records RDKit read as molecules but could not name here');
+    expect(only).not.toMatch(/could not read/);
+
+    const one = noStructureNote('chain.mol', 0, 1);
+    expect(one).toContain('1 record RDKit read as a molecule');
+
+    const mixed = noStructureNote('mixed.sdf', 2, 1);
+    expect(mixed).toContain('2 records RDKit could not read as a structure');
+    expect(mixed).toContain('1 record RDKit read as a molecule but could not name here');
+    // The file with only unreadable records says exactly what it always said.
+    expect(noStructureNote('junk.sdf', 2, 0)).toBe(
+      'junk.sdf holds 2 records, none of which RDKit could read as a structure.',
+    );
+    expect(noStructureNote('empty.sdf', 0, 0)).toBe('No structure found in empty.sdf.');
+  });
+
+  it('gets a clause of its own beside the structures, and counts toward what was read', () => {
+    expect(
+      recordsNote('screen.sdf', {
+        smiles: ['CCO', 'CO'],
+        unreadable: 1,
+        tooComplex: 2,
+        skipped: 0,
+      }),
+    ).toBe(
+      'screen.sdf: 2 structures, 1 record unreadable, 2 records too complex to name here. ' +
+        'One goes into the message at a time.',
+    );
+    // "past the first N" is every record *read*: a too-complex one was read, so leaving it out
+    // would under-state where the cap fell.
+    expect(
+      recordsNote('big.sdf', { smiles: ['CCO'], unreadable: 0, tooComplex: 1, skipped: 5 }),
+    ).toBe('big.sdf: 1 structure, 1 record too complex to name here, 5 past the first 2 not read.');
+  });
+
+  it('reaches the panel when a dropped file holds only such records', async () => {
+    const { container } = render(<StructureInput onAccept={vi.fn()} onClose={vi.fn()} />);
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [molfile('chains.sdf', sdf([LONG_BLOCK]))] } });
+
+    const note = await fileNote('chains.sdf');
+    expect(note.textContent).toContain('1 record RDKit read as a molecule but could not name here');
+    expect(note.textContent).not.toMatch(/could not read/);
+  });
+
+  it('reaches the panel beside the structures a dropped file did yield', async () => {
+    const { container } = render(<StructureInput onAccept={vi.fn()} onClose={vi.fn()} />);
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, {
+      target: { files: [molfile('screen.sdf', sdf([ETHANOL, LONG_BLOCK]))] },
+    });
+
+    const note = await fileNote('screen.sdf:');
+    expect(note.textContent).toBe('screen.sdf: 1 structure, 1 record too complex to name here.');
+  });
+
+  it('reaches the sketcher, which does not say the canvas is empty', async () => {
+    render(<StructureInput onAccept={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.click(screen.getByText('Draw'));
+    await waitFor(() => expect(document.querySelector('[data-sketcher="mounted"]')).toBeTruthy());
+
+    setDrawing(LONG_BLOCK);
+    fireEvent.click(screen.getByText('Use this structure'));
+
+    expect(await screen.findByText(RENDERER_LIMIT)).toBeTruthy();
+    expect(screen.queryByText(/Nothing on the canvas/)).toBeNull();
+  });
+
+  it('reaches the composer when pasted as a molfile', async () => {
+    render(<Composer conversationId="c-too-complex-block" />);
+    pasteInto(screen.getByLabelText('Message') as HTMLTextAreaElement, LONG_BLOCK, 0);
+
+    const strip = await screen.findByRole('alert');
+    expect(strip.textContent).toContain(RENDERER_LIMIT);
+    expect(strip.textContent).not.toMatch(CHEMICAL_VERDICT);
   });
 });

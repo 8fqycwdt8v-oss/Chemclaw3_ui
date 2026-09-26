@@ -28,7 +28,13 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as Comlink from 'comlink';
-import { canonicalSmiles, isMolecule, moleculeSvg } from '../src/chem/rdkit.ts';
+import {
+  canonicalSmiles,
+  isMolecule,
+  moleculeSvg,
+  readCanonicalSmiles,
+  readCanonicalSmilesFromMolblock,
+} from '../src/chem/rdkit.ts';
 import { resetWorkerForTests } from '../src/chem/rdkit.client.ts';
 import { operations } from '../src/chem/rdkit.engine.ts';
 import { CANONICALISATION_OVERFLOWS, resetHandles } from './stubs/rdkit.ts';
@@ -37,7 +43,7 @@ import { CANONICALISATION_OVERFLOWS, resetHandles } from './stubs/rdkit.ts';
 import '../src/chem/rdkit.worker.ts';
 
 /** How a given fake worker treats what it is sent. */
-type Mode = 'deliver' | 'refuse' | 'silent';
+type Mode = 'deliver' | 'refuse' | 'overflow' | 'silent';
 
 /**
  * The other end of a worker that refuses everything, built out of the real `Comlink.expose`.
@@ -52,14 +58,17 @@ type Mode = 'deliver' | 'refuse' | 'silent';
  * `Comlink.Endpoint` needs beyond a `postMessage`, and the `postMessage` is the reply channel back
  * to the fake worker.
  */
-function refusingEnd(reply: (data: unknown) => void): (request: unknown) => void {
+function refusingEnd(
+  reply: (data: unknown) => void,
+  thrown: () => Error = () => new Error('the engine threw inside the worker'),
+): (request: unknown) => void {
   const target = new EventTarget();
   Comlink.expose(
     new Proxy(
       {},
       {
         get: () => (): never => {
-          throw new Error('the engine threw inside the worker');
+          throw thrown();
         },
       },
     ),
@@ -99,6 +108,11 @@ class FakeWorker {
   mode: Mode = FakeWorker.defaultMode;
   private readonly handlers = new Map<string, Set<(event: unknown) => void>>();
   private readonly refuse = refusingEnd((data) => this.reply(data));
+  /** The worker's escalation of a stack exhaustion — what `withMol` rethrows off the main thread. */
+  private readonly overflow = refusingEnd(
+    (data) => this.reply(data),
+    () => new RangeError('Maximum call stack size exceeded'),
+  );
 
   constructor(
     readonly url: URL | string,
@@ -124,6 +138,10 @@ class FakeWorker {
     if (this.mode === 'silent') return;
     if (this.mode === 'refuse') {
       this.refuse(data);
+      return;
+    }
+    if (this.mode === 'overflow') {
+      this.overflow(data);
       return;
     }
     globalThis.dispatchEvent(new MessageEvent('message', { data }));
@@ -270,6 +288,59 @@ describe('a worker that stops answering', () => {
     // where a transport fault would read as a chemical verdict.
     expect(await canonicalSmiles('OCC')).toBe('CCO');
     expect(FakeWorker.instances[0]!.ops).toEqual(['readCanonicalSmiles']);
+  });
+});
+
+describe('an escalation the page cannot take', () => {
+  /**
+   * `ISSUES.md` Issue 10's fix makes this the production case, not a corner. The worker rethrows a
+   * stack exhaustion so the page — bigger stack — can re-run the call; but `'unsafe-eval'` is
+   * granted only to the worker's own script, so under the production CSP the page's copy of RDKit
+   * never loads. Re-running there answered `unreadable`, the worker then said the toolkit was
+   * available, and the composer told a chemist a 600-carbon chain was not a molecule — driven
+   * behind the real BFF before this existed.
+   *
+   * The page's inability is modelled on the engine table the client consults, because in this
+   * realm both placements share one engine and one stubbed toolkit; the real split is
+   * `e2e/rdkit-too-complex.spec.ts`'s.
+   */
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('answers too-complex rather than re-running where it would be called unreadable', async () => {
+    FakeWorker.defaultMode = 'overflow';
+    const pageLoads = vi.spyOn(operations, 'toolkitLoads').mockResolvedValue(false);
+    const pageRan = vi.spyOn(operations, 'readCanonicalSmiles');
+    const pageRanMolblock = vi.spyOn(operations, 'readCanonicalSmilesFromMolblock');
+
+    expect(await readCanonicalSmiles('CCCC')).toEqual({ status: 'too-complex' });
+    expect(await readCanonicalSmilesFromMolblock('M  END')).toEqual({ status: 'too-complex' });
+    // And the key-or-nothing reading of it is still nothing, so no raw spelling becomes a key.
+    expect(await canonicalSmiles('CCCC')).toBeNull();
+
+    expect(pageLoads).toHaveBeenCalled();
+    expect(pageRan).not.toHaveBeenCalled();
+    expect(pageRanMolblock).not.toHaveBeenCalled();
+  });
+
+  it('still sends it to the page when the page can load the toolkit', async () => {
+    // The Vite dev server, or any deployment without the CSP split: the page has RDKit and the
+    // bigger stack, so its answer is the better one and it must still be asked.
+    FakeWorker.defaultMode = 'overflow';
+    vi.spyOn(operations, 'toolkitLoads').mockResolvedValue(true);
+
+    expect(await canonicalSmiles('OCC')).toBe('CCO');
+  });
+
+  it('leaves every other rejection to the page, as before', async () => {
+    // Only a stack exhaustion is an escalation. A worker that threw for any other reason has not
+    // said anything about the string, and the page's own answer — whatever it is — stands.
+    FakeWorker.defaultMode = 'refuse';
+    const pageLoads = vi.spyOn(operations, 'toolkitLoads');
+
+    expect(await canonicalSmiles('OCC')).toBe('CCO');
+    expect(pageLoads).not.toHaveBeenCalled();
   });
 });
 

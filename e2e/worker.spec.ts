@@ -11,16 +11,12 @@ import { expect, test } from '@playwright/test';
  * `rdkit.client.ts` falls back to the page on purpose, and silently give back the 587 ms of
  * blocked main thread the whole change is about (`scripts/measure-rdkit-placement.mjs`).
  *
- * **What this deliberately does not assert is that a structure is drawn, and the reason is a
- * defect this row measured rather than a gap in the test.** Under the CSP the BFF serves, RDKit
- * cannot load at all — on the page or in the worker. `@rdkit/rdkit`'s Embind glue builds its
- * invokers with `Function(...)`, which `script-src 'self' 'wasm-unsafe-eval'` forbids:
- * `'wasm-unsafe-eval'` permits WebAssembly compilation and nothing else. Driven against the built
- * bundle behind the real BFF, the loader throws `EvalError: Refused to evaluate a string as
- * JavaScript`, and the worker answers `toolkitLoads: false` and `drawSvg: null`. That predates
- * this change — the same probe fails identically with the pre-W28.7 tree — and it is filed in
- * `ISSUES.md`. The day it is fixed, this spec should grow the assertion it cannot make today:
- * that the `img` in the trace disclosure contains an `svg`.
+ * **What it does not assert is that a structure is drawn — `e2e/rdkit.spec.ts` does**, behind
+ * this same BFF, together with the policy split that makes it possible (`ISSUES.md` Issue 10,
+ * closed). Until that fix no container-served page could draw anything, and this probe's answer
+ * below was `false`: RDKit's Embind glue needs `Function(...)`, and the worker ran under the
+ * document's `script-src 'self' 'wasm-unsafe-eval'`. It now runs under its own policy, so the
+ * answer is the chemistry's.
  */
 
 test('the app asks a worker for its chemistry, not the main thread', async ({ page }) => {
@@ -52,8 +48,8 @@ test('the app asks a worker for its chemistry, not the main thread', async ({ pa
 
   // And it is running this repository's worker module, asked in the protocol it actually speaks.
   // A thread that exists but never executed — a 404, a parse error, a CSP refusal of the script
-  // itself — answers nothing here. The *value* is `false` in this deployment for the CSP reason
-  // above; what this asserts is that the dispatch ran at all.
+  // itself — answers nothing here. The *value* is RDKit's own answer, which `CCO` makes `true`: it
+  // was `false` for as long as the worker ran under the document's policy (see above).
   //
   // **The frame is Comlink's, hand-written, and that is a coupling worth naming.** The worker used
   // to answer a first-party `{ id, op, args }` envelope this repository declared in
@@ -94,5 +90,5 @@ test('the app asks a worker for its chemistry, not the main thread', async ({ pa
       }),
     PROBE,
   );
-  expect(reply).toEqual({ type: 'RAW', value: false, id: PROBE });
+  expect(reply).toEqual({ type: 'RAW', value: true, id: PROBE });
 });

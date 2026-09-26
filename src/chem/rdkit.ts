@@ -71,14 +71,11 @@
  * The wall clock of that last one barely moved — 586.8 ms to 585.8 ms — which is the whole point:
  * parsing and depicting a 300-bond chain is work, and it is not a bug to be fixed. It moved.
  *
- * **Read that table with the CSP paragraph below, because it was measured where the CSP is not.**
- * The script drives this seam through the Vite dev server, which serves `index.html` itself and
- * sends none of the BFF's headers; behind the BFF the toolkit does not instantiate at all, so the
- * 587 ms it reports as saved is main-thread time no container-served deployment ever spends —
- * nothing is drawn there to spend it on. The improvement is real, it is in the right units, and it
- * is **unobservable in every shipped deployment** until `ISSUES.md` Issue 10 is decided. A measured
- * win no deployment can see is not yet a win, and the table said nothing about which of the two it
- * was.
+ * **It was measured where the CSP is not.** The script drives this seam through the Vite dev
+ * server, which serves `index.html` itself and sends none of the BFF's headers. Until
+ * `ISSUES.md` Issue 10 was closed nothing was drawn behind the BFF at all, so this win was
+ * unobservable in every shipped deployment; it is observable now, because the worker is the one
+ * place the production CSP lets RDKit load (see the CSP paragraph below).
  *
  * **These figures shipped twice, from two runs, and disagreed** — `129 ms / 558 ms` in three
  * source files against `111 ms / 552 ms` in three others, a claim about somebody's afternoon
@@ -104,16 +101,21 @@
  * there, at the same lengths, and the same string asked a second time still answers, which is the
  * part of this that is about a call rather than about a molecule.
  *
- * **The CSP has to allow it, and today's does not.** Instantiating WASM needs `script-src
- * 'wasm-unsafe-eval'` (`server/config.ts`) — and that is necessary rather than sufficient, which
- * this paragraph asserted the opposite of for as long as it has existed. Embind builds this
- * package's invokers with `Function(...)`, which needs `'unsafe-eval'`, so behind the BFF the
- * loader throws and `rdkitAvailable()` answers `false` for the life of the page: measured, the
- * worker answers `toolkitLoads: false` and `drawSvg: null`, and every structure renders as its
- * SMILES with "the structure toolkit could not be loaded" beside it. `ISSUES.md` Issue 10 has the
- * evidence and the options. The reason nobody saw it is the other half of the old sentence, which
- * was right: the Vite dev server serves `index.html` itself and never applies the BFF's CSP, so
- * this fails *only* in the container — verify against `http://localhost:3000`, not `:5173`.
+ * **The CSP allows it in the worker, and only there.** Instantiating WASM needs `script-src
+ * 'wasm-unsafe-eval'`, and that is necessary rather than sufficient: Embind builds this package's
+ * invokers with `Function(...)`, which needs `'unsafe-eval'`. The document's policy never grants
+ * it — the page holds the bearer token and injects RDKit's SVG as markup — so the BFF sends the
+ * worker's script with a policy of its own (`RDKIT_WORKER_CSP`, `server/config.ts`), which a
+ * network-served dedicated worker takes instead of the document's. `ISSUES.md` Issue 10 has the
+ * measurement, and `e2e/rdkit.spec.ts` draws a structure behind the real BFF.
+ *
+ * Two consequences a reader of this seam should know. **The in-process fallback cannot load the
+ * toolkit behind the BFF** — a browser with no worker, or a worker that died, degrades to "the
+ * structure toolkit could not be loaded", which is honest. And **the worker's stack exhaustion can
+ * no longer escalate to the page there**: `rdkit.client.ts` answers `too-complex` instead of
+ * re-running where the answer would be "not a molecule". Measured behind the BFF, the worker named
+ * chains of 300 to 580 characters on the first ask in fresh pages, so that is the edge, not the
+ * common case. Verify against the BFF, not `:5173` — the dev server applies no CSP at all.
  *
  * **Every JSMol must be deleted.** They are C++ objects behind an Emscripten heap pointer, not
  * garbage-collected values, so a forgotten one leaks for the life of whichever thread owns the

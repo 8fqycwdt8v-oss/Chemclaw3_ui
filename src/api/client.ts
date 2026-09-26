@@ -834,6 +834,22 @@ export const api = {
     ).then((page) => page.versions ?? []);
   },
 
+  /**
+   * Keep one skill for yourself, replacing any earlier version of that name.
+   *
+   * The whole `SKILL.md` goes up and the name comes from its frontmatter, as with the organisation
+   * tier. Two refusals are the reader's to see rather than this client's to reword — a **409** for
+   * a name a skill this deployment ships already uses, or for the row cap (every personal skill is
+   * in the prompt of every turn its owner takes), and a **422** for a document that is not a
+   * `SKILL.md` or is over the length cap — so the service's own sentence is what surfaces.
+   */
+  saveMySkill(getToken: TokenGetter, body: string): Promise<SkillDocument> {
+    return request<SkillDocument>('/skills/mine', getToken, {
+      method: 'POST',
+      body: JSON.stringify({ body }),
+    });
+  },
+
   /** Publish one skill to the whole deployment. 403 without the privileged role. */
   publishOrgSkill(getToken: TokenGetter, body: string): Promise<SkillDocument> {
     return request<SkillDocument>('/skills/org', getToken, {

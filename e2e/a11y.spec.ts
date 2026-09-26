@@ -121,6 +121,15 @@ for (const theme of ['light', 'dark'] as const) {
       await scan(page);
     });
 
+    test('the skills screen, with both tiers listed', async ({ page }) => {
+      // The condition the stored skills tiers hold their exemption under, so the one page whose
+      // absence is a control disappearing. Waited for the second tier before scanning, for the
+      // review queue's reason: a scan while it still says "Loading" reports on markup nobody reads.
+      await page.goto('/skills');
+      await expect(page.getByRole('heading', { name: 'house-workup', level: 3 })).toBeVisible();
+      await scan(page);
+    });
+
     test('the protocol document, and the editor over it', async ({ page }) => {
       // The densest page in the app: five scrolling tables, a plate grid whose row and column
       // headers are the only thing locating a well, and then a modal form of two dozen numeric

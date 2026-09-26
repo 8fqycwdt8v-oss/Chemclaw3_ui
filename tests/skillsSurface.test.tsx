@@ -165,6 +165,41 @@ describe('proposals waiting on a person', () => {
     });
   });
 
+  it('tells a chemist at the row cap why the proposal stayed open', async () => {
+    // One of four 409s the accept can answer — already decided, superseded, a shipped name, the
+    // row cap — and only the service knows which. This rendered a fixed "already decided" for all
+    // four, so a chemist at the cap was told the wrong thing and never learned the remedy.
+    const cap =
+      'you keep 8 personal skills, the most this deployment allows: every one is in the prompt of every turn you take. Remove one first.';
+    serve({
+      '/proposals/skill/my-workup': () => json({ detail: cap }, 409),
+      '/proposals': () =>
+        json({
+          proposals: [
+            {
+              kind: 'skill',
+              name: 'my-workup',
+              content_hash: 'hash-1',
+              content: BODY,
+              rationale: 'why',
+              state: 'open',
+              session_id: '',
+            },
+          ],
+        }),
+    });
+    render(
+      <MemoryRouter>
+        <BehaviourProposals />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /Keep this skill/ }));
+
+    expect(await screen.findByText(cap)).toBeTruthy();
+    expect(screen.queryByText(/already been decided/i)).toBeNull();
+  });
+
   it('says a deployment keeps no proposals rather than showing an empty queue', async () => {
     serve({ '/proposals': () => json({ detail: 'no store' }, 503) });
     render(
@@ -237,6 +272,61 @@ describe('what is acting on a chemist', () => {
     fireEvent.click(await screen.findByRole('button', { name: /^Remove$/ }));
 
     await waitFor(() => expect(deletes.some((url) => url.includes('/skills/mine/'))).toBe(true));
+  });
+
+  /** A stub that answers the personal tier's list and its save separately — one URL, two methods. */
+  function serveSave(save: (body: string) => Response): { posted: string[] } {
+    const posted: string[] = [];
+    restore = stubFetch((url, init) => {
+      if (url.includes('/skills/mine') && init?.method === 'POST') {
+        const body = String(JSON.parse(String(init.body)).body);
+        posted.push(body);
+        return save(body);
+      }
+      if (url.includes('/skills/mine')) return json({ skills: [] });
+      if (url.includes('/skills/org')) return json({ skills: [] });
+      return json({});
+    }).restore;
+    return { posted };
+  }
+
+  it('writes one for yourself, which is where a declined proposal is sent', async () => {
+    // The decline dialog says "write it yourself on the skills screen", and until this there was
+    // nowhere to write it. The document goes up whole, as pasted.
+    const { posted } = serveSave(() => json({ name: 'my-workup', body: BODY }));
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(await screen.findByLabelText(/Your skill, as a whole SKILL.md/), {
+      target: { value: BODY },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Keep it/ }));
+
+    expect(await screen.findByText(/Kept my-workup\./)).toBeTruthy();
+    expect(posted).toEqual([BODY]);
+  });
+
+  it('shows why a save was refused, in the service’s words', async () => {
+    // A name a shipped skill already uses is a 409 whose detail names the collision; rewording it
+    // here would lose the one fact the chemist needs, which is what to rename.
+    const shipped =
+      'a skill this deployment ships is already called my-workup; choose another name';
+    serveSave(() => json({ detail: shipped }, 409));
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(await screen.findByLabelText(/Your skill, as a whole SKILL.md/), {
+      target: { value: BODY },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Keep it/ }));
+
+    expect(await screen.findByText(shipped)).toBeTruthy();
   });
 
   it('offers a revert that names the bytes it would put back', async () => {

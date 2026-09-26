@@ -625,6 +625,38 @@ const NOTE = (id: string): NoteView => ({
   neighbors: [],
 });
 
+/** One skill of the chemist's own, verbatim — frontmatter included, because that is what acts. */
+const MY_SKILL = {
+  name: 'my-workup',
+  body: '---\nname: my-workup\ndescription: how I work up a Suzuki\n---\n\nQuench cold, then filter.\n',
+};
+/** The organisation's one active skill, and the history a revert chooses from. */
+const ORG_SKILL = {
+  name: 'house-workup',
+  body: '---\nname: house-workup\ndescription: the house workup\n---\n\nQuench cold.\n',
+};
+const ORG_VERSIONS = [
+  {
+    content_hash: '1'.repeat(64),
+    body: ORG_SKILL.body,
+    activated_by: 'admin@example.com',
+    activated_at: '2026-09-20T10:00:00Z',
+  },
+];
+/** A name this fixture treats as shipped with the deployment, so a save under it is refused. */
+const SHIPPED_SKILL = 'suzuki-coupling';
+const PROPOSAL = {
+  kind: 'skill',
+  name: 'pd-removal',
+  content_hash: '2'.repeat(64),
+  content: '---\nname: pd-removal\ndescription: filter cold\n---\n\nFilter the palladium cold.\n',
+  rationale: 'The third time this quarter the Pd removal failed the same way.',
+  state: 'open',
+  session_id: '',
+};
+const ROW_CAP_DETAIL =
+  'you keep 8 personal skills, the most this deployment allows: every one is in the prompt of every turn you take. Remove one first.';
+
 createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://localhost');
   const path = url.pathname;
@@ -714,6 +746,53 @@ createServer(async (req, res) => {
   // `/review` a11y snapshot to exercise nothing — which is a different change from this one, and
   // the uncovered rendering is recorded as a gap rather than papered over with a fixture.
   if (path === '/digests' && req.method === 'GET') return json(res, 200, []);
+
+  // The two stored skills tiers and the behaviour-proposal queue — the surfaces the stored tiers
+  // hold their exemption from review under, so a page that renders blank is a control that stops
+  // existing. **Stateless**: a delete or a save answers without changing what the next read
+  // returns, because specs run in parallel against this one process and a mutation would make one
+  // spec's assertion depend on another's timing. The specs assert on the request instead.
+  if (path === '/skills/mine' && req.method === 'GET') {
+    return json(res, 200, { skills: [MY_SKILL.name] });
+  }
+  if (path === '/skills/mine' && req.method === 'POST') {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => (body += chunk));
+    req.on('end', () => {
+      const posted = JSON.parse(body) as { body: string };
+      const name = /^name:\s*(\S+)/m.exec(posted.body)?.[1] ?? '';
+      // A name a skill this deployment ships already uses: the refusal the save route owes a
+      // chemist in its own words, because what to rename is the one fact they need.
+      if (name === SHIPPED_SKILL) {
+        return json(res, 409, {
+          detail: `a skill this deployment ships is already called ${name}; choose another name`,
+        });
+      }
+      json(res, 200, { name, body: posted.body });
+    });
+    return;
+  }
+  if (path.startsWith('/skills/mine/')) {
+    if (req.method === 'DELETE') return json(res, 200, { skills: [] });
+    return json(res, 200, MY_SKILL);
+  }
+  if (path === '/skills/org' && req.method === 'GET') {
+    return json(res, 200, { skills: [ORG_SKILL.name] });
+  }
+  if (path.endsWith('/versions') && path.startsWith('/skills/org/')) {
+    return json(res, 200, { versions: ORG_VERSIONS });
+  }
+  if (path.startsWith('/skills/org/') && req.method === 'GET') return json(res, 200, ORG_SKILL);
+  if (path === '/proposals' && req.method === 'GET') {
+    return json(res, 200, { proposals: [PROPOSAL] });
+  }
+  // Accepting answers with the row cap — one of the four 409s this route has, and the one a fixed
+  // "already decided" sentence used to misname.
+  if (path.startsWith('/proposals/') && req.method === 'POST') {
+    req.resume();
+    return json(res, 409, { detail: ROW_CAP_DETAIL });
+  }
 
   // The durable-run registry.
   if (path === '/jobs' && req.method === 'GET') {

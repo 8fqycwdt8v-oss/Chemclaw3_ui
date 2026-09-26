@@ -314,6 +314,7 @@ export const ROUTES: readonly Route[] = [
   },
 
   { method: 'GET', pattern: /^\/api\/skills\/mine$/, target: () => '/skills/mine', sse: false },
+  { method: 'POST', pattern: /^\/api\/skills\/mine$/, target: () => '/skills/mine', sse: false },
   {
     method: 'GET',
     pattern: new RegExp(`^/api/skills/mine/${SKILL}$`),

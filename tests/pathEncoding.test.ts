@@ -26,6 +26,17 @@
  * (`?hops=${…}` — encoded anyway, but for a different reason), and a prebuilt path
  * (`${config.apiBase}${path}`, whose own callers are scanned).
  *
+ * ## A named constant is followed to its value
+ *
+ * `const PROBE_BASE = '/api/jobs/'; fetch(PROBE_BASE + jobId)` is the same URL as
+ * ``fetch(`/api/jobs/${jobId}`)`` and used to pass while the other failed (`ISSUES.md` Issue 15,
+ * driven on 2026-09-14). The scan now resolves an identifier to the string it is bound to — a
+ * `const` in the same file, or one imported by a relative path from another file under `src/` —
+ * wherever it previously read only a literal: the left side of a `+`, a template span, and the
+ * URL's head. What it still cannot follow is a value that is not a compile-time string (a `let`,
+ * a parameter, a property such as `config.apiBase`), and it does not need to: those are exactly the
+ * prefixes whose *own* literal tail (`/sessions/`) it already reads.
+ *
  * ## Scope
  *
  * Files under `src/api/`, plus any file under `src/` that mentions `apiBase` — so a twelfth call
@@ -100,14 +111,30 @@ interface Segment {
  * the same way.
  */
 function segments(file: string): Segment[] {
-  const source = ts.createSourceFile(
-    file,
-    read(file),
-    ts.ScriptTarget.ESNext,
-    true,
-    ts.ScriptKind.TSX,
-  );
+  return segmentsOf(file, read(file), readIfPresent);
+}
+
+const readIfPresent = (path: string): string | null => {
+  try {
+    return read(path);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * `segments`, over text rather than a file on disk, so the rule's own boundary can be driven with
+ * fixtures — the named-constant escape was found by editing a real hook and reverting it, which is
+ * a measurement nobody can repeat. `readOther` is how an imported constant's module is reached.
+ */
+function segmentsOf(
+  file: string,
+  text: string,
+  readOther: (path: string) => string | null,
+): Segment[] {
+  const source = parse(file, text);
   const found: Segment[] = [];
+  const { valueOf } = constantResolver(file, source, readOther);
 
   /**
    * Names bound to an `encodeURIComponent(…)` call in this file.
@@ -152,8 +179,12 @@ function segments(file: string): Segment[] {
 
   const visit = (node: ts.Node): void => {
     if (ts.isTemplateExpression(node)) {
-      const head = node.head.text;
-      let before = head;
+      // The text since the last value the scan could not resolve. A span bound to a constant —
+      // `${PROBE_BASE}${jobId}` — is text like any literal, so it extends `before` rather than
+      // resetting it; anything else (`config.apiBase`, an id) resets it to the literal after it.
+      let before = node.head.text;
+      // The URL's head: the leading text, extended through leading spans that resolve.
+      let head: string | null = before;
       let seenQuery = before.includes('?');
       for (const span of node.templateSpans) {
         const isSegment = !seenQuery && /^[^\s?]*\/$/.test(before);
@@ -161,18 +192,20 @@ function segments(file: string): Segment[] {
           record(
             span.expression,
             before,
-            head.startsWith(SAME_ORIGIN_SERVICE),
+            head !== null && head.startsWith(SAME_ORIGIN_SERVICE),
             `${before}\${${span.expression.getText(source)}}`,
           );
         }
-        before = span.literal.text;
+        const value = valueOf(span.expression);
+        before = value === null ? span.literal.text : `${before}${value}${span.literal.text}`;
+        if (head !== null) head = value === null ? null : `${head}${value}${span.literal.text}`;
         seenQuery ||= before.includes('?');
       }
     }
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-      const before = literalEnding(node.left);
+      const before = literalEnding(node.left, valueOf);
       if (before !== null && /^[^\s?]*\/$/.test(before)) {
-        const head = chainHead(node);
+        const head = chainHead(node, valueOf);
         record(
           node.right,
           before,
@@ -197,32 +230,164 @@ function isEncodeCall(expression: ts.Expression): boolean {
   );
 }
 
-/** The string literal a `+` chain's left side ends with, if it ends with one. */
-function literalEnding(expression: ts.Expression): string | null {
-  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
-    return expression.text;
-  }
+/** What a compile-time string expression evaluates to, or `null` if it is not one. */
+type Resolve = (expression: ts.Expression) => string | null;
+
+/** The string a `+` chain's left side ends with — a literal, or a constant bound to one. */
+function literalEnding(expression: ts.Expression, valueOf: Resolve): string | null {
   if (
     ts.isBinaryExpression(expression) &&
     expression.operatorToken.kind === ts.SyntaxKind.PlusToken
   ) {
-    return literalEnding(expression.right);
+    return literalEnding(expression.right, valueOf);
   }
-  return null;
+  return valueOf(expression);
 }
 
-/** The leftmost string literal of a `+` chain — the URL's head, when there is one. */
-function chainHead(expression: ts.Expression): string | null {
-  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
-    return expression.text;
-  }
+/** The leftmost string of a `+` chain — the URL's head, when there is one. */
+function chainHead(expression: ts.Expression, valueOf: Resolve): string | null {
   if (
     ts.isBinaryExpression(expression) &&
     expression.operatorToken.kind === ts.SyntaxKind.PlusToken
   ) {
-    return chainHead(expression.left);
+    return chainHead(expression.left, valueOf);
   }
-  return null;
+  return valueOf(expression);
+}
+
+const parse = (file: string, text: string): ts.SourceFile =>
+  ts.createSourceFile(file, text, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TSX);
+
+/**
+ * A resolver for the compile-time strings one file can name: literals, `const` bindings to them
+ * in the file, concatenations and substitution-free templates of those, and constants imported by
+ * a relative path from another file under `src/` (followed through that file's own bindings).
+ *
+ * **Why follow the binding rather than inline the one constant that escaped.** Inlining fixes the
+ * call site that was measured and leaves the shape open — the next hook that hoists its base into
+ * a constant, which is ordinary tidy code, walks past the rule the same way. Resolving a `const`
+ * to its value is not the dataflow analysis the escape was once declined for: a `const` bound to a
+ * string has exactly one value, visible at its declaration, so there is nothing to flow. Scoping is
+ * ignored (a name is looked up file-wide); a shadowed name can only make the scan see a segment
+ * that is not there, which fails toward catching.
+ */
+function constantResolver(
+  file: string,
+  source: ts.SourceFile,
+  readOther: (path: string) => string | null,
+  depth = 0,
+): { valueOf: Resolve; valueOfName: (name: string) => string | null } {
+  const bindings = new Map<string, ts.Expression>();
+  const imports = new Map<string, { from: string; name: string }>();
+  const collect = (node: ts.Node): void => {
+    if (ts.isVariableDeclarationList(node) && (node.flags & ts.NodeFlags.Const) !== 0) {
+      for (const declaration of node.declarations) {
+        if (ts.isIdentifier(declaration.name) && declaration.initializer) {
+          bindings.set(declaration.name.text, declaration.initializer);
+        }
+      }
+    }
+    if (
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      node.moduleSpecifier.text.startsWith('.') &&
+      node.importClause?.namedBindings &&
+      ts.isNamedImports(node.importClause.namedBindings)
+    ) {
+      for (const element of node.importClause.namedBindings.elements) {
+        imports.set(element.name.text, {
+          from: node.moduleSpecifier.text,
+          name: (element.propertyName ?? element.name).text,
+        });
+      }
+    }
+    ts.forEachChild(node, collect);
+  };
+  collect(source);
+
+  const others = new Map<string, ((name: string) => string | null) | null>();
+  const resolving = new Set<string>();
+
+  const valueOf: Resolve = (expression) => {
+    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+      return expression.text;
+    }
+    if (
+      ts.isParenthesizedExpression(expression) ||
+      ts.isAsExpression(expression) ||
+      ts.isSatisfiesExpression(expression)
+    ) {
+      return valueOf(expression.expression);
+    }
+    if (
+      ts.isBinaryExpression(expression) &&
+      expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+    ) {
+      const left = valueOf(expression.left);
+      const right = left === null ? null : valueOf(expression.right);
+      return left === null || right === null ? null : left + right;
+    }
+    if (ts.isTemplateExpression(expression)) {
+      let text = expression.head.text;
+      for (const span of expression.templateSpans) {
+        const value = valueOf(span.expression);
+        if (value === null) return null;
+        text += value + span.literal.text;
+      }
+      return text;
+    }
+    return ts.isIdentifier(expression) ? valueOfName(expression.text) : null;
+  };
+
+  const valueOfName = (name: string): string | null => {
+    // A cycle is not a string; a guard rather than a stack overflow.
+    if (resolving.has(name)) return null;
+    const bound = bindings.get(name);
+    if (bound) {
+      resolving.add(name);
+      try {
+        return valueOf(bound);
+      } finally {
+        resolving.delete(name);
+      }
+    }
+    const imported = imports.get(name);
+    if (imported && depth < 4) return importedValue(imported.from, imported.name);
+    return null;
+  };
+
+  const importedValue = (specifier: string, name: string): string | null => {
+    if (!others.has(specifier)) {
+      let found: ((name: string) => string | null) | null = null;
+      for (const target of moduleCandidates(file, specifier)) {
+        const text = readOther(target);
+        if (text === null) continue;
+        found = constantResolver(target, parse(target, text), readOther, depth + 1).valueOfName;
+        break;
+      }
+      others.set(specifier, found);
+    }
+    return others.get(specifier)?.(name) ?? null;
+  };
+
+  return { valueOf, valueOfName };
+}
+
+/**
+ * The `src/`-relative files a relative import may name, in the order to try them: the spelling as
+ * written, then the two extensions this tree uses, because both `./x.ts` and `./x` are in use.
+ */
+function moduleCandidates(from: string, specifier: string): string[] {
+  const parts = from.split('/').slice(0, -1);
+  for (const part of specifier.split('/')) {
+    if (part === '.' || part === '') continue;
+    if (part === '..') {
+      if (parts.length === 0) return [];
+      parts.pop();
+    } else parts.push(part);
+  }
+  const base = parts.join('/');
+  return /\.tsx?$/.test(base) ? [base] : [`${base}.ts`, `${base}.tsx`];
 }
 
 /**
@@ -252,6 +417,67 @@ describe('service URL path segments', () => {
         'or bind it to a name that already is (`const id = encodeURIComponent(raw)`). Do not wrap ' +
         'a value that is already encoded — see this file’s docstring',
     ).toEqual([]);
+  });
+});
+
+/**
+ * The rule's boundary, driven with fixtures rather than described in prose.
+ *
+ * Each case is a hook that reaches the service; the scan is run over its text exactly as it is run
+ * over `src/`. The first is the escape `ISSUES.md` Issue 15 recorded — `PROBE_BASE` in
+ * `src/hooks/useOffline.ts`, driven on 2026-09-14 by editing the real file — which passed the whole
+ * rule while the same URL written as a template failed it.
+ */
+describe('a path assembled off a named constant', () => {
+  const raw = (text: string, others: Record<string, string> = {}): string[] =>
+    segmentsOf('hooks/useFixture.ts', text, (path) => others[path] ?? null)
+      .filter((segment) => segment.service && !segment.encoded)
+      .map((segment) => segment.text);
+
+  it('is seen through a `+`, as the literal it is bound to', () => {
+    const text = `const PROBE_BASE = '/api/jobs/';
+      export const probe = (jobId: string) => fetch(PROBE_BASE + jobId);`;
+    expect(raw(text)).toEqual(["/api/jobs/' + jobId"]);
+  });
+
+  it('is seen through a template span', () => {
+    const text = `const PROBE_BASE = '/api/jobs/';
+      export const probe = (jobId: string) => fetch(\`\${PROBE_BASE}\${jobId}/artifacts\`);`;
+    expect(raw(text)).toEqual(['/api/jobs/${jobId}']);
+  });
+
+  it('is seen through a constant built from constants, and through `as const`', () => {
+    const text = `const API = '/api' as const;
+      const JOBS = API + '/jobs/';
+      export const probe = (jobId: string) => fetch(JOBS + jobId);`;
+    expect(raw(text)).toEqual(["/api/jobs/' + jobId"]);
+  });
+
+  it('is seen through a relative import from another module', () => {
+    const text = `import { JOBS_BASE as BASE } from '../api/paths';
+      export const probe = (jobId: string) => fetch(BASE + jobId);`;
+    expect(raw(text, { 'api/paths.ts': "export const JOBS_BASE = '/api/jobs/';" })).toEqual([
+      "/api/jobs/' + jobId",
+    ]);
+  });
+
+  it('passes once the segment is encoded, and does not ask for a second encode', () => {
+    const text = `const PROBE_BASE = '/api/jobs/';
+      export const a = (jobId: string) => fetch(PROBE_BASE + encodeURIComponent(jobId));
+      export const b = (jobId: string) => {
+        const id = encodeURIComponent(jobId);
+        return fetch(\`\${PROBE_BASE}\${id}\`);
+      };`;
+    expect(raw(text)).toEqual([]);
+  });
+
+  it('still does not treat a prebuilt query suffix as a path segment', () => {
+    // The shapes the docstring says are legitimately raw must stay raw through a constant too.
+    const text = `const JOBS = '/api/jobs';
+      export const list = (suffix: string) => fetch(JOBS + suffix);
+      const Q = '/api/search?q=';
+      export const search = (term: string) => fetch(Q + term);`;
+    expect(raw(text)).toEqual([]);
   });
 });
 

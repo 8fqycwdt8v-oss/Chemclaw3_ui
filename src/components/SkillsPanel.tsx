@@ -264,8 +264,23 @@ function WriteMine({ onSaved }: { onSaved: () => void }): React.JSX.Element {
   );
 }
 
-/** One organisation skill's history — the blame half, open to everybody it acts on. */
-function OrgHistory({ name }: { name: string }): React.JSX.Element {
+/**
+ * One organisation skill's history — the blame half, open to everybody it acts on.
+ *
+ * `retired` is for a name the tier no longer publishes: the newest held version is then *not*
+ * active — `DELETE /skills/org/{name}` removes the active body and keeps every version — so no
+ * row is badged as acting and every row may be put back. Badging the newest one "Active" there
+ * would tell a reviewer the skill still acts on everybody's turns when it acts on nobody's.
+ */
+function OrgHistory({
+  name,
+  retired = false,
+  onReverted,
+}: {
+  name: string;
+  retired?: boolean;
+  onReverted?: () => void;
+}): React.JSX.Element {
   const { auth, ready } = useAuth();
   const isReviewer = useIsReviewer();
   const { data, error, isPending } = useApiQuery({
@@ -286,6 +301,7 @@ function OrgHistory({ name }: { name: string }): React.JSX.Element {
     try {
       await api.revertOrgSkill(auth, name, version.content_hash);
       invalidateTier('org');
+      onReverted?.();
     } catch (err) {
       setFailed(
         err instanceof ApiError && err.status === 403
@@ -305,21 +321,27 @@ function OrgHistory({ name }: { name: string }): React.JSX.Element {
           <li key={version.content_hash} className="rounded border border-line p-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-sm">
-                {index === 0 ? <Badge>Active</Badge> : <Badge>Held</Badge>}{' '}
+                {index === 0 && !retired ? <Badge>Active</Badge> : <Badge>Held</Badge>}{' '}
                 <span className="text-ink-muted">
                   {version.activated_by || 'somebody'} · {when(version.activated_at)}
                 </span>
               </span>
-              {index !== 0 && isReviewer && (
+              {(index !== 0 || retired) && isReviewer && (
                 <ConfirmDialog
                   trigger={
                     <Button size="sm" variant="outline">
                       <Undo2 className="size-4" /> Put this back
                     </Button>
                   }
-                  title={`Revert ${name} to this version?`}
-                  description="Every turn in this deployment is handed these exact bytes from the next one. The version it replaces is kept, so this is itself reversible."
-                  confirmLabel="Revert"
+                  title={
+                    retired ? `Restore ${name} as this version?` : `Revert ${name} to this version?`
+                  }
+                  description={
+                    retired
+                      ? 'It is published again, and every turn in this deployment is handed these exact bytes from the next one. Retiring it again is the way back.'
+                      : 'Every turn in this deployment is handed these exact bytes from the next one. The version it replaces is kept, so this is itself reversible.'
+                  }
+                  confirmLabel={retired ? 'Restore' : 'Revert'}
                   onConfirm={() => void revert(version)}
                 />
               )}
@@ -331,6 +353,77 @@ function OrgHistory({ name }: { name: string }): React.JSX.Element {
         ))}
       </ul>
     </>
+  );
+}
+
+/**
+ * Bring back a skill somebody retired, by name.
+ *
+ * A retire removes the active body and keeps every version (`retire_org_skill` in the service),
+ * and `POST /skills/org/{name}/revert` activates any held body whether or not the name is still
+ * published — so a retire was always reversible on the service, and only unreachable here: a
+ * retired skill leaves the list, and the list was the only way to open a history. This is that
+ * way, keyed by the one thing a reviewer still has, the name.
+ *
+ * Reviewer-only for the reason the publish box is: every button it could reveal is a write the
+ * service refuses without the privileged role. A name that is still published is sent back to its
+ * own row rather than opened here, because this history treats every version as inactive and the
+ * row's history knows which one acts.
+ */
+function RestoreRetired({ published }: { published: readonly string[] }): React.JSX.Element {
+  const [draft, setDraft] = useState('');
+  const [looking, setLooking] = useState('');
+  const [restored, setRestored] = useState('');
+  const name = looking.trim();
+  const stillPublished = name !== '' && published.includes(name);
+
+  return (
+    <div className="mt-6 rounded-lg border border-line p-4">
+      <h3 className="font-medium">Restore a retired skill</h3>
+      <p className="mt-1 text-sm text-ink-muted">
+        A retired skill leaves the list above, but the service keeps every version it held. Name it
+        to see them, then put the one you want back.
+      </p>
+      <form
+        className="mt-2 flex flex-wrap gap-2"
+        onSubmit={(event) => {
+          event.preventDefault();
+          setRestored('');
+          setLooking(draft);
+        }}
+      >
+        <input
+          aria-label="Name of the retired skill"
+          className="min-w-0 flex-1 rounded border border-line bg-surface p-2 font-mono text-xs"
+          placeholder="its frontmatter name"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+        <Button size="sm" type="submit" disabled={!draft.trim()}>
+          Show what it held
+        </Button>
+      </form>
+      {restored && <p className="mt-2 text-sm text-success">{restored}</p>}
+      {stillPublished && (
+        <p className="mt-2 text-sm text-ink-muted">
+          {name} is still published — its own history in the list above is where to revert it.
+        </p>
+      )}
+      {name && !stillPublished && (
+        <OrgHistory
+          key={name}
+          name={name}
+          retired
+          onReverted={() => {
+            setLooking('');
+            setDraft('');
+            setRestored(
+              `Restored ${name}. Every turn in this deployment reads it from the next one.`,
+            );
+          }}
+        />
+      )}
+    </div>
   );
 }
 
@@ -407,7 +500,7 @@ function OrgSkills(): React.JSX.Element {
                       </Button>
                     }
                     title={`Retire ${name}?`}
-                    description="It stops acting on everybody's turns. Its history is kept on the service, so an administrator can restore it by name — but a retired skill leaves this list, and with it this screen's revert."
+                    description="It stops acting on everybody's turns and leaves this list. Its history is kept on the service, so an administrator can bring it back by name under “Restore a retired skill”."
                     confirmLabel="Retire"
                     variant="destructive"
                     onConfirm={() => void act(() => api.retireOrgSkill(auth, name))}
@@ -461,6 +554,7 @@ function OrgSkills(): React.JSX.Element {
           </Button>
         </div>
       )}
+      {isReviewer && <RestoreRetired published={names} />}
     </>
   );
 }

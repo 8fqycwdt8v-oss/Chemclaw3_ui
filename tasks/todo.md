@@ -570,3 +570,24 @@ is somebody else's repository and inventing any of the four here would be worse 
 real response model rather than skipping with a reason. Not run, and neither is skippable by
 choice: `npm run check:live` needs a live Chemclaw3, and `npm run ci:container` needs a container
 runtime. No count of the suite is written here; the run prints one.
+
+---
+
+## Three backlog rows: a legible Chemclaw3 base, the named-constant escape, and a molblock's third answer
+
+- [x] **Every run says which Chemclaw3 revision it read and why.** `scripts/chemclaw3-ref.mjs`
+      resolves the dispatch input → `vars.CHEMCLAW3_REF` → `main` in a step of its own, prints the
+      ref, its source and whether the run is a fork PR, and hands the ref to the checkout as an
+      output; a second call prints the commit that landed. `ISSUES.md`'s `CHEMCLAW3_REF` entry stays
+      open: the question is now answerable from one fork PR's log, and nobody has run one.
+- [x] **The path-encoding rule follows a `const`.** `tests/pathEncoding.test.ts` resolves an
+      identifier to the compile-time string it is bound to (in-file, composed, or imported), with
+      fixtures for each shape. The `%00` half of Issue 15 is accepted as that entry argued and now
+      pinned in `tests/routes.test.ts`. Issue 15 closed.
+- [x] **A molblock that is a molecule is not "unreadable".** `readCanonicalSmilesFromMolblock` is
+      three-valued like its SMILES sibling; `MolfileRecords.tooComplex`, `noStructureNote`,
+      `recordsNote` and the sketcher's refusal carry it, as do both molblock paste paths.
+      `tests/rdkitTooComplex.test.tsx` drives all of it. The _Known gaps_ row is closed.
+
+**Run:** `npm run ci` with `CHEMCLAW3_DIR` pointing at the sibling checkout. Not run:
+`npm run ci:container` and `npm run check:live`, for the reasons the section above gives.

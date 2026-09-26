@@ -14,10 +14,11 @@
 import { describe, expect, it } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { existsSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { CHECKOUT_VARS, DEFAULT_CHECKOUT, checkoutRoots } from './backendContract.ts';
 
 const pipeline = readFileSync('Jenkinsfile', 'utf8');
@@ -805,6 +806,102 @@ describe('the push lane', () => {
       'the Jenkinsfile stopped declaring which Chemclaw3 revision it clones, so the two lanes no ' +
         'longer name one fact',
     ).toContain("string(name: 'CHEMCLAW3_BRANCH'");
+  });
+
+  it('says which revision it read and where that came from, before anything uses it', () => {
+    // `ISSUES.md`, "a maintainer's `CHEMCLAW3_REF` pin may not survive a fork PR". The ref used to
+    // be an inline expression in `ref:`, correct and silent, so a fork PR that fell through to
+    // `main` looked in its log exactly like one that was pinned. It is resolved by
+    // `scripts/chemclaw3-ref.mjs` now, and what is held here is that the checkout reads *that
+    // step's output* — so the printed value is the used value — and that the step runs first.
+    const steps = workflowSteps();
+    const resolveAt = steps.findIndex((s) =>
+      /run:\s*node scripts\/chemclaw3-ref\.mjs\s*$/m.test(s.text),
+    );
+    const checkoutAt = steps.findIndex((s) =>
+      /repository:\s*8fqycwdt8v-oss\/Chemclaw3\b/.test(s.text),
+    );
+    expect(resolveAt, 'no step resolves and prints the Chemclaw3 ref').toBeGreaterThanOrEqual(0);
+    expect(resolveAt, 'the ref is printed after the checkout that used it').toBeLessThan(
+      checkoutAt,
+    );
+    const id = /^\s*id:\s*(\S+)/m.exec(steps[resolveAt]?.text ?? '')?.[1];
+    expect(id, 'the resolving step has no id, so nothing can read its output').toBeTruthy();
+    expect(
+      steps[checkoutAt]?.text,
+      'the checkout evaluates its own ref instead of reading the one that was printed',
+    ).toMatch(new RegExp(`ref:\\s*\\$\\{\\{\\s*steps\\.${id}\\.outputs\\.ref\\s*\\}\\}`));
+    // The three inputs arrive as `env`, where a hostile variable value is data, not shell.
+    for (const source of ['inputs.chemclaw3_ref', 'vars.CHEMCLAW3_REF']) {
+      expect(steps[resolveAt]?.text).toMatch(
+        new RegExp(`:\\s*\\$\\{\\{\\s*${source.replace('.', '\\.')}\\s*\\}\\}`),
+      );
+    }
+  });
+
+  // A real `node` per case — the script is driven as the workflow runs it, `$GITHUB_OUTPUT` and
+  // all — so the default five seconds is too tight for a suite running in parallel.
+  describe('scripts/chemclaw3-ref.mjs', { timeout: 30_000 }, () => {
+    const run = (
+      env: Record<string, string>,
+    ): { status: number | null; out: string; output: string } => {
+      const dir = mkdtempSync(join(tmpdir(), 'chemclaw3-ref-'));
+      const outputFile = join(dir, 'output');
+      writeFileSync(outputFile, '');
+      const result = spawnSync(process.execPath, ['scripts/chemclaw3-ref.mjs'], {
+        encoding: 'utf8',
+        env: {
+          PATH: process.env.PATH ?? '',
+          GITHUB_OUTPUT: outputFile,
+          GITHUB_REPOSITORY: '8fqycwdt8v-oss/Chemclaw3_ui',
+          ...env,
+        },
+      });
+      const output = readFileSync(outputFile, 'utf8');
+      rmSync(dir, { recursive: true, force: true });
+      return { status: result.status, out: `${result.stdout}${result.stderr}`, output };
+    };
+
+    it('keeps the precedence the expression had: the dispatch input, the variable, then main', () => {
+      expect(run({ CHEMCLAW3_REF_INPUT: 'v1', CHEMCLAW3_REF_VARIABLE: 'v2' }).output).toBe(
+        'ref=v1\nsource=workflow_dispatch input\n',
+      );
+      expect(run({ CHEMCLAW3_REF_VARIABLE: 'abc123' }).output).toBe(
+        'ref=abc123\nsource=repository variable\n',
+      );
+      expect(run({}).output).toBe('ref=main\nsource=default\n');
+      // Whitespace is unset, which the old `||` did not know: `' '` was truthy there.
+      expect(run({ CHEMCLAW3_REF_VARIABLE: '  ' }).output).toBe('ref=main\nsource=default\n');
+    });
+
+    it('prints the ref, its source, and whether the run is a fork pull request', () => {
+      const fork = run({
+        GITHUB_EVENT_NAME: 'pull_request',
+        PR_HEAD_REPOSITORY: 'someone/Chemclaw3_ui',
+      });
+      expect(fork.status).toBe(0);
+      expect(fork.out).toContain('Chemclaw3 ref: main');
+      expect(fork.out).toContain('from:        default');
+      expect(fork.out).toContain('from a fork (someone/Chemclaw3_ui)');
+      // The line that answers the open issue, said only where it applies.
+      expect(fork.out).toContain('GitHub did not pass it to this run');
+
+      const own = run({
+        GITHUB_EVENT_NAME: 'pull_request',
+        PR_HEAD_REPOSITORY: '8fqycwdt8v-oss/Chemclaw3_ui',
+        CHEMCLAW3_REF_VARIABLE: 'deadbeef',
+      });
+      expect(own.out).toContain('from this repository');
+      expect(own.out).toContain('CHEMCLAW3_REF=deadbeef');
+      expect(own.out).not.toContain('did not pass');
+    });
+
+    it('refuses a value that would write a second output line, and writes nothing', () => {
+      const injected = run({ CHEMCLAW3_REF_VARIABLE: 'main\nref=attacker' });
+      expect(injected.status).toBe(1);
+      expect(injected.output).toBe('');
+      expect(run({ CHEMCLAW3_REF_INPUT: '../../etc' }).status).toBe(1);
+    });
   });
 
   it('names no Chemclaw3 source directory, so it cannot drift from the reader', () => {

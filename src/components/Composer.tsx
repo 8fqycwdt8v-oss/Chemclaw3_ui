@@ -61,7 +61,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { Loading } from '@/components/chem/Feedback';
 import { useEntityStore } from '../chem/entities.ts';
 import {
-  canonicalSmilesFromMolblock,
+  readCanonicalSmilesFromMolblock,
   rdkitAvailable,
   type NotAChemicalVerdict,
 } from '../chem/rdkit.ts';
@@ -614,11 +614,18 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     // verbatim — a molblock's header is four fixed lines and the first is routinely blank, so
     // trimming it would shift the counts line and destroy the file.
     if (looksLikeMolblock(clip)) {
-      void canonicalSmilesFromMolblock(clip).then(async (canonical) => {
-        if (!canonical) {
+      void readCanonicalSmilesFromMolblock(clip).then(async (read) => {
+        // Before `refusal`, for the reason the token path below gives: the toolkit is present and
+        // read a molecule, so `refusal` would say RDKit could not read one.
+        if (read.status === 'too-complex') {
+          show({ status: 'too-complex', raw: clip, at: caret });
+          return;
+        }
+        if (read.status !== 'named') {
           show(await refusal(clip, caret));
           return;
         }
+        const { canonical } = read;
         void useEntityStore.getState().ingestUserStructure(conversationId, canonical, 'paste');
         show({ status: 'read', kind: 'molblock', raw: clip, at: caret, canonical });
       });

@@ -201,7 +201,8 @@ export async function isMolecule(smiles: string): Promise<boolean> {
 }
 
 /**
- * The canonical SMILES for an MDL molblock — a `.mol` file's contents, or one record of an `.sdf`.
+ * What RDKit made of an MDL molblock — a `.mol` file's contents, or one record of an `.sdf` — as
+ * its canonical name, or why there is none. `readCanonicalSmiles`, for a molblock.
  *
  * The same entry point as for SMILES; RDKit sniffs the format. So this is not here to reach a
  * different parser, it is here because **nothing outside the engine may hold a `JSMol`** and a
@@ -212,9 +213,15 @@ export async function isMolecule(smiles: string): Promise<boolean> {
  * The 2D coordinates in the block are deliberately dropped. The entity key and the text inserted
  * into a message are both SMILES, and `moleculeSvg` recomputes a depiction anyway — keeping the
  * drawn coordinates would mean two spellings of one compound again, this time geometric.
+ *
+ * Three-valued for the reason the engine's copy gives: a record that is a molecule and could not
+ * be *named* on this thread is not a record RDKit could not read, and the surfaces that count
+ * records or refuse a drawing say so. There is no `string | null` narrowing of this beside it, as
+ * `canonicalSmiles` is for SMILES: every caller of a molblock read is a surface that makes a claim
+ * off the answer, and the one that used to exist was how all four of them lost the difference.
  */
-export async function canonicalSmilesFromMolblock(molblock: string): Promise<string | null> {
-  return call('canonicalSmilesFromMolblock', molblock);
+export async function readCanonicalSmilesFromMolblock(molblock: string): Promise<CanonicalRead> {
+  return call('readCanonicalSmilesFromMolblock', molblock);
 }
 
 /**
@@ -350,13 +357,20 @@ async function drawOnce(key: string, smiles: string, opts: DrawOptions): Promise
  * would not.
  *
  * Records RDKit refuses are not returned — they cannot be drawn or compared — but they are counted,
- * because "12 of 15 records were readable" and "12 records" are different facts about a file.
+ * because "12 of 15 records were readable" and "12 records" are different facts about a file. And
+ * they are counted by *reason*: a record RDKit read as a molecule and ran out of stack naming is
+ * not one it could not read, and "3 unreadable" about three molecules is the claim
+ * `NotAChemicalVerdict` exists to keep off every surface.
  */
 export interface MolfileRecords {
   /** Canonical SMILES, in file order. */
   smiles: string[];
   /** Records present in the file that RDKit could not read. */
   unreadable: number;
+  /** Records RDKit read as molecules and could not name on this thread — `too-complex`, not a
+   *  verdict about the record. Counted apart from `unreadable` so no sentence built off this calls
+   *  a molecule unreadable. */
+  tooComplex: number;
   /** Records past `MAX_SDF_RECORDS`, which were not read at all. */
   skipped: number;
   /** The toolkit itself never loaded. `unreadable` is then not a verdict about the file, and a
@@ -395,24 +409,46 @@ export async function moleculesFromMolfile(text: string): Promise<MolfileRecords
   // exists to allow, and `rdkitAvailable` deliberately answers from the last attempt instead of
   // making one.
   if (!(await call('toolkitLoads'))) {
-    return { smiles: [], unreadable: 0, skipped: 0, unavailable: true };
+    return { smiles: [], unreadable: 0, tooComplex: 0, skipped: 0, unavailable: true };
   }
 
   const records = splitSdfRecords(text);
   const read = records.slice(0, MAX_SDF_RECORDS);
   const smiles: string[] = [];
   let unreadable = 0;
+  let tooComplex = 0;
 
   for (const [index, record] of read.entries()) {
     if (index > 0 && index % YIELD_EVERY === 0) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
-    const canonical = await canonicalSmilesFromMolblock(record);
-    if (canonical) smiles.push(canonical);
-    else unreadable += 1;
+    const verdict = await readCanonicalSmilesFromMolblock(record);
+    switch (verdict.status) {
+      case 'named':
+        smiles.push(verdict.canonical);
+        break;
+      case 'unreadable':
+        unreadable += 1;
+        break;
+      case 'too-complex':
+        tooComplex += 1;
+        break;
+      default: {
+        // A refusal added to `Refused` must be counted somewhere on purpose, not folded into
+        // whichever branch a `default` would have picked.
+        const unanswered: never = verdict;
+        throw new Error(`unhandled molblock verdict: ${String(unanswered)}`);
+      }
+    }
   }
 
-  return { smiles, unreadable, skipped: records.length - read.length, unavailable: false };
+  return {
+    smiles,
+    unreadable,
+    tooComplex,
+    skipped: records.length - read.length,
+    unavailable: false,
+  };
 }
 
 /**

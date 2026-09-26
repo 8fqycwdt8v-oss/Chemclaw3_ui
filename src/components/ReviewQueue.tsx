@@ -34,7 +34,7 @@
  * — the same argument the deleted holds section made for linking back rather than answering here.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Clock, Inbox, ListChecks } from 'lucide-react';
 import { Link } from 'react-router';
 import { keepPreviousData } from '@tanstack/react-query';
@@ -347,6 +347,18 @@ function PendingInbox(): React.JSX.Element {
   const [value, setValue] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
+  /**
+   * Questions this view has seen settled — answered here, or refused with a 409 because somebody
+   * else did — which the list keeps hiding even while it still holds them.
+   *
+   * `keepPreviousData` is why this is needed: the submit moves the key, and until the refetch
+   * lands the list on screen *is* the previous answer, with the question just answered still in
+   * it behind a live Answer button. Answering it again was a 409, rendered as "somebody has
+   * already answered this one" to the person who had. The service stays the authority on what is
+   * open; this only withholds what this view already knows is not.
+   */
+  const [settled, setSettled] = useState<ReadonlySet<string>>(() => new Set());
+  const settle = (id: string): void => setSettled((held) => new Set(held).add(id));
   // The stream's own revision, not the list's length: `syncAwaiting` below must not be able to
   // re-trigger the read that calls it. See `awaitingRevision` in the store.
   const pushes = useChatStore((s) => s.awaitingRevision);
@@ -371,12 +383,14 @@ function PendingInbox(): React.JSX.Element {
   // authority on what is open; the `awaiting_answer` stream only says that something changed.
   // This is what keeps the sidebar badge honest after an answer given in another tab, and what
   // fills in the fields neither push carries whole.
+  const waiting = useMemo(
+    () => (view?.requests ?? []).filter((r) => r.state === 'waiting' && !settled.has(r.request_id)),
+    [view, settled],
+  );
   useEffect(() => {
     if (!view) return;
-    useChatStore
-      .getState()
-      .syncAwaiting(view.requests.filter((r) => r.state === 'waiting').map((r) => r.request_id));
-  }, [view]);
+    useChatStore.getState().syncAwaiting(waiting.map((r) => r.request_id));
+  }, [view, waiting]);
 
   const submit = (request: PendingRequest) => async (): Promise<void> => {
     setNotice(null);
@@ -389,6 +403,7 @@ function PendingInbox(): React.JSX.Element {
           ? { value: parsed }
           : { value: value.trim() };
       await api.answerPendingRequest(request.request_id, payload, auth);
+      settle(request.request_id);
       setAnswering(null);
       setValue('');
       setNotice('Answered. Whatever was waiting on it has been released.');
@@ -396,6 +411,7 @@ function PendingInbox(): React.JSX.Element {
     } catch (err: unknown) {
       // The 409 is the one worth spelling out: two chemists at one bench answering the same
       // question is ordinary, and the second must be told rather than have their answer dropped.
+      if (err instanceof ApiError && err.status === 409) settle(request.request_id);
       setNotice(
         err instanceof ApiError && err.status === 409
           ? 'Somebody has already answered this one.'
@@ -417,11 +433,21 @@ function PendingInbox(): React.JSX.Element {
   }
   if (!view) return <Loading>Reading what is waiting…</Loading>;
 
-  const waiting = view.requests.filter((r) => r.state === 'waiting');
+  // Rendered in both branches: answering the last open question empties the list, and the notice
+  // saying what became of that answer is the one thing the reader still needs to see.
+  const status = notice && (
+    <p
+      role="status"
+      className="rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-xs"
+    >
+      {notice}
+    </p>
+  );
   if (waiting.length === 0) {
     return (
       <div className="flex flex-col gap-3">
         <PageVerdict verdict={view.verdict} />
+        {status}
         <EmptyState icon={<Inbox className="size-5" />} title="Nothing is waiting on you">
           A question appears here when the agent holds work open for an answer only a person can
           give — a measured yield, a decision about a batch, a value off an instrument.
@@ -433,14 +459,7 @@ function PendingInbox(): React.JSX.Element {
   return (
     <div className="flex flex-col gap-3">
       <PageVerdict verdict={view.verdict} />
-      {notice && (
-        <p
-          role="status"
-          className="rounded-lg border border-border-subtle bg-surface-sunken px-3 py-2 text-xs"
-        >
-          {notice}
-        </p>
-      )}
+      {status}
       <ul className="flex flex-col gap-2">
         {waiting.map((request) => (
           <li

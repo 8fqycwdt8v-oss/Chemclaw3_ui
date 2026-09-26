@@ -1076,6 +1076,25 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
   if (!stored?.conversations || !Array.isArray(stored.order)) return next;
 
   /**
+   * **Ordered by each row's own `receivedAt`, newest first, because every caller slices to its cap
+   * after this** — the order `addDigests`, `addCheckIns` and the job feed keep in memory.
+   *
+   * Neither positional order is right. Appending the stored rows cut, at the cap, exactly the rows
+   * another tab had just claimed (which the service has already consumed) and kept this tab's
+   * oldest. Prepending them was worse in the commonest case there is — one tab — because the
+   * stored copy is then this tab's own previous write: a row it had just trimmed at the cap came
+   * back at the head as the newest notice, and the slice evicted a genuinely newer one beneath
+   * it, so disk and memory diverged on every flush past the cap. Sorting on the row's own clock
+   * answers both, since the slice then drops what is oldest wherever it came from.
+   *
+   * `sort` is stable, and on a tie this tab's rows come first. A tie is not rare — `addDigests`
+   * stamps a whole claimed batch with one `Date.now()` — and a stored row tied with rows this tab
+   * kept is, in one tab, a row this tab trimmed from that same batch; preferring it would
+   * reproduce the divergence above one batch at a time.
+   */
+  const newestFirst = <T extends { receivedAt: number }>(rows: T[]): T[] =>
+    rows.sort((a, b) => b.receivedAt - a.receivedAt);
+  /**
    * The two slices whose rows a re-fetch cannot replace, folded back unconditionally.
    *
    * **This merge covered conversations, order and drafts, and those are the three that could be
@@ -1089,7 +1108,7 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
    * Folded ABOVE the `extra.length === 0` return, because the conversation half being unchanged
    * is exactly the common case in which the other tab has nonetheless claimed something.
    */
-  const union = <T>(
+  const union = <T extends { receivedAt: number }>(
     ours: T[],
     theirs: T[] | undefined,
     keyOf: (row: T) => string,
@@ -1110,22 +1129,22 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
         const mine = known.get(keyOf(row));
         if (mine !== undefined) known.set(keyOf(row), fresher(mine, row));
       }
-      return [...added, ...known.values()];
+      return newestFirst([...known.values(), ...added]);
     }
-    // **The other tab's rows go first**, here and above, the newest-first order `addDigests` and `addCheckIns`
-    // keep, because every caller slices to its cap after this: appended, a list at the cap cut
-    // exactly the rows the other tab had just claimed — which the service has already consumed —
-    // and kept this tab's oldest.
-    return added.length === 0 ? ours : [...added, ...ours];
+    return added.length === 0 ? ours : newestFirst([...ours, ...added]);
   };
   // **What a reader did to a row is folded too, not just the row.** With no `fresher`, "ours wins"
   // kept this tab's undismissed copy over the other tab's dismissed one on every flush, so a card
   // dismissed in one window came back on the next reload. `seen` only ever goes one way, so it is
   // OR-ed; `dismissed` can be undone, so the later of the two changes wins, and a tie (two rows
   // persisted before the stamp existed) keeps the dismissal rather than resurrecting a card.
+  // Every stored slice is aged on `partialize`'s own cutoff before it is folded, for the reason
+  // the check-in fold below gives: without it, the row `partialize` had just dropped for age was
+  // put straight back on disk by this fold, rehydrated, dropped, and written again, for ever.
+  const cutoff = Date.now() - JOB_FEED_MAX_AGE_MS;
   const jobFeed = union(
     next.jobFeed,
-    stored.jobFeed,
+    Array.isArray(stored.jobFeed) ? stored.jobFeed.filter((j) => j.receivedAt > cutoff) : [],
     (j) => j.event.job_id,
     (mine, theirs) => {
       const mineAt = mine.dismissedChangedAt ?? 0;
@@ -1144,7 +1163,7 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
   // so ours wins — except for the dismissal, which nothing un-does and is therefore OR-ed.
   const digests = union(
     next.digests ?? [],
-    stored.digests,
+    Array.isArray(stored.digests) ? stored.digests.filter((d) => d.receivedAt > cutoff) : [],
     (d) => `${d.query}\u0000${d.noteIds.join(',')}`,
     (mine, theirs) => (theirs.dismissed && !mine.dismissed ? { ...mine, dismissed: true } : mine),
   ).slice(0, MAX_DIGESTS);
@@ -1155,10 +1174,9 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
   // that was just dropped returned, and rehydrated, for ever. A stale digest is a stale finding;
   // a stale check-in is a countdown that is days wrong, which is the one payload where that is
   // not harmless, and the comment added beside `partialize` claimed it did not happen.
-  const checkInCutoff = Date.now() - JOB_FEED_MAX_AGE_MS;
   const checkIns = union(
     next.checkIns ?? [],
-    (stored.checkIns ?? []).filter((c) => checkInFreshAt(c) > checkInCutoff),
+    (stored.checkIns ?? []).filter((c) => checkInFreshAt(c) > cutoff),
     checkInKey,
     // The fresher countdown wins, but `dismissCheckIn` does not move `refreshedAt`, so a dismissal
     // is carried across whichever copy that picks — nothing un-dismisses a check-in.
@@ -1351,6 +1369,10 @@ const chatStorage: PersistStorage<PersistedState> = {
  * sign-out redirect is slow or blocked, and `persist.clearStorage` is what stops them coming back
  * on the next load. Ordered, too: `clearAll` writes a fresh state through the persist middleware,
  * so removing the key has to come second.
+ *
+ * "Reset app" is the other caller, and `clearAll` alone is not enough there either: the next write
+ * goes through `mergeWithStored`, which folds the stored digests, job endings and check-ins back
+ * onto disk, so the notices the dialog says it discards rehydrated on the next load.
  */
 export function forgetLocalHistory(): void {
   useChatStore.getState().clearAll();

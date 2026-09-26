@@ -46,6 +46,8 @@ let page = {
   verdict: 'COMPLETE: every request waiting on you is shown.',
 };
 let answerStatus = 204;
+/** Hold every list read made after an answer, so the placeholder is what stays on screen. */
+let holdRefetch = false;
 const posted: { url: string; body: unknown }[] = [];
 let restore: (() => void) | null = null;
 
@@ -68,6 +70,7 @@ function serve(): void {
       return Promise.resolve(json({ plans: [], gated: false, unread: 0 }));
     }
     if (/\/pending$/.test(url)) {
+      if (holdRefetch && posted.length > 0) return new Promise<Response>(() => {});
       return Promise.resolve(json({ requests, count: requests.length, ...page }));
     }
     // Proposals and anything else.
@@ -95,6 +98,7 @@ beforeEach(() => {
     verdict: 'COMPLETE: every request waiting on you is shown.',
   };
   answerStatus = 204;
+  holdRefetch = false;
   posted.length = 0;
   serve();
 });
@@ -180,6 +184,24 @@ describe('a question the agent is holding work open for', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Send it' }));
 
     expect(await screen.findByText(/already answered this one/)).toBeTruthy();
+  });
+
+  it('does not offer the question just answered again while the list refetches', async () => {
+    // The submit moves the query key and `keepPreviousData` keeps the old list on screen until the
+    // new one lands — so the row just answered stayed there behind a live Answer button, and
+    // answering it again was a 409 that told the person who had answered it that somebody else
+    // had. The refetch is held here so the placeholder is all there is to see.
+    holdRefetch = true;
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Answer' }));
+    fireEvent.change(screen.getByLabelText('Your answer'), { target: { value: '82.4' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send the answer' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Send it' }));
+
+    expect(await screen.findByText('Nothing is waiting on you')).toBeTruthy();
+    expect(screen.queryByText('Isolated yield for arm B3')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Answer' })).toBeNull();
+    expect(posted).toHaveLength(1);
   });
 
   it('reconciles the badge with what the service actually holds', async () => {

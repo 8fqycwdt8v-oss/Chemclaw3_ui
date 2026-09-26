@@ -33,7 +33,7 @@ import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { keys, useApiInfiniteQuery } from '../api/queryClient.ts';
 import type { AuthProvider } from '../auth/types.ts';
-import { useChatStore, newConversation } from '../state/chatStore.ts';
+import { useChatStore, newConversation, forgetLocalHistory } from '../state/chatStore.ts';
 import type { ChatState } from '../state/chatStore.ts';
 import type { Conversation } from '../state/types.ts';
 import { announceStatus } from '../state/announce.ts';
@@ -710,7 +710,10 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           description="This clears every conversation stored in this browser and starts fresh. Notices held only in this browser — saved-query findings, check-ins and job completions — are discarded too. Server-side sessions are not deleted, but this device will no longer have a link to them."
           confirmLabel="Reset everything"
           variant="destructive"
-          onConfirm={() => useChatStore.getState().clearAll()}
+          // Not `clearAll()` alone: the next write folds the stored notices back onto disk
+          // (`mergeWithStored` — they are the rows a re-fetch cannot replace), so the findings,
+          // check-ins and job endings this dialog says it discards rehydrated on the next load.
+          onConfirm={forgetLocalHistory}
         />
       </div>
     </>

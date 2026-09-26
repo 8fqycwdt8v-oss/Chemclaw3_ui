@@ -609,3 +609,24 @@ runtime. No count of the suite is written here; the run prints one.
 
 **Run:** `npm ci` then `npm run ci` on Node 25.8.2 with no `NODE_OPTIONS`. Not run:
 `npm run ci:container` and `npm run check:live`, for the reasons the sections above give.
+
+---
+
+## Issue 14's second bullet: the contract check reads the wire where the body is cast
+
+- [x] **The reader takes the declaration at the cast.** `tests/backendContract.ts` reads a call's
+      type argument (`request<ProposalsOut>`) before the enclosing function's return, so an
+      unwrapping, narrowing or paging function is compared on the wire shape rather than on what it
+      built. `orEmpty`'s route label is no longer read as a request, and `@computed_field` is read
+      as a field.
+- [x] **Every model-shaped read declares the model by name.** `src/api/client.ts` casts to the
+      service's model names and reshapes after them (old names kept as aliases);
+      `pageSessions`/`pageJobs` share `requestPage<T>`. `undeclaredReads` fails any call that
+      casts a model-shaped answer to anything else; driven over built sources in
+      `tests/backendContract.test.ts`.
+- [x] **One real drift found and argued, not hidden.** `DesignListOut.total`/`.truncated` are in
+      `NOT_READ`; surfacing them is a `ProtocolsPanel` copy decision. Issue 14 stays open for the
+      coupling decision, the declared-vs-served gap, element types and query parameters.
+
+**Run:** `npm ci` then `npm run ci` with `CHEMCLAW3_DIR` pointing at the sibling checkout. Not run:
+`npm run ci:container` and `npm run check:live`, for the reasons the sections above give.

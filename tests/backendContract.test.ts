@@ -44,21 +44,21 @@
  *     one the BFF forwards; every key in every JSON body must be a field of that route's request
  *     model, and every *required* field of that model must be in the body. Six of those models are
  *     `extra="forbid"`, so a stale key there is a 422 rather than a silent drop.
- *  6. **What it reads back, where the pairing is not a guess.** Every route annotates its return,
- *     so the model is readable route by route; where this client's own declared type *is* that
- *     model, a property it declares and nobody sends fails, and a field sent and not declared is
- *     listed. Where the two are named differently, or one of them cannot be read, the pair is
- *     printed rather than reached for — see the boundary below.
+ *  6. **What it reads back.** Every route annotates its return, so the model is readable route by
+ *     route. This client declares the wire shape where it casts the body (`request<PlanStatusOut>`)
+ *     and reshapes after that, so the declaration is the model's own name: a property declared here
+ *     and sent by nobody fails, and a field sent and not declared fails unless `NOT_READ` argues it.
+ *     A call that reads a route answering one readable model and casts it to anything else fails
+ *     too (`undeclaredReads`), so an unpaired response is a red build rather than a quiet skip.
  *
  * ## What this cannot check, and therefore does not claim
  *
- *  - **Most response shapes.** Axis 6 below compares a response only where this client declares
- *    the wire shape itself — the API function's return type is one interface, carrying the model's
- *    own name — and for most calls it is not: the client narrows a union, unwraps an envelope,
- *    reshapes a listing into a page plus an `X-Next-Cursor` header, or resolves `void`. Those are
- *    listed rather than paired, because a check that guessed the pairing would produce confident
- *    findings about a relationship it invented. `tests/contractDrift.test.tsx` covers the three
- *    fields this has actually cost so far, by driving them. Recorded in `ISSUES.md` Issue 14.
+ *  - **Below the top level of a response.** Axis 6 compares the fields of the model a route
+ *    returns; an element type inside it (`ProposalsOut.proposals`' `ProposalOut`) is compared only
+ *    where some route returns that element by name too. A response that is not one model —
+ *    `dict[str, str]`, `list[str]`, a bare `Response` — is printed, not compared.
+ *    `tests/contractDrift.test.tsx` still drives the three fields this has actually cost. Recorded
+ *    in `ISSUES.md` Issue 14.
  *  - **Semantics.** That `plan_hash` is the hash of the plan shown, that `preview` is 200
  *    characters, that a 409 means what this client says it means — none of that is in a
  *    declaration.
@@ -85,12 +85,13 @@ import {
   normalizeEventReads,
   clientInterfaceFields,
   normalizeTemplate,
+  pydanticFields,
   requestModelOf,
   responseModelOf,
   returnAnnotationOf,
   whitelistTemplate,
 } from './backendContract.ts';
-import type { BackendRoute } from './backendContract.ts';
+import type { BackendRoute, ClientRequest } from './backendContract.ts';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -395,8 +396,8 @@ describe('a name this client admits and the service does not is argued, not mere
  * What a response interface declares that its model does not, and the other way round.
  *
  * A pure function for the reason every other predicate in this file is one: the pairs it runs over
- * are the ones where this client declares the wire shape *by name*, and there are two of them, both
- * currently agreeing — so the loop that calls it is satisfied by any body at all. The probe below
+ * are the ones where this client declares the wire shape *by name*, and every one of them agrees
+ * today — so the loop that calls it is satisfied by any body at all. The probe below
  * is what makes its run over the real trees mean something.
  *
  * The asymmetry is the same as the event axis's, and for the same reason. A property this client
@@ -420,9 +421,9 @@ export function responseDrift(
 /**
  * Response fields the service sends that this client deliberately does not declare, and why.
  *
- * Empty, and that is the point at which a ratchet is cheapest to fit: the two entries that would
- * have been here (`Digest.disputed`, `Digest.headlines`) were both fields the UI had a surface for,
- * and both are read now. An entry is a sentence, not a name — "not needed" is not a reason anybody
+ * It was empty, and that was the point at which a ratchet is cheapest to fit: the two entries that
+ * would have been here (`Digest.disputed`, `Digest.headlines`) were both fields the UI had a surface
+ * for, and both are read now. The two it holds arrived with the envelopes being paired at all. An entry is a sentence, not a name — "not needed" is not a reason anybody
  * can check a year later.
  *
  * **A field from a route whose read is a destructive claim may not be exempted at all.**
@@ -430,7 +431,134 @@ export function responseDrift(
  * gone rather than deferred: there is no later read to pick it up, and "a note for later" is a
  * description of a field that can be fetched again.
  */
-const NOT_READ: Record<string, string> = {};
+const NOT_READ: Record<string, string> = {
+  // Both found the day `listProtocols` stopped declaring its envelope inline (`ISSUES.md` Issue 14):
+  // the service added them because a site with more designs than the page "rendered the newest 50
+  // as the corpus", and this client unwraps to an array and draws exactly that. Not read here
+  // because saying so is copy on `ProtocolsPanel` — whether "50 of 212" or a nudge to filter — and
+  // that is a surface decision, not a contract one. Deleting both lines is the whole fix once it is.
+  'DesignListOut.total':
+    'the protocols panel has no copy for a short listing yet; recorded in ISSUES.md Issue 14',
+  'DesignListOut.truncated':
+    'the protocols panel has no copy for a short listing yet; recorded in ISSUES.md Issue 14',
+};
+
+/**
+ * Calls that read a route whose answer is one model the service declares, and do not declare that
+ * model at the point the body is cast.
+ *
+ * The other half of Issue 14's second bullet, and the half that makes the first one stick. Reading
+ * the declaration at the cast (`ClientRequest.responseType`) is what lets an envelope-unwrapping
+ * function be compared at all — but a call that casts to an inline `{ proposals: X[] }` still
+ * declares no model, and the pairing would drop it as silently as before. So a `null` against a
+ * readable model is not a quiet pass any more: it is a read of a declared shape this client has
+ * written no name for, and it fails. Pure, so it can be driven over calls built to be wrong.
+ */
+export function undeclaredReads(
+  requests: readonly ClientRequest[],
+  modelOf: (request: ClientRequest) => string | null,
+): string[] {
+  return requests.flatMap((request) => {
+    const model = modelOf(request);
+    if (model === null || request.responseType === model) return [];
+    return [
+      `${request.method} ${request.template} answers ${model}; ` +
+        `${request.file}:${request.line} declares ${request.responseType ?? 'no model'}`,
+    ];
+  });
+}
+
+describe('the wire shape is read where the body is cast, not where the function returns', () => {
+  // Built to be the shape Issue 14 named: a function that unwraps an envelope, so what it *returns*
+  // is not the wire. The declaration this reader now reads is the type argument at the cast.
+  const unwrapping = (cast: string, iface: string): Record<string, string> => ({
+    'fixture.ts': [
+      iface,
+      'export interface ProposalOut { name: string }',
+      'const api = {',
+      '  listProposals(t: TokenGetter): Promise<ProposalOut[]> {',
+      `    return request<${cast}>('/proposals', t).then((page) => page.proposals);`,
+      '  },',
+      '};',
+    ].join('\n'),
+  });
+  const model = (request: ClientRequest): string | null =>
+    request.template === '/proposals' ? 'ProposalsOut' : null;
+
+  it('pairs an envelope-unwrapping call with the envelope, and fails a property nobody sends', () => {
+    // Misspelled on purpose. Before this, `responseType` was the function's return — `ProposalOut`
+    // — so the call paired with nothing, the envelope was never compared, and this passed.
+    const source = unwrapping(
+      'ProposalsOut',
+      'export interface ProposalsOut { proposal: ProposalOut[] }',
+    );
+    const [call] = clientRequests(source);
+    expect(call?.responseType).toBe('ProposalsOut');
+    expect(undeclaredReads(clientRequests(source), model)).toEqual([]);
+    expect(
+      responseDrift('ProposalsOut', clientInterfaceFields('ProposalsOut', source) ?? [], [
+        'proposals',
+      ]),
+    ).toEqual({ wrong: ['ProposalsOut.proposal'], unread: ['ProposalsOut.proposals'] });
+  });
+
+  it('fails a call that casts a declared model to an inline shape', () => {
+    // The same function with the envelope written inline: no model named anywhere, which the old
+    // pairing skipped without a word. It is a read of a shape the service declares, so it fails.
+    const source = unwrapping('{ proposals: ProposalOut[] }', '');
+    expect(undeclaredReads(clientRequests(source), model)).toEqual([
+      'GET /proposals answers ProposalsOut; fixture.ts:5 declares no model',
+    ]);
+  });
+
+  it('falls back to the enclosing return through an unannotated closure, and not past a cast', () => {
+    const source = {
+      'fixture.ts': [
+        'function upload(): Promise<AttachmentSummary> {',
+        '  return new Promise((resolve) => {',
+        "    xhr.open('POST', `${base}/sessions/${encodeURIComponent(id)}/attachments`);",
+        '  });',
+        '}',
+        'async function stop(): Promise<boolean> {',
+        "  await request<{ stopped: boolean }>('/stop', t);",
+        '  return true;',
+        '}',
+        "const listed = (): Promise<string[]> => orEmpty('/labels', () => request<Row[]>('/rows', t));",
+      ].join('\n'),
+    };
+    expect(
+      clientRequests(source).map((call) => [call.method, call.template, call.responseType]),
+    ).toEqual([
+      ['POST', '/sessions/{}/attachments', 'AttachmentSummary'],
+      ['GET', '/stop', null],
+      // `orEmpty`'s first argument names the route it degrades and is not a request of its own.
+      ['GET', '/rows', 'Row'],
+    ]);
+  });
+});
+
+describe('a computed field is a field on the wire', () => {
+  it('reads `@computed_field` properties beside annotated ones, and no other method', () => {
+    const source = [
+      'class PageOut(BaseModel):',
+      '    rows: list[str] = Field(default_factory=list)',
+      '',
+      '    @computed_field  # type: ignore[prop-decorator]',
+      '    @property',
+      '    def verdict(self) -> str:',
+      '        return "all of it"',
+      '',
+      '    @field_validator("rows")',
+      '    @classmethod',
+      '    def _rows(cls, value: list[str]) -> list[str]:',
+      '        return value',
+    ].join('\n');
+    expect(pydanticFields(source, 'PageOut')).toEqual([
+      { name: 'rows', required: false },
+      { name: 'verdict', required: false },
+    ]);
+  });
+});
 
 describe('the response drift this client can be held to', () => {
   it('fails a property nobody sends and lists a field nobody reads', () => {
@@ -812,12 +940,10 @@ if (root === null) {
   });
 
   describe('what this client reads back', () => {
-    // The axis `ISSUES.md` Issue 14 records as absent, half of which turned out not to be. That
-    // row said what would close it is "the handlers' return models being readable route-by-route,
-    // which is a shape the backend does not owe anybody today" — measured against this checkout,
-    // every route the service registers annotates its return, so the readable half is here and the
-    // part that is still open is on *this* side: for all but a couple of the calls it makes, this
-    // client's declared type is not the wire shape but something it builds out of one.
+    // The axis `ISSUES.md` Issue 14 recorded as absent, both halves of which turned out not to be.
+    // The service's half: every route it registers annotates its return. This client's half: every
+    // call casts its body to the model's own name and reshapes after the cast, so what the reader
+    // compares is the wire as this client declares it rather than what it builds out of it.
     const requests = clientRequests();
 
     it('is named on every route the service registers, which is the premise of the rest', () => {
@@ -857,6 +983,30 @@ if (root === null) {
       return model !== null && request.responseType === model ? [{ request, model }] : [];
     });
 
+    it('declares the model by name for every response that is one readable model', () => {
+      // What makes the pairing below a population rather than a sample. A call reading a route that
+      // answers one model this reader can open either casts to that model's name — and is compared
+      // below — or is listed here and fails. There is no third outcome any more, which is the one
+      // Issue 14 described: most calls reshaped their answer, declared the reshaped type, and were
+      // silently not compared at all.
+      const modelOf = (request: ClientRequest): string | null => {
+        const route = backend.find(
+          (candidate) =>
+            candidate.method === request.method &&
+            normalizeTemplate(candidate.template) === request.template,
+        );
+        const model = route ? responseModelOf(root, route) : null;
+        return model !== null && modelFields(root, model) !== null ? model : null;
+      };
+      expect(
+        undeclaredReads(requests, modelOf),
+        'these read a response the service declares as one model and cast it to something else — ' +
+          'declare the model by its own name at the cast, and reshape after it',
+      ).toEqual([]);
+      // Guard the guard: a reader that stopped resolving models would pass the line above empty.
+      expect(requests.filter((request) => modelOf(request) !== null).length).toBeGreaterThan(20);
+    });
+
     it('declares the wire shape itself for the responses it declares at all', () => {
       // Both sides have to be *readable* as well as named the same, and refusing where one is not
       // is the whole of why this axis can exist at all: `JobRecordSummary` is on the wire as a
@@ -877,9 +1027,9 @@ if (root === null) {
             unreadable.map((model) => `      ${model}`).join('\n'),
         );
       }
-      // Two of them today, so the loop below is nearly empty and would pass with its body
-      // deleted — which is why the comparison is a function driven over built inputs one `it`
-      // down, and why the pairs it *cannot* make are printed rather than silently dropped.
+      // Every pair agrees today, so the loop below would pass with its body deleted — which is why
+      // the comparison is a function driven over built inputs above, and why the pairs it *cannot*
+      // make are printed rather than silently dropped.
       expect(
         pairs.length,
         'no response this client declares is the wire model by name — the pairing this axis ' +

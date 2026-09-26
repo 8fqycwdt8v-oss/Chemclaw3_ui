@@ -145,19 +145,19 @@ indistinguishable from one that does not work — and this repository has produc
   pipeline declares, so flipping the parameter fails here until the record is rewritten. Recorded
   in `ISSUES.md` Issue 14.
 
-- **Enforced.** Every route the service registers declares what it returns, and every response
-  this client declares the wire shape _of_ — the API function's return type is one interface and it
-  carries the model's own name — has its properties compared to that model's fields. A property
-  declared here and sent by nobody fails; a field sent and not declared is listed
-  (`tests/backendContract.test.ts`).
-- **Accepted.** That is a minority of the responses, because for most calls this client's declared
-  type is not the wire shape: it narrows a union, unwraps an envelope, reshapes a listing into a
-  page plus an `X-Next-Cursor` header, or resolves `void`. Those are listed rather than paired, and
-  a pair whose model is declared outside the service's `api/` package is listed too — reaching for
-  either would be the check inventing the relationship it then reports on. The three fields this
-  has actually cost are driven end to end (`tests/contractDrift.test.tsx`). **Who decides:**
-  whoever owns `src/api/client.ts`. **What would change it:** this client declaring the wire shape
-  and reshaping downstream of it. `ISSUES.md` Issue 14.
+- **Enforced.** Every route the service registers declares what it returns, and every call this
+  client makes to a route answering one readable model casts the body to that model's own name
+  (`request<PlanStatusOut>(…)`) and reshapes after the cast. The reader takes the declaration at
+  the cast, so the properties declared there are compared to the model's fields: a property
+  declared here and sent by nobody fails, a field sent and not declared fails unless `NOT_READ`
+  argues it, and a call that casts a model-shaped answer to anything else fails
+  (`undeclaredReads`, `tests/backendContract.test.ts`).
+- **Accepted.** Below the top level: an element type inside a response is compared only where some
+  route also returns it by name, and a response that is not one model (`dict[str, str]`,
+  `list[str]`, a bare `Response`) is printed rather than compared. `DesignListOut.total` and
+  `.truncated` are sent and not read — the protocols panel has no copy for a short listing yet —
+  and are argued in `NOT_READ`. The three fields drift has actually cost are driven end to end
+  (`tests/contractDrift.test.tsx`). `ISSUES.md` Issue 14.
 - **Accepted.** The check reads what the service **declares**, not what a deployment **serves**.
   `npm run check:openapi` is still the only thing that asks a running service, and it is
   operator-run (§1).
@@ -404,14 +404,14 @@ control that existed, was believed, and did not do what it said.
 
 Every one of these is argued above and recorded in `ISSUES.md` with an anchor:
 
-| Accepted                                                                                                 | Where                     |
-| -------------------------------------------------------------------------------------------------------- | ------------------------- |
-| The access token is readable by any script on this origin; silent refresh runs on third-party cookies    | `ISSUES.md` Issue 8       |
-| No container-served deployment can draw a structure, so the RDKit worker's win is unobservable there     | `ISSUES.md` Issue 10      |
-| `canonicalSmiles` answers `null` for some legal long chains, depending on the JS stack                   | `ISSUES.md` Issue 11      |
-| A job ending read off a stream and not yet relayed dies with the tab                                     | `ISSUES.md` Issue 12      |
-| The old wire name `note_proposed` is still accepted, and must be, until the service ships the new one    | `ISSUES.md` Issue 13      |
-| The contract check verifies nothing where there is no sibling checkout, and never checks response shapes | `ISSUES.md` Issue 14      |
-| `check:live` is operator-run: `smoke` and `check:openapi` are on no schedule                             | `ISSUES.md`, "Known gaps" |
-| `%00` / `%0A` in a wide-class id is forwarded encoded; a non-constant URL base is outside the scan       | `ISSUES.md` Issue 15      |
-| No screenshot baselines; no real MSAL redirect exercised; the sketcher canvas has no accessible path     | `ISSUES.md`, "Known gaps" |
+| Accepted                                                                                              | Where                     |
+| ----------------------------------------------------------------------------------------------------- | ------------------------- |
+| The access token is readable by any script on this origin; silent refresh runs on third-party cookies | `ISSUES.md` Issue 8       |
+| No container-served deployment can draw a structure, so the RDKit worker's win is unobservable there  | `ISSUES.md` Issue 10      |
+| `canonicalSmiles` answers `null` for some legal long chains, depending on the JS stack                | `ISSUES.md` Issue 11      |
+| A job ending read off a stream and not yet relayed dies with the tab                                  | `ISSUES.md` Issue 12      |
+| The old wire name `note_proposed` is still accepted, and must be, until the service ships the new one | `ISSUES.md` Issue 13      |
+| The contract check verifies nothing without a checkout, and compares no element type below a response | `ISSUES.md` Issue 14      |
+| `check:live` is operator-run: `smoke` and `check:openapi` are on no schedule                          | `ISSUES.md`, "Known gaps" |
+| `%00` / `%0A` in a wide-class id is forwarded encoded; a non-constant URL base is outside the scan    | `ISSUES.md` Issue 15      |
+| No screenshot baselines; no real MSAL redirect exercised; the sketcher canvas has no accessible path  | `ISSUES.md`, "Known gaps" |

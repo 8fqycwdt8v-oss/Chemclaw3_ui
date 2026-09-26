@@ -559,6 +559,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           sessionId,
           opts.text,
           heldAnswer,
+          correlationId,
           abort.signal,
           auth,
         );
@@ -709,7 +710,14 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
  * on a turn that can no longer exist — and abandoned early if the user presses Stop, whose
  * `stop()` both cancels the server turn and flips this signal.
  *
- * The wire carries no turn id, so the question text is all there is to match on — but a chemist
+ * **By identity first.** A service that stamps each transcript row with the turn that stored it
+ * (`TranscriptMessage.correlation_id`) lets this find the turn's answer by the `correlationId` its
+ * own response header carried, wherever it sits and whatever its text — which is the only way to
+ * see an answer that landed before the first read with nothing held, or one byte-identical to the
+ * held answer. Everything below is the fallback for when that cannot be done: an older service
+ * that sends no id, a row stored without one, or a turn whose header never arrived (`''`).
+ *
+ * Without a turn id, the question text is all there is to match on — but a chemist
  * retrying an identical failed question (the banner's own "Retry" refills the same text) makes
  * that text non-unique, and an answer bound to the wrong copy is this app's worst output: a
  * three-week-old "no alerts fired" presented as this turn's answer to a genotoxicity question.
@@ -730,9 +738,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
  * question twice against a local list the trim had shortened undercounted by one, stopped at the
  * older copy, and bound *that* turn's answer into this turn's bubble. A single answer read from the
  * message next to this turn cannot come apart that way — every path that shortens a conversation
- * keeps its *tail*, so the turn's own neighbour survives whatever the head loses. A turn id on the
- * wire would be better still, and there is none: `session_messages.correlation_id` exists and
- * `GET /sessions/{id}/messages` does not return it.
+ * keeps its *tail*, so the turn's own neighbour survives whatever the head loses.
  *
  * **The cadence is backed off with jitter, and the reason is the trigger.** This loop starts on
  * any dropped turn stream, and the thing that drops every turn stream at once is a backend rolling
@@ -754,6 +760,7 @@ export async function recoverDetachedAnswer(
   sessionId: string,
   question: string,
   heldAnswer: string | null,
+  correlationId: string,
   signal: AbortSignal,
   auth: AuthProvider,
 ): Promise<string | null> {
@@ -765,6 +772,13 @@ export async function recoverDetachedAnswer(
    * `null` on the way in means this client cannot say what the session's newest answer is — the
    * previous turn left none here, and the service may hold one it never saw — so the first read
    * becomes the anchor and only an answer that appears *after* recovery started can be this turn's.
+   *
+   * **Two answers the text anchor cannot find**, and `tests/detachRecoveryLimits.test.ts` pins
+   * both: this turn's own answer when it landed before the first read (it becomes the anchor), and
+   * one byte-identical to the held answer. Turn identity finds both, so they are misses only
+   * against a service that sends no `correlation_id`. Accepting a matching question when nothing is
+   * held is *not* the fix for that service: a retry repeats its question, and that would bind the
+   * aborted turn's stored answer into this one.
    */
   let held = heldAnswer;
   while (Date.now() < deadline && !signal.aborted) {
@@ -786,6 +800,8 @@ export async function recoverDetachedAnswer(
       });
       continue;
     }
+    const own = correlationId ? answerOfTurn(transcript, correlationId) : null;
+    if (own !== null) return own;
     const newest = newestExchange(transcript);
     if (held === null) {
       // The anchor this client could not supply, taken from the same population the search runs on.
@@ -794,8 +810,26 @@ export async function recoverDetachedAnswer(
       continue;
     }
     if (!newest || newest.question !== question) continue; // not this turn's exchange
+    // Stamped with another turn's id, it is that turn's answer however its text reads — the retry
+    // of a question whose aborted first attempt stored an answer is exactly this.
+    if (correlationId && typeof newest.turn === 'string' && newest.turn !== correlationId) continue;
     if (newest.answer !== held) return newest.answer;
     // The last pair is still the one we already hold, so the service has not written this turn's.
+  }
+  return null;
+}
+
+/**
+ * The answer the turn `correlationId` stored, or `null` when the transcript holds none stamped so.
+ *
+ * Newest first, and an empty one is skipped for the same reason `newestExchange` skips it: a turn
+ * whose record is its work alone is not an answer anybody is waiting on.
+ */
+function answerOfTurn(transcript: TranscriptMessage[], correlationId: string): string | null {
+  for (let i = transcript.length - 1; i >= 0; i -= 1) {
+    const entry = transcript[i];
+    if (entry?.role === 'assistant' && entry.correlation_id === correlationId && entry.text.trim())
+      return entry.text;
   }
   return null;
 }
@@ -807,17 +841,19 @@ export async function recoverDetachedAnswer(
  * in order, and a session runs one turn at a time, so nothing is written after the pair at the end
  * until the next turn finishes. An assistant entry with no text is skipped — a turn whose record is
  * its work alone is not an answer anybody is waiting on — and so is a stored `system` entry, by
- * looking back for a `user` role rather than for the entry immediately before.
+ * looking back for a `user` role rather than for the entry immediately before. `turn` is the
+ * answer's `correlation_id` as sent — a string, `null`, or absent from an older service.
  */
 function newestExchange(
   transcript: TranscriptMessage[],
-): { question: string; answer: string } | null {
+): { question: string; answer: string; turn: string | null | undefined } | null {
   for (let i = transcript.length - 1; i >= 0; i -= 1) {
     const answer = transcript[i];
     if (!answer || answer.role !== 'assistant' || answer.text.trim() === '') continue;
     for (let j = i - 1; j >= 0; j -= 1) {
       const asked = transcript[j];
-      if (asked?.role === 'user') return { question: asked.text, answer: answer.text };
+      if (asked?.role === 'user')
+        return { question: asked.text, answer: answer.text, turn: answer.correlation_id };
     }
     return null; // an answer to nothing: not a pair, and not something to bind a turn to
   }
@@ -897,6 +933,7 @@ export function resumeInterruptedTurn(
       sessionId,
       question.text,
       heldAnswer,
+      message.correlationId ?? '',
       abort.signal,
       auth,
     );

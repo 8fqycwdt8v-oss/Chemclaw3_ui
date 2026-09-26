@@ -48,6 +48,14 @@ export interface JobFeedItem {
   receivedAt: number;
   seen: boolean;
   dismissed: boolean;
+  /**
+   * When `dismissed` last changed in this browser, so the cross-tab fold can tell a dismissal the
+   * other tab made from a restore this tab made after it. Unlike a check-in or a digest, a job card
+   * can be put back (`restoreJobItem`), so neither "ours wins" (which undid the other tab's
+   * dismissal) nor "dismissed wins" (which would undo this tab's restore) is right on its own.
+   * Absent on every row persisted before it existed, which reads as 0.
+   */
+  dismissedChangedAt?: number;
 }
 
 /** Exactly the slice `partialize` writes to localStorage, and what `migrate` must return. */
@@ -1094,13 +1102,35 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
     }
     return added.length === 0 ? ours : [...ours, ...added];
   };
-  const jobFeed = union(next.jobFeed, stored.jobFeed, (j) => j.event.job_id).slice(0, MAX_JOB_FEED);
+  // **What a reader did to a row is folded too, not just the row.** With no `fresher`, "ours wins"
+  // kept this tab's undismissed copy over the other tab's dismissed one on every flush, so a card
+  // dismissed in one window came back on the next reload. `seen` only ever goes one way, so it is
+  // OR-ed; `dismissed` can be undone, so the later of the two changes wins, and a tie (two rows
+  // persisted before the stamp existed) keeps the dismissal rather than resurrecting a card.
+  const jobFeed = union(
+    next.jobFeed,
+    stored.jobFeed,
+    (j) => j.event.job_id,
+    (mine, theirs) => {
+      const mineAt = mine.dismissedChangedAt ?? 0;
+      const theirsAt = theirs.dismissedChangedAt ?? 0;
+      const decided = mineAt === theirsAt ? null : mineAt > theirsAt ? mine : theirs;
+      return {
+        ...mine,
+        seen: mine.seen || theirs.seen,
+        dismissed: decided ? decided.dismissed : mine.dismissed || theirs.dismissed,
+        dismissedChangedAt: Math.max(mineAt, theirsAt),
+      };
+    },
+  ).slice(0, MAX_JOB_FEED);
   // The same `(query, note ids)` identity `addDigests` dedups on, so a row claimed by both tabs
-  // folds to one rather than reading as two findings.
+  // folds to one rather than reading as two findings. Two copies of one key are the same finding,
+  // so ours wins — except for the dismissal, which nothing un-does and is therefore OR-ed.
   const digests = union(
     next.digests ?? [],
     stored.digests,
     (d) => `${d.query}\u0000${d.noteIds.join(',')}`,
+    (mine, theirs) => (theirs.dismissed && !mine.dismissed ? { ...mine, dismissed: true } : mine),
   ).slice(0, MAX_DIGESTS);
   // Keyed by the service's own request id, which a digest does not have: two tabs claiming the
   // same blocked question fold to one card rather than to two notices about one question.
@@ -1114,7 +1144,12 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
     next.checkIns ?? [],
     (stored.checkIns ?? []).filter((c) => c.receivedAt > checkInCutoff),
     checkInKey,
-    (mine, theirs) => (theirs.refreshedAt > mine.refreshedAt ? theirs : mine),
+    // The fresher countdown wins, but `dismissCheckIn` does not move `refreshedAt`, so a dismissal
+    // is carried across whichever copy that picks — nothing un-dismisses a check-in.
+    (mine, theirs) => {
+      const winner = theirs.refreshedAt > mine.refreshedAt ? theirs : mine;
+      return { ...winner, dismissed: mine.dismissed || theirs.dismissed };
+    },
   ).slice(0, MAX_CHECK_INS);
   const carried: PersistedState = { ...next, jobFeed, digests, checkIns };
 
@@ -1593,7 +1628,10 @@ export const useChatStore = create<ChatState>()(
             ...target,
             latestPlan: todos,
             latestPlanHash: planHash,
-            latestPlanScope: scope ?? target.latestPlanScope,
+            // Never inherited from the message: a scope belongs to the revision it was read for,
+            // and a previous one kept under this hash would name another plan's tools under
+            // these steps. Unknown stays `null`, which the card fetches rather than rendering.
+            latestPlanScope: scope,
             trace,
           };
           return {
@@ -1923,7 +1961,9 @@ export const useChatStore = create<ChatState>()(
       restoreJobItem(jobId) {
         set((s) => ({
           jobFeed: s.jobFeed.map((j) =>
-            j.event.job_id === jobId ? { ...j, dismissed: false } : j,
+            j.event.job_id === jobId
+              ? { ...j, dismissed: false, dismissedChangedAt: Date.now() }
+              : j,
           ),
         }));
       },
@@ -2104,7 +2144,9 @@ export const useChatStore = create<ChatState>()(
         // would otherwise be a permanent deletion of the only copy — the backend's is consumed.
         set((s) => ({
           jobFeed: s.jobFeed.map((j) =>
-            j.event.job_id === jobId ? { ...j, dismissed: true, seen: true } : j,
+            j.event.job_id === jobId
+              ? { ...j, dismissed: true, seen: true, dismissedChangedAt: Date.now() }
+              : j,
           ),
         }));
       },

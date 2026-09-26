@@ -107,6 +107,26 @@ describe('plan approval', () => {
     expect(getPlan).toHaveBeenCalledTimes(2);
   });
 
+  it('re-reads the scope with the steps when the service says it changed', async () => {
+    // The buttons re-bind to the new revision after a 409, so the line naming what an approval
+    // authorises must move with them — or a chemist approves write tools they were never shown.
+    vi.spyOn(api, 'getPlan')
+      .mockResolvedValueOnce(planStatus('h1', ['Run xTB on the aryl bromide'], ['compute_pka']))
+      .mockResolvedValueOnce(
+        planStatus('h2', ['Search conformers of the aryl bromide'], ['record_failure']),
+      );
+    vi.spyOn(api, 'decidePlan').mockRejectedValue(
+      new ApiError('plan_changed', 'the plan changed since it was shown', 409),
+    );
+    render(<ApprovalPrompt prompt="Approve this plan?" sessionId={SID} />);
+
+    expect(await screen.findByText(/compute_pka/)).toBeTruthy();
+    await decideVia(/approve plan/i);
+
+    expect(await screen.findByText(/record_failure/)).toBeTruthy();
+    expect(screen.queryByText(/compute_pka/)).toBeNull();
+  });
+
   it('falls back to the composer when the service has no plan route', async () => {
     // Better than a card whose only buttons do nothing — and the wording says which it is.
     vi.spyOn(api, 'getPlan').mockRejectedValue(new ApiError('session_not_found', 'nope', 404));
@@ -276,6 +296,35 @@ describe('the plan the stream already carried', () => {
 
     expect(await screen.findByText('Run xTB on the aryl bromide')).toBeTruthy();
     expect(screen.queryByText(/authorises/)).toBeNull();
+  });
+
+  it('lets a streamed revision replace a scope it had to fetch for an earlier one', async () => {
+    // Revision 1 streamed an empty scope, which is stored as "unknown" and read off the route as
+    // []. Revision 2 streams its own scope; the fetched [] describes revision 1 and must not win.
+    vi.spyOn(api, 'getPlan').mockResolvedValue(planStatus('rev-1', ['Run xTB'], []));
+    const { rerender } = render(
+      <ApprovalPrompt
+        prompt="Approve this plan?"
+        sessionId={SID}
+        planTodos={['Run xTB']}
+        planHash="rev-1"
+        planScope={null}
+      />,
+    );
+    expect(await screen.findByText(/no tools beyond the read-only ones/)).toBeTruthy();
+
+    rerender(
+      <ApprovalPrompt
+        prompt="Approve this plan?"
+        sessionId={SID}
+        planTodos={['Run xTB', 'Record the failure']}
+        planHash="rev-2"
+        planScope={['record_failure']}
+      />,
+    );
+
+    expect(await screen.findByText(/record_failure/)).toBeTruthy();
+    expect(screen.queryByText(/no tools beyond the read-only ones/)).toBeNull();
   });
 
   it('falls back to the fetch when the service sent no hash', async () => {

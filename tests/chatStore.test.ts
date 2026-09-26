@@ -309,6 +309,26 @@ describe('plan approval reaching the message', () => {
     expect(assistantOf(cid, second).latestPlanHash).toBe('h-2');
   });
 
+  it("attaches the scope read with the plan, and never keeps an older revision's", () => {
+    const cid = useChatStore.getState().createConversation();
+    const mid = useChatStore.getState().startAssistantMessage(cid);
+    useChatStore.getState().applyEvent(cid, mid, {
+      type: 'plan',
+      todos: ['a'],
+      plan_hash: 'h-1',
+      scope: ['compute_pka'],
+    });
+    useChatStore.getState().finishTurn(cid, mid, 'done');
+
+    useChatStore.getState().attachPlan(cid, ['b'], 'h-2', false, ['record_failure']);
+    expect(assistantOf(cid, mid).latestPlanScope).toEqual(['record_failure']);
+
+    // A read that could not say is unknown for the new hash — not the previous revision's list.
+    useChatStore.getState().attachPlan(cid, ['c'], 'h-3');
+    expect(assistantOf(cid, mid).latestPlanHash).toBe('h-3');
+    expect(assistantOf(cid, mid).latestPlanScope).toBeNull();
+  });
+
   it('attaches no empty plan', () => {
     const store = useChatStore.getState();
     const cid = store.createConversation();

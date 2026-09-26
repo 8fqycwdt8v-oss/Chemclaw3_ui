@@ -35,6 +35,18 @@ describe('proxy route whitelist', () => {
       ['POST', `/api/protocols/${DESIGN}/revisions`, `/protocols/${DESIGN}/revisions`],
       ['GET', `/api/protocols/${DESIGN}/diff`, `/protocols/${DESIGN}/diff`],
       ['POST', `/api/protocols/${DESIGN}/status`, `/protocols/${DESIGN}/status`],
+      ['GET', '/api/proposals', '/proposals'],
+      ['POST', '/api/proposals/skill/house-workup', '/proposals/skill/house-workup'],
+      ['GET', '/api/skills/mine', '/skills/mine'],
+      ['POST', '/api/skills/mine', '/skills/mine'],
+      ['GET', '/api/skills/mine/house-workup', '/skills/mine/house-workup'],
+      ['DELETE', '/api/skills/mine/house-workup', '/skills/mine/house-workup'],
+      ['GET', '/api/skills/org', '/skills/org'],
+      ['POST', '/api/skills/org', '/skills/org'],
+      ['GET', '/api/skills/org/house-workup', '/skills/org/house-workup'],
+      ['DELETE', '/api/skills/org/house-workup', '/skills/org/house-workup'],
+      ['GET', '/api/skills/org/house-workup/versions', '/skills/org/house-workup/versions'],
+      ['POST', '/api/skills/org/house-workup/revert', '/skills/org/house-workup/revert'],
     ];
     for (const [method, path, upstream] of cases) {
       expect(resolveRoute(method, path), `${method} ${path}`).toMatchObject({ path: upstream });
@@ -257,6 +269,66 @@ describe('proxy route whitelist', () => {
       });
       expect(resolveRoute('DELETE', '/api/jobs/a/b')).toBeNull();
       expect(resolveRoute('DELETE', `/api/jobs/${'j'.repeat(513)}`)).toBeNull();
+    });
+  });
+
+  describe('skill names', () => {
+    // Every route that names a skill, as `[method, prefix, suffix]` around the name segment.
+    const SKILL_ROUTES = [
+      ['GET', '/skills/mine/', ''],
+      ['DELETE', '/skills/mine/', ''],
+      ['GET', '/skills/org/', ''],
+      ['DELETE', '/skills/org/', ''],
+      ['GET', '/skills/org/', '/versions'],
+      ['POST', '/skills/org/', '/revert'],
+      ['POST', '/proposals/skill/', ''],
+    ] as const;
+
+    it.each(['löslichkeit-workup', 'pd(OAc)2-removal', '_draft', '-x', 'a+b@site', 'house-workup'])(
+      'resolves %s on every skill route, because the service stores it',
+      (name) => {
+        // The service's rule is a refusal list (`/`, a leading `.`, whitespace, non-printables),
+        // not an alphabet. An ASCII-alphanumeric segment 404'd each of the first five here, so a
+        // skill acting on every turn could not be deleted from the UI.
+        const encoded = encodeURIComponent(name);
+        for (const [method, prefix, suffix] of SKILL_ROUTES) {
+          expect(
+            resolveRoute(method, `/api${prefix}${encoded}${suffix}`),
+            `${method} ${prefix}${name}${suffix}`,
+          ).toMatchObject({ path: `${prefix}${encoded}${suffix}` });
+        }
+      },
+    );
+
+    it('resolves a name the service accepts in full even when every character costs twelve', () => {
+      // One four-byte character encodes to twelve; the cap is on the encoded segment.
+      const encoded = encodeURIComponent('𝛼'.repeat(64));
+      expect(encoded.length).toBeGreaterThan(512);
+      expect(resolveRoute('GET', `/api/skills/mine/${encoded}`)).not.toBeNull();
+    });
+
+    it('refuses an encoded separator, a parent reference, a raw slash and a malformed escape', () => {
+      for (const bad of ['..', '..%2F', '..%2F..%2Fmetrics', '%2e%2e', 'a%5Cb', 'a/b', 'x%zz']) {
+        for (const [method, prefix, suffix] of SKILL_ROUTES) {
+          expect(
+            resolveRoute(method, `/api${prefix}${bad}${suffix}`),
+            `${method} ${bad}`,
+          ).toBeNull();
+        }
+      }
+      expect(resolveRoute('GET', `/api/skills/mine/${'s'.repeat(1025)}`)).toBeNull();
+    });
+
+    it('labels a proposal decision by the upstream shape, never by the name it carries', () => {
+      expect(resolveRoute('POST', '/api/proposals/skill/house-workup')?.template).toBe(
+        '/proposals/{kind}/{name}',
+      );
+      expect(resolveRoute('GET', `/api/sessions/${SID}/tool-results/${REF}`)?.template).toBe(
+        '/sessions/{id}/tool-results/{ref}',
+      );
+      expect(resolveRoute('GET', '/api/skills/org/house-workup/versions')?.template).toBe(
+        '/skills/org/{id}/versions',
+      );
     });
   });
 

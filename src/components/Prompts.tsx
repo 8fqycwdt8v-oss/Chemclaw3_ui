@@ -213,18 +213,33 @@ function PlanApprovalPrompt({
   >(streamedPlan ? 'idle' : sessionId ? 'loading' : 'unavailable');
   const [error, setError] = useState<string | null>(null);
   /**
-   * The tools approving this plan would authorize, or `null` when this card cannot say.
+   * The tools a read said some revision would authorize, stamped with the hash of that revision.
    *
-   * `null` is "not known" — the read failed, or the service predates the field, or it answered
-   * about a different revision — and is rendered as nothing rather than as an empty list, which
-   * would claim the approval carries no tool authority at all.
+   * The hash is what makes it safe to prefer: a scope is only ever rendered under the plan whose
+   * hash it was read for. It used to be a bare list that beat the streamed scope unconditionally
+   * and was never replaced by the 409 re-read, so after a revision the buttons bound to the new
+   * plan while the line above them still named the old one's tools — a chemist could approve write
+   * tools the card had never shown them.
    */
-  const [fetchedScope, setFetchedScope] = useState<string[] | null>(null);
-  // Derived during render, not copied into state by the effect — the same reason `streamedPlan`
-  // above is: `planScope` is a prop, so storing it would be one more thing that can disagree with
-  // its source, and React rightly objects to a `setState` that only mirrors one. The fetch wins
-  // when there is one, and there is one only where the event carried no scope or after a 409.
-  const scope = fetchedScope ?? planScope ?? null;
+  const [fetchedScope, setFetchedScope] = useState<{
+    hash: string;
+    scope: string[] | null;
+  } | null>(null);
+  /**
+   * The tools approving the displayed plan would authorize, or `null` when this card cannot say.
+   *
+   * `null` is "not known" — the read failed, or the service predates the field, or nothing that
+   * was read describes the revision on screen — and is rendered as nothing rather than as an empty
+   * list, which would claim the approval carries no tool authority at all. Derived during render
+   * rather than mirrored into state: `planScope` is a prop, and a copy is one more thing that can
+   * disagree with its source.
+   */
+  const scope =
+    plan && fetchedScope?.hash === plan.hash
+      ? fetchedScope.scope
+      : plan && planHash && plan.hash === planHash
+        ? (planScope ?? null)
+        : null;
 
   // Through a ref, so the read below depends on the session alone. `useAuth()` hands back a fresh
   // object on every render, and an effect that listed it as a dependency re-read the plan on each
@@ -260,12 +275,11 @@ function PlanApprovalPrompt({
       try {
         const status = await api.getPlan(sessionId, currentAuth);
         if (!live) return;
-        // Only when the service is describing the plan this card is showing. A scope read off a
-        // revision made since would name tools this approval does not authorize, which is the
-        // disclosure defect inverted — and the streamed hash is exactly how that is detectable.
-        // An older service sends no scope at all, and `undefined` stays `null` here: unknown, not
-        // "authorizes nothing".
-        if (!planHash || status.plan_hash === planHash) setFetchedScope(status.scope ?? null);
+        // Stamped with the revision it describes, and rendered only under that revision: a scope
+        // read off a revision made since would name tools this approval does not authorize, which
+        // is the disclosure defect inverted. An older service sends no scope at all, and
+        // `undefined` stays `null` here: unknown, not "authorizes nothing".
+        setFetchedScope({ hash: status.plan_hash, scope: status.scope ?? null });
         // The binding never comes from this read: between rendering the plan and reading it the
         // agent may have revised it, and a decision must bind to what the human was shown.
         if (streamed) return;
@@ -305,6 +319,9 @@ function PlanApprovalPrompt({
     try {
       const status = await api.getPlan(sessionId, currentAuth);
       setFetchedPlan({ hash: status.plan_hash, todos: status.plan });
+      // The scope moves with the steps, or the line naming what an approval authorizes would
+      // still describe the revision the buttons no longer bind to.
+      setFetchedScope({ hash: status.plan_hash, scope: status.scope ?? null });
       setState('idle');
     } catch {
       setState('failed');

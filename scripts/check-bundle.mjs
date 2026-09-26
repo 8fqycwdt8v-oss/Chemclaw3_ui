@@ -34,7 +34,7 @@
  * better control than a number for that job.
  */
 
-import { readdirSync, readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { argv, exit } from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -262,4 +262,7 @@ function main() {
   }
 }
 
-if (argv[1] && fileURLToPath(import.meta.url) === argv[1]) main();
+// Realpaths on both sides: a module's URL is resolved through symlinks and `argv[1]` is not, so
+// invoked through a symlinked checkout the bare comparison was false, `main()` never ran, and
+// the gate exited 0 having checked nothing.
+if (argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(argv[1])) main();

@@ -585,7 +585,7 @@ function Row({
             label={
               <>
                 <span className="font-medium">{entry.handoff?.from || 'the agent'}</span> handed to{' '}
-                <span className="font-medium">{entry.handoff?.to ?? 'another agent'}</span>
+                <span className="font-medium">{entry.handoff?.to || 'another agent'}</span>
               </>
             }
             badge={

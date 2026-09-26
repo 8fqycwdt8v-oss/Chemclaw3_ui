@@ -253,24 +253,19 @@ export function JobsPanel(): React.JSX.Element {
   // The search text is the key, which is what the `loaded.query === submitted` derivation this
   // replaces was for: a stale list is never shown under a new search, and there is no second
   // render clearing the old one on the way in.
-  //
-  // A failure still renders as an empty list rather than as a banner, unchanged: this panel is a
-  // search over a durable-run archive, and a chemist who searched and found nothing is not misled
-  // the way one told "nothing is waiting on you" would be.
-  const { data, isError, fetchNextPage, hasNextPage, isFetchingNextPage } = useApiInfiniteQuery({
-    ...jobsQuery(submitted, auth),
-    enabled: ready,
-  });
-  // **`null` is "still reading" and `[]` is "nothing matched", and a failure is the second.** The
-  // catch this replaces answered `setLoaded({ query, list: [] })`, and `data` on a failed query is
-  // `undefined` — so defaulting it to `null` left the spinner on screen for ever, which is
-  // "still loading" and "this failed and will never load" being the same screen. That is the
-  // distinction the sheet below already makes for a single job, and this panel had no test for it.
-  //
-  // An empty list rather than a banner is unchanged and deliberate: this is a search over a
-  // durable-run archive, and a chemist who searched and found nothing is not misled the way one
-  // told "nothing is waiting on you" would be.
-  const jobs = data ? data.pages.flatMap((page) => page.jobs) : isError ? [] : null;
+  const { data, isError, isFetchNextPageError, fetchNextPage, hasNextPage, isFetchingNextPage } =
+    useApiInfiniteQuery({
+      ...jobsQuery(submitted, auth),
+      enabled: ready,
+    });
+  // **Three states, never two.** `null` is "still reading", `[]` is "nothing matched", and a failed
+  // first read is neither. It used to render as the empty list, on the argument that a search over
+  // an archive finding nothing misleads nobody — but `pageJobs` already folds the one benign case
+  // (a service without the route, 404) into an empty page, so every error that reaches here is a
+  // real failure, and a chemist searching during a rollout was told no run matched. Before that it
+  // was a spinner for ever, which is "failed" and "still loading" being one screen instead.
+  const failed = isError && !data;
+  const jobs = data ? data.pages.flatMap((page) => page.jobs) : null;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -306,7 +301,13 @@ export function JobsPanel(): React.JSX.Element {
           </Button>
         </form>
 
-        {!jobs && <Loading>Reading the registry…</Loading>}
+        {failed && (
+          <p role="alert" className="text-sm text-danger-ink">
+            Could not search the registry, so this says nothing about which runs exist — try again.
+          </p>
+        )}
+
+        {!jobs && !failed && <Loading>Reading the registry…</Loading>}
 
         {jobs?.length === 0 && (
           <EmptyState
@@ -380,6 +381,14 @@ export function JobsPanel(): React.JSX.Element {
           >
             {isFetchingNextPage ? 'Loading…' : 'Load older runs'}
           </Button>
+        )}
+        {/* A failed older page used to leave the button as it was, so the click read as having
+            done nothing. The rows above are still true; what is missing is said beside the control
+            that fetches it, as `Sidebar` does for the same pattern. */}
+        {isFetchNextPageError && !isFetchingNextPage && (
+          <p role="alert" className="text-xs text-danger-ink">
+            Could not load older runs — try again.
+          </p>
         )}
 
         {openId !== null && (

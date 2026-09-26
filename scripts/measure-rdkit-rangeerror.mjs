@@ -18,8 +18,8 @@
  *    this has to say *which* negative it is, because that decides the sentence a chemist is shown.
  *  - `engine` — `src/chem/rdkit.engine.ts` called straight from the page: same thread, same heap,
  *    same molecule, shallower stack. The control.
- *  - `isMolecule` and `moleculeSvg`, because "the same seam has the same problem" is an assumption
- *    until it is a column. Neither asks for a canonical name, so neither reaches the recursion.
+ *  - `isMolecule` and `moleculeSvg`, both through the seam, because "the same seam has the same
+ *    problem" is an assumption until it is a column. Neither asks for a canonical name, so neither reaches the recursion.
  *
  * **Read the repeat columns before reading the first one as a threshold.** Measured here, the call
  * that refuses is the *first* one at a length — six consecutive `readCanonicalSmiles` at 600
@@ -60,90 +60,103 @@ const vite = spawn(
   ['node_modules/vite/bin/vite.js', '--port', String(port), '--strictPort'],
   { stdio: ['ignore', 'pipe', 'inherit'], env: { ...process.env, BFF_PORT: '8787' } },
 );
-await new Promise((resolve, reject) => {
-  const timer = setTimeout(() => reject(new Error('vite did not start')), 60_000);
-  vite.stdout.on('data', (chunk) => {
-    if (String(chunk).includes('ready in')) {
+// Everything after the spawn is inside the `finally`, so a startup timeout, a browser that will
+// not launch or a probe that throws still releases the port. Before, only the success path killed
+// the child, and an orphaned Vite on `--strictPort` failed every later run.
+/** @type {import('@playwright/test').Browser | undefined} */
+let browser;
+try {
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('vite did not start')), 60_000);
+    vite.stdout.on('data', (chunk) => {
+      if (String(chunk).includes('ready in')) {
+        clearTimeout(timer);
+        setTimeout(resolve, 500);
+      }
+    });
+    // A child that dies before it is ready (the port taken, under `--strictPort`) is an answer now,
+    // not a 60 s wait for a line that will never come.
+    vite.on('exit', (code) => {
       clearTimeout(timer);
-      setTimeout(resolve, 500);
-    }
+      reject(new Error(`vite exited with ${code} before it was ready`));
+    });
   });
-});
 
-// The same resolution `playwright.config.ts` uses — the variable IS the executable path, and a
-// sandbox that has one has no downloaded browser for Playwright to fall back to.
-const browser = await chromium.launch(
-  process.env.PLAYWRIGHT_CHROMIUM_PATH
-    ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
-    : {},
-);
-
-/** One length, in a page of its own, because the stack this measures is the page's. */
-async function probe(length) {
-  const page = await browser.newPage();
-  page.on('pageerror', (error) => console.error('  page error:', error.message));
-  await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded' });
-  const row = await page.evaluate(async (length) => {
-    const seam = await import('/src/chem/rdkit.ts');
-    const engine = await import('/src/chem/rdkit.engine.ts');
-
-    const timed = async (fn) => {
-      const tasks = [];
-      const observer = new PerformanceObserver((list) => tasks.push(...list.getEntries()));
-      observer.observe({ entryTypes: ['longtask'] });
-      const answer = await fn();
-      // One more frame, so a long task that ran inside the awaited call is reported.
-      await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 60)));
-      observer.disconnect();
-      return {
-        answer,
-        blockedMs: Number(tasks.reduce((sum, t) => sum + t.duration, 0).toFixed(1)),
-      };
-    };
-
-    // Both placements warmed on a trivial molecule, so no number below is a 6.9 MB fetch.
-    await seam.canonicalSmiles('CCO');
-    await engine.readCanonicalSmiles('CCO');
-
-    const smiles = 'C'.repeat(length);
-    const viaSeam = await timed(() => seam.canonicalSmiles(smiles));
-    const readSecond = await timed(() => seam.readCanonicalSmiles(smiles));
-    const readThird = await timed(() => seam.readCanonicalSmiles(smiles));
-    const viaEngine = await timed(() => engine.readCanonicalSmiles(smiles));
-    const molecule = await timed(() => engine.isMolecule(smiles));
-    const svg = await timed(() => seam.moleculeSvg(smiles, { width: 300, height: 200 }));
-    return {
-      length,
-      seam: viaSeam.answer === null ? 'null' : 'answered',
-      seamBlockedMs: viaSeam.blockedMs,
-      readSecond: readSecond.answer.status,
-      readThird: readThird.answer.status,
-      // A status rather than a boolean: this is the whole subject of the measurement.
-      engine: viaEngine.answer.status,
-      engineBlockedMs: viaEngine.blockedMs,
-      isMolecule: String(molecule.answer),
-      svg: svg.answer === null ? 'null' : 'answered',
-    };
-  }, length);
-  await page.close();
-  return row;
-}
-
-const rows = [];
-for (let run = 1; run <= repeats; run += 1) {
-  for (const length of lengths) rows.push({ run, ...(await probe(length)) });
-}
-
-console.log(
-  '\n  run  chars  seam.canonical  blocked   read #2      read #3      engine       blocked   isMolecule  moleculeSvg',
-);
-for (const r of rows) {
-  console.log(
-    `  ${String(r.run).padStart(3)}  ${String(r.length).padStart(5)}  ${r.seam.padEnd(14)}  ${String(r.seamBlockedMs).padStart(7)}   ${r.readSecond.padEnd(11)}  ${r.readThird.padEnd(11)}  ${r.engine.padEnd(11)}  ${String(r.engineBlockedMs).padStart(7)}   ${r.isMolecule.padEnd(10)}  ${r.svg}`,
+  // The same resolution `playwright.config.ts` uses — the variable IS the executable path, and a
+  // sandbox that has one has no downloaded browser for Playwright to fall back to.
+  browser = await chromium.launch(
+    process.env.PLAYWRIGHT_CHROMIUM_PATH
+      ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH }
+      : {},
   );
-}
-console.log('');
 
-await browser.close();
-vite.kill('SIGTERM');
+  /** One length, in a page of its own, because the stack this measures is the page's. */
+  async function probe(length) {
+    const page = await browser.newPage();
+    page.on('pageerror', (error) => console.error('  page error:', error.message));
+    await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded' });
+    const row = await page.evaluate(async (length) => {
+      const seam = await import('/src/chem/rdkit.ts');
+      const engine = await import('/src/chem/rdkit.engine.ts');
+
+      const timed = async (fn) => {
+        const tasks = [];
+        const observer = new PerformanceObserver((list) => tasks.push(...list.getEntries()));
+        observer.observe({ entryTypes: ['longtask'] });
+        const answer = await fn();
+        // One more frame, so a long task that ran inside the awaited call is reported.
+        await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 60)));
+        observer.disconnect();
+        return {
+          answer,
+          blockedMs: Number(tasks.reduce((sum, t) => sum + t.duration, 0).toFixed(1)),
+        };
+      };
+
+      // Both placements warmed on a trivial molecule, so no number below is a 6.9 MB fetch.
+      await seam.canonicalSmiles('CCO');
+      await engine.readCanonicalSmiles('CCO');
+
+      const smiles = 'C'.repeat(length);
+      const viaSeam = await timed(() => seam.canonicalSmiles(smiles));
+      const readSecond = await timed(() => seam.readCanonicalSmiles(smiles));
+      const readThird = await timed(() => seam.readCanonicalSmiles(smiles));
+      const viaEngine = await timed(() => engine.readCanonicalSmiles(smiles));
+      const molecule = await timed(() => seam.isMolecule(smiles));
+      const svg = await timed(() => seam.moleculeSvg(smiles, { width: 300, height: 200 }));
+      return {
+        length,
+        seam: viaSeam.answer === null ? 'null' : 'answered',
+        seamBlockedMs: viaSeam.blockedMs,
+        readSecond: readSecond.answer.status,
+        readThird: readThird.answer.status,
+        // A status rather than a boolean: this is the whole subject of the measurement.
+        engine: viaEngine.answer.status,
+        engineBlockedMs: viaEngine.blockedMs,
+        isMolecule: String(molecule.answer),
+        svg: svg.answer === null ? 'null' : 'answered',
+      };
+    }, length);
+    await page.close();
+    return row;
+  }
+
+  const rows = [];
+  for (let run = 1; run <= repeats; run += 1) {
+    for (const length of lengths) rows.push({ run, ...(await probe(length)) });
+  }
+
+  console.log(
+    '\n  run  chars  seam.canonical  blocked   read #2      read #3      engine       blocked   isMolecule  moleculeSvg',
+  );
+  for (const r of rows) {
+    console.log(
+      `  ${String(r.run).padStart(3)}  ${String(r.length).padStart(5)}  ${r.seam.padEnd(14)}  ${String(r.seamBlockedMs).padStart(7)}   ${r.readSecond.padEnd(11)}  ${r.readThird.padEnd(11)}  ${r.engine.padEnd(11)}  ${String(r.engineBlockedMs).padStart(7)}   ${r.isMolecule.padEnd(10)}  ${r.svg}`,
+    );
+  }
+  console.log('');
+} finally {
+  await browser?.close();
+  vite.kill('SIGTERM');
+}
 process.exit(0);

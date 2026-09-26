@@ -553,4 +553,115 @@ describe('what a check-in does on the way to disk', () => {
     expect(written.state.checkIns).toHaveLength(1);
     expect(written.state.checkIns[0]?.daysLeft).toBe(4);
   });
+
+  it('keeps a dismissal the other tab made, whichever copy is fresher', async () => {
+    // `dismissCheckIn` does not move `refreshedAt`, so two copies of one question tie and "mine
+    // wins" put this tab's undismissed copy back on disk — the card returned on the next reload.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const now = Date.now();
+    onDisk(store, [stored({ refreshedAt: now, receivedAt: now, dismissed: true })]);
+    const [row] = [stored({ refreshedAt: now, receivedAt: now })];
+    useChatStore.setState({
+      checkIns: [{ ...row, kind: 'measurement', sessionId: 'conv-7', truncated: false }],
+    });
+    flushChatPersistence();
+
+    const written = JSON.parse(store.get(KEY) ?? '{}') as {
+      state: { checkIns: { dismissed: boolean }[] };
+    };
+    expect(written.state.checkIns[0]?.dismissed).toBe(true);
+  });
+});
+
+describe('what a reader did to a job card or a digest, on the way to disk', () => {
+  const KEY = 'chemclaw3.chat.v2.anon';
+
+  async function freshStore() {
+    vi.resetModules();
+    const store = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      length: 0,
+      key: () => null,
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    });
+    return { store, ...(await import('../src/state/chatStore.ts')) };
+  }
+
+  const job = (over: Record<string, unknown> = {}) => ({
+    event: { type: 'job_failed', job_id: 'qm-1', reason: 'did not converge' },
+    sessionId: 'a'.repeat(32),
+    conversationId: null,
+    receivedAt: Date.now(),
+    seen: false,
+    dismissed: false,
+    ...over,
+  });
+  const digest = (over: Record<string, unknown> = {}) => ({
+    query: 'aryl bromide pKa',
+    noteIds: ['n-1'],
+    receivedAt: Date.now(),
+    dismissed: false,
+    ...over,
+  });
+
+  const onDisk = (store: Map<string, string>, jobFeed: unknown[], digests: unknown[]): void => {
+    store.set(
+      KEY,
+      JSON.stringify({
+        version: 3,
+        state: {
+          conversations: {},
+          order: [],
+          activeId: null,
+          drafts: {},
+          jobFeed,
+          digests,
+          checkIns: [],
+          notifyOnJobComplete: false,
+        },
+      }),
+    );
+  };
+
+  const written = (store: Map<string, string>) =>
+    JSON.parse(store.get(KEY) ?? '{}') as {
+      state: {
+        jobFeed: { dismissed: boolean; seen: boolean }[];
+        digests: { dismissed: boolean }[];
+      };
+    };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps a dismissal the other tab made rather than this tab's untouched copy", async () => {
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    onDisk(
+      store,
+      [job({ dismissed: true, seen: true, dismissedChangedAt: Date.now() })],
+      [digest({ dismissed: true })],
+    );
+    useChatStore.setState({ jobFeed: [job()] as never, digests: [digest()] as never });
+    flushChatPersistence();
+
+    expect(written(store).state.jobFeed[0]).toMatchObject({ dismissed: true, seen: true });
+    expect(written(store).state.digests[0]?.dismissed).toBe(true);
+  });
+
+  it('keeps a restore this tab made after the dismissal on disk', async () => {
+    // A job card, unlike a digest or a check-in, can be put back — so "dismissed wins" would undo
+    // the restore on the next flush. The later change wins instead.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const now = Date.now();
+    onDisk(store, [job({ dismissed: true, seen: true, dismissedChangedAt: now - 5_000 })], []);
+    useChatStore.setState({
+      jobFeed: [job({ dismissed: false, seen: true, dismissedChangedAt: now })] as never,
+    });
+    flushChatPersistence();
+
+    expect(written(store).state.jobFeed[0]).toMatchObject({ dismissed: false, seen: true });
+  });
 });

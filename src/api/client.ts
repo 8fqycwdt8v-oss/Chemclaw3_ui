@@ -271,6 +271,13 @@ export interface TranscriptMessage {
    * with no working behind them.
    */
   tool_calls: TranscriptToolCall[];
+  /**
+   * The turn that stored this message (`session_messages.correlation_id`) — the same id the turn's
+   * response header carried, so detach recovery can find *its* answer by identity rather than by
+   * text. `null` for a row stored off the request path or before the column existed; absent
+   * altogether from a service older than the field, which is why it is optional here.
+   */
+  correlation_id?: string | null;
 }
 
 export interface AttachmentSummary {
@@ -546,8 +553,8 @@ export interface PlanStatus {
    * state-changing tool no step declared is refused even under a live approval.
    *
    * Absent — not empty — from a service that predates the field, which a reader must treat as
-   * "unknown" rather than as "this authorizes nothing". The `plan` *event* does not carry it at
-   * all, which is why the card reads it here.
+   * "unknown" rather than as "this authorizes nothing". The `plan` event carries it too; this read
+   * is the fallback for a service that sends none there, and for the re-read after a 409.
    */
   scope: string[];
   /** `plan_only` until a human approves; `execute` afterwards. */
@@ -1332,12 +1339,6 @@ export const api = {
     planHash: string,
     getToken: TokenGetter,
   ): Promise<void> {
-    // Whatever the outcome, this inbox's answer is now suspect: an approval removes a row, and a
-    // 409 means the plan moved under the reader. Invalidating is what keeps `PENDING_PLANS_STALE_MS`
-    // from being a staleness window on the one action that invalidates it — and it is `void`ed
-    // rather than awaited because the caller is waiting on the decision, not on a re-read of a list
-    // it may not even be looking at.
-    void queryClient.invalidateQueries({ queryKey: keys.pendingPlans });
     try {
       await request<void>(`/sessions/${encodeURIComponent(sessionId)}/plan/decision`, getToken, {
         method: 'POST',
@@ -1348,6 +1349,15 @@ export const api = {
         throw new ApiError('plan_changed', err.message, 409);
       }
       throw err;
+    } finally {
+      // Whatever the outcome, the inbox's answer is now suspect: an approval removes a row, and a
+      // 409 means the plan moved under the reader. Invalidating is what keeps
+      // `PENDING_PLANS_STALE_MS` from being a staleness window on the one action that invalidates
+      // it. **After the write settles, never before it**: invalidating refetches an active
+      // observer at once, so a read issued before the POST could be answered with the plan still
+      // pending and cached as fresh for the whole window. `void`ed rather than awaited because the
+      // caller is waiting on the decision, not on a re-read of a list it may not be looking at.
+      void queryClient.invalidateQueries({ queryKey: keys.pendingPlans });
     }
   },
 

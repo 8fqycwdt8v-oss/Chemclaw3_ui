@@ -160,16 +160,16 @@ function mountJobs(at = '/jobs'): void {
 }
 
 describe('JobsPanel', () => {
-  it('stops the spinner when the LIST read failed, and says nothing is there', async () => {
+  it('stops the spinner when the LIST read failed, and says it could not ask', async () => {
     // The list, not the sheet — the case further down covers the sheet, and this panel had no case
     // for this one at all. That gap is what let a regression through: `data` on a failed query is
     // `undefined`, and defaulting it to `null` means "still reading", so a 500 left "Reading the
     // registry…" on screen for ever. "Still loading" and "this failed and will never load" being
     // the same screen is exactly what the sheet's own case exists to prevent, one component out.
     //
-    // An empty list rather than a banner is the deliberate part and is unchanged: this is a search
-    // over a durable-run archive, and a chemist who searched and found nothing is not misled the
-    // way one told "nothing is waiting on you" would be.
+    // And not as an empty list either: `pageJobs` already folds the one benign case (a 404) into
+    // an empty page, so a failure reaching the panel is a real one, and "No runs recorded yet"
+    // during a 500 told a chemist their run did not exist.
     restore?.();
     const stub = stubFetch(
       () =>
@@ -182,8 +182,36 @@ describe('JobsPanel', () => {
 
     mountJobs();
 
-    expect(await screen.findByText('No runs recorded yet')).toBeTruthy();
+    expect((await screen.findByRole('alert')).textContent).toMatch(/Could not search the registry/);
+    expect(screen.queryByText('No runs recorded yet')).toBeNull();
     expect(screen.queryByText('Reading the registry…')).toBeNull();
+  });
+
+  it('says an older page failed beside the control that fetches it', async () => {
+    restore?.();
+    let calls = 0;
+    const stub = stubFetch((url) => {
+      calls += 1;
+      if (url.includes('after=')) {
+        return new Response(JSON.stringify({ detail: 'boom' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify([RECORD]), {
+        status: 200,
+        headers: { 'content-type': 'application/json', 'x-next-cursor': 'cursor-2' },
+      });
+    });
+    restore = stub.restore;
+    mountJobs();
+
+    fireEvent.click(await screen.findByRole('button', { name: /Load older runs/ }));
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(/Could not load older runs/);
+    // The first page is still shown: it is still true.
+    expect(screen.getByText('compare_solvents')).toBeTruthy();
+    expect(calls).toBeGreaterThanOrEqual(2);
   });
 
   it('leads with why a run happened, not with its id', async () => {

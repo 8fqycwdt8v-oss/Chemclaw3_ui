@@ -21,6 +21,10 @@
  *     pinned to the current byte reds on an unrelated merge and teaches everybody to raise it.
  */
 
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { BUDGET, MEASURED, firstLoadFiles } from '../scripts/check-bundle.mjs';
 
@@ -95,4 +99,24 @@ describe('the budget itself', () => {
     // readable, which is the difference between a number with a date and a number.
     expect(MEASURED.at).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
+
+  it.each(['scripts/check-bundle.mjs', 'scripts/ci.mjs'])(
+    '%s runs when invoked through a symlinked checkout, rather than exiting 0 having run nothing',
+    (script) => {
+      // The CLI guard compared the module's URL — resolved through symlinks — against the
+      // unresolved `argv[1]`, so through a symlink `main()` was skipped and the gate exited 0.
+      const dir = mkdtempSync(join(tmpdir(), 'gate-link-'));
+      try {
+        const link = join(dir, 'checkout');
+        symlinkSync(process.cwd(), link);
+        const args = script.endsWith('ci.mjs') ? ['--no-such-step'] : ['/nonexistent'];
+        const result = spawnSync(process.execPath, [join(link, script), ...args], {
+          encoding: 'utf8',
+        });
+        expect(result.status, result.stderr).not.toBe(0);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

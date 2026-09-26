@@ -69,21 +69,22 @@ jobs:
       # exists to prevent — so this names no paths at all and cannot drift from the reader.
       # No credential: every repository in this family is public, so `contents: read` reaches it.
       #
-      # **`ref:` is named, and without it this lane's verdict was not a function of its inputs.**
-      # `actions/checkout` defaults to the *default branch's HEAD at the moment the job runs* for
-      # any repository but this one, so the same UI commit was green one day and red the next with
-      # nothing changed here, and re-running an old pull request silently judged it against today's
-      # Chemclaw3. The cost recorded for this checkout — "reds on a rename merged in another
-      # repository" — understated that: a rename reds a build, an unpinned ref makes the build
-      # unrepeatable, which is a different and worse property.
+      # **`ref:` is named, so pinning this lane is a setting — and pinning is opt-in.** With neither
+      # the dispatch input nor `vars.CHEMCLAW3_REF` set, the expression resolves to `main`, which
+      # `actions/checkout` reads as that branch's HEAD *at the moment the job runs*. So by default
+      # this lane's verdict is still not a function of this repository's inputs alone: the same UI
+      # commit can be green one day and red the next with nothing changed here, and re-running an
+      # old pull request judges it against today's Chemclaw3. That is deliberate — a real rename
+      # upstream should red loudly, which is what this check is for — but it means the default lane
+      # is not repeatable, and naming `ref:` did not change that.
       #
-      # The default still tracks `main`, so a real rename still reds loudly, which is what this
-      # check is for. What the variable buys is a remedy that is not "edit the guard": a pull
-      # request blocked by an unrelated upstream change is unblocked by pointing
-      # `vars.CHEMCLAW3_REF` at the last agreeing revision — a repository setting with an audit
-      # trail — rather than by weakening what is asserted. `Jenkinsfile` already declares
-      # `CHEMCLAW3_BRANCH` for its own clone of the same repository; this is that fact in the other
-      # lane, and `tests/delivery.test.ts` holds both lanes to naming one.
+      # What naming it buys is a remedy that is not "edit the guard": a pull request blocked by an
+      # unrelated upstream change is unblocked by pointing `vars.CHEMCLAW3_REF` (or the dispatch
+      # input) at the last agreeing revision — a repository setting with an audit trail — rather
+      # than by weakening what is asserted. Only a full SHA there makes a run repeatable; a branch
+      # or tag still moves. `Jenkinsfile` already declares `CHEMCLAW3_BRANCH` for its own clone of
+      # the same repository; this is that fact in the other lane, and `tests/delivery.test.ts`
+      # holds both lanes to naming one.
       - name: The Chemclaw3 checkout the contract check reads
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

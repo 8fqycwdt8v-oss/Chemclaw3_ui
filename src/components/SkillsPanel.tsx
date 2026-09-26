@@ -134,10 +134,13 @@ function MySkills(): React.JSX.Element {
   const names = data ?? [];
   if (names.length === 0) {
     return (
-      <EmptyState icon={<User className="size-5" />} title="You keep none">
-        When a turn works out a procedure worth keeping, it can propose one — you decide on the
-        review screen, and what you accept appears here.
-      </EmptyState>
+      <>
+        <EmptyState icon={<User className="size-5" />} title="You keep none">
+          When a turn works out a procedure worth keeping, it can propose one — you decide on the
+          review screen, and what you accept appears here.
+        </EmptyState>
+        <WriteMine onSaved={() => void refetch()} />
+      </>
     );
   }
 
@@ -178,7 +181,68 @@ function MySkills(): React.JSX.Element {
           </li>
         ))}
       </ul>
+      <WriteMine onSaved={() => void refetch()} />
     </>
+  );
+}
+
+/**
+ * Write one for yourself — the path a declined proposal's dialog points at, which until this
+ * existed pointed at nothing.
+ *
+ * Its refusals are the service's sentences, shown as they arrive: a name a skill this deployment
+ * ships already uses and the row cap are both 409s, a document that is not a `SKILL.md` or is too
+ * long is a 422, and each detail says what to change. A saved name that already exists is
+ * replaced, which the button says rather than the reader discovering it.
+ */
+function WriteMine({ onSaved }: { onSaved: () => void }): React.JSX.Element {
+  const { auth } = useAuth();
+  const [draft, setDraft] = useState('');
+  const [failed, setFailed] = useState('');
+  const [saved, setSaved] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function save(): Promise<void> {
+    setBusy(true);
+    setFailed('');
+    setSaved('');
+    try {
+      const kept = await api.saveMySkill(auth, draft);
+      setDraft('');
+      setSaved(`Kept ${kept.name}. It acts on your turns from the next one, and on nobody else's.`);
+      onSaved();
+    } catch (err) {
+      setFailed(err instanceof Error ? err.message : 'The skill was not kept.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-6 rounded-lg border border-line p-4">
+      <h3 className="font-medium">Write one yourself</h3>
+      <p className="mt-1 text-sm text-ink-muted">
+        Paste the whole <code>SKILL.md</code>, frontmatter included — its <code>name</code> is what
+        it is kept under, and saving a name you already keep replaces it.
+      </p>
+      <textarea
+        aria-label="Your skill, as a whole SKILL.md"
+        className="mt-2 h-40 w-full rounded border border-line bg-surface p-2 font-mono text-xs"
+        placeholder={'---\nname: my-workup\ndescription: how I work one up\n---\n\n…'}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+      />
+      {failed && <p className="mt-2 text-sm text-danger">{failed}</p>}
+      {saved && <p className="mt-2 text-sm text-success">{saved}</p>}
+      <Button
+        className="mt-2"
+        size="sm"
+        disabled={busy || !draft.trim()}
+        onClick={() => void save()}
+      >
+        {busy ? 'Keeping…' : 'Keep it'}
+      </Button>
+    </div>
   );
 }
 

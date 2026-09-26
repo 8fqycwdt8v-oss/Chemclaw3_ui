@@ -73,13 +73,16 @@ function Proposal({
       await api.decideProposal(auth, proposal.kind, proposal.name, proposal.content_hash, accepted);
       onDecided();
     } catch (err) {
-      // Named rather than swallowed, and the two that matter are distinguishable: a 409 means
-      // somebody already decided this exact document or a newer version replaced it, and a 503
-      // means the deployment cannot keep the skill this decision would write.
+      // Named rather than swallowed. A **409 carries four different reasons** — already decided, a
+      // newer version replaced it, a name a skill this deployment ships already uses, and the row
+      // cap on the personal tier — and only the service knows which, so its sentence is shown. A
+      // fixed "already decided" here told a chemist at the cap the wrong thing, and they never
+      // learned the remedy (remove one, then accept) while the proposal sat open in front of them.
+      // A 503 means the deployment cannot keep the skill this decision would write.
       setFailed(
         err instanceof ApiError
           ? err.status === 409
-            ? 'This one has already been decided, or a newer version replaced it. Reload to see what stands.'
+            ? err.message
             : err.status === 503
               ? 'This deployment cannot keep personal skills, so accepting would record a decision that changes nothing.'
               : err.message

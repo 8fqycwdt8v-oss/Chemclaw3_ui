@@ -403,6 +403,7 @@ describe('what is acting on a chemist', () => {
     expect(await screen.findByText('house-workup')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Retire/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /^Publish$/ })).toBeNull();
+    expect(screen.queryByLabelText(/Name of the retired skill/)).toBeNull();
   });
 
   it('says a deployment keeps no stored skills rather than showing an empty tier', async () => {
@@ -526,6 +527,97 @@ describe('a write refreshes what the page is showing about it', () => {
     fireEvent.click(button);
 
     await waitFor(() => expect(posts).toHaveLength(1));
+  });
+});
+
+describe('restoring a retired skill', () => {
+  /**
+   * A retire keeps every version and the revert route activates a held body whether or not the
+   * name is still published, so the service could always bring one back. The screen could not: a
+   * retired skill leaves the list, and the list was the only way into a history.
+   */
+  it('finds a retired skill by name and puts a held body back', async () => {
+    let published: string[] = [];
+    const posts: { url: string; body: unknown }[] = [];
+    serve(
+      {
+        '/skills/mine': () => json({ skills: [] }),
+        '/skills/org': () => json({ skills: published }),
+        '/skills/org/house-workup/versions': () =>
+          json({
+            versions: [
+              {
+                content_hash: 'hash-new',
+                body: NEWER,
+                activated_by: 'u-admin',
+                activated_at: '2026-09-20T09:00:00Z',
+              },
+              {
+                content_hash: 'hash-old',
+                body: OLDER,
+                activated_by: 'u-admin',
+                activated_at: '2026-09-19T09:00:00Z',
+              },
+            ],
+          }),
+        '/skills/org/house-workup/revert': () => {
+          published = ['house-workup'];
+          return json({ name: 'house-workup', body: NEWER });
+        },
+      },
+      (url, init) => {
+        if (init?.method === 'POST') posts.push({ url, body: JSON.parse(String(init.body)) });
+      },
+    );
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText(/Nothing published/i)).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/Name of the retired skill/), {
+      target: { value: 'house-workup' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Show what it held/ }));
+
+    // Both bodies, and neither badged as acting: a retired skill acts on nobody's turns, so the
+    // newest version is as restorable as the oldest.
+    expect(await screen.findByText(/Quench hot\./)).toBeTruthy();
+    expect(screen.getByText(/Quench cold\./)).toBeTruthy();
+    expect(screen.queryByText('Active')).toBeNull();
+    const buttons = screen.getAllByRole('button', { name: /Put this back/ });
+    expect(buttons).toHaveLength(2);
+
+    fireEvent.click(buttons[0]!);
+    fireEvent.click(await screen.findByRole('button', { name: /^Restore$/ }));
+
+    await waitFor(() => expect(posts).toHaveLength(1));
+    expect(posts[0]!.url).toContain('/skills/org/house-workup/revert');
+    expect(posts[0]!.body).toMatchObject({ content_hash: 'hash-new' });
+    // The list is re-read, so the restored skill is back where everybody can see it.
+    expect(await screen.findByText(/Restored house-workup/)).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'house-workup' })).toBeTruthy();
+  });
+
+  it('sends a still-published name back to its own row rather than calling it retired', async () => {
+    const { calls } = serve({
+      '/skills/mine': () => json({ skills: [] }),
+      '/skills/org': () => json({ skills: ['house-workup'] }),
+    });
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(await screen.findByLabelText(/Name of the retired skill/), {
+      target: { value: 'house-workup' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Show what it held/ }));
+
+    expect(await screen.findByText(/is still published/)).toBeTruthy();
+    expect(calls.some((call) => call.url.includes('/versions'))).toBe(false);
   });
 });
 

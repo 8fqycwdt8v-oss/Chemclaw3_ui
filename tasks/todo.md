@@ -630,3 +630,30 @@ runtime. No count of the suite is written here; the run prints one.
 
 **Run:** `npm ci` then `npm run ci` with `CHEMCLAW3_DIR` pointing at the sibling checkout. Not run:
 `npm run ci:container` and `npm run check:live`, for the reasons the sections above give.
+
+---
+
+## Three owner decisions: RDKit's eval confined to its worker, the too-complex retry copy, and Issue 12's reconcile
+
+- [x] **Measured before building: a network-served worker runs under its own response's CSP.**
+      Chromium 151: a same-origin worker whose response adds `'unsafe-eval'` evaluates `new
+Function` under a document CSP that forbids it; the same script under the document's policy
+      and a `blob:` worker both throw. RDKit needs `'unsafe-eval'`, not only
+      `'wasm-unsafe-eval'` — with the WASM token alone the worker drew nothing behind the BFF.
+- [x] **`RDKIT_WORKER_CSP` on the worker script only; the document has no `'unsafe-eval'`.**
+      `server/config.ts` + `server/app.ts`, keyed on the request path so a 304 carries it.
+      `tests/workerCsp.test.ts`; `e2e/rdkit.spec.ts` draws a structure behind the production BFF
+      and proves the page still refuses a string `setTimeout`. Issue 10 closed.
+- [x] **A spent escalation is `too-complex`, not "not a molecule".** Found by the browser test:
+      the worker's stack exhaustion escalated to a page that cannot load RDKit behind the BFF.
+      `rdkit.client.ts`; `tests/rdkitWorker.test.ts`.
+- [x] **The too-complex copy says a retry may differ; no retry button.**
+      `TOO_COMPLEX_EXPLANATION`; `tests/rdkitTooComplex.test.tsx`; and through real RDKit in
+      `e2e/rdkit-too-complex.spec.ts` (Chromium with a smaller V8 stack, so the refusal is
+      deterministic). Both _Known gaps_ rows closed.
+- [x] **Issue 12: a new leader reconciles against `GET /jobs/{id}`.** The registry reports every
+      terminal state; `src/state/jobReconcile.ts` publishes the endings of runs this account saw
+      launched and never saw end. `tests/jobReconcile.test.ts`, `tests/jobStreamElection.test.ts`.
+      The frame itself (payload, acknowledgement) is recorded in Issue 12 as a core ask.
+
+**Run:** `npm ci` then `npm run ci` on Node 25.8.2. See the PR for `ci:container`.

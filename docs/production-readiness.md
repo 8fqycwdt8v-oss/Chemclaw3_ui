@@ -295,32 +295,35 @@ A leader election plus an interest protocol is what keeps two windows from spend
   that _this_ tab 429'd twice and is deliberately irreversible, so relaying it pinned the whole
   account to one stream for the life of every page. The notice travels; the budget reads this tab's
   own flag (`tests/streamThrottleNotice.test.tsx`, `tests/jobStreamRateLimit.test.ts`).
-- **Accepted.** A job ending read off a stream and not yet relayed dies with the tab that read it.
-  The service's claim is destructive by design, so the row is gone from the mailbox before the
-  browser has it; every client-side arrangement loses the same frame, and the fix is an upstream
-  protocol change nobody has asked for. Bounded: the leader publishes synchronously inside the read
-  loop, so for a tab that is merely closed the window is microseconds. `ISSUES.md` Issue 12.
+- **Accepted, and recovered late.** A job ending read off a stream and not yet relayed dies with
+  the tab that read it: the service's claim is destructive by design, so the row is gone from the
+  mailbox before the browser has it. The window is accepted — the leader publishes synchronously
+  inside the read loop, so for a tab that is merely closed it is microseconds. What is recovered is
+  the _fact_ of the ending: on every takeover (and the first election at page load) the new leader
+  asks `GET /jobs/{id}` about each run this account saw launched and never saw end, within the job
+  feed's seven-day retention and at most ten, and publishes what the registry reports
+  (`src/state/jobReconcile.ts`; `tests/jobReconcile.test.ts`, and a leader dying mid-frame in
+  `tests/jobStreamElection.test.ts`). What is not recovered is the frame's own payload — the
+  registry answers with the run's `result`, not the push-back's summary object. `ISSUES.md`
+  Issue 12.
 
 ## 7. Chemistry on the client
 
 - **Measured.** Moving the toolkit to a worker took a 600-character draw from 587 ms of blocked
   main thread to 0 — measured by `scripts/measure-rdkit-placement.mjs`, **through the Vite dev
   server**, which serves `index.html` itself and sends none of the BFF's headers.
-- **Accepted, and it outranks the line above: CSP has never let RDKit load behind the BFF, so no
-  container-served deployment can observe that win.** `server/config.ts` sends `script-src 'self'
-'wasm-unsafe-eval'`; `@rdkit/rdkit`'s Embind builds its invokers with `Function(...)` on the
-  ordinary path, which needs `'unsafe-eval'`. Driven against the built bundle behind the real BFF:
-  `EvalError: Refused to evaluate a string as JavaScript`, `toolkitLoads → false`, `drawSvg →
-null` — and it predates the worker. A chemist sees every structure as text with "The structure
-  toolkit could not be loaded" beside it, which reads as a deployment quirk because the degradation
-  copy is correct. Two ways out, both posture rather than typo: `'unsafe-eval'` for the whole
-  document (the origin that holds the bearer token and injects SVG with
-  `dangerouslySetInnerHTML`), or serving the worker from a `blob:` so the relaxation is confined to
-  a thread with no DOM. **Who decides:** whoever owns this app's CSP. `ISSUES.md` Issue 10.
-  What is enforced meanwhile: the policy is pinned in both auth modes, including the absence of
-  `'unsafe-eval'` and `'unsafe-inline'` (`tests/csp.test.ts`); the fallback degrades to text and
-  says so (`tests/rdkitUnavailable.test.tsx`); and the worker is started and answers in a real
-  browser (`e2e/worker.spec.ts`).
+- **Closed 2026-09-26: the container draws structures, and the document still refuses `eval`.**
+  `@rdkit/rdkit`'s Embind builds its invokers with `Function(...)`, which needs `'unsafe-eval'`;
+  the document's `script-src 'self' 'wasm-unsafe-eval'` never grants it, so behind the BFF RDKit
+  used to load nowhere. Measured in Chromium before anything was built: a dedicated worker loaded
+  from a network URL runs under its own response's CSP, and a `blob:` worker inherits the
+  document's. So the BFF sends `RDKIT_WORKER_CSP` (`default-src 'none'; script-src 'self'
+'wasm-unsafe-eval' 'unsafe-eval'; connect-src 'self'; base-uri 'none'`) on the RDKit worker's
+  script only, keyed on its path so a 304 carries it too; with `'wasm-unsafe-eval'` alone the
+  worker drew nothing, with `'unsafe-eval'` it drew. Enforced by `tests/workerCsp.test.ts` (which
+  responses get which policy), `tests/csp.test.ts` (no `'unsafe-eval'` in the document), and
+  `e2e/rdkit.spec.ts` (a structure's `svg` behind the real BFF, the document's header without
+  `'unsafe-eval'`, and the page refusing a string `setTimeout`). `ISSUES.md` Issue 10.
 - **Enforced.** A dead or silent worker is not turned into "that is not a molecule": the client
   gives up on a worker that never replies and answers on the page, and a stack exhaustion is
   reported as a fact about a thread rather than as a chemical negative
@@ -407,9 +410,8 @@ Every one of these is argued above and recorded in `ISSUES.md` with an anchor:
 | Accepted                                                                                              | Where                     |
 | ----------------------------------------------------------------------------------------------------- | ------------------------- |
 | The access token is readable by any script on this origin; silent refresh runs on third-party cookies | `ISSUES.md` Issue 8       |
-| No container-served deployment can draw a structure, so the RDKit worker's win is unobservable there  | `ISSUES.md` Issue 10      |
 | `canonicalSmiles` answers `null` for some legal long chains, depending on the JS stack                | `ISSUES.md` Issue 11      |
-| A job ending read off a stream and not yet relayed dies with the tab                                  | `ISSUES.md` Issue 12      |
+| A job ending read off a stream and not yet relayed is recovered late, from the run registry           | `ISSUES.md` Issue 12      |
 | The old wire name `note_proposed` is still accepted, and must be, until the service ships the new one | `ISSUES.md` Issue 13      |
 | The contract check verifies nothing without a checkout, and compares no element type below a response | `ISSUES.md` Issue 14      |
 | `check:live` is operator-run: `smoke` and `check:openapi` are on no schedule                          | `ISSUES.md`, "Known gaps" |

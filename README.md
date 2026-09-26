@@ -145,6 +145,13 @@ Silent token refresh uses a hidden iframe to `login.microsoftonline.com`, so the
 conditionally on `AUTH_MODE` (`server/config.ts`). Copying the backend's `connect-src 'self'`
 verbatim breaks refresh about an hour after login — a failure that looks like a random logout.
 
+One response carries a different policy: the RDKit worker's script (`/assets/rdkit.worker-<hash>.js`)
+is sent with `RDKIT_WORKER_CSP`, the only place `'unsafe-eval'` appears, because RDKit's Embind glue
+needs `Function(...)` and a network-served worker runs under its own response's CSP rather than the
+document's. The document never gets it. A proxy or CDN in front of the BFF must pass that header
+through per path, not overwrite every response with one policy — or no structure is drawn
+(`ISSUES.md` Issue 10).
+
 ## Layout
 
 ```

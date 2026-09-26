@@ -105,9 +105,12 @@
  * with `restore_unconsumed` un-claiming only a row whose *yield* never completed — so a row already
  * written to the departing tab's socket is gone from the mailbox. A tab that dies between reading
  * that frame and `publish`ing it loses it for every window on the account, and no reconnect brings
- * it back. Nothing on this side can close that: the fix is an acknowledgement upstream, and
- * `ISSUES.md` Issue 12 records it. This paragraph read "a delay, not a loss" flatly, which made the
- * one case this file cannot cover the one case it claimed to.
+ * it back from the stream. What a new leader *can* do is ask the run registry, which knows how a
+ * run ended whether or not anyone was told: `src/state/jobReconcile.ts` does that on every takeover,
+ * so the loss is of the frame, not of the fact — a chemist is told late rather than never. Only an
+ * acknowledgement upstream would make the frame itself survive, and `ISSUES.md` Issue 12 records
+ * both halves. This paragraph read "a delay, not a loss" flatly, which made the one case this file
+ * could not cover the one case it claimed to.
  */
 
 import type { AwaitingAnswerEvent, JobTerminalEvent } from '../../shared/events.ts';

@@ -393,7 +393,58 @@ The half that stays a poll is deliberate and is not this issue: `GET /pending` i
 
 ---
 
-## Issue 10: the CSP forbids what RDKit needs, so no container has ever drawn a structure
+## Issue 10 (closed): the CSP forbids what RDKit needs, so no container has ever drawn a structure
+
+Closed 2026-09-26. **The second way out is taken — scoped to the worker — and the document's
+policy is unchanged: `'unsafe-eval'` appears in no header the page is served with.** The decision
+was the owner's; what follows is what was measured before it was built, because the paragraph
+below that proposed it was wrong about the mechanism.
+
+**Measured first, in Chromium 151 under Playwright**, with a document CSP of `script-src 'self'
+'wasm-unsafe-eval'` and a worker that tries `new Function` and `eval`:
+
+| Worker                                                               | Classic | Module  |
+| -------------------------------------------------------------------- | ------- | ------- |
+| same-origin URL, response has **no** CSP                             | allowed | allowed |
+| same-origin URL, response CSP `script-src 'self' 'wasm-unsafe-eval'` | refused | refused |
+| same-origin URL, response CSP adds `'unsafe-eval'`                   | allowed | allowed |
+| `blob:` built on the page                                            | refused | refused |
+
+So a dedicated worker served from a network URL runs under **its own response's** policy, and a
+`blob:` worker inherits the document's — the opposite of what the second bullet below said ("a
+dedicated worker's policy is the document's in Chromium … it means serving the worker from a
+`blob:`"). The `blob:` route would not have worked; the header route does, and it is smaller.
+
+**Then whether RDKit needs `'unsafe-eval'` at all, or only `'wasm-unsafe-eval'`**, against the
+built bundle behind the real BFF with the fixture service: worker policy `script-src 'self'
+'wasm-unsafe-eval'` → no `svg` drawn, "The structure toolkit could not be loaded" shown; the same
+plus `'unsafe-eval'` → three structures drawn, no error. Embind's `Function(...)` is on the
+ordinary path, as this entry said. CSP has no token narrower than `'unsafe-eval'`.
+
+**What shipped.** `RDKIT_WORKER_CSP` in `server/config.ts` — `default-src 'none'; script-src 'self'
+'wasm-unsafe-eval' 'unsafe-eval'; connect-src 'self'; base-uri 'none'` — sent by `server/app.ts` on
+`/assets/rdkit.worker-<hash>.js` and nothing else. Keyed on the request path rather than inside
+`sirv`'s per-file hook, because `sirv` answers a revalidation with a 304 before that hook runs and
+a 304's headers replace the cached ones: the worker would have come back from cache under the
+document's policy. A worker-shaped path is never answered with HTML (it has an extension, so the
+SPA fallback does not apply), so the relaxed policy cannot land on a document.
+
+**One consequence found on the way, and fixed in the same change.** The worker escalates a stack
+exhaustion to the page (`withMol`, Issue 11), and behind the BFF the page can no longer load RDKit
+— so the escalation answered `unreadable`, the worker said the toolkit was available, and the
+composer told a chemist a 600-carbon chain "could not be read as a molecule". Driven in the browser
+before it was fixed. `rdkit.client.ts` now answers `too-complex` for the two canonical reads when
+the worker ran out of stack and the page cannot load the toolkit, and still escalates where it can
+(the Vite dev server). Measured behind the BFF at the default stack, the worker named chains of
+300–580 characters on the first ask in fresh pages, so this is the edge, not the common case.
+
+**Held by:** `tests/workerCsp.test.ts` (which response gets which policy, the 304, the look-alikes,
+no HTML with the relaxed one); `tests/csp.test.ts` (the document's `script-src` still has no
+`'unsafe-eval'`); `tests/rdkitWorker.test.ts` (the spent escalation); and in a real browser behind
+the production BFF, `e2e/rdkit.spec.ts` — an `svg` inside a structure image, the document's header
+without `'unsafe-eval'`, the page refusing a string `setTimeout` before and after the worker ran,
+and the worker's script arriving with its own policy — plus `e2e/worker.spec.ts`, whose probe now
+answers `isMolecule('CCO') → true` where it answered `false`. The original entry is kept below.
 
 **Found by measurement, not by report** — W28.7 moved the toolkit to a worker, went to prove in a
 real browser that a structure was drawn there, and found none is drawn anywhere.
@@ -587,6 +638,45 @@ it claims to.
 ---
 
 ## Issue 12: a job ending read off a stream and not yet relayed dies with the tab that read it
+
+**Updated 2026-09-26: the window is accepted, and the ending is now recovered late from the run
+registry. What stays open is the frame itself, and that part is a core ask.**
+
+**The registry can tell completion — checked in the service, not assumed.** `GET /jobs/{id}` is
+`job_status` in `chemclaw/agent/durable_tools.py` (read at Chemclaw3 `03807b52`): Temporal while
+it remembers the run, `job_records` after (D-157), mapping every terminal state to `completed`,
+`failed`, `cancelled`, `terminated` or `timed_out`, and `running` otherwise. A failed run's cause
+comes back as `summary` on both paths — `failed_job_reason` live, `failure_reason` from the record,
+which the failure path has written since 2026-08-27. That is exactly the fact the lost frame
+carried.
+
+**What was built.** `src/state/jobReconcile.ts`: on every takeover — and the first election at page
+load, which covers the one-tab case of a window killed mid-frame and reopened — the new leader
+collects every run this account saw launched and never saw end (a `job_started` trace row, not
+settled, no ending in the trace, no card in the job feed), bounded to the feed's own seven-day
+retention and to the ten newest, asks `GET /jobs/{id}` for each, and publishes each ending through
+the same `tab.publish` a streamed frame takes. `pushJobFinished` is idempotent on `job_id`, so a
+run the stream also delivers — its row was never claimed, or is claimed a second later — costs
+nothing in either order. A run still `running`, a read that fails, or an id the service no longer
+knows is left alone. Driven through the real hook and election in `tests/jobStreamElection.test.ts`
+(a leader dies holding `job-lost`; the next one reads the registry, files the completion and relays
+it; a follower reads nothing; a takeover with nothing awaited reads nothing), and the bounds in
+`tests/jobReconcile.test.ts`.
+
+**What it cannot recover, and why the rest is a core ask.** The fact, not the frame. The registry
+answers with the run's decoded `result` and a one-line `summary`; the push-back payload
+(`connector_job.py` sends `{job_id, connector, job, summary}`) is not stored anywhere a client can
+read, so a reconciled card is built from `result` and can show different fields from the one the
+stream would have produced. Two things only the service can change: an acknowledgement before the
+claim (or `restore_unconsumed` keyed on delivery rather than on the yield completing), which would
+make the frame itself survive; or the push-back payload recorded on the run so `GET /jobs/{id}` can
+return it. Either is a protocol change in `Chemclaw3`, and nobody has asked for one yet — this is
+the ask. Two smaller limits on this side, stated: a run launched from a conversation this browser
+never loaded has no `job_started` row here and cannot be reconciled; and the fallback runs on
+takeover, not on a timer, so an ending lost while a leader stays alive (the wedged-thread case the
+election already accepts) waits for the next election or reload.
+
+The original entry follows.
 
 **Found by re-reading the docstring against the service, not by report.** `src/state/jobStreamLeader.ts`
 said, flatly, that "the gap during a takeover is a delay, not a loss … a row nobody has claimed is
@@ -1080,6 +1170,27 @@ over an empty body fails, which is the blank-render class this row named. The a1
 `/review` waits for the card before scanning, so axe now covers it, badge included, in both
 themes. The request path was already exercised (Issue 17); the rendering now is too.
 
+**Closed 2026-09-26: the too-complex copy says a retry may differ, and nothing offers one.** The
+owner's decision on the row that asked whether a retry control or a sentence was the honest answer:
+the sentence. `TOO_COMPLEX_EXPLANATION` now ends "…a limit of the JavaScript stack at the moment
+of the check rather than of the structure, so checking the same structure again may give a
+different answer." — the measurement is that it can, so a chemist is told so instead of meeting it
+— and neither surface has a retry button, because a second attempt that answers would read as a
+flaky app and an automatic one would hide the non-determinism the sentence names.
+`tests/rdkitTooComplex.test.tsx` holds the clause and the absence of a retry on both surfaces.
+
+**Closed 2026-09-26: a browser test covers the "too complex to name here" wording.** It could not
+while no container loaded RDKit (Issue 10, now closed). `e2e/rdkit-too-complex.spec.ts` pastes a
+600-carbon chain into the composer behind the real BFF, with the real toolkit in the real worker,
+and reads the whole shared sentence — including the retry clause — with no chemical verdict, no
+"toolkit could not be loaded" and no retry control. It runs Chromium with `--js-flags=--stack-size=400`,
+because the refusal is a property of the stack at the moment of the call: at the default stack,
+580- and 600-carbon chains refused once in eighteen asks; at 150, 250 and 400 every ask at 600
+refused, every ask at 450 and below named, and `CCO` still drew. Writing it found a defect the
+unit lane could not: behind the BFF the worker's escalation of a stack exhaustion reached a page
+that cannot load RDKit, and the composer said the chain "could not be read as a molecule". Fixed
+in `rdkit.client.ts` — see Issue 10.
+
 **Still not done:**
 
 - **One intermittent browser test, seen once and not reproduced.**
@@ -1092,34 +1203,6 @@ themes. The request path was already exercised (Issue 17); the rendering now is 
   machine, or the mobile sheet's open animation. **What would settle it:** the next occurrence, with
   the trace kept — `test-results/` holds an `error-context.md` per failure, and both runs above
   cleared it before anybody read it.
-
-- **Neither surface offers the retry the measurement says would work, and the copy used to imply
-  there was none.** Issue 11's own sweep (`scripts/measure-rdkit-rangeerror.mjs`) is that the
-  refusal is a property of the JavaScript stack _at the instant of the call_, not of the string:
-  the same chain at the same length refused through the seam and answered from a shallower stack in
-  the same page milliseconds later. Two consequences neither surface handles. A chemist who pastes
-  the same structure twice can get two different answers to one question, with nothing on screen
-  saying that is possible; and the obvious remedy — a "try again" control, or one automatic
-  re-ask from a shallower frame — exists at neither. Both surfaces used to end "it is a limit of
-  the browser this is running in", which reads as a stable verdict a chemist can act on and is the
-  opposite of what was measured; that clause is now "a limit of the JavaScript stack at the moment
-  of the check rather than of the structure", which is honest about the _fact_ and still silent
-  about the _remedy_. **Softened rather than left alone, and recorded rather than only softened**:
-  the wording was making a claim the measurement contradicts, which is a defect and not a gap,
-  while the missing retry is a change with a design question in it — a re-ask that answers is
-  indistinguishable to a chemist from a flaky app unless the copy explains why the second attempt
-  is trusted, and an automatic one hides the non-determinism instead of naming it. **What would
-  close it:** a retry affordance on both surfaces with copy that says what changed between the two
-  attempts, or a decision that the honest answer is the refusal and the sentence should say the
-  next attempt may differ. Anchors: `TOO_COMPLEX_EXPLANATION` in `src/components/StructureInput.tsx`,
-  `Refused` in `src/chem/rdkit.engine.ts`.
-
-- **No browser test covers the "too complex to name here" wording, and none can here.** Issue 11's
-  surfaces are held by `tests/rdkitTooComplex.test.tsx` against the behavioural stub, which is the
-  right level for the sentence; what is missing is the same string through a real RDKit in a real
-  browser. The e2e lane cannot be it — behind the BFF the toolkit does not instantiate at all
-  (Issue 10), so every structure surface there is already in its `unavailable` state. This row
-  closes with Issue 10, not before.
 
 - **Screenshot baselines.** The axe pass covers the mechanical half of the visual contract; nothing
   guards a layout regression that is still accessible.

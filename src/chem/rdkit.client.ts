@@ -152,7 +152,11 @@ export async function call<K extends Op>(op: K, ...args: Args<K>): Promise<Retur
     // `null` is "this placement did not answer", never "the answer is nothing" — an operation that
     // really answers `null` comes back as `{ value: null }`. Conflating the two is how a dead
     // worker would become "that is not a molecule".
-    if (answer) return answer.value as Returns<K>;
+    if (answer && 'value' in answer) return answer.value as Returns<K>;
+    if (answer && isStackExhaustion(answer.thrown)) {
+      const spent = await escalationWithNowhereToGo(op);
+      if (spent) return spent.value as Returns<K>;
+    }
   }
   return (await (operations[op] as (...a: readonly unknown[]) => Promise<unknown>)(
     ...args,
@@ -160,18 +164,54 @@ export async function call<K extends Op>(op: K, ...args: Args<K>): Promise<Retur
 }
 
 /**
- * One call across the boundary, bounded, and `null` if this placement did not produce an answer.
+ * What a canonical read is when the worker ran out of stack and the page cannot take the call.
  *
- * Three ways it does not, raced against each other: the call rejects (the engine threw in there, or
- * Comlink could not post the arguments), the reply budget expires, or the worker is retired under
- * it by the `error` listener. All three mean the same thing to the caller and none of them is
- * allowed to reach one.
+ * The worker rethrows a `RangeError` from RDKit's canonical ranking so that this file re-runs the
+ * call on the page, which has the bigger stack (`withMol` in `rdkit.engine.ts`). That escalation
+ * assumes the page can load RDKit, and **under the production CSP it cannot**: `'unsafe-eval'` is
+ * granted to the worker's own script and never to the document (`RDKIT_WORKER_CSP`,
+ * `server/config.ts`), so the page's copy of the engine fails to load and answers `unreadable`.
+ * The surfaces then ask `rdkitAvailable()` — which the *worker* answers `true` — and tell the
+ * chemist "RDKit could not read this as a molecule" about a chain it had just read. Driven behind
+ * the real BFF (`e2e/rdkit-too-complex.spec.ts`): that is exactly what the composer said.
+ *
+ * So when the page cannot load the toolkit, the escalation is spent and the honest answer is the
+ * one the page would have given had it the stack to try: `too-complex`. Only the two canonical
+ * reads carry that value; every other operation's negative is already the one a stack refusal
+ * produces in-process, so they fall through to the page as before.
+ */
+const STACK_REFUSAL: { [K in Op]?: Returns<K> } = {
+  readCanonicalSmiles: { status: 'too-complex' },
+  readCanonicalSmilesFromMolblock: { status: 'too-complex' },
+};
+
+/** A rejection that is the worker's escalation of a stack exhaustion. Comlink rebuilds a thrown
+ *  error as a plain `Error` carrying the original `name`, so the name is what survives the hop. */
+const isStackExhaustion = (thrown: unknown): boolean =>
+  (thrown as { name?: unknown } | null)?.name === 'RangeError';
+
+async function escalationWithNowhereToGo(op: Op): Promise<{ value: unknown } | null> {
+  if (!(op in STACK_REFUSAL)) return null;
+  // The page can take it — a deployment without the CSP split, or the Vite dev server — so it
+  // should, and its answer is the better one.
+  if (await operations.toolkitLoads()) return null;
+  return { value: STACK_REFUSAL[op] };
+}
+
+/**
+ * One call across the boundary, bounded: its answer, what it threw, or `null` if it went silent.
+ *
+ * Three ways it does not answer, raced against each other: the call rejects (the engine threw in
+ * there, or Comlink could not post the arguments), the reply budget expires, or the worker is
+ * retired under it by the `error` listener. All three mean "no answer" to the caller and none of
+ * them is allowed to reach one; a rejection carries its reason only so `call` can tell a stack
+ * exhaustion from the rest.
  */
 async function onWorker(
   active: RemoteOperations,
   op: Op,
   args: readonly unknown[],
-): Promise<{ value: unknown } | null> {
+): Promise<{ value: unknown } | { thrown: unknown } | null> {
   let abandon = (): void => undefined;
   const abandoned = new Promise<null>((resolve) => {
     abandon = () => resolve(null);
@@ -185,7 +225,9 @@ async function onWorker(
     return await Promise.race([
       run(...args).then(
         (value) => ({ value }),
-        () => null,
+        // Kept rather than dropped, for one reader: a stack exhaustion the page may be unable to
+        // take (`escalationWithNowhereToGo`). Every other rejection is still "no answer".
+        (thrown: unknown) => ({ thrown }),
       ),
       abandoned,
     ]);

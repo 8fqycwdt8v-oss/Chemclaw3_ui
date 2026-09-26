@@ -179,6 +179,34 @@ describe('the two surfaces', () => {
   });
 });
 
+describe('a second check may differ, and nothing offers one', () => {
+  /** Anything a chemist could press to re-ask. The decision is that there is none. */
+  const RETRY = /try again|retry|check again|re-?check/i;
+
+  it('says so in the one sentence both surfaces share', () => {
+    // The owner's decision on the _Known gaps_ row: no retry control, and copy that says plainly
+    // that the next attempt may give a different answer — because the measurement is that it can.
+    expect(TOO_COMPLEX_EXPLANATION).toMatch(
+      /checking the same structure again may give a different answer\.$/,
+    );
+  });
+
+  it('offers no retry in the structure panel', async () => {
+    render(<StructureInput onAccept={vi.fn()} onClose={vi.fn()} />);
+    fireEvent.change(field(), { target: { value: LONG } });
+    expect(await screen.findByText(RENDERER_LIMIT, { exact: false })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: RETRY })).toBeNull();
+  });
+
+  it('offers no retry in the composer', async () => {
+    render(<Composer conversationId="c-too-complex-retry" />);
+    pasteInto(screen.getByLabelText('Message') as HTMLTextAreaElement, LONG, 0);
+    const strip = await screen.findByRole('alert');
+    expect(strip.textContent).toContain(RENDERER_LIMIT);
+    expect(screen.queryByRole('button', { name: RETRY })).toBeNull();
+  });
+});
+
 describe('the composer', () => {
   it('says the same thing about a paste, in the same words', async () => {
     render(<Composer conversationId="c-too-complex" />);

@@ -23,7 +23,7 @@
 import http from 'node:http';
 import { existsSync } from 'node:fs';
 import sirv from 'sirv';
-import { cfg } from './config.ts';
+import { cfg, isRdkitWorkerScript, RDKIT_WORKER_CSP } from './config.ts';
 import { resolveRoute } from './routes.ts';
 import { proxy } from './proxy.ts';
 import { serveConfigJs } from './runtimeConfig.ts';
@@ -44,8 +44,15 @@ import type { RequestTrace } from './proxy.ts';
  * proxied backend response is a same-origin document — an HTML-typed body on `/api/notes/<id>`
  * was measured executing script on the origin that holds the bearer token.
  */
-export function setSecurityHeaders(res: http.ServerResponse): void {
-  res.setHeader('content-security-policy', cfg.csp);
+export function setSecurityHeaders(res: http.ServerResponse, path = ''): void {
+  // One path gets a different policy: the RDKit worker's own script, which a dedicated worker
+  // takes as its policy instead of the document's — `RDKIT_WORKER_CSP` has the measurement. Keyed
+  // on the request path, not inside `sirv`'s `setHeaders`, because `sirv` answers a revalidation
+  // with a 304 *before* calling that hook, and a 304's headers replace the cached ones: the worker
+  // would come back from cache under the document's policy and stop drawing. A path of this shape
+  // is never answered with HTML — it carries an extension, so `sirv` never falls back to
+  // `index.html` for it; a missing one is a `text/plain` 404.
+  res.setHeader('content-security-policy', isRdkitWorkerScript(path) ? RDKIT_WORKER_CSP : cfg.csp);
   res.setHeader('x-content-type-options', 'nosniff');
   res.setHeader('referrer-policy', 'same-origin');
   // Both anti-framing controls move together, and on their own switch: tying them to
@@ -270,10 +277,9 @@ export function createRequestListener(): http.RequestListener {
   const assets = createAssetHandler();
 
   return (req, res) => {
-    setSecurityHeaders(res);
-
     const rawUrl = req.url ?? '/';
     const path = rawUrl.split('?', 1)[0] ?? '/';
+    setSecurityHeaders(res, path);
     const method = req.method ?? 'GET';
 
     // One trace per request, narrowed as dispatch proceeds and read by `observe` when the response

@@ -94,19 +94,16 @@ function buildCsp(mode: AuthMode, allowFraming: boolean): string {
     // compilation and nothing else — it does NOT re-open `eval` or inline script, which is
     // exactly why the narrow token exists.
     //
-    // **It is not sufficient for RDKit, and this comment used to say it was.** Driven against the
-    // built bundle behind this BFF (W28.7): `@rdkit/rdkit`'s Embind glue builds its invokers with
-    // `Function(...)` on the ordinary path, not on a fallback, and this directive refuses it —
-    // `EvalError: Refused to evaluate a string as JavaScript`. So the toolkit has never loaded in
-    // any container-served deployment, on the page or in `src/chem/rdkit.worker.ts`, and every
-    // structure renders as "The structure toolkit could not be loaded". `ISSUES.md` Issue 10
-    // carries the evidence and the two ways out; neither is taken here, because both are a
-    // posture decision rather than a typo.
+    // **It is not sufficient for RDKit, and the page does not get what is.** `@rdkit/rdkit`'s
+    // Embind glue builds its invokers with `Function(...)` on the ordinary path, so the toolkit
+    // needs `'unsafe-eval'` — and that token is never in THIS policy, the document's. It is in
+    // `RDKIT_WORKER_CSP` below, sent only on the RDKit worker's own script response, which a
+    // network-served dedicated worker takes as its policy instead of the document's (measured,
+    // `ISSUES.md` Issue 10). The relaxation lives on a thread with no DOM and no markup path.
     //
-    // The other half of the old sentence stands and is the reason this was invisible: verify
-    // against the BFF, not against Vite. The dev server serves index.html itself and never sends
-    // this header, so a missing directive here fails ONLY in the container — check
-    // `http://localhost:3000`, not `:5173`. Nothing did.
+    // Verify against the BFF, not against Vite: the dev server serves index.html itself and never
+    // sends this header, so a missing directive here fails ONLY in the container. That is how
+    // Issue 10 stayed invisible; `e2e/rdkit.spec.ts` now draws a structure behind the real BFF.
     'script-src': ["'self'", "'wasm-unsafe-eval'"],
     // Ketcher runs Indigo in a Web Worker created from a same-origin module URL. Without this the
     // sketcher dialog mounts and then dies on the first chemistry operation — and `worker-src`
@@ -140,6 +137,47 @@ function buildCsp(mode: AuthMode, allowFraming: boolean): string {
   return Object.entries(directives)
     .map(([key, values]) => `${key} ${values.join(' ')}`)
     .join('; ');
+}
+
+/**
+ * The RDKit worker's own policy — the one place `'unsafe-eval'` is permitted, and only there.
+ *
+ * **Why a header on one script changes anything.** A dedicated worker loaded from a network URL
+ * runs under the CSP of *its own response*, not the document's; a `blob:` or `data:` worker
+ * inherits the document's. Measured in Chromium 151 (`ISSUES.md` Issue 10): under a document CSP
+ * without `'unsafe-eval'`, a same-origin worker whose response carries `script-src 'self'
+ * 'wasm-unsafe-eval' 'unsafe-eval'` evaluates `new Function`, the identical script served with
+ * the document's policy throws `EvalError`, and so does a `blob:` worker. `ISSUES.md` used to say
+ * the opposite of the network case; it was not measured then.
+ *
+ * **Why `'unsafe-eval'` and not only `'wasm-unsafe-eval'`.** Measured against the built worker
+ * behind this BFF: with the WASM token alone the worker's load throws `EvalError` in Embind's
+ * `craftInvokerFunction` and nothing is drawn; with `'unsafe-eval'` added it draws. Nothing
+ * narrower exists — CSP has no token for "`Function` but not `eval`".
+ *
+ * Everything else is closed: no `default-src` fallback to anything, `connect-src 'self'` for the
+ * `.wasm` fetch, and `script-src 'self'` so the worker can import its sibling chunks and nothing
+ * from anywhere else. A worker has no DOM, so there is no markup for an injected string to become
+ * and no token in scope — the page holds the bearer token and the page's policy is unchanged.
+ */
+export const RDKIT_WORKER_CSP = [
+  "default-src 'none'",
+  "script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'",
+  "connect-src 'self'",
+  "base-uri 'none'",
+].join('; ');
+
+/**
+ * The emitted RDKit worker chunk, by shape — the only response `RDKIT_WORKER_CSP` is sent on.
+ *
+ * Vite writes it as `assets/rdkit.worker-<hash>.js` (the name `scripts/check-bundle.mjs` and
+ * `e2e/worker.spec.ts` already hold it to). Anchored at both ends and to `/assets/`, so no other
+ * path — a deep link, a query-carrying variant of the shell, another chunk — can pick up the
+ * relaxed policy. As a subresource `<script>` the header would be ignored anyway; as a navigated
+ * document it is served `text/javascript` with `nosniff`, which renders as text and runs nothing.
+ */
+export function isRdkitWorkerScript(pathname: string): boolean {
+  return /^\/assets\/rdkit\.worker-[A-Za-z0-9_-]{8,}\.js$/.test(pathname);
 }
 
 export interface BffConfig {

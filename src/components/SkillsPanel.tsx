@@ -437,6 +437,7 @@ function OrgSkills(): React.JSX.Element {
             refuses and nothing changes.
           </p>
           <textarea
+            aria-label="Organisation skill to publish, as a whole SKILL.md"
             className="mt-2 h-40 w-full rounded border border-line bg-surface p-2 font-mono text-xs"
             placeholder={'---\nname: house-workup\ndescription: how we work one up here\n---\n\n…'}
             value={draft}

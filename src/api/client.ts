@@ -556,7 +556,7 @@ export interface PlanStatus {
    * "unknown" rather than as "this authorizes nothing". The `plan` event carries it too; this read
    * is the fallback for a service that sends none there, and for the re-read after a 409.
    */
-  scope: string[];
+  scope?: string[];
   /** `plan_only` until a human approves; `execute` afterwards. */
   mode: string;
   approved: boolean;
@@ -573,7 +573,7 @@ export interface PendingPlan {
   /** What approving it would authorize — see `PlanStatus.scope`. The inbox carries it for the same
    *  reason the card does, and here it arrives in the same payload as the steps, so there is no
    *  revision to check it against. */
-  scope: string[];
+  scope?: string[];
 }
 
 /**

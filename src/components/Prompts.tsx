@@ -259,6 +259,18 @@ function PlanApprovalPrompt({
     [],
   );
 
+  /**
+   * Which plan read is the latest one started, so an older read resolving late cannot overwrite a
+   * newer one.
+   *
+   * The mount read and the 409 re-read in `decide` race: `live` below flips only on cleanup, and a
+   * 409 changes none of the effect's dependencies, so a mount read of revision H1 resolving after
+   * the re-read of H2 used to stamp the scope with H1 — the card then showed H2's steps with live
+   * buttons and no line naming what approving them authorizes. Each read takes a ticket and writes
+   * only while its ticket is still the newest.
+   */
+  const readSeq = useRef(0);
+
   useEffect(() => {
     if (!sessionId) return;
     // The stream carries the steps, the hash **and** the scope, so on a current service this read
@@ -271,10 +283,12 @@ function PlanApprovalPrompt({
     // enough to send no `scope`, and the 409 re-read further down.
     if (streamed && planScope != null) return;
     let live = true;
+    const seq = ++readSeq.current;
+    const current = (): boolean => live && seq === readSeq.current;
     void (async () => {
       try {
         const status = await api.getPlan(sessionId, currentAuth);
-        if (!live) return;
+        if (!current()) return;
         // Stamped with the revision it describes, and rendered only under that revision: a scope
         // read off a revision made since would name tools this approval does not authorize, which
         // is the disclosure defect inverted. An older service sends no scope at all, and
@@ -290,7 +304,7 @@ function PlanApprovalPrompt({
         // leaves the chemist with a card they can still act on rather than one that cannot be
         // answered at all. With the plan already streamed there is nothing to fall back to: the
         // card stands, minus the scope it could not read.
-        if (live && !streamed) setState('unavailable');
+        if (current() && !streamed) setState('unavailable');
       }
     })();
     return () => {
@@ -316,15 +330,17 @@ function PlanApprovalPrompt({
     // The plan moved between being shown and being answered. Re-read it, so the buttons bind to
     // what is actually being proposed — and never retry the decision with the new hash, which
     // would approve a plan nobody read.
+    const seq = ++readSeq.current;
     try {
       const status = await api.getPlan(sessionId, currentAuth);
+      if (seq !== readSeq.current) return;
       setFetchedPlan({ hash: status.plan_hash, todos: status.plan });
       // The scope moves with the steps, or the line naming what an approval authorizes would
       // still describe the revision the buttons no longer bind to.
       setFetchedScope({ hash: status.plan_hash, scope: status.scope ?? null });
       setState('idle');
     } catch {
-      setState('failed');
+      if (seq === readSeq.current) setState('failed');
     }
   };
 

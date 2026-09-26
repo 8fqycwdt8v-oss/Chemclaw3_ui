@@ -138,8 +138,9 @@ const VERIFIER_LABEL: Record<'judge' | 'citation-gate', string> = {
 /**
  * What each answer check looked at, in a chemist's words rather than the gate's own name.
  *
- * One row per member of `AnswerCheck`, so a third check upstream is named here once. An unknown one
- * falls through to its wire name, which is still more honest than dropping it.
+ * One row per member of `AnswerCheck`. An unknown check never reaches this table: `checks_run` is
+ * parsed with `listOf(ANSWER_CHECKS)` (`shared/events.ts`), which drops it, so a third check
+ * upstream has to be added to `ANSWER_CHECKS` and named here before it is shown at all.
  */
 const CHECK_LABEL: Record<AnswerCheck, string> = {
   verifier: 'citations',
@@ -262,7 +263,7 @@ export function StatusStrip({ message }: { message: AssistantMessage }): React.J
           {checksRun.length > 0 && (
             <Chip
               tone="ok"
-              label={`checked · ${checksRun.map((check) => CHECK_LABEL[check] ?? check).join(' · ')}`}
+              label={`checked · ${checksRun.map((check) => CHECK_LABEL[check]).join(' · ')}`}
               detail="A check that ran and found nothing is not the same as no check having run. An answer with nothing named here was not verified."
             />
           )}

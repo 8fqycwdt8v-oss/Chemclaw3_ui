@@ -186,6 +186,15 @@ describe('the check-in store', () => {
     expect(persisted).not.toHaveProperty('checkInClaim');
   });
 
+  it('a reset keeps the outcome of the claim this page already made', () => {
+    // The claim runs once per page, so a reset to `pending` could never be moved off again: the
+    // section read "Reading what you are waiting on…" until a full reload.
+    useChatStore.getState().addCheckIns([row()]);
+    useChatStore.getState().clearAll();
+    expect(useChatStore.getState().checkIns).toEqual([]);
+    expect(useChatStore.getState().checkInClaim).toBe('ready');
+  });
+
   it('does not drop a card for being unread', () => {
     // Aged out on the same clock as the digest feed, never on having been seen: an unread check-in
     // is exactly the one whose loss the sweep exists to prevent.
@@ -461,13 +470,80 @@ describe('what a check-in does on the way to disk', () => {
     // rehydrated on the next load, dropped, and written again, for ever. A stale digest is a stale
     // finding; a stale check-in says a deadline that is a week wrong.
     const { store, useChatStore, flushChatPersistence } = await freshStore();
-    onDisk(store, [stored({ requestId: 'old', receivedAt: Date.now() - WEEK - 1_000 })]);
+    const stale = Date.now() - WEEK - 1_000;
+    onDisk(store, [stored({ requestId: 'old', receivedAt: stale, refreshedAt: stale })]);
 
     const id = useChatStore.getState().createConversation();
     useChatStore.getState().appendUserMessage(id, 'q');
     flushChatPersistence();
 
     expect(store.get(KEY) ?? '').not.toContain('"requestId":"old"');
+  });
+
+  it('keeps a question first claimed over a week ago that is still being refreshed', async () => {
+    // A refresh keeps `receivedAt` (it orders the list) and moves only `refreshedAt`, so ageing on
+    // the first arrival dropped a question the sweep re-sends every night a week after it opened —
+    // and the claim that refreshed it had already been consumed, so the card was gone for good.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const now = Date.now();
+    const firstArrived = now - WEEK - 86_400_000;
+    onDisk(store, [
+      stored({ requestId: 'theirs', subject: 'Still open elsewhere', receivedAt: firstArrived }),
+    ]);
+    useChatStore.setState({
+      checkIns: [
+        {
+          ...stored({ subject: 'Still open here', receivedAt: firstArrived, refreshedAt: now }),
+          kind: 'measurement',
+          sessionId: 'conv-7',
+          truncated: false,
+        },
+      ],
+    });
+    flushChatPersistence();
+
+    const written = store.get(KEY) ?? '';
+    expect(written).toContain('Still open here');
+    expect(written).toContain('Still open elsewhere');
+  });
+
+  it('keeps a fresh card persisted before `refreshedAt` existed', async () => {
+    // Nothing migrates the field onto an older row, and `undefined > cutoff` is false — so without
+    // the fallback to `receivedAt` every such card would be dropped on the first flush.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const { refreshedAt: _absent, ...legacy } = stored({ subject: 'Stored before the field' });
+    onDisk(store, [{ ...legacy, requestId: 'legacy' }]);
+
+    const id = useChatStore.getState().createConversation();
+    useChatStore.getState().appendUserMessage(id, 'q');
+    flushChatPersistence();
+
+    expect(store.get(KEY) ?? '').toContain('Stored before the field');
+  });
+
+  it('keeps what the other tab claimed when this one is at the cap', async () => {
+    // The fold appended the other tab's rows and then sliced to the cap, so at the cap it cut
+    // exactly the rows the service had just consumed and kept this tab's oldest.
+    const { store, useChatStore, flushChatPersistence } = await freshStore();
+    const now = Date.now();
+    onDisk(store, [stored({ requestId: 'theirs', subject: 'Claimed in the other window' })]);
+    useChatStore.setState({
+      checkIns: Array.from({ length: 200 }, (_, i) => ({
+        ...stored({ requestId: `mine-${i}`, receivedAt: now - i, refreshedAt: now - i }),
+        kind: 'measurement',
+        sessionId: '',
+        truncated: false,
+      })),
+    });
+    flushChatPersistence();
+
+    const written = JSON.parse(store.get(KEY) ?? '{}') as {
+      state: { checkIns: { requestId: string }[] };
+    };
+    const ids = written.state.checkIns.map((c) => c.requestId);
+    expect(ids).toHaveLength(200);
+    expect(ids).toContain('theirs');
+    expect(ids).not.toContain('mine-199');
   });
 
   it('carries a card the other tab claimed and this one has never seen', async () => {

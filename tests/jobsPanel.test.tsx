@@ -187,6 +187,35 @@ describe('JobsPanel', () => {
     expect(screen.queryByText('Reading the registry…')).toBeNull();
   });
 
+  it('retries a failed first read from the alert, since nothing else would', async () => {
+    // The client never retries on its own and resubmitting the same search leaves the query key
+    // unchanged, so the alert's "try again" needs a control that actually asks again.
+    restore?.();
+    let calls = 0;
+    const stub = stubFetch(() => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({ detail: 'bad gateway' }), {
+          status: 502,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify([RECORD]), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    restore = stub.restore;
+    mountJobs();
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(/Could not search the registry/);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+    expect(await screen.findByText('compare_solvents')).toBeTruthy();
+    expect(calls).toBe(2);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('says an older page failed beside the control that fetches it', async () => {
     restore?.();
     let calls = 0;

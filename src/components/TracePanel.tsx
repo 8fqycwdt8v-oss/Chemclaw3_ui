@@ -570,11 +570,6 @@ function Row({
         </Step>
       );
 
-    // The wire name is `note_proposed` and the event is not a proposal: nothing reviews a note
-    // since Chemclaw3's `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`. It is readable by
-    // everyone the moment it is written, so telling a chemist it is "for review" promises them a
-    // reviewer who does not exist. The literal stays because it is the SSE contract; the label a
-    // person reads is the half that was making the false claim.
     case 'handoff':
       // The boundary rather than the speaker. What a reader needs from this row is that the prose
       // after it comes from an agent with a different surface and a different brief; `reason` is
@@ -596,6 +591,12 @@ function Row({
           />
         </Step>
       );
+
+    // The wire name is `note_proposed` and the event is not a proposal: nothing reviews a note
+    // since Chemclaw3's `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`. It is readable by
+    // everyone the moment it is written, so telling a chemist it is "for review" promises them a
+    // reviewer who does not exist. The literal stays because it is the SSE contract; the label a
+    // person reads is the half that was making the false claim.
     case 'note_proposed':
       return (
         <Step tone="idle">

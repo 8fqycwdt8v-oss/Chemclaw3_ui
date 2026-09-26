@@ -37,6 +37,7 @@
 import { useEffect, useState } from 'react';
 import { Clock, Inbox, ListChecks } from 'lucide-react';
 import { Link } from 'react-router';
+import { keepPreviousData } from '@tanstack/react-query';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { keys, useApiQuery } from '../api/queryClient.ts';
 import { pendingPlansQuery } from '../api/queries.ts';
@@ -189,7 +190,7 @@ function PlanInbox(): React.JSX.Element {
                 because a chemist triaging an inbox is choosing which one to open, and "this one
                 writes to the graph" is the fact that decides it. Absent from an older service,
                 which reads as unknown and prints nothing. */}
-            {pending.scope?.length > 0 && (
+            {pending.scope && pending.scope.length > 0 && (
               <p className="mt-2 text-xs text-ink-muted">
                 Approving authorises <span className="font-mono">{pending.scope.join(' · ')}</span>.
               </p>
@@ -353,14 +354,16 @@ function PendingInbox(): React.JSX.Element {
   // `nonce` and `pushes` are in the *key* rather than in a dependency array, which is the same
   // mechanism said better: a frame off the push-back stream moves `pushes`, and that is the whole
   // reason an inbox left open on screen notices a new question without polling for one.
-  const {
-    data: view = null,
-    isError: failed,
-    isPending,
-  } = useApiQuery({
+  //
+  // **The previous answer stays on screen while the new key loads.** Every push and every submit
+  // is a new key, and a new key starts with no data — so without `keepPreviousData` the whole
+  // inbox was swapped for a spinner, and the answer box a chemist was typing in unmounted and lost
+  // focus the moment another question arrived.
+  const { data: view = null, isError: failed } = useApiQuery({
     queryKey: keys.pendingRequests(nonce, pushes),
     queryFn: () => api.listPendingRequests(auth),
     enabled: ready,
+    placeholderData: keepPreviousData,
   });
 
   // The reconciliation, which is a *use* of the answer rather than part of fetching it, so it
@@ -412,7 +415,7 @@ function PendingInbox(): React.JSX.Element {
       </p>
     );
   }
-  if (!view || isPending) return <Loading>Reading what is waiting…</Loading>;
+  if (!view) return <Loading>Reading what is waiting…</Loading>;
 
   const waiting = view.requests.filter((r) => r.state === 'waiting');
   if (waiting.length === 0) {

@@ -529,6 +529,27 @@ describe('a write refreshes what the page is showing about it', () => {
   });
 });
 
+describe('the reviewer-only publish box', () => {
+  it('has an accessible name, as the write-your-own box beside it does', async () => {
+    // A placeholder is not a name, and the e2e axe scan never renders this block: dev auth there
+    // carries no reviewer role. So the name is held here, where the reviewer branch does render.
+    serve({
+      '/skills/mine': () => json({ skills: [] }),
+      '/skills/org': () => json({ skills: [] }),
+    });
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+    expect(
+      await screen.findByRole('textbox', {
+        name: 'Organisation skill to publish, as a whole SKILL.md',
+      }),
+    ).toBeTruthy();
+  });
+});
+
 describe('a proposal that is a record rather than a skill', () => {
   it('does not tell a chemist a profile will act on their turns', async () => {
     serve({

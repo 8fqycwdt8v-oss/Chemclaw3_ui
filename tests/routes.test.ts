@@ -307,6 +307,22 @@ describe('proxy route whitelist', () => {
       expect(resolveRoute('GET', `/api/skills/mine/${encoded}`)).not.toBeNull();
     });
 
+    it('refuses a current-directory segment, which a normalising hop would collapse', () => {
+      // `/skills/org/./revert` normalises to `/skills/org/revert`, and `DELETE /skills/mine/.` to
+      // `DELETE /skills/mine/` — routes other than the one matched. This proxy forwards verbatim,
+      // so the next hop is the one that would collapse it.
+      for (const bad of ['.', '%2e', '%2E']) {
+        for (const [method, prefix, suffix] of SKILL_ROUTES) {
+          expect(
+            resolveRoute(method, `/api${prefix}${bad}${suffix}`),
+            `${method} ${bad}`,
+          ).toBeNull();
+        }
+      }
+      // A dot inside a name is still a name.
+      expect(resolveRoute('GET', '/api/skills/mine/a.b')).not.toBeNull();
+    });
+
     it('refuses an encoded separator, a parent reference, a raw slash and a malformed escape', () => {
       for (const bad of ['..', '..%2F', '..%2F..%2Fmetrics', '%2e%2e', 'a%5Cb', 'a/b', 'x%zz']) {
         for (const [method, prefix, suffix] of SKILL_ROUTES) {

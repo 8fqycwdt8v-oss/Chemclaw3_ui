@@ -127,6 +127,46 @@ describe('plan approval', () => {
     expect(screen.queryByText(/compute_pka/)).toBeNull();
   });
 
+  it('keeps the re-read scope when the mount read resolves after it', async () => {
+    // The mount read and the 409 re-read race, and nothing about a 409 changes the effect's
+    // dependencies — so a mount read of H1 landing after the re-read of H2 used to stamp the scope
+    // with H1. The card then showed H2's steps and live buttons with no line naming what
+    // approving them authorises, on exactly the revision that added a write tool.
+    let resolveMount: (status: PlanStatus) => void = () => undefined;
+    vi.spyOn(api, 'getPlan')
+      .mockImplementationOnce(
+        () =>
+          new Promise<PlanStatus>((resolve) => {
+            resolveMount = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(
+        planStatus('h2', ['Search conformers of the aryl bromide'], ['record_failure']),
+      );
+    vi.spyOn(api, 'decidePlan').mockRejectedValue(
+      new ApiError('plan_changed', 'the plan changed since it was shown', 409),
+    );
+    render(
+      <ApprovalPrompt
+        prompt="Approve this plan?"
+        sessionId={SID}
+        planTodos={['Run xTB on the aryl bromide']}
+        planHash="h1"
+        planScope={null}
+      />,
+    );
+
+    await decideVia(/approve plan/i);
+    expect(await screen.findByText(/record_failure/)).toBeTruthy();
+
+    resolveMount(planStatus('h1', ['Run xTB on the aryl bromide'], ['compute_pka']));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(screen.getByText('Search conformers of the aryl bromide')).toBeTruthy();
+    expect(screen.getByText(/record_failure/)).toBeTruthy();
+    expect(screen.queryByText(/compute_pka/)).toBeNull();
+  });
+
   it('falls back to the composer when the service has no plan route', async () => {
     // Better than a card whose only buttons do nothing — and the wording says which it is.
     vi.spyOn(api, 'getPlan').mockRejectedValue(new ApiError('session_not_found', 'nope', 404));

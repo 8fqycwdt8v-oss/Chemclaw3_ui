@@ -253,11 +253,18 @@ export function JobsPanel(): React.JSX.Element {
   // The search text is the key, which is what the `loaded.query === submitted` derivation this
   // replaces was for: a stale list is never shown under a new search, and there is no second
   // render clearing the old one on the way in.
-  const { data, isError, isFetchNextPageError, fetchNextPage, hasNextPage, isFetchingNextPage } =
-    useApiInfiniteQuery({
-      ...jobsQuery(submitted, auth),
-      enabled: ready,
-    });
+  const {
+    data,
+    isError,
+    isFetchNextPageError,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+    refetch,
+  } = useApiInfiniteQuery({
+    ...jobsQuery(submitted, auth),
+    enabled: ready,
+  });
   // **Three states, never two.** `null` is "still reading", `[]` is "nothing matched", and a failed
   // first read is neither. It used to render as the empty list, on the argument that a search over
   // an archive finding nothing misleads nobody — but `pageJobs` already folds the one benign case
@@ -301,10 +308,19 @@ export function JobsPanel(): React.JSX.Element {
           </Button>
         </form>
 
+        {/* The control is what makes "try again" possible: the client never retries on its own
+            (`retry: false`, no refetch on focus or reconnect), and resubmitting the same text
+            leaves the query key unchanged, so no request would go out. */}
         {failed && (
-          <p role="alert" className="text-sm text-danger-ink">
-            Could not search the registry, so this says nothing about which runs exist — try again.
-          </p>
+          <div className="flex flex-col items-start gap-2">
+            <p role="alert" className="text-sm text-danger-ink">
+              Could not search the registry, so this says nothing about which runs exist — try
+              again.
+            </p>
+            <Button variant="outline" size="sm" onClick={() => void refetch()}>
+              Try again
+            </Button>
+          </div>
         )}
 
         {!jobs && !failed && <Loading>Reading the registry…</Loading>}

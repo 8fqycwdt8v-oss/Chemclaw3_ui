@@ -445,6 +445,11 @@ function templateGroups(route: Route): RegExpMatchArray {
  * `encodeURIComponent` cannot emit, so no client of this app produces one — is refused with it,
  * because what a normalising proxy does with `%zz` is its own business.
  *
+ * A bare `.` (or `%2e`) is refused beside `..`: a normalising hop removes a current-directory
+ * segment, so `/skills/org/./revert` would reach `/skills/org/revert` and `DELETE /skills/mine/.`
+ * would reach `DELETE /skills/mine/` — routes other than the one the whitelist matched. No
+ * legitimate id is a lone dot; the service refuses a leading `.` in a skill name outright.
+ *
  * The narrow segments (`SID`, `RESULT_REF`, `DESIGN`) cannot fail this and are checked anyway: a
  * rule applied to every capture is one nobody has to remember to apply to the next route.
  */
@@ -455,7 +460,7 @@ function isTraversal(segment: string): boolean {
   } catch {
     return true;
   }
-  return decoded.includes('/') || decoded.includes('\\') || decoded === '..';
+  return decoded.includes('/') || decoded.includes('\\') || decoded === '..' || decoded === '.';
 }
 
 /** Resolve a request to an upstream path, or `null` if it is not whitelisted. */

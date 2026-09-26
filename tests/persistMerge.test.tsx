@@ -125,3 +125,56 @@ describe('Reset app', () => {
     expect(second.useChatStore.getState().digests).toEqual([]);
   });
 });
+
+describe('stored notices past the age cutoff', () => {
+  it('does not fold a digest or a job ending older than a week back onto disk', async () => {
+    // `partialize` drops a row older than `JOB_FEED_MAX_AGE_MS`, and the fold then put every
+    // stored row this tab did not know straight back — so the dropped row was written again,
+    // rehydrated, dropped, and written again, for ever. A fresh row of each kind rides along, so
+    // the assertion is about the cutoff rather than about the fold discarding stored rows at all.
+    const WEEK = 7 * 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const stale = now - WEEK - 1_000;
+    const card = (query: string, receivedAt: number) => ({
+      query,
+      noteIds: [`note-${query}`],
+      receivedAt,
+      dismissed: false,
+    });
+    const job = (jobId: string, receivedAt: number) => ({
+      event: { job_id: jobId, status: 'completed' },
+      sessionId: 'sess-1',
+      conversationId: null,
+      receivedAt,
+      seen: false,
+      dismissed: false,
+    });
+    const store = new Map<string, string>();
+    store.set(
+      KEY,
+      JSON.stringify({
+        version: 3,
+        state: {
+          conversations: {},
+          order: [],
+          activeId: null,
+          drafts: {},
+          jobFeed: [job('STALE-JOB', stale), job('FRESH-JOB', now)],
+          digests: [card('STALE-DIGEST', stale), card('FRESH-DIGEST', now)],
+          checkIns: [],
+          notifyOnJobComplete: false,
+        },
+      }),
+    );
+    const { useChatStore, flushChatPersistence } = await freshStore(store);
+    const id = useChatStore.getState().createConversation();
+    useChatStore.getState().appendUserMessage(id, 'q');
+    flushChatPersistence();
+
+    const written = store.get(KEY) ?? '';
+    expect(written).toContain('FRESH-DIGEST');
+    expect(written).toContain('FRESH-JOB');
+    expect(written).not.toContain('STALE-DIGEST');
+    expect(written).not.toContain('STALE-JOB');
+  });
+});

@@ -707,12 +707,14 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
             </Button>
           }
           title="Reset the app?"
-          description="This clears every conversation stored in this browser and starts fresh. Notices held only in this browser — saved-query findings, check-ins and job completions — are discarded too. Server-side sessions are not deleted, but this device will no longer have a link to them."
+          description="This clears every conversation stored in this browser and starts fresh. Notices held only in this browser — saved-query findings, check-ins and job completions — are discarded too. Close any other ChemClaw tab first: one left open keeps its copy and writes it back. Server-side sessions are not deleted, but this device will no longer have a link to them."
           confirmLabel="Reset everything"
           variant="destructive"
           // Not `clearAll()` alone: the next write folds the stored notices back onto disk
           // (`mergeWithStored` — they are the rows a re-fetch cannot replace), so the findings,
           // check-ins and job endings this dialog says it discards rehydrated on the next load.
+          // The reset reaches this tab only: there is no cross-tab signal for chat state, so
+          // another open tab's next flush writes its in-memory copy back — hence the caveat.
           onConfirm={forgetLocalHistory}
         />
       </div>

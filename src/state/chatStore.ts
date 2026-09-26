@@ -1087,10 +1087,7 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
    * it, so disk and memory diverged on every flush past the cap. Sorting on the row's own clock
    * answers both, since the slice then drops what is oldest wherever it came from.
    *
-   * `sort` is stable, and on a tie this tab's rows come first. A tie is not rare — `addDigests`
-   * stamps a whole claimed batch with one `Date.now()` — and a stored row tied with rows this tab
-   * kept is, in one tab, a row this tab trimmed from that same batch; preferring it would
-   * reproduce the divergence above one batch at a time.
+   * On a tie this tab's rows come first — see `union`, the one caller, for why.
    */
   const newestFirst = <T extends { receivedAt: number }>(rows: T[]): T[] =>
     rows.sort((a, b) => b.receivedAt - a.receivedAt);
@@ -1112,7 +1109,7 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
     ours: T[],
     theirs: T[] | undefined,
     keyOf: (row: T) => string,
-    fresher?: (ours: T, theirs: T) => T,
+    fresher: (ours: T, theirs: T) => T,
   ): T[] => {
     if (!Array.isArray(theirs) || theirs.length === 0) return ours;
     const known = new Map(ours.map((row) => [keyOf(row), row]));
@@ -1124,16 +1121,17 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
     // already consumed both, so whichever is discarded is discarded for ever. Measured before
     // this argument existed: a tab open since yesterday overwrote this morning's refresh, showing
     // a deadline a day more generous than the truth, and undid a dismissal made in the other tab.
-    if (fresher) {
-      for (const row of theirs) {
-        const mine = known.get(keyOf(row));
-        if (mine !== undefined) known.set(keyOf(row), fresher(mine, row));
-      }
-      return newestFirst([...known.values(), ...added]);
+    for (const row of theirs) {
+      const mine = known.get(keyOf(row));
+      if (mine !== undefined) known.set(keyOf(row), fresher(mine, row));
     }
-    return added.length === 0 ? ours : newestFirst([...ours, ...added]);
+    // `sort` is stable and this tab's rows go in first, so on a tie they win. A tie is not rare —
+    // `addDigests` stamps a whole claimed batch with one `Date.now()` — and a stored row tied with
+    // rows this tab kept is, in one tab, a row this tab trimmed from that same batch; preferring it
+    // would reproduce the divergence `newestFirst` describes one batch at a time.
+    return newestFirst([...known.values(), ...added]);
   };
-  // **What a reader did to a row is folded too, not just the row.** With no `fresher`, "ours wins"
+  // **What a reader did to a row is folded too, not just the row.** Before `fresher`, "ours wins"
   // kept this tab's undismissed copy over the other tab's dismissed one on every flush, so a card
   // dismissed in one window came back on the next reload. `seen` only ever goes one way, so it is
   // OR-ed; `dismissed` can be undone, so the later of the two changes wins, and a tie (two rows

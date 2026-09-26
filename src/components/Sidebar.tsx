@@ -707,7 +707,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
             </Button>
           }
           title="Reset the app?"
-          description="This clears every conversation stored in this browser and starts fresh. Server-side sessions are not deleted, but this device will no longer have a link to them."
+          description="This clears every conversation stored in this browser and starts fresh. Notices held only in this browser — saved-query findings, check-ins and job completions — are discarded too. Server-side sessions are not deleted, but this device will no longer have a link to them."
           confirmLabel="Reset everything"
           variant="destructive"
           onConfirm={() => useChatStore.getState().clearAll()}

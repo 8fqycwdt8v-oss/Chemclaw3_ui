@@ -12,8 +12,8 @@ deleted, because a gap that was real and got fixed is worth being able to find a
 
 ## Open: a maintainer's `CHEMCLAW3_REF` pin may not survive a fork PR
 
-`.github/workflows/ci.yml` resolves the sibling checkout's ref as
-`${{ inputs.chemclaw3_ref || vars.CHEMCLAW3_REF || 'main' }}`. The chain is correct — an
+`.github/workflows/ci.yml` resolved the sibling checkout's ref as
+`${{ inputs.chemclaw3_ref || vars.CHEMCLAW3_REF || 'main' }}`. The chain was correct — an
 unpopulated context evaluates falsy in a GitHub expression, so `inputs` outside
 `workflow_dispatch` falls through and an unset variable lands on `'main'`, which is what a run
 without either actually does.
@@ -25,8 +25,26 @@ and nothing says so: `tests/delivery.test.ts` asserts only that a `ref:` is _nam
 either way. Driving it needs a fork and a run, which is outside what this repository's suite can
 reach, so it is a row rather than an assertion.
 
-The remedy if it turns out to be true is an echo of the resolved ref in the gate step, so a run's
-log says which revision it checked out rather than leaving it to be inferred from the expression.
+**Now observable, 2026-09-26; still open, because observable is not observed.** The remedy this
+entry named is in, one step earlier than it said: `scripts/chemclaw3-ref.mjs` resolves the same
+precedence in a step of its own _before_ the checkout, prints the ref, which arm it came from
+(`workflow_dispatch input` / `repository variable` / `default`), what `vars.CHEMCLAW3_REF` arrived
+as, and whether the run is a pull request from a fork — then hands the ref to `actions/checkout` as
+a step output, so the value in the log is the value used rather than a second evaluation that could
+disagree with it. A second invocation prints the commit that ref named at that moment, and both go
+into the run summary. `tests/delivery.test.ts` drives the script (precedence, the fork line, and a
+value with a newline refused before it can reach `$GITHUB_OUTPUT`) and holds the checkout to
+reading the step's output.
+
+What it still cannot do is answer the question by itself. An unset variable and one GitHub
+withheld both arrive as `''`; the script says "unset or not passed to this run" and, on a fork PR
+that fell through to `main`, says that if the setting is populated GitHub did not pass it. At the
+time of writing `gh variable list` shows no `CHEMCLAW3_REF` on this repository, so every run
+today takes `default` whichever way the answer goes. **What would close it:** one pull request from
+a fork, run while `CHEMCLAW3_REF` is set, and its first step's log read — `repository variable`
+closes this as a non-issue; `default` with the fork note confirms it, and the fix then moves to
+where a fork PR's base is decided (e.g. a `pull_request_target` preflight, which has its own
+security cost and is not a line to add casually).
 
 ---
 
@@ -819,7 +837,37 @@ out of the reader's scope by name rather than by accident.
 
 ---
 
-## Issue 15: two shapes the path-encoding rule does not see, and one it deliberately allows
+## Issue 15 (closed): two shapes the path-encoding rule does not see, and one it deliberately allows
+
+Closed 2026-09-26. **The first shape is fixed at its root; the second is decided, and now held by a
+test rather than by this paragraph.**
+
+- **The named-constant escape is gone, by teaching the rule to follow a `const`, not by inlining
+  the constant.** `tests/pathEncoding.test.ts` resolves an identifier to the compile-time string it
+  is bound to — a `const` in the file, a concatenation or substitution-free template of those
+  (through `as const`), or a constant imported by a relative path from another file under `src/` —
+  wherever it used to read only a literal: the left side of a `+`, a template span, and the URL's
+  head. Inlining `PROBE_BASE` would have fixed the one site that was measured and left the shape
+  open for the next hook that hoists its base into a constant, which is ordinary tidy code. The
+  reason this was once declined — "a dataflow analysis rather than a syntactic rule" — does not
+  survive contact: a `const` bound to a string has exactly one value, visible at its declaration,
+  so there is nothing to flow. Scoping is ignored (names are looked up file-wide), which can only
+  make the scan see a segment that is not there, so it fails toward catching. Six fixtures drive
+  it: the recorded `PROBE_BASE + jobId`, the same through a template span, a constant built from
+  constants, one imported under an alias, the encoded forms passing without a second encode, and
+  the legitimately raw shapes (a query suffix, a query value) staying raw through a constant.
+  **Still outside it, and said so in the test's docstring:** a base that is not a compile-time
+  string (a `let`, a parameter, `config.apiBase` — whose own literal tail the scan already reads)
+  and a re-export.
+- **The NUL half is handled as this entry argued: accepted, not narrowed.** No character policy was
+  added, for the reason below — the wide classes exist for ids this repository does not mint, and
+  what keeps `%00` harmless is the upstream's `[^/]+` parameter. What changed is that the three
+  forwards this entry recorded (`note-a%00b`, `note-a%0Ab`, `qm%00-1`) are now a test in
+  `tests/routes.test.ts`, so the day the behaviour changes it is a diff somebody argued for — and
+  this entry cannot quietly stop being true. **What would reopen it** is unchanged: an ingress in
+  front of this process that normalises before the service.
+
+The original report follows.
 
 `tests/pathEncoding.test.ts` holds the rule that every interpolated path segment reaches the
 service encoded, as an invariant over the tree rather than as a list of call sites. Both escapes
@@ -931,6 +979,20 @@ registry; profile selection; tool calls surviving a reload; the skills screen an
 behaviour-proposal queue, now opened in a real browser (`e2e/skills.spec.ts`, and `/skills` in the
 a11y pass) with a chemist's own write path beside them.
 
+**Closed 2026-09-26: a molblock record that is a molecule is no longer counted as one RDKit could
+not read.** `canonicalSmilesFromMolblock` collapsed `too-complex` into the ordinary negative, so a
+dropped `.sdf` of long chains was reported as records "none of which RDKit could read as a
+structure". The engine now answers a molblock with the same three-valued `CanonicalRead` as a
+SMILES (`readCanonicalSmilesFromMolblock`), and the four surfaces this row named carry it:
+`MolfileRecords.tooComplex`, both sentence builders in `StructureInput` (now `noStructureNote` and
+`recordsNote`, whose "past the first N" also counts the too-complex records it read), and the
+sketcher's refusal, which says `TOO_COMPLEX_EXPLANATION` instead of "Nothing on the canvas". The
+two molblock _paste_ paths (the panel's and the composer's) collapsed the same way and carry it too.
+The cost this row recorded — `stillAlive()` as a second parse per refused record — turned out not
+to be one this adds: `withMol` probes only on a _throw_, which it already did, and an ordinary
+unreadable record returns `null` without one. `tests/rdkitTooComplex.test.tsx` drives the seam, the
+count, both sentences, the panel, the sketcher and the composer against a 580-atom V2000 chain.
+
 **Still not done:**
 
 - **No browser test asserts on a digest card.** `/digests` is served by the e2e fixture (Issue 17)
@@ -951,19 +1013,6 @@ a11y pass) with a chemist's own write path beside them.
   machine, or the mobile sheet's open animation. **What would settle it:** the next occurrence, with
   the trace kept — `test-results/` holds an `error-context.md` per failure, and both runs above
   cleared it before anybody read it.
-
-- **A molblock record that is a molecule is still counted as one RDKit could not read.** Issue 11
-  threaded `too-complex` as far as the two surfaces that make a claim about one string a chemist is
-  looking at, and `canonicalSmilesFromMolblock` collapses it back into the ordinary negative — with
-  a comment saying so at the line that does it. It is reachable: `withSmilesMol`'s own docstring
-  records a 999-atom V2000 chain raising exactly that `RangeError` with the runtime still alive, so
-  a dropped `.sdf` can make `moleculesFromMolfile` report "12 of 15 records were readable" about a
-  file whose other three are molecules. **It is its own change rather than a line in that one**
-  because the surface is a count over a file rather than a verdict about a string: carrying it
-  means a fourth field on `MolfileRecords`, both sentence builders in `StructureInput`, and the
-  sketcher's own refusal — and `stillAlive()` runs once per refused record, which is a second
-  parse per record on a file that can hold a thousand. Anchors: `canonicalSmilesFromMolblock` in
-  `src/chem/rdkit.engine.ts`, `MolfileRecords` in `src/chem/rdkit.ts`.
 
 - **Neither surface offers the retry the measurement says would work, and the copy used to imply
   there was none.** Issue 11's own sweep (`scripts/measure-rdkit-rangeerror.mjs`) is that the

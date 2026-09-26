@@ -591,3 +591,21 @@ runtime. No count of the suite is written here; the run prints one.
 
 **Run:** `npm run ci` with `CHEMCLAW3_DIR` pointing at the sibling checkout. Not run:
 `npm run ci:container` and `npm run check:live`, for the reasons the section above gives.
+
+---
+
+## Two backlog rows: a digest card in the browser lane, and the suite on Node 25
+
+- [x] **A browser test asserts on a digest card.** `e2e/fixture-service.ts` serves one digest
+      (`DIGESTS`), `e2e/routing.spec.ts` reads the filled card — query, a headline, the disputed
+      count and the one badge — and the a11y pass over `/review` waits for it before scanning.
+      The _Known gaps_ row is closed; Issue 17's "empty rather than a row" is marked superseded.
+- [x] **The unit suite means the same thing on Node 22 and 25.** Node 25's default-on Web Storage
+      put `localStorage`/`sessionStorage`/`Storage` on the global before vitest populated it, and
+      vitest skips a window key the global already has, so happy-dom's storage never arrived.
+      `vitest.config.ts` starts its workers with `--no-experimental-webstorage`;
+      `tests/webStorage.test.ts` holds the flag (fails on 22 too if removed) and the storage
+      identity. Recorded as `ISSUES.md` Issue 18, closed.
+
+**Run:** `npm ci` then `npm run ci` on Node 25.8.2 with no `NODE_OPTIONS`. Not run:
+`npm run ci:container` and `npm run check:live`, for the reasons the sections above give.

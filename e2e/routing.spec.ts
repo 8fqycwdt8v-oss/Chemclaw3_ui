@@ -103,6 +103,23 @@ test('the review queue is reachable and shows what is waiting on a person', asyn
   ).toBeVisible();
   await expect(page.getByText('Measured yield for the 2-MeTHF arm')).toBeVisible();
   await expect(page.getByText('5 days left')).toBeVisible();
+
+  // The digest card, which nothing in the browser lane drew before (the _Known gaps_ row this
+  // closes). The same three layers as the check-in above — claimed once by the shell through the
+  // real BFF, persisted, rendered here — and each assertion reads something only a *filled* card
+  // shows: the headline the service sent for a note, the disputed count, and the badge on the one
+  // note it counts. A section that rendered its heading over an empty body fails on the second.
+  const digests = page.getByRole('region', { name: 'New knowledge from your standing queries' });
+  await expect(digests).toBeVisible();
+  await expect(digests.getByText('Suzuki couplings in 2-MeTHF')).toBeVisible();
+  await expect(
+    digests.getByText('Pd(dppf)Cl2 in 2-MeTHF gave 84% at 60 °C on the bromide.'),
+  ).toBeVisible();
+  await expect(
+    digests.getByText(/2 notes · 1 of 2 disagree with something already in the graph/),
+  ).toBeVisible();
+  await expect(digests.getByRole('button', { name: 'note-7f3b' })).toBeVisible();
+  await expect(digests.getByText('disputed', { exact: true })).toHaveCount(1);
 });
 
 test('the durable-run registry leads with why a run happened', async ({ page, isMobile }) => {

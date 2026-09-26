@@ -132,14 +132,22 @@ export const FIELD_PLACEHOLDER = 'Paste SMILES, drop a .mol or .sdf, or draw it'
  * *same string at the same length* refused through the seam and answered from a shallower stack in
  * the same page milliseconds later — so the limit is the JavaScript stack at the instant of the
  * call, not a property of the browser that a chemist could reason about. Copy that named the
- * browser read as a stable verdict and asserted the opposite of what was measured. What neither
- * surface does yet is offer the retry that follows from it; that gap is recorded in `ISSUES.md`
- * under _Still not done_ rather than implied away by a sentence.
+ * browser read as a stable verdict and asserted the opposite of what was measured.
+ *
+ * **The last clause is the decision about the retry, and there is deliberately no button.** A
+ * second check of the same string can answer where the first refused — measured, and the reason
+ * this sentence exists — so a chemist who pastes it twice can get two answers to one question. A
+ * "try again" control would present that as a flaky app the second time it worked, and an
+ * automatic re-ask would hide the non-determinism instead of naming it. So the sentence says it
+ * plainly and offers nothing to press (`ISSUES.md` _Known gaps_, closed 2026-09-26). The wording
+ * is held whole by `tests/rdkitTooComplex.test.tsx`, and through a real RDKit in a real browser by
+ * `e2e/rdkit-too-complex.spec.ts`.
  */
 export const TOO_COMPLEX_EXPLANATION =
   'RDKit read this as a molecule and then ran out of stack naming it, so it is too complex to ' +
   'name here. Nothing is wrong with it as chemistry: it is a limit of the JavaScript stack at ' +
-  'the moment of the check rather than of the structure.';
+  'the moment of the check rather than of the structure, so checking the same structure again ' +
+  'may give a different answer.';
 
 /** `n record` / `n records`. */
 const recordCount = (n: number): string => `${n} record${n === 1 ? '' : 's'}`;

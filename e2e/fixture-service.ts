@@ -33,9 +33,12 @@ import type {
   JobRecordSummary,
   NoteView,
   PendingPlans,
+  PlanStatusOut,
   ProtocolView,
   RevisionWritten,
+  SessionMembersOut,
   SessionSummary,
+  SharedSessionSummary,
   StoredToolResult,
   TranscriptMessage,
 } from '../src/api/client.ts';
@@ -410,6 +413,142 @@ const SHARED_TRANSCRIPT: TranscriptMessage[] = [
   },
 ];
 
+/**
+ * Shared sessions (Chemclaw3 #483), from both sides of one — driven by `e2e/shared.spec.ts`.
+ *
+ * The browser is always `dev-user` here (`AUTH_MODE=dev`), so "member" and "owner" are two
+ * sessions rather than two people:
+ *
+ *  - `MEMBER_SID` is somebody else's (`OWNER_OID`) that `dev-user` was let into. It is listed by
+ *    `GET /sessions/shared`, its transcript has both people's questions, its plan is the owner's —
+ *    so the card must show the author and refuse the controls — and the owner's acts (delete,
+ *    fork, admitting anybody) answer 403 exactly as the service does.
+ *  - `OWNED_SID` is `dev-user`'s own, with a roster the spec edits. It is **not** listed by
+ *    `GET /sessions` — every other spec's sidebar would grow a row — so the spec seeds the local
+ *    conversation that points at it.
+ *
+ * The roster is the one piece of mutable state, and the spec runs in two projects in parallel, so
+ * each run adds and removes an actor id of its own; nothing asserts the roster as a whole.
+ */
+const MEMBER_SID = '9'.repeat(32);
+const OWNED_SID = '8'.repeat(32);
+const OWNER_OID = 'owner-oid-5b1f';
+const DEV_OID = 'dev-user';
+const SHARED_WITH_ME: SharedSessionSummary[] = [
+  {
+    session_id: MEMBER_SID,
+    owner: OWNER_OID,
+    title: 'Shared amination screen',
+    added_at: '2026-09-27T09:00:00Z',
+  },
+];
+const MEMBER_TRANSCRIPT: TranscriptMessage[] = [
+  {
+    index: 0,
+    role: 'user',
+    text: 'Which base for the amination?',
+    tool_calls: [],
+    author: { actor: OWNER_OID, agent: null },
+  },
+  {
+    index: 1,
+    role: 'assistant',
+    text: 'Cs2CO3 in 2-MeTHF; I have drafted a screen for approval.',
+    tool_calls: [],
+    author: { actor: OWNER_OID, agent: 'chemclaw' },
+  },
+  {
+    index: 2,
+    role: 'user',
+    text: 'Can we add K3PO4 as a second arm?',
+    tool_calls: [],
+    author: { actor: DEV_OID, agent: null },
+  },
+  {
+    index: 3,
+    role: 'assistant',
+    text: 'Added. The owner’s plan still needs their decision.',
+    tool_calls: [],
+    author: { actor: DEV_OID, agent: 'chemclaw' },
+  },
+];
+/** The member session's plan — its owner's, so `dev-user` may read it and not decide it. */
+const MEMBER_PLAN: PlanStatusOut = {
+  session_id: MEMBER_SID,
+  plan_hash: 'e2e-shared-plan',
+  plan: ['[ ] Screen Cs2CO3 and K3PO4 in 2-MeTHF'],
+  scope: ['draft_experiment_protocol'],
+  mode: 'plan_only',
+  approved: false,
+  decided_by: null,
+  author: OWNER_OID,
+};
+/** `OWNED_SID`'s members, by actor id → when they were added. */
+const ownedMembers = new Map<string, string>();
+
+function roster(sessionId: string): SessionMembersOut {
+  if (sessionId === MEMBER_SID) {
+    return {
+      owner: OWNER_OID,
+      members: [
+        { actor: DEV_OID, added_at: '2026-09-27T09:00:00Z' },
+        { actor: 'colleague-oid-77a2', added_at: '2026-09-27T09:30:00Z' },
+      ],
+    };
+  }
+  // Every other session here is `dev-user`'s own; only `OWNED_SID` has anybody else in it.
+  return {
+    owner: DEV_OID,
+    members:
+      sessionId === OWNED_SID
+        ? [...ownedMembers].map(([actor, added_at]) => ({ actor, added_at }))
+        : [],
+  };
+}
+
+/** The member routes, answered the way `routes/members.py` answers them. */
+function members(
+  res: ServerResponse,
+  method: string,
+  sessionId: string,
+  actor: string | null,
+): void {
+  if (actor === null) {
+    if (method === 'GET') return json(res, 200, roster(sessionId));
+    return json(res, 405, { detail: 'Method Not Allowed' });
+  }
+  if (sessionId === MEMBER_SID) {
+    // A member may take only themself out; everything else is the owner's.
+    if (method === 'DELETE' && actor === DEV_OID) return noContent(res);
+    return json(res, 403, {
+      detail:
+        method === 'PUT'
+          ? 'only the session’s owner may admit somebody'
+          : 'only the session’s owner may remove somebody else',
+    });
+  }
+  // The roster the spec edits is `OWNED_SID`'s alone, so no other spec's session grows members.
+  if (sessionId !== OWNED_SID) return json(res, 404, { detail: 'unknown session' });
+  if (method === 'PUT') {
+    if (actor === DEV_OID) {
+      return json(res, 409, { detail: 'the owner is not a member of their session' });
+    }
+    if (!ownedMembers.has(actor)) ownedMembers.set(actor, new Date().toISOString());
+    return noContent(res);
+  }
+  if (method === 'DELETE') {
+    if (!ownedMembers.delete(actor))
+      return json(res, 404, { detail: 'not a member of this session' });
+    return noContent(res);
+  }
+  return json(res, 405, { detail: 'Method Not Allowed' });
+}
+
+function noContent(res: ServerResponse): void {
+  res.writeHead(204);
+  res.end();
+}
+
 // One conversation blocked on a plan decision, so `/review` renders its inbox with a row rather
 // than one of its empty states. `unread: 0` and `truncated: false` keep the partial-scan notice
 // out of the way of the axe pass; the notice itself is covered by the component tests. Both are
@@ -733,12 +872,41 @@ createServer(async (req, res) => {
   // sidebar's degraded branch — the fixture was exercising the error path by accident. Typing it
   // as `SessionSummary[]` is what stops that recurring silently.
   if (path === '/sessions' && req.method === 'GET') return json(res, 200, SESSIONS);
+  // Before any `/sessions/{id}/…` match: `shared` is not a session id, and the service registers
+  // this route without one.
+  if (path === '/sessions/shared' && req.method === 'GET') return json(res, 200, SHARED_WITH_ME);
+  const memberRoute = /^\/sessions\/([0-9a-f]{32})\/members(?:\/([^/]+))?$/.exec(path);
+  if (memberRoute) {
+    const actor = memberRoute[2] === undefined ? null : decodeURIComponent(memberRoute[2]);
+    return members(res, req.method ?? 'GET', memberRoute[1] ?? '', actor);
+  }
+  if (path === `/sessions/${MEMBER_SID}/plan` && req.method === 'GET') {
+    return json(res, 200, MEMBER_PLAN);
+  }
+  if (path === `/sessions/${MEMBER_SID}/plan/decision` && req.method === 'POST') {
+    req.resume();
+    return json(res, 403, {
+      detail: 'only the person whose message produced this plan may decide on it',
+    });
+  }
+  // The owner's acts, refused to a member with the service's 403 rather than its 404: the member
+  // already knows the session exists.
+  if (
+    (path === `/sessions/${MEMBER_SID}` && req.method === 'DELETE') ||
+    (path === `/sessions/${MEMBER_SID}/fork` && req.method === 'POST')
+  ) {
+    return json(res, 403, { detail: 'only the session’s owner may do this' });
+  }
   // Two, so the picker has a choice to offer — with one it stays hidden.
   if (path === '/profiles') return json(res, 200, ['default', 'property-lookup']);
   if (path.endsWith('/messages') && req.method === 'GET') {
     // A shared-link session has a transcript to pull back; everything else is empty. The shape
     // is the service's: an index, and the tool calls behind each message.
-    const transcript: TranscriptMessage[] = path.includes(SHARED_SID) ? SHARED_TRANSCRIPT : [];
+    const transcript: TranscriptMessage[] = path.includes(SHARED_SID)
+      ? SHARED_TRANSCRIPT
+      : path.includes(MEMBER_SID)
+        ? MEMBER_TRANSCRIPT
+        : [];
     return json(res, 200, transcript);
   }
 

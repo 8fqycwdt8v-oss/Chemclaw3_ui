@@ -317,6 +317,52 @@ export interface TranscriptMessage {
    * altogether from a service older than the field, which is why it is optional here.
    */
   correlation_id?: string | null;
+  /**
+   * Who wrote this message: the person it was written for and the agent that wrote it — `agent`
+   * null for a person's own words (Chemclaw3 #478, `core/authorship.py`'s `Authorship`).
+   *
+   * Read since shared sessions (Chemclaw3 #483): a session can now hold more than one person, and
+   * in one that does a user bubble has to say *whose* question it is — the service runs each
+   * message as its sender, so "who asked" is also "whose roles and memories answered". `null` or
+   * absent for a row that records neither half, and from a service older than the field.
+   */
+  author?: Authorship | null;
+}
+
+/** The person a thing was written for, and the agent that wrote it (`null`: a human did). */
+export interface Authorship {
+  actor?: string | null;
+  agent?: string | null;
+}
+
+/** One person the owner has let into a session, and since when. */
+export interface SessionMemberOut {
+  actor: string;
+  added_at: string;
+}
+
+/**
+ * Who may reach a session: its owner, and the members that owner admitted (Chemclaw3 #483).
+ *
+ * `owner` is `null` for a session with no recorded owner, which can have no members — nobody holds
+ * the standing to have admitted them.
+ */
+export interface SessionMembersOut {
+  owner: string | null;
+  members: SessionMemberOut[];
+}
+
+/**
+ * A session somebody else owns that the caller has been let into — `GET /sessions/shared`.
+ *
+ * `owner` and `title` are `null` under the service's in-process session store, which keeps
+ * memberships and no conversation list.
+ */
+export interface SharedSessionSummary {
+  session_id: string;
+  owner?: string | null;
+  title?: string | null;
+  added_at: string;
 }
 
 export interface AttachmentSummary {
@@ -605,6 +651,16 @@ export interface PlanStatusOut {
   mode: string;
   approved: boolean;
   decided_by: string | null;
+  /**
+   * Whose turn last wrote this plan — **the one person who may decide on it** (Chemclaw3 #483,
+   * `D-2026-09-27-in-a-shared-session-the-sender-governs`). A plan is the proposal one person's
+   * turn made about what *their* turns will do, so another member's yes, or the owner's, is not
+   * consent to it and the service answers it 403.
+   *
+   * `null` when no author is recorded, in which case the session's owner decides, as before
+   * authorship existed; absent from a service older than the field, which reads the same way.
+   */
+  author?: string | null;
 }
 
 export type PlanStatus = PlanStatusOut;
@@ -1192,6 +1248,61 @@ export const api = {
     return request<SessionOut>(`/sessions/${encodeURIComponent(sessionId)}/fork`, getToken, {
       method: 'POST',
     });
+  },
+
+  /**
+   * Who is in a session: its owner and the members that owner admitted.
+   *
+   * Nothing is swallowed. A 404 here is the session gate's "unknown or not yours" — the caller was
+   * removed, or the service predates the route — and the panel that asks says it could not tell
+   * rather than drawing a session with nobody in it.
+   */
+  listMembers(sessionId: string, getToken: TokenGetter): Promise<SessionMembersOut> {
+    return request<SessionMembersOut>(
+      `/sessions/${encodeURIComponent(sessionId)}/members`,
+      getToken,
+    );
+  },
+
+  /**
+   * Let `actor` into this session — the owner's act alone.
+   *
+   * The refusals are the service's, and each keeps its own sentence: **403** the caller is a member
+   * rather than the owner, **409** the owner named themself (they already hold more than a
+   * membership grants), **422** a blank id. Admitting somebody twice is one membership upstream,
+   * so a repeat is a 204 rather than an error.
+   */
+  async addMember(sessionId: string, actor: string, getToken: TokenGetter): Promise<void> {
+    await request<void>(
+      `/sessions/${encodeURIComponent(sessionId)}/members/${encodeURIComponent(actor)}`,
+      getToken,
+      { method: 'PUT' },
+    );
+  },
+
+  /**
+   * Take `actor` out of this session: the owner removing somebody, or a member leaving (their own
+   * id). 404 is "not a member" — kept as an error, because "removed" and "there was nobody to
+   * remove" are different answers and the panel says which.
+   */
+  async removeMember(sessionId: string, actor: string, getToken: TokenGetter): Promise<void> {
+    await request<void>(
+      `/sessions/${encodeURIComponent(sessionId)}/members/${encodeURIComponent(actor)}`,
+      getToken,
+      { method: 'DELETE' },
+    );
+  },
+
+  /**
+   * The sessions somebody else owns that the caller has been let into, newest admission first.
+   *
+   * A list route, so it degrades to `[]` on a 404 like `listSessions`: a service that predates
+   * shared sessions has nothing shared with anybody, and the sidebar section simply stays away.
+   */
+  listSharedSessions(getToken: TokenGetter): Promise<SharedSessionSummary[]> {
+    return orEmpty('/sessions/shared', () =>
+      request<SharedSessionSummary[]>('/sessions/shared', getToken),
+    );
   },
 
   /**

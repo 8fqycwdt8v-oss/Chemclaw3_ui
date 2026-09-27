@@ -22,12 +22,13 @@
  * the alternative is a card whose only buttons do nothing.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import { api } from '../api/client.ts';
 import { PlanItems } from './PlanItems.tsx';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
+import { useChatStore } from '../state/chatStore.ts';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/chem/ConfirmDialog';
 import { Loading } from '@/components/chem/Feedback';
@@ -70,11 +71,20 @@ function DecisionControls({
   state,
   error,
   onDecide,
+  lockedReason = null,
 }: {
   state: 'idle' | 'sending' | 'approved' | 'rejected' | 'failed';
   error: string | null;
   onDecide: (approved: boolean) => void;
+  /**
+   * Why this reader may not decide, when they may not — in a shared conversation only the plan's
+   * author decides (Chemclaw3 #483). The buttons stay on screen, disabled and described by the
+   * sentence, rather than vanishing: a card with no controls reads as a plan nobody needs to
+   * answer, and this one is waiting on somebody.
+   */
+  lockedReason?: string | null;
 }): React.JSX.Element {
+  const reasonId = useId();
   if (state === 'rejected') {
     return <p className="text-sm text-ink-muted">You declined this plan. Nothing will run.</p>;
   }
@@ -103,6 +113,23 @@ function DecisionControls({
             Continue
           </Button>
         </div>
+      </div>
+    );
+  }
+  if (lockedReason) {
+    return (
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Button variant="success" size="sm" disabled aria-describedby={reasonId}>
+            Approve plan
+          </Button>
+          <Button variant="outline" size="sm" disabled aria-describedby={reasonId}>
+            Decline
+          </Button>
+        </div>
+        <p id={reasonId} className="text-xs text-ink-muted">
+          {lockedReason}
+        </p>
       </div>
     );
   }
@@ -158,11 +185,42 @@ function DecisionControls({
  * and ask again — never to re-fetch the hash and approve whatever is current, which would make
  * the binding decorative.
  */
+/**
+ * Who may decide on a plan, given what is known about its author — Chemclaw3 #483's rule, as the
+ * service's `plan_gate.may_decide` states it, restated here only to decide what to *offer*.
+ *
+ * `author` is three answers, not two. **A string** is the service naming whose turn wrote the plan:
+ * that person, and nobody else. **`null`** is the service recording no author: the session's owner
+ * decides, as before authorship existed — so a member may not. **`undefined`** is "nobody asked":
+ * the plan streamed into this browser's own turn, which makes it this person's by construction.
+ *
+ * Returns the sentence that explains a refusal, or `null` when this reader may decide. A reader
+ * whose identity is unknown is let through: the service is the gate, and a card that disabled
+ * itself for want of an account id would block the one person entitled to answer it.
+ */
+export function planDecisionLock(
+  author: string | null | undefined,
+  me: string | null,
+  member: { owner: string | null } | undefined,
+): string | null {
+  if (author === undefined || me === null) return null;
+  if (author !== null) {
+    return author === me
+      ? null
+      : `Only ${author} can approve or decline this plan — it was proposed in answer to their message, and in a shared conversation a plan is its author's alone to decide.`;
+  }
+  if (!member) return null;
+  return member.owner
+    ? `Only this conversation's owner, ${member.owner}, can decide on this plan.`
+    : "Only this conversation's owner can decide on this plan.";
+}
+
 function PlanApprovalPrompt({
   sessionId,
   planTodos,
   planHash,
   planScope,
+  planAuthor,
 }: {
   sessionId: string | null;
   /** The plan this message rendered, from its own `plan` event. */
@@ -195,8 +253,24 @@ function PlanApprovalPrompt({
    * would be a false reassurance about what approving it authorizes.
    */
   planScope?: string[] | null;
+  /** Whose turn wrote the plan, when it was read rather than streamed — see `planDecisionLock`. */
+  planAuthor?: string | null;
 }): React.JSX.Element {
   const { auth } = useAuth();
+  // Whether this conversation is somebody else's that this person was let into. The object off the
+  // store, so the selector is stable between writes that do not touch it.
+  const membership = useChatStore((s) =>
+    sessionId
+      ? Object.values(s.conversations).find((c) => c.sessionId === sessionId)?.membership
+      : undefined,
+  );
+  /** The author a read reported, stamped with the revision it describes — `fetchedScope`'s rule. */
+  const [fetchedAuthor, setFetchedAuthor] = useState<{
+    hash: string;
+    author: string | null;
+  } | null>(null);
+  /** The service refused this reader's decision (403): whatever it said, the buttons stay locked. */
+  const [refusal, setRefusal] = useState<string | null>(null);
   // What the turn's own `plan` event carried, when it carried a hash. Derived during render rather
   // than copied into state by an effect: it is a prop, so storing it would be one more thing that
   // can disagree with its source, and the effect below then exists only for the fetch.
@@ -294,6 +368,9 @@ function PlanApprovalPrompt({
         // is the disclosure defect inverted. An older service sends no scope at all, and
         // `undefined` stays `null` here: unknown, not "authorizes nothing".
         setFetchedScope({ hash: status.plan_hash, scope: status.scope ?? null });
+        if (status.author !== undefined) {
+          setFetchedAuthor({ hash: status.plan_hash, author: status.author });
+        }
         // The binding never comes from this read: between rendering the plan and reading it the
         // agent may have revised it, and a decision must bind to what the human was shown.
         if (streamed) return;
@@ -321,6 +398,14 @@ function PlanApprovalPrompt({
       setState(approved ? 'approved' : 'rejected');
       return;
     } catch (err) {
+      // 403 is the author rule answering (Chemclaw3 #483): somebody else's plan, or a member on a
+      // plan with no recorded author. Final for this reader — pressing again is refused the same
+      // way — so it locks the card with the service's own sentence rather than offering a retry.
+      if (err instanceof ApiError && err.kind === 'forbidden') {
+        setRefusal(err.message);
+        setState('idle');
+        return;
+      }
       setError(err instanceof Error ? err.message : 'Could not deliver the decision.');
       if (!(err instanceof ApiError && err.kind === 'plan_changed')) {
         setState('failed');
@@ -338,11 +423,18 @@ function PlanApprovalPrompt({
       // The scope moves with the steps, or the line naming what an approval authorizes would
       // still describe the revision the buttons no longer bind to.
       setFetchedScope({ hash: status.plan_hash, scope: status.scope ?? null });
+      if (status.author !== undefined) {
+        setFetchedAuthor({ hash: status.plan_hash, author: status.author });
+      }
       setState('idle');
     } catch {
       if (seq === readSeq.current) setState('failed');
     }
   };
+
+  // The author a read reported for the revision on screen wins; otherwise what the message carried.
+  const author = plan && fetchedAuthor?.hash === plan.hash ? fetchedAuthor.author : planAuthor;
+  const me = auth.account?.id ?? null;
 
   if (state === 'loading') return <Loading size="xs">Reading the plan…</Loading>;
 
@@ -413,10 +505,24 @@ function PlanApprovalPrompt({
           .
         </p>
       )}
+      {typeof author === 'string' && (membership || author !== me) && (
+        <p className="mb-3 text-xs text-ink-muted">
+          Proposed in answer to{' '}
+          {author === me ? (
+            'your message'
+          ) : (
+            <>
+              <span className="font-mono break-all">{author}</span>’s message
+            </>
+          )}
+          .
+        </p>
+      )}
       <DecisionControls
         state={state}
         error={error}
         onDecide={(approved) => void decide(approved)}
+        lockedReason={refusal ?? planDecisionLock(author, me, membership)}
       />
     </>
   );
@@ -428,6 +534,7 @@ export function ApprovalPrompt({
   planTodos,
   planHash,
   planScope,
+  planAuthor,
 }: {
   prompt: string;
   /** The server session this conversation is bound to — the plan gate is per session, and
@@ -439,6 +546,8 @@ export function ApprovalPrompt({
   planHash?: string | null;
   /** And the tools it declares, which the card displays rather than merely collecting a yes to. */
   planScope?: string[] | null;
+  /** Whose turn wrote the plan, when a read said — the one person who may decide on it. */
+  planAuthor?: string | null;
 }): React.JSX.Element {
   return (
     <div className="mt-3 rounded-lg border border-warn/40 bg-warn-soft p-3.5">
@@ -454,6 +563,7 @@ export function ApprovalPrompt({
         planTodos={planTodos}
         planHash={planHash}
         planScope={planScope}
+        planAuthor={planAuthor}
       />
     </div>
   );

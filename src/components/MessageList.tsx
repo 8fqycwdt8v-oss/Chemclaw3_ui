@@ -304,6 +304,7 @@ const AssistantBubble = memo(function AssistantBubble({
             planTodos={message.latestPlan}
             planHash={message.latestPlanHash}
             planScope={message.latestPlanScope}
+            planAuthor={message.latestPlanAuthor}
           />
         )}
       </div>
@@ -330,9 +331,12 @@ const AssistantBubble = memo(function AssistantBubble({
 const Bubble = memo(function Bubble({
   message,
   sessionId,
+  sender,
 }: {
   message: ChatMessage;
   sessionId: string | null;
+  /** Who sent a user message, in a conversation with more than one person — see `senderOf`. */
+  sender?: string;
 }): React.JSX.Element {
   const streaming = message.role === 'assistant' && message.status === 'streaming';
   return (
@@ -352,21 +356,56 @@ const Bubble = memo(function Bubble({
         streaming ? undefined : { contentVisibility: 'auto', containIntrinsicSize: 'auto 220px' }
       }
     >
-      <BubbleBody message={message} sessionId={sessionId} />
+      <BubbleBody message={message} sessionId={sessionId} sender={sender} />
     </div>
   );
 });
 
+/**
+ * Who a user bubble should say sent it, or `undefined` for no label at all.
+ *
+ * Only in a conversation that has more than one person in it — one this reader was let into, or
+ * one where somebody other than the reader has spoken — because everywhere else every question is
+ * the reader's own and a "You" on each would be noise. Inside one, every user bubble is labelled,
+ * the reader's own included: the service runs each message as its sender (Chemclaw3 #483), so
+ * whose question it is decides whose roles and memories answered it.
+ *
+ * A message this browser sent live carries no author and is the reader's by construction.
+ * Exported for its own test.
+ */
+export function senderOf(
+  message: ChatMessage,
+  shared: boolean,
+  me: string | null,
+): string | undefined {
+  if (!shared || message.role !== 'user') return undefined;
+  return message.author && message.author !== me ? message.author : 'You';
+}
+
 function BubbleBody({
   message,
   sessionId,
+  sender,
 }: {
   message: ChatMessage;
   sessionId: string | null;
+  sender?: string;
 }): React.JSX.Element {
   if (message.role === 'user') {
     return (
       <div className="flex flex-col items-end">
+        {sender && (
+          <p className="mb-1 max-w-[min(85%,42rem)] truncate text-2xs text-ink-muted">
+            {sender === 'You' ? (
+              'You'
+            ) : (
+              <>
+                <span className="sr-only-live">Sent by </span>
+                <span className="font-mono">{sender}</span>
+              </>
+            )}
+          </p>
+        )}
         <div className="max-w-[min(85%,42rem)] rounded-2xl rounded-br-md bg-brand px-4 py-2.5 text-brand-fg shadow-xs">
           {/* Plain text, with its structures drawable — see `StructureText`. Not markdown: a
               chemist typed this, and a parser would turn their asterisks into emphasis in the
@@ -426,6 +465,17 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
   const all = useChatStore((s) => s.conversations[conversationId]?.messages);
   const sessionId = useChatStore((s) => s.conversations[conversationId]?.sessionId ?? null);
   const contextLost = useChatStore((s) => s.conversations[conversationId]?.contextLost ?? false);
+  const member = useChatStore((s) => Boolean(s.conversations[conversationId]?.membership));
+  const me = useChatStore((s) => s.viewer);
+  // More than one person here: this reader was let in, or somebody else has spoken. Derived from
+  // the transcript rather than read from the roster, so opening a conversation costs no extra
+  // request — the roster is read when somebody opens the people panel.
+  const shared = useMemo(
+    () =>
+      member ||
+      (all ?? []).some((m) => m.role === 'user' && m.author !== undefined && m.author !== me),
+    [all, member, me],
+  );
 
   // Selecting a subject in the rail narrows the transcript to the turns that mention it. Read from
   // THIS conversation's index, named by the same route parameter the rail is: a global `selected`
@@ -578,7 +628,12 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
           ))}
 
         {shown.map((message) => (
-          <Bubble key={message.id} message={message} sessionId={sessionId} />
+          <Bubble
+            key={message.id}
+            message={message}
+            sessionId={sessionId}
+            sender={senderOf(message, shared, me)}
+          />
         ))}
         <div ref={endRef} className="h-px" />
       </div>

@@ -170,6 +170,28 @@ for (const theme of ['light', 'dark'] as const) {
       await scan(page);
     });
 
+    test('a conversation shared with the reader, with its people panel open', async ({
+      page,
+      isMobile,
+    }) => {
+      // Chemclaw3 #483: the member's view — sender labels over each question, a plan card whose
+      // disabled controls are described by why, and the roster sheet with Leave.
+      await page.goto('/');
+      await expect(page).toHaveURL(/\/c\/[0-9a-f-]+$/);
+      if (isMobile) await page.getByRole('button', { name: 'Conversations' }).click();
+      await page
+        .getByRole('list', { name: 'Shared with me' })
+        .getByRole('button', { name: /^Shared amination screen/ })
+        .click();
+      await expect(page.getByRole('button', { name: 'Approve plan' })).toBeDisabled();
+      await expectTheme(page, theme);
+      await scan(page);
+
+      await page.getByRole('button', { name: 'People in this shared conversation' }).click();
+      await expect(page.getByRole('button', { name: 'Leave this conversation' })).toBeVisible();
+      await scan(page);
+    });
+
     test('the conversation that is not on this device', async ({ page }) => {
       // A new page, a new focus target, and the one state reached by a link rather than a click.
       await page.goto('/c/does-not-exist');

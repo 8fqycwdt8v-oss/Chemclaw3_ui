@@ -64,6 +64,13 @@ bearer token.
   plan is approved on the strength of the reasoning that produced it. Against a service that
   predates the plan route, the card falls back to answering in the conversation and says that is
   what it is doing.
+- **Shares a conversation without sharing authority** (Chemclaw3 #483). A conversation's owner adds
+  a colleague by account id from its people panel; the colleague finds it under _Shared with me_.
+  Every message runs as its sender, so once more than one person is in a conversation each question
+  says whose it was; a plan is decided only by its author, so the card names the author and
+  disables the decision for anybody else; and a member is offered Leave rather than Branch or
+  Delete, which stay the owner's. The service enforces every one of those; this UI just does not
+  offer what would be refused.
 - **Survives a reload** — conversations persist locally and rehydrate from the service.
 - **Is ready for Entra SSO** without a rewrite: one env var switches the auth provider.
 

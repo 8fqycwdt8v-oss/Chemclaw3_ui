@@ -120,6 +120,7 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
         hash: string;
         awaitingApproval: boolean;
         scope: string[] | null;
+        author: string | null;
       } | null = null;
       try {
         const status = await api.getPlan(sessionId, auth);
@@ -135,6 +136,10 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
             // The same payload names what an approval authorizes, and dropping it cost the card a
             // second read of this route on every reload. Absent from an older service: unknown.
             scope: status.scope ?? null,
+            // Whose turn wrote it — in a shared conversation, the one person who may decide on it
+            // (Chemclaw3 #483). `null` (none recorded, or a service older than the field) leaves
+            // the decision with the owner.
+            author: status.author ?? null,
           };
         }
       } catch {
@@ -145,7 +150,14 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
       if (plan) {
         useChatStore
           .getState()
-          .attachPlan(conversationId, plan.todos, plan.hash, plan.awaitingApproval, plan.scope);
+          .attachPlan(
+            conversationId,
+            plan.todos,
+            plan.hash,
+            plan.awaitingApproval,
+            plan.scope,
+            plan.author,
+          );
       }
     })();
     return () => {

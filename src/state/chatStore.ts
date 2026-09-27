@@ -613,6 +613,16 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
 }
 
 export interface ChatState {
+  /**
+   * The signed-in account's id (`oid`) whose history this store holds, or `null` before it is
+   * known and under a provider with no account.
+   *
+   * Not persisted — it is *which slot* was loaded, set by `hydrateChatForAccount` — and here rather
+   * than read off the auth context because the one consumer only labels things by it: the
+   * transcript says "You" over the reader's own messages in a shared conversation (Chemclaw3
+   * #483), and a label is no reason to make every transcript render depend on the auth provider.
+   */
+  viewer: string | null;
   conversations: Record<string, Conversation>;
   order: string[];
   activeId: string | null;
@@ -741,7 +751,18 @@ export interface ChatState {
     planHash: string,
     awaitingApproval?: boolean,
     scope?: string[] | null,
+    /** Whose turn wrote the plan, as the plan route reports it — see
+     *  `AssistantMessage.latestPlanAuthor`. Omitted leaves the field absent. */
+    author?: string | null,
   ) => void;
+  /**
+   * Record whether this person is a member of somebody else's conversation, and whose.
+   *
+   * Written from the two reads that can answer it — `GET /sessions/shared` and
+   * `GET /sessions/{id}/members` — and cleared (`undefined`) when the second says this person owns
+   * it. See `Conversation.membership`.
+   */
+  setMembership: (conversationId: string, membership: { owner: string | null } | undefined) => void;
 
   appendUserMessage: (conversationId: string, text: string) => string;
   startAssistantMessage: (conversationId: string) => string;
@@ -1415,6 +1436,10 @@ export function hydrateChatForAccount(oid: string | null | undefined): void {
   // memory, so a re-read after the store has moved on (a freshly created conversation not yet
   // flushed) would clobber live state with a stale snapshot. Reading the slot once, when the
   // account first becomes known, is both sufficient and what the app actually wants.
+  // Before the once-per-slot guard: which account is reading is true whether or not the slot
+  // needs reading again.
+  if (useChatStore.getState().viewer !== (oid ?? null))
+    useChatStore.setState({ viewer: oid ?? null });
   if (hydratedName === name) return;
   if (useChatStore.persist.getOptions().name !== name) {
     useChatStore.persist.setOptions({ name });
@@ -1426,6 +1451,7 @@ export function hydrateChatForAccount(oid: string | null | undefined): void {
 export const useChatStore = create<ChatState>()(
   persist(
     (set, get) => ({
+      viewer: null,
       conversations: {},
       order: [],
       activeId: null,
@@ -1619,7 +1645,28 @@ export const useChatStore = create<ChatState>()(
         });
       },
 
-      attachPlan(conversationId, todos, planHash, awaitingApproval = false, scope = null) {
+      setMembership(conversationId, membership) {
+        set((s) => {
+          const conversation = s.conversations[conversationId];
+          if (!conversation) return {};
+          // No write when nothing changed: both reads that call this run on every open of the
+          // panel and every sidebar listing, and a fresh conversation object per call would
+          // re-render its row and its transcript for nothing.
+          const held = conversation.membership;
+          const unchanged =
+            held && membership ? held.owner === membership.owner : !held && !membership;
+          if (unchanged) return {};
+          const { membership: _previous, ...rest } = conversation;
+          return {
+            conversations: {
+              ...s.conversations,
+              [conversationId]: membership ? { ...rest, membership } : rest,
+            },
+          };
+        });
+      },
+
+      attachPlan(conversationId, todos, planHash, awaitingApproval = false, scope = null, author) {
         // The session's current plan, read back after a reload. `latestPlan` is stream-only state
         // — the transcript stores the messages, not the plan — so a rehydrated conversation lost
         // its checklist while the session, per `GET /sessions/{id}/plan`, was still proposing one.
@@ -1658,7 +1705,10 @@ export const useChatStore = create<ChatState>()(
                     // quoting the service's sentence would claim an event that never arrived.
                     approval: {
                       prompt:
-                        'This plan is still waiting for your decision, so the agent cannot carry ' +
+                        // "a decision", not "your": in a shared conversation the plan may be
+                        // another member's, and only its author decides (Chemclaw3 #483) — the
+                        // card beneath says whose.
+                        'This plan is still waiting for a decision, so the agent cannot carry ' +
                         'out its state-changing steps yet.',
                     },
                   },
@@ -1672,6 +1722,10 @@ export const useChatStore = create<ChatState>()(
             // and a previous one kept under this hash would name another plan's tools under
             // these steps. Unknown stays `null`, which the card fetches rather than rendering.
             latestPlanScope: scope,
+            // Only when the caller read it. Absent means "streamed into this browser's own turn",
+            // which the card reads as this person's plan; `null` means the service recorded no
+            // author and the owner decides — two different answers that must not collapse.
+            ...(author !== undefined ? { latestPlanAuthor: author } : {}),
             trace,
           };
           return {

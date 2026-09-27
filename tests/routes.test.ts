@@ -23,6 +23,10 @@ describe('proxy route whitelist', () => {
       ['GET', `/api/sessions/${SID}/plan`, `/sessions/${SID}/plan`],
       ['POST', `/api/sessions/${SID}/plan/decision`, `/sessions/${SID}/plan/decision`],
       ['GET', '/api/plans/pending', '/plans/pending'],
+      ['GET', '/api/sessions/shared', '/sessions/shared'],
+      ['GET', `/api/sessions/${SID}/members`, `/sessions/${SID}/members`],
+      ['PUT', `/api/sessions/${SID}/members/dev-user`, `/sessions/${SID}/members/dev-user`],
+      ['DELETE', `/api/sessions/${SID}/members/dev-user`, `/sessions/${SID}/members/dev-user`],
       ['GET', `/api/sessions/${SID}/tool-results/${REF}`, `/sessions/${SID}/tool-results/${REF}`],
       ['GET', '/api/notes/note-suzuki-42', '/notes/note-suzuki-42'],
       ['GET', '/api/profiles', '/profiles'],
@@ -182,6 +186,43 @@ describe('proxy route whitelist', () => {
       // conversation produced them. A `/tool-results/{ref}` with no session would have to invent
       // an auth story, and does not exist on either side.
       expect(resolveRoute('GET', `/api/tool-results/${REF}`)).toBeNull();
+    });
+  });
+
+  describe('session member ids', () => {
+    // Chemclaw3 #483. The service validates an actor id as `Path(min_length=1)` and nothing else —
+    // an Entra `oid` is a GUID, the dev principal is `dev-user`, and neither is this repo's to pin.
+    it.each([
+      'dev-user',
+      '6f1c2a3e-8b4d-4c1e-9f2a-0d3b5e7a9c11',
+      'someone@example.com',
+      'Müller',
+      "o'brien",
+    ])('passes %s through, encoded', (actor) => {
+      const encoded = encodeURIComponent(actor);
+      for (const method of ['PUT', 'DELETE']) {
+        expect(
+          resolveRoute(method, `/api/sessions/${SID}/members/${encoded}`),
+          `${method} ${actor}`,
+        ).toMatchObject({
+          path: `/sessions/${SID}/members/${encoded}`,
+          template: '/sessions/{id}/members/{actor}',
+        });
+      }
+    });
+
+    it('refuses an encoded separator, a parent reference, a raw slash and the wrong verb', () => {
+      for (const bad of ['..%2F..%2Fmetrics', '%2e%2e', '..', '.', 'a%2Fb', 'a%5Cb', 'x%zz']) {
+        expect(resolveRoute('PUT', `/api/sessions/${SID}/members/${bad}`), bad).toBeNull();
+        expect(resolveRoute('DELETE', `/api/sessions/${SID}/members/${bad}`), bad).toBeNull();
+      }
+      expect(resolveRoute('PUT', `/api/sessions/${SID}/members/a/b`)).toBeNull();
+      expect(resolveRoute('PUT', `/api/sessions/${SID}/members/${'a'.repeat(513)}`)).toBeNull();
+      expect(resolveRoute('GET', `/api/sessions/${SID}/members/dev-user`)).toBeNull();
+      expect(resolveRoute('POST', `/api/sessions/${SID}/members`)).toBeNull();
+      // The session half is still `SID`: the wide actor class does not widen the session id.
+      expect(resolveRoute('PUT', '/api/sessions/shared/members/dev-user')).toBeNull();
+      expect(resolveRoute('DELETE', '/api/sessions/shared')).toBeNull();
     });
   });
 

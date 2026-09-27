@@ -441,6 +441,12 @@ const NOT_READ: Record<string, string> = {
     'the protocols panel has no copy for a short listing yet; recorded in ISSUES.md Issue 14',
   'DesignListOut.truncated':
     'the protocols panel has no copy for a short listing yet; recorded in ISSUES.md Issue 14',
+  // Chemclaw3 #474/#478: `{actor, agent}` on every transcript message — the person it was written
+  // for and the agent that wrote it (`agent` null for a person). Until a session can have more than
+  // one member every message is the owner's, and the role already says which side wrote it, so
+  // there is nothing to draw. Read it when shared sessions land (Chemclaw3 #479).
+  'TranscriptMessage.author':
+    'every message in a session is its owner’s until shared sessions exist (Chemclaw3 #479)',
 };
 
 /**

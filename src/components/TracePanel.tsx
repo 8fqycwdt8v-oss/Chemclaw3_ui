@@ -39,6 +39,7 @@ import { refusalCopy } from '../lib/refusals.ts';
 import { JobFailureCard, JobResultCard } from './JobResultCard.tsx';
 import { parsePlanItem } from './PlanItems.tsx';
 import { ResultSheet } from './ResultSheet.tsx';
+import { CutResultNotice } from './FullResultText.tsx';
 import { methodFor } from '../chem/provenance.ts';
 import { smilesFromArguments } from '../chem/recognise.ts';
 import { Molecule } from './Molecule.tsx';
@@ -387,8 +388,24 @@ function Row({
                   <p className="mt-1.5 text-2xs text-ink-subtle">returned</p>
                   <Pre label={`Result preview from ${call.tool}`}>{call.result}</Pre>
                   <ReturnedNumbers numbers={call.numbers ?? []} values={call.values} />
-                  {call.resultRef && (
-                    <FullResult sessionId={sessionId} tool={call.tool} resultRef={call.resultRef} />
+                  {/* A cut result gets its own control: the assistant read less than this, and
+                      the ref opens what the tool actually returned, as plain text. The typed
+                      "see the full result" would open the same ref, so only one is offered. */}
+                  {call.resultCut ? (
+                    <CutResultNotice
+                      className="mt-1"
+                      sessionId={sessionId}
+                      tool={call.tool}
+                      resultRef={call.resultRef}
+                    />
+                  ) : (
+                    call.resultRef && (
+                      <FullResult
+                        sessionId={sessionId}
+                        tool={call.tool}
+                        resultRef={call.resultRef}
+                      />
+                    )
                   )}
                 </>
               )}

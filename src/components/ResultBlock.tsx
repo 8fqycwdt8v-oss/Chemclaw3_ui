@@ -44,6 +44,7 @@ import { rendererFor, Verdict } from '../results/renderers.tsx';
 import { methodFor } from '../chem/provenance.ts';
 import { Badge } from '@/components/ui/badge';
 import { ResultSheet } from './ResultSheet.tsx';
+import { CutResultNotice } from './FullResultText.tsx';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
@@ -79,6 +80,7 @@ export function ResultBlock({
   tool,
   resultRef,
   inline,
+  cut = false,
   className,
 }: {
   sessionId: string;
@@ -92,6 +94,8 @@ export function ResultBlock({
    * is still what says one was stored, and the block falls back to fetching exactly as before.
    */
   inline?: string;
+  /** The assistant read a cut of this result; the block (fetched by ref) is the full text. */
+  cut?: boolean;
   className?: string;
 }): React.JSX.Element | null {
   const { auth } = useAuth();
@@ -249,6 +253,9 @@ export function ResultBlock({
             Open full result
           </Button>
         )}
+        {/* The table above is what the tool returned; the assistant worked from less. Said on the
+            card, because a figure here the answer never mentions is otherwise a puzzle. */}
+        {cut && <CutResultNotice sessionId={sessionId} resultRef={resultRef} tool={tool} />}
         {/* The join a reviewer asks for, and the one a card without it cannot make. */}
         <span className="ml-auto font-mono text-2xs text-ink-subtle">
           {result.byte_size.toLocaleString()} B

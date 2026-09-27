@@ -164,6 +164,9 @@ const full: Array<[string, Record<string, unknown>]> = [
       // optimisation and never as the presence check — `result_ref` is still what says a result
       // was stored — so both are populated here, together, as the service sends them.
       result_inline: '{"pka": 1.5}',
+      // The model read a cut; the ref opens the full text. Dropped in transit, the chemist never
+      // learns the assistant worked from less than the tool returned.
+      result_cut: true,
       note_ids: ['note-x'],
       numbers: [1.5],
       // The same figure under the key the tool filed it under. Dropped in transit, the entity rail

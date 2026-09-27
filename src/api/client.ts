@@ -286,6 +286,14 @@ export interface TranscriptToolCall {
    * not distinguish those, because the only consumer that acts on this cannot.
    */
   result_ref?: string;
+  /**
+   * The model was shown a cut of this result, as `ToolResultEvent.result_cut` says live.
+   *
+   * When set, `result_ref` (if non-empty) opens the full text the tool returned rather than the
+   * cut; `result` stays the model's text. Optional because an older service does not send it,
+   * and absent reads as "not cut", which is what the service's own default says.
+   */
+  result_cut?: boolean;
 }
 
 export interface TranscriptMessage {

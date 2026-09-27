@@ -89,6 +89,11 @@ screen, the ICH lookup and the charge table, a generic table for anything shaped
 the raw text otherwise. The preview stays — it is what makes the row scannable — and the panel is
 what makes its numbers checkable.
 
+A result **cut to fit the model's context** (`result_cut`, Chemclaw3 #473) is marked on its row —
+"Result was shortened for the assistant — open full result" — and opens the full text the tool
+returned as plain monospace text: size, copy and download of the whole, the first 64 KiB drawn, and
+"no longer available — retention may have removed it" when the ref has been swept.
+
 **A4.** ~~`ErrorEvent` carries only `message`.~~ **Fixed.** `code`, `retryable` and
 `correlation_id` are read: a `budget_exhausted` arriving as an event now locks the composer exactly
 as the 429 does, a failure the service marked retryable is offered a Retry, and the correlation id

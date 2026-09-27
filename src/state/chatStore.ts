@@ -435,6 +435,7 @@ function closeToolCall(
     | {
         result: string;
         resultRef?: string;
+        resultCut?: boolean;
         resultInline?: string;
         numbers?: number[];
         values?: { label: string; value: number; unit: string }[];
@@ -1810,6 +1811,8 @@ export const useChatStore = create<ChatState>()(
               trace: closeToolCall(m.trace, event.tool, {
                 result: event.preview,
                 ...(event.result_ref ? { resultRef: event.result_ref } : {}),
+                // The model read a cut; the ref opens what the tool actually returned.
+                ...(event.result_cut ? { resultCut: true } : {}),
                 // Omitted rather than stored empty, the same rule the ref takes: absent means "the
                 // service did not send the result with the event", and a block then fetches it.
                 ...(event.result_inline ? { resultInline: event.result_inline } : {}),

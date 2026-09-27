@@ -578,6 +578,14 @@ export type ErrorCode =
   | 'loop_cap_reached'
   | 'spend_cap_reached'
   | 'bad_tool_arguments'
+  /**
+   * The model endpoint refused the request because the conversation no longer fits its context
+   * window. Its own member rather than `internal`, because nothing is broken and the remedy is the
+   * chemist's: a fresh session, or a narrower question. The service reported it as `internal`
+   * until 2026-09-27, which told a chemist "internal error" about the one failure a shorter thread
+   * fixes. Never retryable as-is — the same thread overflows the same window.
+   */
+  | 'context_length'
   | 'empty_answer';
 
 /** Every member of `ErrorCode`. An array rather than a `Set` because the schema picks from it and
@@ -592,6 +600,7 @@ const ERROR_CODES: readonly ErrorCode[] = [
   'loop_cap_reached',
   'spend_cap_reached',
   'bad_tool_arguments',
+  'context_length',
   'empty_answer',
 ];
 

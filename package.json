@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Lightweight React chat frontend for the Chemclaw3 agent service",
   "engines": {
-    "node": ">=22.6"
+    "node": ">=22.12"
   },
   "scripts": {
     "dev": "node scripts/dev.mjs",

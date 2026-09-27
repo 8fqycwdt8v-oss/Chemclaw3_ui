@@ -48,7 +48,7 @@ export default defineConfig({
     // Node's instead, whose methods are absent without `--localstorage-file`. Node 22 (CI, the
     // Dockerfile) has no such global, which is why only a laptop on 25 saw it.
     //
-    // A flag rather than a pin: `engines` says `>=22.6`, and this makes the suite mean the same
+    // A flag rather than a pin: `engines` says `>=22.12`, and this makes the suite mean the same
     // thing on every Node in that range instead of narrowing the range to hide it. The flag has
     // existed since 22.4, so it is valid everywhere `engines` admits. If a later Node drops it, the
     // workers fail to start — loudly, not by quietly reverting to Node's storage.

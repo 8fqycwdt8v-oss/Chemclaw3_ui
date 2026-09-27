@@ -90,6 +90,8 @@ framed (a preview iframe) with `ALLOW_FRAMING=true` — each one a separate deci
 
 ### Against a locally-run backend
 
+Node **22.12 or newer** (`engines` in `package.json`; CI and the Dockerfile run the current 22.x).
+
 ```sh
 # in the Chemclaw3 repo
 uvicorn chemclaw.api.app:create_app --factory --port 8080

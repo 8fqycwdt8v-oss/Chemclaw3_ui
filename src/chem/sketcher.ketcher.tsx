@@ -45,7 +45,7 @@
  *    `MISSING_EXPORT` errors — `ketcher-react`'s bundle imports names that older core does not
  *    export. Nothing about the failure points at a version skew; it reads as a broken package. A
  *    range on any of the three re-opens it in the other direction.
- *  - `ketcher-core` declares `engines.node >= 24.14.1`, which this repo's `>= 22.6` does not
+ *  - `ketcher-core` declares `engines.node >= 24.14.1`, which this repo's `>= 22.12` does not
  *    satisfy, so `npm install` warns. It is a browser library and nothing here runs it in Node —
  *    but the warning is real and will keep appearing until one of the two moves.
  *  - `ketcher-standalone/dist/binaryWasm`, not the package root: the root inlines the WASM as

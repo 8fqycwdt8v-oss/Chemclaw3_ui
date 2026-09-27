@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { streamTurn } from '../src/api/streamTurn.ts';
 import { ApiError } from '../src/api/errors.ts';
+import { readEventStream, type SseFrame } from '../src/lib/sse.ts';
 import type { ChemclawEvent } from '../shared/events.ts';
 import {
   answerEvent,
@@ -473,5 +474,125 @@ describe('streamTurn', () => {
       message: 'x',
       dry_run: true,
     });
+  });
+});
+
+/**
+ * The SSE edge cases, through the parser this app actually runs (`eventsource-parser`, behind
+ * `readEventStream`) rather than a stand-in. `src/lib/sse.ts` leans on the parser for multi-line
+ * `data:`, CRLF and chunk boundaries and says so; these hold it to that. Each assertion is on what
+ * the app receives — the decoded frame — not on parser internals, so they read the same under
+ * eventsource-parser 3 and 4 (4 discards an invalid line early instead of buffering it to its
+ * terminator; either way, the app must see nothing of it and lose none of its neighbours).
+ */
+describe('readEventStream on the real SSE parser', () => {
+  /** A body delivered as exactly these network chunks, in order. */
+  const chunked = (parts: string[]): ReadableStream<Uint8Array> => {
+    const enc = new TextEncoder();
+    let i = 0;
+    return new ReadableStream({
+      pull(controller) {
+        if (i >= parts.length) controller.close();
+        else controller.enqueue(enc.encode(parts[i++]));
+      },
+    });
+  };
+
+  const read = async (body: string | string[]): Promise<SseFrame[]> => {
+    // Both through a `Response`, so the body is exactly the type `streamTurn` hands the reader.
+    const res =
+      typeof body === 'string'
+        ? sseResponse(body)
+        : new Response(chunked(body), { headers: { 'content-type': 'text/event-stream' } });
+    const frames: SseFrame[] = [];
+    for await (const frame of readEventStream(res.body!)) frames.push(frame);
+    return frames;
+  };
+
+  // `agent` is what `normalizeEvent` fills in for a token that names none.
+  const token = (text: string): ChemclawEvent => ({ type: 'token', text, agent: '' });
+
+  it('joins a multi-line data field into one frame', async () => {
+    const frames = await read(
+      'event: token\ndata: {\ndata:   "type": "token",\ndata:   "text": "joined"\ndata: }\n\n',
+    );
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.event).toEqual(token('joined'));
+  });
+
+  it('joins data lines with a newline, not with nothing', async () => {
+    // Joined with "" this would be the valid `"text":"ab"`; joined with "\n" (the spec) the string
+    // holds a raw newline, which JSON forbids — so the app sees one malformed frame, not "ab".
+    const frames = await read(
+      'data: {"type":"token","text":"a\ndata: b"}\n\n' + sseFrames([token('next')]),
+    );
+    expect(frames.map((f) => f.drop ?? f.event?.type)).toEqual(['malformed', 'token']);
+    expect(frames[1]?.event).toEqual(token('next'));
+  });
+
+  it('takes a retry field without turning it into a frame or into data', async () => {
+    const frames = await read(
+      'retry: 5000\n\n' + 'event: token\nretry: 1000\ndata: {"type":"token","text":"r"}\n\n',
+    );
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.event).toEqual(token('r'));
+  });
+
+  it('decodes a frame carrying an id without the id leaking into its payload', async () => {
+    // Nothing here resumes by Last-Event-ID (a turn is not resumable, a job watch re-subscribes
+    // from scratch), so the id is only required not to disturb the frame it rides on.
+    const frames = await read(
+      'id: 42\nevent: token\ndata: {"type":"token","text":"i"}\n\n' +
+        'id\ndata: {"type":"token","text":"j"}\n\n',
+    );
+    expect(frames.map((f) => f.event)).toEqual([token('i'), token('j')]);
+  });
+
+  it('reads CRLF and lone-CR line endings the same as LF', async () => {
+    const lf = 'event: token\ndata: {"type":"token","text":"x"}\n\n: hb\n\n';
+    const crlf = lf.replaceAll('\n', '\r\n');
+    const cr = lf.replaceAll('\n', '\r');
+    for (const body of [crlf, cr]) {
+      const frames = await read(body);
+      expect(frames).toHaveLength(1);
+      expect(frames[0]?.event).toEqual(token('x'));
+    }
+  });
+
+  it('reassembles an event split across two network chunks, wherever the split falls', async () => {
+    const body =
+      'event: token\r\ndata: {"type":"token","text":"split"}\r\n\r\n' + sseFrames([token('after')]);
+    // Every cut point, including inside `data:`, inside the JSON, and between a CR and its LF.
+    for (let cut = 1; cut < body.length; cut++) {
+      const frames = await read([body.slice(0, cut), body.slice(cut)]);
+      expect(
+        frames.map((f) => f.event),
+        `split at ${cut}`,
+      ).toEqual([token('split'), token('after')]);
+    }
+  });
+
+  it('ignores an invalid line without losing the frames around it', async () => {
+    const frames = await read(
+      sseFrames([token('before')]) +
+        'this line is not an SSE field\n' +
+        'event: token\nbogus: nope\ndata: {"type":"token","text":"with junk"}\n\n' +
+        sseFrames([token('after')]),
+    );
+    expect(frames.map((f) => f.event)).toEqual([
+      token('before'),
+      token('with junk'),
+      token('after'),
+    ]);
+  });
+
+  it('ignores an invalid line that is split across chunks', async () => {
+    // eventsource-parser 4 discards such a line as soon as it can tell it is invalid rather than
+    // at its terminator; the frame that follows in the same chunk must survive either way.
+    const frames = await read([
+      'nonsense-that-',
+      'keeps-going\nevent: token\ndata: {"type":"token","text":"ok"}\n\n',
+    ]);
+    expect(frames.map((f) => f.event)).toEqual([token('ok')]);
   });
 });

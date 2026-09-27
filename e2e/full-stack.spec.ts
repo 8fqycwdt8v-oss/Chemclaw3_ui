@@ -1,5 +1,6 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import { toolNames, traceText } from './trace.ts';
+import type { FullStackLane } from '../playwright.full-stack.config.ts';
 
 /**
  * Eight scenarios across the four-repo stack, one per subsystem boundary.
@@ -36,6 +37,44 @@ test.afterAll(async () => {
 const composer = () => page.getByPlaceholder(/Ask about a reaction/);
 
 /**
+ * The lane facts the config resolved from the environment — which gateway, which front door.
+ *
+ * Read through `testInfo.config.metadata` rather than `process.env` again, so the config is the one
+ * place the environment is interpreted and the spec cannot disagree with it.
+ */
+const lane = (info: TestInfo): FullStackLane => info.config.metadata as FullStackLane;
+
+/**
+ * Skip a scenario whose claim is a *model decision*, when there is no model.
+ *
+ * Scenarios 2–4 (and scenario 6's job launch) assert that a question made the model route to a particular tool family. The
+ * lane's default gateway is `chemclaw.cli.mock_llm`, whose completions are scripted and do not read
+ * the question — so against it those scenarios measure the script, and a red run there says
+ * nothing about the integration. Skipped with the reason on the line, not failed.
+ */
+function requireRealModel(): void {
+  test.skip(!realModel(), needsModel());
+}
+
+/** Whether the lane's gateway is a real model rather than core's scripted mock. */
+const realModel = (): boolean => lane(test.info()).modelGateway.kind === 'real';
+
+const needsModel = (): string =>
+  `needs a real model: the gateway is the scripted mock (${lane(test.info()).modelGateway.reason}). ` +
+  'Set CHEMCLAW_LLM_BASE_URL + CHEMCLAW_LLM_MODEL for the lane (and this run), or ' +
+  'CHEMCLAW_E2E_MODEL=real to assert anyway.';
+
+/**
+ * The sidebar's footer navigation — the screens that are not a conversation.
+ *
+ * Scoped because the conversation list above it is buttons too, titled by whatever a chemist (or a
+ * probe corpus) asked: an unscoped `/Review queue/` or `'Stop'` role query matches any session
+ * whose title contains the phrase, and under `describe.serial` one strict-mode violation skips
+ * every later scenario.
+ */
+const otherViews = () => page.getByRole('navigation', { name: 'Other views', exact: true });
+
+/**
  * Ask one question and wait for the turn to fully settle.
  *
  * Settle is "the Send button is back", not "the composer is enabled": the composer unlocks briefly
@@ -45,8 +84,12 @@ const composer = () => page.getByPlaceholder(/Ask about a reaction/);
 async function ask(question: string): Promise<string> {
   await composer().fill(question);
   await page.getByRole('button', { name: 'Send', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Stop' })).toBeHidden({ timeout: 220_000 });
-  const answer = page.getByRole('article', { name: 'Assistant answer' }).last();
+  // `exact`: a role name given as a string is a case-insensitive *substring* match, so without it
+  // any sidebar session titled "…stop…" is a second match and strict mode throws.
+  await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeHidden({
+    timeout: 220_000,
+  });
+  const answer = page.getByRole('article', { name: 'Assistant answer', exact: true }).last();
   await expect(answer).not.toBeEmpty();
   return (await answer.textContent()) ?? '';
 }
@@ -75,7 +118,9 @@ test('1 · the shell paints against the real front door', async () => {
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(String(e)));
 
-  await expect(page.getByRole('heading', { name: 'Chemclaw', level: 1 })).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Chemclaw', level: 1, exact: true }),
+  ).toBeVisible();
   await expect(composer()).toBeVisible();
 
   // The connection badge is the one that would have caught the two dev-path defects this suite was
@@ -85,6 +130,7 @@ test('1 · the shell paints against the real front door', async () => {
 });
 
 test('2 · a solvent question reaches the props server (Chemclaw3-mcp)', async () => {
+  requireRealModel();
   const answer = await ask(
     'What is the flash point of 2-MeTHF, and what are its Hansen solubility parameters?',
   );
@@ -98,6 +144,7 @@ test('2 · a solvent question reaches the props server (Chemclaw3-mcp)', async (
 });
 
 test('3 · a reaction question reaches rxnpredict (Chemclaw3-mcp)', async () => {
+  requireRealModel();
   await ask(
     'Predict the products of CC(=O)OC(C)=O.Nc1ccccc1 using the forward reaction prediction tool.',
   );
@@ -110,6 +157,7 @@ test('3 · a reaction question reaches rxnpredict (Chemclaw3-mcp)', async () => 
 });
 
 test('4 · a sourcing question reaches mock-vendor (Chemclaw3_mock)', async () => {
+  requireRealModel();
   await ask('Search for commercial suppliers and pricing for aniline as a building block.');
 
   // The question contains "suppliers" and "building block". Both used to satisfy this assertion on
@@ -138,21 +186,30 @@ test('5 · evidence comes back from the seeded ELN/ORD data (Chemclaw3_mock)', a
 });
 
 test('6 · a durable job is launched and tracked (Temporal)', async () => {
-  await ask('Search the conformers of 1,2-dichloroethane and submit it as a durable job.');
-
   // First: a job was really launched. `job_started` renders "Started <kind>" plus the job's own id
   // in the trace, and neither can come from the question — which is what the previous version of
   // this scenario could not say, since it asserted only that a sidebar button existed.
-  const names = await toolsUsed();
-  expect(names, used(names)).not.toEqual([]);
-  expect(await traceOf(), `no durable job was started; ${used(names)}`).toMatch(/\bStarted\b/);
+  //
+  // Only against a real model: whether "submit it as a durable job" becomes a job-launching tool
+  // call is the model's routing decision, and the scripted mock answers every unmarked turn with
+  // the same `find_notes` call. The panel half below is a wiring claim and runs either way.
+  if (realModel()) {
+    await ask('Search the conformers of 1,2-dichloroethane and submit it as a durable job.');
+    const names = await toolsUsed();
+    expect(names, used(names)).not.toEqual([]);
+    expect(await traceOf(), `no durable job was started; ${used(names)}`).toMatch(/\bStarted\b/);
+  } else {
+    test.info().annotations.push({ type: 'partial', description: `job launch: ${needsModel()}` });
+  }
 
   // Then: the durable panel is the product surface for long work, and a job that runs but never
   // appears there is invisible to the chemist who started it. Asserted on the panel's own H2 —
   // the sidebar control is a button, so this cannot be satisfied by the thing just clicked, which
   // is exactly how the old assertion passed with the registry unreachable.
-  await page.getByRole('button', { name: /Durable runs/ }).click();
-  await expect(page.getByRole('heading', { name: 'Durable runs', level: 2 })).toBeVisible();
+  await otherViews().getByRole('button', { name: 'Durable runs', exact: true }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Durable runs', level: 2, exact: true }),
+  ).toBeVisible();
   // And it resolved against the real registry rather than sitting on its loading state.
   //
   // Deliberately not "a row for the job just launched": the registry holds *finished* runs, and a
@@ -164,7 +221,11 @@ test('6 · a durable job is launched and tracked (Temporal)', async () => {
 });
 
 test('7 · the review queue is reachable and renders (what is waiting on a human)', async () => {
-  await page.getByRole('button', { name: /Review queue/ }).click();
+  // Anchored rather than `exact`: the link's name grows a "N waiting on you" badge when a plan or
+  // question is open.
+  await otherViews()
+    .getByRole('button', { name: /^Review queue\b/ })
+    .click();
 
   // Asserting the page *renders* rather than that it holds a specific row: whether a given turn
   // raises a plan or a question is a model decision, and pinning this test to that would make it
@@ -176,9 +237,11 @@ test('7 · the review queue is reachable and renders (what is waiting on a human
   // after the click — so the scenario passed with the service down. Both headings below belong to
   // the panel and to nothing else. (A third, 'Notes waiting for review', stood here until
   // Chemclaw3 deleted the PR gate and its `/proposals` routes.)
-  await expect(page.getByRole('heading', { name: 'Plans waiting on you', level: 2 })).toBeVisible();
   await expect(
-    page.getByRole('heading', { name: 'Questions waiting on you', level: 2 }),
+    page.getByRole('heading', { name: 'Plans waiting on you', level: 2, exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Questions waiting on you', level: 2, exact: true }),
   ).toBeVisible();
 
   // And the lists resolved rather than sitting on their loading copy, which is the difference
@@ -193,24 +256,43 @@ test('7 · the review queue is reachable and renders (what is waiting on a human
   await expect(page.getByText('Reading what is waiting…')).toHaveCount(0);
 });
 
-test('8 · /readyz reports every connector healthy', async ({ request }) => {
-  const res = await request.get('/api/readyz');
-  expect(res.ok(), `readyz returned ${res.status()}`).toBe(true);
+test('8 · every enabled connector is healthy, by name', async ({ request }, info) => {
+  // `/readyz` first, through the SPA's own proxy chain: it is the probe a load balancer reads, and
+  // what it is allowed to say is a status and a *count* — it is unauthenticated, so its body is a
+  // public document and names nothing (core `api/routes/ops.py::readyz`, D-2026-08-05). This used
+  // to grep its body for connector names, which could only ever fail.
+  const ready = await request.get('/api/readyz');
+  expect(ready.ok(), `readyz returned ${ready.status()}`).toBe(true);
+  const readyBody = (await ready.json()) as { status?: string; connectors_unhealthy?: number };
+  expect(readyBody.status).toBe('ready');
+  expect(readyBody.connectors_unhealthy, 'readyz counts unhealthy connectors').toBe(0);
 
-  const body = JSON.stringify(await res.json());
-  for (const connector of [
-    'props',
-    'rxnpredict',
-    'chem',
-    'safety',
-    'calc',
-    'bo',
-    'molfp',
-    'rxnfp',
-  ]) {
-    expect(body, `${connector} missing from /readyz`).toContain(connector);
+  // The roster is the labelled gauge on the front door's `/metrics` — one series per *enabled*
+  // connector, 1 when it could not be reached (core `infra/live/e2e-full-stack/README.md`,
+  // "Checking it is really wired up"). Read from core directly: the BFF does not proxy `/metrics`.
+  const { coreUrl, requiredConnectors } = lane(info);
+  const metrics = await request.get(`${coreUrl}/metrics`);
+  expect(metrics.ok(), `${coreUrl}/metrics returned ${metrics.status()}`).toBe(true);
+  const roster = new Map<string, number>();
+  for (const m of (await metrics.text()).matchAll(
+    /^chemclaw_connector_unhealthy\{connector="([^"]+)"\}\s+(\S+)$/gm,
+  )) {
+    roster.set(m[1]!, Number(m[2]));
   }
-  // `mock-vendor` is `unprobed`, not `unhealthy`: it serves no REST health route, and its manifest
-  // correctly declares no `health_url`. `unreachable` anywhere is the real failure.
-  expect(body).not.toContain('unreachable');
+  const listed = [...roster].map(([name, v]) => `${name}=${v}`).join(', ') || 'none';
+
+  // Every connector the lane enabled is up — whatever the lane enabled. The set is read, not
+  // written down here, because it is the lane's to decide (props, kinetics, … come and go with
+  // core's bring-up) and a literal list here went stale the first time it changed.
+  expect(roster.size, `no chemclaw_connector_unhealthy{connector=…} series at all`).toBeGreaterThan(
+    0,
+  );
+  for (const [name, value] of roster) {
+    expect(value, `${name} is unhealthy; roster: ${listed}`).toBe(0);
+  }
+  // And the ones this lane always has are *in* the roster: an absent name is a connector that was
+  // never enabled, which a count of zero unhealthy cannot tell from a healthy one.
+  for (const name of requiredConnectors) {
+    expect(roster.has(name), `${name} missing from the roster; roster: ${listed}`).toBe(true);
+  }
 });

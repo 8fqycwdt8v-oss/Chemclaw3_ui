@@ -51,9 +51,9 @@
  *  - `ketcher-standalone/dist/binaryWasm`, not the package root: the root inlines the WASM as
  *    base64 in a 21 MB JS file (see `ketcher-standalone.d.ts`).
  *  - The worker is created as `new Worker(new URL(…, import.meta.url), { type: 'module' })`, which
- *    Vite understands natively — no plugin, no config. It is also created at *module* scope inside
- *    ketcher-standalone, so the worker spawns on import rather than on mount, which is another
- *    reason this file must stay behind the dynamic import.
+ *    Vite understands natively — no plugin, no config. It is a page-wide singleton inside
+ *    ketcher-standalone (a module-scope slot filled on the first struct service), so it outlives
+ *    any one editor; see `destroy()` below.
  *  - `staticResourcesUrl: ''` resolves Ketcher's own assets against the app origin. Anything it
  *    cannot find surfaces through `errorHandler` rather than throwing.
  */
@@ -142,17 +142,18 @@ export const mountKetcher: MountSketcher = async (host, initial) => {
       // of the tree being unmounted, and the close button that calls this is usually in one.
       setTimeout(() => root.unmount(), 0);
       // **This unmounts the editor's React tree and nothing else.** The Indigo heap stays, and it
-      // stays on purpose. Read against the installed `ketcher-standalone@3.17.2`
-      // (`dist/binaryWasm/main.js`): the worker is `var indigoWorker = new Worker(…)` at *module*
-      // scope, so it spawns when this chunk is imported rather than when an editor mounts; every
-      // `IndigoService` takes that same one (`this.worker = indigoWorker`); and `IndigoService`
-      // does have a `destroy()` that calls `this.worker.terminate()`, which nothing in
-      // `ketcher-react@3.17.2` ever calls.
+      // stays on purpose. Read against the installed `ketcher-standalone@3.18.0`
+      // (`dist/binaryWasm/main.js`): the worker is a page-wide singleton — a module-scope slot
+      // (`_indigoWorker`) that `getIndigoWorker()` fills with `new Worker(…)` the first time an
+      // `IndigoService` is built and returns to every later one (`this.worker =
+      // getIndigoWorker()`); and `IndigoService` does have a `destroy()` that calls
+      // `this.worker.terminate()`, which nothing in `ketcher-react@3.18.0` ever calls.
       //
       // So it is terminable, and this is a decision rather than a limitation. Wrapping the
       // provider to capture the service Ketcher builds and calling its `destroy()` here would
-      // free ~11.79 MB — **once**. Module scope runs a single time and `loadSketcher` memoises the
-      // chunk, so nothing can spawn a second worker: the first close would leave every later Draw
+      // free ~11.79 MB — **once**. `destroy()` terminates without clearing the slot, so the getter
+      // keeps handing out the dead worker, and `loadSketcher` memoises the chunk so the slot is
+      // never re-created: the first close would leave every later Draw
       // click mounting an editor whose backend is dead, which surfaces as `onInit` never firing
       // and the 60 s load timeout, with the button still there offering itself. Trading a working
       // feature for one page's memory is the wrong way round; holding the heap warm for the next

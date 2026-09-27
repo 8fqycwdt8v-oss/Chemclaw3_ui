@@ -84,7 +84,19 @@ export default defineConfig({
     sourcemap: false,
   },
   server: {
+    /**
+     * One address, and fail rather than drift.
+     *
+     * Vite's default host is `localhost`, which Node resolves to `::1` first on Linux, and its
+     * default on a taken port is to move to 5174 and say so in a line nobody reads. Chemclaw3's
+     * `infra/live/e2e-full-stack/up.sh` polls `http://127.0.0.1:5173` — so both defaults turned a
+     * working dev server into "ui-spa never came up", and a stale Vite on 5173 into a lane quietly
+     * testing yesterday's SPA. `scripts/dev.mjs` prints the same address; the fixture suite's
+     * `playwright.config.ts` does not start this server (it serves the built client via the BFF).
+     */
+    host: '127.0.0.1',
     port: 5173,
+    strictPort: true,
     proxy: {
       // Proxy to the BFF, NOT straight to the Chemclaw service. If dev talked to FastAPI
       // directly we would never exercise the BFF's SSE path until production — and the BFF's

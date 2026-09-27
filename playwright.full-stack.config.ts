@@ -3,8 +3,16 @@
  *
  * Unlike `playwright.config.ts`, this config starts **nothing**. It points at a stack that is
  * already up — Chemclaw3's `make live-e2e-full-stack`, which runs Postgres, Temporal, the
- * Chemclaw3-mcp fleet, Chemclaw3_mock's ELN/Entra/vendor mocks, this repo's BFF and SPA, and a real
- * Anthropic model behind the front door. There is no fixture service anywhere in the chain.
+ * Chemclaw3-mcp fleet, Chemclaw3_mock's ELN/Entra/vendor mocks, this repo's BFF and SPA, and
+ * whatever model gateway `CHEMCLAW_LLM_BASE_URL` names behind the front door — core's scripted
+ * `chemclaw.cli.mock_llm` on 127.0.0.1:8820 when it names nothing, which is the lane's default.
+ * There is no fixture service anywhere in the chain.
+ *
+ * **Against the mock, scenarios 2–4 skip, and 6 checks only the panel.** They assert that a question made the model route to a
+ * tool family, and scripted completions do not read the question. Everything else — the shell,
+ * the ELN and Temporal hops, the review queue, the connector roster — is a claim about wiring and
+ * runs either way. The gateway is decided below (`modelGateway`) from the same variable `up.sh`
+ * reads, so export it in the shell that runs this suite too, or say `CHEMCLAW_E2E_MODEL=real|mock`.
  *
  * That distinction is the whole point of the file. The fixture suite answers "does the client
  * behave correctly given well-formed frames"; this one answers "does a chemist's question reach a
@@ -53,6 +61,70 @@ import { defineConfig, devices } from '@playwright/test';
 
 const UI_URL = process.env.CHEMCLAW_UI_URL ?? 'http://127.0.0.1:5173';
 
+/**
+ * What this suite knows about the lane it is pointed at, handed to the spec as `metadata`.
+ *
+ * Nothing here is discoverable from the stack itself: the front door answers the same whether a
+ * real model or the scripted mock is behind it, so the gateway is read from the environment, by
+ * the same rule core's `infra/live/e2e-full-stack/up.sh` applies.
+ */
+export interface FullStackLane {
+  /** The front door, for what the BFF deliberately does not proxy (`/metrics`). */
+  coreUrl: string;
+  modelGateway: { kind: 'mock' | 'real'; reason: string };
+  /** Connectors that must appear in `/metrics`' labelled roster, whatever else the lane enables. */
+  requiredConnectors: string[];
+}
+
+/** The address `infra/live/processes.sh` starts `chemclaw.cli.mock_llm` on. */
+const MOCK_LLM = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\]):8820(\/|$)/;
+
+function modelGateway(env: NodeJS.ProcessEnv): FullStackLane['modelGateway'] {
+  const explicit = env.CHEMCLAW_E2E_MODEL?.trim().toLowerCase();
+  if (explicit === 'mock' || explicit === 'real') {
+    return { kind: explicit, reason: `CHEMCLAW_E2E_MODEL=${explicit}` };
+  }
+  if (explicit) throw new Error(`CHEMCLAW_E2E_MODEL must be "mock" or "real", not "${explicit}"`);
+  const base = env.CHEMCLAW_LLM_BASE_URL?.trim();
+  if (!base) {
+    return { kind: 'mock', reason: 'CHEMCLAW_LLM_BASE_URL is unset — up.sh defaults to the mock' };
+  }
+  if (MOCK_LLM.test(base)) return { kind: 'mock', reason: `CHEMCLAW_LLM_BASE_URL=${base}` };
+  return { kind: 'real', reason: `CHEMCLAW_LLM_BASE_URL=${base}` };
+}
+
+/**
+ * The roster floor: core's own connectors plus the two sibling-repo ones scenarios 3–4 route to.
+ * Everything *else* the lane enables (props, kinetics, … as core's bring-up grows) is still held to
+ * healthy by scenario 8 — just not required by name, so a lane change is not a stale literal here.
+ * `CHEMCLAW_E2E_CONNECTORS=props,kinetics` adds names a given run wants required.
+ */
+const REQUIRED_CONNECTORS = [
+  'bo',
+  'calc',
+  'chem',
+  'molfp',
+  'results',
+  'rxnfp',
+  'safety',
+  'rxnpredict',
+  'mock-vendor',
+];
+
+const lane: FullStackLane = {
+  coreUrl: (process.env.CHEMCLAW_API_URL ?? 'http://127.0.0.1:8000').replace(/\/+$/, ''),
+  modelGateway: modelGateway(process.env),
+  requiredConnectors: [
+    ...new Set([
+      ...REQUIRED_CONNECTORS,
+      ...(process.env.CHEMCLAW_E2E_CONNECTORS ?? '')
+        .split(',')
+        .map((c) => c.trim())
+        .filter(Boolean),
+    ]),
+  ],
+};
+
 export default defineConfig({
   testDir: './e2e',
   testMatch: /full-stack\.spec\.ts/,
@@ -65,6 +137,7 @@ export default defineConfig({
   retries: 0,
   forbidOnly: !!process.env.CI,
   reporter: [['list']],
+  metadata: lane as unknown as Record<string, unknown>,
   timeout: 240_000,
   expect: { timeout: 30_000 },
 

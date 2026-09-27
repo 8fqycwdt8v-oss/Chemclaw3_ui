@@ -85,6 +85,10 @@ export type ApiErrorKind =
    *  completion and produced nothing. Not a connection problem — polling the transcript would
    *  wait for an answer the server has already said will never arrive. */
   | 'empty_answer'
+  /** The stream ended with the server's `context_length` event: the conversation has outgrown
+   *  the model's context window. Not a fault and not retryable — the same thread overflows the
+   *  same window — so the offer is a fresh session, not Retry. */
+  | 'context_length'
   /** An `error` event arrived in-stream. Includes the turn timeout, which the backend reports as
    *  a final SSE event rather than an HTTP status. */
   | 'agent'
@@ -306,6 +310,17 @@ export function errorFromStatus(
 }
 
 /**
+ * What a chemist reads when the conversation has outgrown the model's context window.
+ *
+ * Written here rather than taken from the event because the service's generic sentence is the
+ * wrong one for this code (it said "internal error" until the code existed), and because the
+ * remedy — a fresh session — is an offer this app makes, beside this sentence, on the banner.
+ */
+export const CONTEXT_LENGTH_MESSAGE =
+  'This conversation has grown too long for the model to read in one go. Start a fresh session ' +
+  'to carry on — asking again here will hit the same limit.';
+
+/**
  * Map an in-stream `error` event onto a typed error.
  *
  * The event's `code` is a closed set the service maintains, and each member wants something
@@ -352,6 +367,14 @@ export function errorFromEvent(event: {
       // the transcript for an answer that will never land) against an outcome the server has
       // already resolved.
       return new ApiError('empty_answer', event.message, undefined, options);
+    case 'context_length':
+      // The one code whose remedy is the chemist's rather than an operator's, so the sentence is
+      // this app's own: it has to say what to do next, and "Retry" is the one thing that cannot
+      // work. Not retryable whatever the event says — resending re-reads the same too-long thread.
+      return new ApiError('context_length', CONTEXT_LENGTH_MESSAGE, undefined, {
+        ...options,
+        retryable: false,
+      });
     default:
       return new ApiError('agent', event.message, undefined, options);
   }

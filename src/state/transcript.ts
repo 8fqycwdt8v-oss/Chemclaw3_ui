@@ -44,6 +44,8 @@ function traceFrom(calls: TranscriptToolCall[], key: string, at: number): TraceE
       // was the whole of why every full result — a hazard table, a charge table, a solvent
       // ranking — became a 400-character paraphrase the moment the page was reloaded.
       ...(call.result_ref ? { resultRef: call.result_ref } : {}),
+      // Same fact as `tool_result.result_cut` live: `result` is the model's cut text.
+      ...(call.result_cut === true ? { resultCut: true } : {}),
       ...(call.result == null ? { unresolved: true } : { result: call.result }),
     },
   }));

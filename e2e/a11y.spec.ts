@@ -103,6 +103,27 @@ for (const theme of ['light', 'dark'] as const) {
       await scan(page);
     });
 
+    test('the full text of a result cut for the assistant', async ({ page }) => {
+      // A modal holding a large keyboard-scrollable region of untrusted text, a copy control with
+      // a status line, and a download — the controls a chemist reaches for on a cut result.
+      await page.goto('/');
+      await page.getByPlaceholder(/Ask about a reaction/).fill('Read the SDS for 2-MeTHF.');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      await expect(page.getByRole('article', { name: 'Assistant answer' }).last()).toContainText(
+        '4.76',
+        { timeout: 15_000 },
+      );
+      await page.getByRole('button', { name: /The agent’s work/ }).click();
+      await page.getByRole('button', { name: 'Expand all' }).click();
+      await page
+        .getByRole('button', { name: 'Result was shortened for the assistant — open full result' })
+        .click();
+      await expect(
+        page.getByRole('region', { name: 'Full text returned by read_document' }),
+      ).toContainText('Safety data sheet');
+      await scan(page);
+    });
+
     test('the review queue, with a plan waiting', async ({ page }) => {
       // A list of decisions somebody has to take, each linking back into the conversation that
       // raised it. Reached by URL rather than through the sidebar, because the drawer is already

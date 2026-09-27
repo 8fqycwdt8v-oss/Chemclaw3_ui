@@ -728,6 +728,20 @@ const toolResultEvent = v.object({
    * stored.
    */
   result_inline: text(),
+  /**
+   * Whether the model was shown **less** than the tool returned.
+   *
+   * A result over the model's share of the context is cut head-and-tail before the model reads
+   * it. When this is set, `result_ref` opens the *full* text the tool returned rather than the
+   * cut — kept for the chemist, never offered back to the model — while `preview`, `note_ids`,
+   * `numbers` and `values` stay on what the model read. One case keeps the ref on the cut: the
+   * full text was over the service's store cap, and then the fetched text is the model's own and
+   * carries the cut's notice in-band, so it never reads as whole.
+   *
+   * Optional in the type and always populated by `normalizeEvent`: the service defaults it to
+   * `false`, so an older one simply sends nothing and nothing was cut.
+   */
+  result_cut: isTrue(),
   /** Note ids the result cited, untruncated even when `preview` is not — so a citation survives
    *  the cut that loses the sentence around it. */
   note_ids: textList(),
@@ -757,7 +771,7 @@ const toolResultEvent = v.object({
 });
 export type ToolResultEvent = Loosen<
   v.InferOutput<typeof toolResultEvent>,
-  'result_inline' | 'values' | 'agent'
+  'result_inline' | 'result_cut' | 'values' | 'agent'
 >;
 
 const evidenceSourceEvent = v.object({

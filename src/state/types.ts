@@ -90,6 +90,12 @@ export interface TraceEntry {
      */
     resultRef?: string;
     /**
+     * The model was shown a cut of this result; `resultRef` then opens the full text.
+     *
+     * Absent means not cut. Stored only when true, the same way the ref is stored only when set.
+     */
+    resultCut?: boolean;
+    /**
      * The numeric values the result carried, untruncated.
      *
      * The one piece of structured chemistry the stream carries, and it is on the trace row rather

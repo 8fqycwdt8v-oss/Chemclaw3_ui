@@ -57,6 +57,20 @@ const RESULT_REF = 'c'.repeat(64);
 const VALUES_REF = 'd'.repeat(64);
 /** A third, because the protocol receipt is a third shape and shape is what the registry keys on. */
 const PROTOCOL_REF = 'e'.repeat(64);
+/**
+ * A result the model was shown only part of (`result_cut`, core #473): the ref opens the FULL
+ * text. Plain prose over the page's drawing bound, with markup in it, because that is the case
+ * the full-text panel exists for — long, untrusted, and not JSON.
+ */
+const CUT_REF = 'f'.repeat(64);
+const CUT_TEXT = [
+  'Safety data sheet, section 10: stability and reactivity.',
+  '<b>Not bold</b> <script>window.__fixturePwned = true</script>',
+  ...Array.from({ length: 1500 }, (_, i) => `Line ${i + 1}: incompatible with strong oxidisers.`),
+  'END OF DOCUMENT',
+].join('\n');
+/** A cut result whose full text retention has since swept — the ref 404s. */
+const SWEPT_REF = '0'.repeat(64);
 
 /** What `screen_hazards` actually returns, of which the streamed preview is the first 200 chars. */
 const HAZARD_RESULT = {
@@ -289,6 +303,21 @@ const TURN: readonly Frame[] = [
     },
     40,
   ],
+  [{ type: 'tool_call', tool: 'read_document', arguments: '{"id":"sds-2-methf"}', agent: '' }, 40],
+  [
+    {
+      type: 'tool_result',
+      tool: 'read_document',
+      // What the model read began like this; it was cut to fit, and the ref opens all of it.
+      preview: CUT_TEXT.slice(0, 200),
+      result_ref: CUT_REF,
+      result_cut: true,
+      note_ids: [],
+      numbers: [],
+      agent: '',
+    },
+    40,
+  ],
   [{ type: 'job_started', job_id: 'calc-9f2c', kind: 'calc' }, 40],
   // `agent: ''` on every token, deliberately. The field means "which agent produced this chunk",
   // and the backend's own contract is that a consumer concatenates only the *unattributed* ones —
@@ -367,7 +396,17 @@ const SHARED_TRANSCRIPT: TranscriptMessage[] = [
     index: 1,
     role: 'assistant',
     text: 'BrettPhos, at 1.2 equiv base.',
-    tool_calls: [{ tool: 'gather_evidence', arguments: '{"query":"ligand"}', result: '2 notes' }],
+    tool_calls: [
+      { tool: 'gather_evidence', arguments: '{"query":"ligand"}', result: '2 notes' },
+      // Cut for the model, and its full text since swept by retention: the ref 404s.
+      {
+        tool: 'read_document',
+        arguments: '{"id":"ligand-review"}',
+        result: 'BrettPhos review, first part…',
+        result_ref: SWEPT_REF,
+        result_cut: true,
+      },
+    ],
   },
 ];
 
@@ -711,6 +750,17 @@ createServer(async (req, res) => {
       [VALUES_REF]: { tool: 'predict_pka', payload: PKA_RESULT },
       [PROTOCOL_REF]: { tool: 'draft_experiment_protocol', payload: PROTOCOL_RECEIPT },
     };
+    // Stored as text, not JSON — a cut result is usually prose.
+    if (ref === CUT_REF) {
+      const cut: StoredToolResult = {
+        ref,
+        tool: 'read_document',
+        correlation_id: 'turn-e2e-1',
+        byte_size: Buffer.byteLength(CUT_TEXT, 'utf8'),
+        text: CUT_TEXT,
+      };
+      return json(res, 200, cut);
+    }
     const found = stored[ref];
     if (!found) return json(res, 404, { detail: 'unknown result' });
     const text = JSON.stringify(found.payload);

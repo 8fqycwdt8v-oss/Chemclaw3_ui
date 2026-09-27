@@ -50,6 +50,8 @@ export function toolResultEvent(over: Partial<ToolResultEvent> = {}): ToolResult
     // defaults them, so a builder used in `toEqual` has to name them. Empty `result_inline` is
     // "the result did not ride along", which is every result over the service's inline cap.
     result_inline: '',
+    // Defaulted by the service and populated by `normalizeEvent`: nothing was cut.
+    result_cut: false,
     note_ids: [],
     numbers: [],
     values: [],

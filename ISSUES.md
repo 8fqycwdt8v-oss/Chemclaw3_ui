@@ -1157,6 +1157,40 @@ Anchors: `vitest.config.ts`, `tests/webStorage.test.ts`, and `getWindowKeys` in
 
 ---
 
+## Issue 19: the npm minor/patch group is held back, and ketcher 3.18 broke the worker test
+
+Dependabot #104 (18 updates) is red: ketcher 3.18 changed its worker bundle, and
+`tests/ketcherWorker.test.ts` greps the built bundle for `var indigoWorker = new Worker(`. The
+bump was redone by hand on branch `fix/npm-group-ketcher` (WIP commit `75f5773`: `package.json`,
+`package-lock.json`, `src/chem/sketcher.ketcher.tsx`, `src/components/StructureInput.tsx`, the
+test) and stopped on the owner's instruction on 2026-09-27 before CI ran. Finish it by asserting
+what the test guards — that the Indigo worker is a same-origin network worker served under the
+worker CSP route — against the new bundle shape rather than a literal string, check the sketcher
+e2e, open the PR, and close #104 when it lands.
+
+## Issue 20: TypeScript 7 waits on typescript-eslint
+
+Dependabot #42 (typescript 5.9 → 7.0) was closed on 2026-09-27 because `npm ci` fails with
+ERESOLVE: typescript-eslint's peer range does not yet admit TypeScript 7. Revisit when
+typescript-eslint publishes TS 7 support; the migration is its own planned PR, not a lockfile bump.
+
+## Issue 21: three unit tests time out on a loaded machine
+
+`tests/turnStall.test.tsx` (a 20 ms timer), `tests/backendContract.test.ts` (reads and parses the
+Chemclaw3 checkout) and `tests/serverLimits.test.ts` each failed `npm run ci` on 2026-09-27 at a
+host load average of 50–650 and passed when rerun alone; CI on GitHub runners stayed green. They
+are wall-clock-sensitive rather than wrong, but a gate that reds under load teaches people to
+rerun. Make the first assert order rather than elapsed time, and give the contract test a timeout
+derived from what it reads rather than vitest's 5 s default.
+
+## Issue 22: shared sessions will queue turns, and the UI shows none of it yet
+
+Core Chemclaw3 is adding a per-session turn queue and stream fan-out for shared sessions (claim
+issue Chemclaw3#488, unfinished WIP branch `backlog/shared-session-queue-multireader`). Today a
+second sender gets a 409 and this UI offers Retry (`src/state/sendMessage.ts`). When core lands the
+queue, mirror its events and fields in `shared/events.ts`, show a queued message and its position,
+let the sender cancel it, and let several members follow one live stream. Blocked on that core PR.
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.

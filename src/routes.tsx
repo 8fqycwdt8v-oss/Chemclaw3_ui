@@ -27,6 +27,12 @@
  * it fell through the catch-all to `/`, and an old bookmark opened a brand-new empty
  * conversation. It explains and goes nowhere — a redirect is what the decision refused.
  *
+ * **Since Chemclaw3 #483 that has one exception, and it is an explicit grant rather than a link.**
+ * An owner can add somebody to a session (`PUT /sessions/{id}/members/{actor}`), and the session
+ * gate then admits them — so `/open/<id>` does work for a member. It still is not a *share link*:
+ * the link grants nothing, the membership does, and a member finds the conversation under "Shared
+ * with me" in the sidebar (`GET /sessions/shared`) without being handed any link at all.
+ *
  * `/auth/callback` is reserved by MSAL's `redirectUri` and is already SPA-fallbacked by `sirv`
  * (`server/index.ts`). Its element writes no URL — and the URL-sync effects live INSIDE the
  * `/c/:id` element rather than being guarded by a pathname check, so they structurally cannot run
@@ -420,7 +426,7 @@ export function AppRoutes(): React.JSX.Element {
           <AppShell>
             <NotFound
               title="That link has moved"
-              detail="Conversation links start with /open/ now — the 32-character session id at the end is unchanged. They open a conversation on another of your own devices; the service does not serve one person’s conversation to anybody else."
+              detail="Conversation links start with /open/ now — the 32-character session id at the end is unchanged. They open a conversation on another of your own devices, or one its owner has added you to — the service serves a conversation to nobody else."
             />
           </AppShell>
         }

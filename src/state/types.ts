@@ -207,6 +207,15 @@ export interface UserMessage {
   role: 'user';
   text: string;
   at: number;
+  /**
+   * Who sent it, as the stored transcript records it (`TranscriptMessage.author.actor`).
+   *
+   * Absent on a message this browser sent live — that is this person's own by construction — and
+   * on a row the service stored without an author. Read because a shared session can hold more
+   * than one person (Chemclaw3 #483), and the service runs every message as its *sender*: whose
+   * question a bubble is, is also whose roles and memories answered it.
+   */
+  author?: string;
 }
 
 export interface AssistantMessage {
@@ -334,6 +343,13 @@ export interface AssistantMessage {
    */
   latestPlanScope: string[] | null;
   /**
+   * Whose turn wrote `latestPlan`, as `GET /sessions/{id}/plan` reports it — the one person who
+   * may decide on it (Chemclaw3 #483). Absent when not read (a plan streamed into this browser's
+   * own turn is this person's by construction) and `null` when the service records no author, in
+   * which case the session's owner decides.
+   */
+  latestPlanAuthor?: string | null;
+  /**
    * When the turn stopped, however it stopped — answered, aborted or failed.
    *
    * What makes the summary line able to say how long the turn took. Deliberately *our* clock and
@@ -398,6 +414,17 @@ export interface Conversation {
    * a premise the agent has forgotten is a real hazard.
    */
   contextLost: boolean;
+  /**
+   * Present when this conversation is **somebody else's** and its owner let this person in
+   * (`GET /sessions/shared`, Chemclaw3 #483) — carrying that owner's actor id, `null` when the
+   * service could not name one.
+   *
+   * What it changes is what this person may do here, and the service enforces each rule on its
+   * own: a member reads and sends (every message runs as them), but deleting or branching the
+   * conversation and stopping somebody else's turn stay the owner's, so those controls are not
+   * offered rather than offered and refused. Absent on a conversation this person owns.
+   */
+  membership?: { owner: string | null };
 }
 
 export type ComposerLock = false | 'turn_in_flight' | 'budget_exhausted';

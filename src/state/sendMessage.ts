@@ -30,6 +30,14 @@ const STOP_UNCONFIRMED =
   'Stopped here, but the server did not confirm it. The turn may still be running, so the next ' +
   'message may be refused until it finishes.';
 
+/**
+ * What a 403 on `POST /sessions/{id}/turn/stop` means: in a shared conversation a turn is its
+ * sender's to stop, or the owner's (Chemclaw3 #483), so a member cannot cancel somebody else's.
+ */
+const STOP_REFUSED =
+  'Stopped watching here, but the service did not cancel the turn: in a shared conversation only ' +
+  'the person who sent a message, or the conversation’s owner, can stop its turn.';
+
 /** How long the announcement waits for the stop request before saying the ordinary thing. */
 const STOP_CONFIRM_TIMEOUT_MS = 2_000;
 
@@ -187,7 +195,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
    * and kept the session's turn lock, so their next message came back 409 and was rendered as a
    * "reset the conversation" banner: an app bug to a chemist and nothing at all to an operator.
    */
-  let stopOutcome: Promise<'stopped' | 'unconfirmed'> | null = null;
+  let stopOutcome: Promise<'stopped' | 'unconfirmed' | 'refused'> | null = null;
 
   /** Assigned inside the try, and read by the catch and finally below. */
   let messageId = '';
@@ -225,6 +233,10 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           return 'unconfirmed' as const;
         })
         .catch((err: unknown) => {
+          // In a shared conversation a turn is its sender's to stop, or the owner's (Chemclaw3
+          // #483): a member pressing Stop on a turn that is not theirs is refused, and that is a
+          // rule answering rather than a fault — said as such below, not as "unconfirmed".
+          if (err instanceof ApiError && err.kind === 'forbidden') return 'refused' as const;
           logger.error('turn.stop_failed', {
             sessionId,
             kind: err instanceof ApiError ? err.kind : 'unknown',
@@ -308,11 +320,17 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       warnStopUnconfirmed();
       return;
     }
+    if (outcome === 'refused') {
+      showBanner({ kind: 'warn', text: STOP_REFUSED });
+      announceStatus('Stopped here; the service refused to cancel a turn that is not yours.');
+      return;
+    }
     announceStatus('Stopped before the answer was complete.');
     // Still in flight: whatever it eventually says, say it then rather than blocking on it.
     if (outcome === 'pending') {
       void pending.then((late) => {
         if (late === 'unconfirmed') warnStopUnconfirmed();
+        if (late === 'refused') showBanner({ kind: 'warn', text: STOP_REFUSED });
       });
     }
   };
@@ -493,6 +511,21 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         // live-session LRU. Mint a new one and replay the message exactly once. The transcript
         // belongs to the local conversation, so nothing visible is lost — but the AGENT has
         // lost its context, and we mark that rather than pretending continuity.
+        //
+        // **Not in a conversation somebody else owns** (Chemclaw3 #483). There a 404 means the
+        // owner removed this person, and minting a replacement would quietly move their question
+        // into a private session of their own — answered with none of the shared context, under a
+        // title that still reads as the shared conversation. Say what happened instead.
+        if (
+          err.kind === 'session_not_found' &&
+          useChatStore.getState().conversations[conversationId]?.membership
+        ) {
+          throw new ApiError(
+            'session_not_found',
+            'You no longer have access to this shared conversation — its owner may have removed you. Nothing was sent.',
+            404,
+          );
+        }
         if (err.kind === 'session_not_found' && !recreatedSession) {
           recreatedSession = true;
           const { session_id } = await api.createSession(auth, profileFor(conversationId));
@@ -659,19 +692,27 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     }
 
     releaseComposer(false);
+    // In a conversation somebody else owns, "start a fresh session" would leave it: the new session
+    // is this person's own and nobody else is in it. A turn in flight there is usually another
+    // member's, which ends by itself — so the remedy is to wait and retry, not to reset.
+    const member = Boolean(useChatStore.getState().conversations[conversationId]?.membership);
     showBanner({
       kind: 'error',
       text,
       action:
         apiError.kind === 'unauthorized'
           ? 'reauth'
-          : apiError.kind === 'turn_in_flight' ||
-              apiError.kind === 'session_not_found' ||
-              apiError.kind === 'context_length'
-            ? 'reset'
-            : apiError.retryable
-              ? 'retry'
-              : undefined,
+          : member && apiError.kind === 'turn_in_flight'
+            ? 'retry'
+            : member && apiError.kind === 'session_not_found'
+              ? undefined
+              : apiError.kind === 'turn_in_flight' ||
+                  apiError.kind === 'session_not_found' ||
+                  apiError.kind === 'context_length'
+                ? 'reset'
+                : apiError.retryable
+                  ? 'retry'
+                  : undefined,
     });
   } finally {
     const streaming = useChatStore.getState().streaming;

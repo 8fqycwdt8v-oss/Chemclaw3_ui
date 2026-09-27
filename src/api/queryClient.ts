@@ -175,6 +175,14 @@ export const keys = {
    */
   pendingRequests: (nonce: number, pushes: number) => ['pending-requests', nonce, pushes] as const,
   sessions: ['sessions'] as const,
+  /**
+   * The sessions somebody else owns that this person was let into (Chemclaw3 #483). Not nested
+   * under `sessions`: that key is an infinite query of *owned* pages, and a prefix invalidation of
+   * it should not have to know this one exists.
+   */
+  sharedSessions: ['shared-sessions'] as const,
+  /** Who is in one session: its owner and the members that owner admitted. */
+  members: (sessionId: string) => ['members', sessionId] as const,
   jobs: (text: string) => ['jobs', text] as const,
   protocols: (status: string, project: string) => ['protocols', status, project] as const,
   protocol: (designId: string, at: number | undefined) =>

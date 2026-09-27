@@ -195,6 +195,28 @@ change reverted.
 **What would change the answer:** somebody actually asking for cross-person sharing, which then
 starts upstream rather than here.
 
+**Somebody asked, and it started upstream — as a grant, not as a link.** Chemclaw3 #483
+(`D-2026-09-27-in-a-shared-session-the-sender-governs`) gave a session's owner an explicit
+membership list: `PUT`/`DELETE /sessions/{id}/members/{actor}`, `GET /sessions/{id}/members`, and
+`GET /sessions/shared` for the other side. What a membership grants is reach, not authority: every
+message runs as its **sender** (their roles, their memories), a plan is decided only by its
+**author**, and deleting, branching and stopping somebody else's turn stay the owner's — each
+enforced upstream with a 403. This UI's half: a people panel on the conversation (the owner adds by
+account id and removes; a member sees who is here and leaves), a "Shared with me" group in the
+sidebar, a sender label over each question in a conversation with more than one person in it, a
+plan card that names its author and disables the decision for anybody else (with the service's
+sentence if a 403 comes anyway), and Branch/Delete not offered to a member. The two decisions above
+still stand: `/open/` is still not a share link — the membership is what admits somebody, and a
+member needs no link to find the conversation — and the rotation hazard is unchanged, since
+recovery on `session_not_found` still mints a private replacement. **Except in a conversation this
+person is a member of**, where a 404 means the owner removed them and the send path now says so
+rather than silently moving their question into a session nobody else is in.
+
+What this does **not** do yet, and is recorded rather than implied: a member's roster reads are
+per-open (the panel asks on open, nothing polls), so a removal is discovered on the next request
+rather than pushed; and actor ids are shown as the service sends them — an Entra object id is a
+GUID, and there is no directory lookup here to turn it into a name.
+
 ---
 
 ## Closed: one tab holds the streams and tells the others (was Issue 6)

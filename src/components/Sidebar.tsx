@@ -13,7 +13,7 @@
  * sharpest edge in the product.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { useLocation, useNavigate } from 'react-router';
 import {
@@ -21,6 +21,7 @@ import {
   FileCheck2,
   FlaskConical,
   GitBranch,
+  LogOut,
   MoreHorizontal,
   Plus,
   Search,
@@ -28,10 +29,15 @@ import {
   Trash2,
   TriangleAlert,
 } from 'lucide-react';
-import { api, type SessionPage, type SessionSummary } from '../api/client.ts';
+import {
+  api,
+  type SessionPage,
+  type SessionSummary,
+  type SharedSessionSummary,
+} from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
-import { keys, useApiInfiniteQuery } from '../api/queryClient.ts';
+import { keys, useApiInfiniteQuery, useApiQuery } from '../api/queryClient.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore, newConversation, forgetLocalHistory } from '../state/chatStore.ts';
 import type { ChatState } from '../state/chatStore.ts';
@@ -39,6 +45,7 @@ import type { Conversation } from '../state/types.ts';
 import { announceStatus } from '../state/announce.ts';
 import { relativeTime } from '../lib/format.ts';
 import { logger } from '../lib/logger.ts';
+import { leaveConversation } from './MembersPanel.tsx';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -105,6 +112,68 @@ function adoptSessions(remote: SessionSummary[]): number {
     return { conversations: next, order: [...s.order, ...ids] };
   });
   return additions.length;
+}
+
+/**
+ * Fold `GET /sessions/shared` into the local list, marking each as somebody else's.
+ *
+ * `adoptSessions`' shape for the same reason — a stub the transcript rehydrate knows to read — plus
+ * `membership`, which is what moves the row under "Shared with me" and takes Branch and Delete off
+ * it. A session this browser already holds is *marked* rather than duplicated: it was opened
+ * before (by link, say) and is only now known to be somebody else's.
+ */
+export function adoptShared(remote: SharedSessionSummary[]): void {
+  const state = useChatStore.getState();
+  const bySession = new Map(
+    Object.values(state.conversations)
+      .filter((c) => c.sessionId)
+      .map((c) => [c.sessionId, c.id] as const),
+  );
+  const additions: Conversation[] = [];
+  for (const summary of remote) {
+    const membership = { owner: summary.owner ?? null };
+    const known = bySession.get(summary.session_id);
+    if (known) {
+      state.setMembership(known, membership);
+      continue;
+    }
+    const added = Date.parse(summary.added_at);
+    const at = Number.isNaN(added) ? Date.now() : added;
+    additions.push({
+      ...newConversation(),
+      sessionId: summary.session_id,
+      title: summary.title?.trim() || 'Shared conversation',
+      createdAt: at,
+      updatedAt: at,
+      sessionOrigin: 'server',
+      membership,
+    });
+  }
+  if (additions.length === 0) return;
+  useChatStore.setState((s) => ({
+    conversations: {
+      ...s.conversations,
+      ...Object.fromEntries(additions.map((c) => [c.id, c])),
+    },
+    order: [...s.order, ...additions.map((c) => c.id)],
+  }));
+}
+
+/**
+ * The conversations other people have let this person into (Chemclaw3 #483), adopted into the
+ * local list as they arrive. Once per mount, like the owned listing; `listSharedSessions` folds a
+ * service without the route into `[]`, so an older deployment simply has no such section.
+ */
+function useSharedSessions(): void {
+  const { auth, ready } = useAuth();
+  const { data } = useApiQuery<SharedSessionSummary[], ApiError>({
+    queryKey: keys.sharedSessions,
+    queryFn: () => api.listSharedSessions(auth),
+    enabled: ready,
+  });
+  useEffect(() => {
+    if (data) adoptShared(data);
+  }, [data]);
 }
 
 /**
@@ -290,13 +359,17 @@ async function deleteConversation(id: string, auth: AuthProvider): Promise<void>
       logger.warn('session.delete_failed', {
         kind: err instanceof ApiError ? err.kind : 'unknown',
       });
+      // 403 is a member asking (Chemclaw3 #483): deleting a shared conversation is its owner's
+      // act, because it erases everybody's words. Final, so no Retry — and the way out is named.
+      const forbidden = err instanceof ApiError && err.kind === 'forbidden';
       useChatStore.getState().setBanner({
         kind: 'warn',
-        text:
-          err instanceof Error
+        text: forbidden
+          ? 'Only this conversation’s owner can delete it — it holds other people’s messages too. You can leave it instead.'
+          : err instanceof Error
             ? `This conversation was not deleted on the server: ${err.message}`
             : 'This conversation was not deleted on the server.',
-        action: 'retry',
+        ...(forbidden ? {} : { action: 'retry' as const }),
       });
       return;
     }
@@ -331,13 +404,15 @@ async function forkConversation(
     useChatStore.getState().setBanner({
       kind: 'warn',
       text:
-        err instanceof ApiError && err.status === 409
-          ? 'This conversation has a turn running. A branch cannot be taken until it finishes.'
-          : err instanceof ApiError && err.status === 501
-            ? 'This deployment does not keep conversations on the server, so there is nothing to branch.'
-            : err instanceof Error
-              ? `This conversation was not branched: ${err.message}`
-              : 'This conversation was not branched.',
+        err instanceof ApiError && err.kind === 'forbidden'
+          ? 'Only this conversation’s owner can branch it — a branch would copy other people’s messages into a conversation only you own.'
+          : err instanceof ApiError && err.status === 409
+            ? 'This conversation has a turn running. A branch cannot be taken until it finishes.'
+            : err instanceof ApiError && err.status === 501
+              ? 'This deployment does not keep conversations on the server, so there is nothing to branch.'
+              : err instanceof Error
+                ? `This conversation was not branched: ${err.message}`
+                : 'This conversation was not branched.',
     });
   }
 }
@@ -384,8 +459,9 @@ function ConversationRow({
           )}
           <span className="truncate text-sm">{conversation.title}</span>
         </span>
-        <span className="mt-0.5 block text-2xs text-ink-subtle">
+        <span className="mt-0.5 block truncate text-2xs text-ink-subtle">
           {relativeTime(conversation.updatedAt)}
+          {conversation.membership?.owner && ` · from ${conversation.membership.owner}`}
         </span>
       </button>
 
@@ -404,7 +480,44 @@ function ConversationRow({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          {/* deleteConversation has existed in the store from the start and no UI ever called it,
+          {/* Somebody else's conversation (Chemclaw3 #483): branching and deleting it are its
+              owner's acts, and the service refuses a member both — so neither is offered. What a
+              member holds instead is leaving, which nobody should have to ask the owner for. */}
+          {conversation.membership && (
+            <ConfirmDialog
+              trigger={
+                <DropdownMenuItem tone="danger" onSelect={(e) => e.preventDefault()}>
+                  <LogOut />
+                  Leave conversation
+                </DropdownMenuItem>
+              }
+              title="Leave this conversation?"
+              description="You will no longer be able to read it or send into it. Only its owner can add you back."
+              confirmLabel="Leave"
+              variant="destructive"
+              onConfirm={() => void leaveConversation(id, auth)}
+            />
+          )}
+          {!conversation.membership && <OwnerActions id={id} auth={auth} navigate={navigate} />}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </li>
+  );
+}
+
+/** Branch and Delete — the acts that are the conversation owner's alone. */
+function OwnerActions({
+  id,
+  auth,
+  navigate,
+}: {
+  id: string;
+  auth: AuthProvider;
+  navigate: (to: string) => void | Promise<void>;
+}): React.JSX.Element {
+  return (
+    <>
+      {/* deleteConversation has existed in the store from the start and no UI ever called it,
               so the only way to remove one conversation was to delete all of them.
 
               **Two things were wrong with the version that gave it one.** It was a local map
@@ -416,38 +529,36 @@ function ConversationRow({
 
               `onSelect` is prevented so the menu does not close and unmount the dialog it is
               opening. */}
-          {/* Branch it, keeping both. The service copies the whole thread under a new id and
+      {/* Branch it, keeping both. The service copies the whole thread under a new id and
               refuses while a turn is in flight, so a fork is never a half-copied conversation.
               This is also the version of "edit and resend" that keeps the original: the message
               control refills the composer in place, this one gives the new question its own
               thread. */}
-          <DropdownMenuItem
-            onSelect={() => {
-              // A statement body, not `() => void fork(…)`: the rule reads the expression form as
-              // returning the promise. `forkConversation` reports its own failures through the
-              // banner, so there is nothing here to await.
-              void forkConversation(id, auth, navigate);
-            }}
-          >
-            <GitBranch />
-            Branch this conversation
+      <DropdownMenuItem
+        onSelect={() => {
+          // A statement body, not `() => void fork(…)`: the rule reads the expression form as
+          // returning the promise. `forkConversation` reports its own failures through the
+          // banner, so there is nothing here to await.
+          void forkConversation(id, auth, navigate);
+        }}
+      >
+        <GitBranch />
+        Branch this conversation
+      </DropdownMenuItem>
+      <ConfirmDialog
+        trigger={
+          <DropdownMenuItem tone="danger" onSelect={(e) => e.preventDefault()}>
+            <Trash2 />
+            Delete conversation
           </DropdownMenuItem>
-          <ConfirmDialog
-            trigger={
-              <DropdownMenuItem tone="danger" onSelect={(e) => e.preventDefault()}>
-                <Trash2 />
-                Delete conversation
-              </DropdownMenuItem>
-            }
-            title="Delete this conversation?"
-            description="It is removed from this browser and from the server — the transcript, its attachments and everything keyed by it. This cannot be undone."
-            confirmLabel="Delete it"
-            variant="destructive"
-            onConfirm={() => void deleteConversation(id, auth)}
-          />
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </li>
+        }
+        title="Delete this conversation?"
+        description="It is removed from this browser and from the server — the transcript, its attachments and everything keyed by it. This cannot be undone."
+        confirmLabel="Delete it"
+        variant="destructive"
+        onConfirm={() => void deleteConversation(id, auth)}
+      />
+    </>
   );
 }
 
@@ -525,6 +636,33 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
   // React does nothing. `ConversationRow` already subscribes to its own conversation, so the one
   // row that genuinely changed still re-renders — which is the whole of what should.
   const visible = useChatStore(useShallow((s) => visibleConversationIds(s, needle)));
+  // Split by whose they are, as ids for the same reason as above: a conversation somebody else let
+  // this person into is listed under its own heading, so "mine" and "shared with me" are never
+  // one column a reader has to tell apart row by row.
+  const sharedIds = useChatStore(
+    useShallow((s) => visible.filter((id) => s.conversations[id]?.membership)),
+  );
+  const ownIds = useMemo(() => {
+    const shared = new Set(sharedIds);
+    return visible.filter((id) => !shared.has(id));
+  }, [visible, sharedIds]);
+  useSharedSessions();
+
+  const open = (id: string): void => {
+    // Read at click time rather than subscribed: the announcement wants the title and the length
+    // as they are when the reader acts, and subscribing to the map to get them is what put this
+    // panel on the per-token render path.
+    const opened = useChatStore.getState().conversations[id];
+    const title = opened?.title ?? 'conversation';
+    const count = opened?.messages.length ?? 0;
+    void navigate(`/c/${id}`);
+    onNavigate?.();
+    // Land the reader in the transcript rather than leaving focus on a list item whose content
+    // just changed underneath it, and say what they landed in — the transcript itself gives no
+    // spoken cue that it swapped.
+    document.getElementById('transcript')?.focus({ preventScroll: true });
+    announceStatus(`Opened ${title}. ${count} message${count === 1 ? '' : 's'}.`);
+  };
 
   return (
     <>
@@ -572,29 +710,31 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           </p>
         )}
         <ul className="space-y-1">
-          {visible.map((id) => (
-            <ConversationRow
-              key={id}
-              id={id}
-              active={id === activeId}
-              onSelect={() => {
-                // Read at click time rather than subscribed: the announcement wants the title and
-                // the length as they are when the reader acts, and subscribing to the map to get
-                // them is what put this panel on the per-token render path.
-                const opened = useChatStore.getState().conversations[id];
-                const title = opened?.title ?? 'conversation';
-                const count = opened?.messages.length ?? 0;
-                void navigate(`/c/${id}`);
-                onNavigate?.();
-                // Land the reader in the transcript rather than leaving focus on a list item
-                // whose content just changed underneath it, and say what they landed in — the
-                // transcript itself gives no spoken cue that it swapped.
-                document.getElementById('transcript')?.focus({ preventScroll: true });
-                announceStatus(`Opened ${title}. ${count} message${count === 1 ? '' : 's'}.`);
-              }}
-            />
+          {ownIds.map((id) => (
+            <ConversationRow key={id} id={id} active={id === activeId} onSelect={() => open(id)} />
           ))}
         </ul>
+
+        {/* Conversations other people let this person into (Chemclaw3 #483). A heading and a
+            labelled list rather than a second landmark: they are still conversations, and one
+            "Conversations" navigation with two groups is what a screen reader should hear. */}
+        {sharedIds.length > 0 && (
+          <>
+            <h2 className="px-2.5 pt-4 pb-1 text-2xs font-semibold tracking-wide text-ink-subtle uppercase">
+              Shared with me
+            </h2>
+            <ul aria-label="Shared with me" className="space-y-1">
+              {sharedIds.map((id) => (
+                <ConversationRow
+                  key={id}
+                  id={id}
+                  active={id === activeId}
+                  onSelect={() => open(id)}
+                />
+              ))}
+            </ul>
+          </>
+        )}
 
         {/* Only when the service said there is a next page. The listing is capped at
             `service_max_listed_sessions`, and before this the cap was invisible: conversation 101

@@ -38,6 +38,13 @@ function serveSessions(answers: Answer[]) {
   const original = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();
+    // The sidebar also asks for the conversations other people shared with this person — a
+    // different listing, answered here with none so it cannot consume the owned pages below.
+    if (url.includes('/sessions/shared')) {
+      return Promise.resolve(
+        new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } }),
+      );
+    }
     asked.push(url);
     const answer = answers[asked.length - 1] ?? { sessions: [] };
     if ('status' in answer) {

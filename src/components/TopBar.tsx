@@ -26,6 +26,7 @@ import { useOffline } from '../hooks/useOffline.ts';
 import { resetSession } from '../state/sendMessage.ts';
 import { SidebarBody } from './Sidebar.tsx';
 import { EntityRailTrigger } from './EntityRail.tsx';
+import { MembersTrigger } from './MembersPanel.tsx';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
 import { Badge } from '@/components/ui/badge';
@@ -190,6 +191,9 @@ export function TopBar({
           {/* Before the theme toggle: this one changes what a chemist can read, and the other
               changes how it looks. */}
           {conversationId && <EntityRailTrigger conversationId={conversationId} />}
+          {/* Who else is in this conversation (Chemclaw3 #483). Beside the subjects rather than in
+              the account menu: it is a fact about the conversation on screen, not about you. */}
+          {conversationId && <MembersTrigger conversationId={conversationId} />}
           <DrawStructuresToggle />
           <ThemeToggle />
 

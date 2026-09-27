@@ -80,7 +80,10 @@ export function transcriptToMessages(remote: TranscriptMessage[]): ChatMessage[]
     if (m.role === 'user') {
       // A user message is its text; there is nothing else it could be showing.
       if (!text) continue;
-      messages.push({ id: key, role: 'user', text, at });
+      // Who sent it, when the service recorded a person: in a shared conversation that is whose
+      // question this is — and, since every message runs as its sender, whose roles answered it.
+      const author = m.author?.actor?.trim();
+      messages.push({ id: key, role: 'user', text, at, ...(author ? { author } : {}) });
       continue;
     }
 

@@ -123,6 +123,20 @@ const DESIGN = '(design-[0-9a-f]{12})';
  */
 const SKILL = "([A-Za-z0-9._:~!*'()%-]{1,1024})";
 
+/**
+ * A session member's actor id — the Entra object id the owner names when admitting somebody.
+ *
+ * `NOTE`'s closed set and `NOTE`'s cap, for `NOTE`'s reason: this repo does not own the shape.
+ * Under Entra it is the `oid` claim (a GUID), under dev auth it is `dev-user`, and the service's
+ * own validation (`routes/members.py`'s `MemberId`) is `Path(min_length=1)` stripped and nothing
+ * else — no alphabet at all. Pinning it to a GUID would 404 every dev principal and every tenant
+ * whose identity provider mints something else, for the one act (`DELETE`, "leave") a member
+ * needs most. `src/api/client.ts` encodes it with `encodeURIComponent`, so the set is what that
+ * function emits; `isTraversal` below refuses an encoded `/`, `\`, a bare `.`/`..` and a malformed
+ * escape on this capture as on every other.
+ */
+const ACTOR = "([A-Za-z0-9._:~!*'()%-]{1,512})";
+
 /** What a proposal proposes. Two values, because the service's `ProposalKind` has exactly two. */
 const KIND = '(skill|profile)';
 
@@ -212,6 +226,41 @@ export const ROUTES: readonly Route[] = [
     target: (m) => `/sessions/${m[1]}/attachments`,
     sse: false,
     upload: true,
+  },
+
+  // Shared sessions (Chemclaw3 #483, `D-2026-09-27-in-a-shared-session-the-sender-governs`).
+  //
+  // The sessions somebody else owns that the caller has been let into — the other half of
+  // `GET /sessions`, which lists only what the caller owns. No `{id}` segment, and `shared` can
+  // never match `SID`, so it cannot be mistaken for a session-scoped route.
+  {
+    method: 'GET',
+    pattern: /^\/api\/sessions\/shared$/,
+    target: () => '/sessions/shared',
+    sse: false,
+  },
+  // Who is in a session: its owner and the members that owner admitted. Open to every participant.
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/members$`),
+    target: (m) => `/sessions/${m[1]}/members`,
+    sse: false,
+  },
+  // Admit somebody — the owner's act alone (403 for a member). Idempotent upstream.
+  {
+    method: 'PUT',
+    pattern: new RegExp(`^/api/sessions/${SID}/members/${ACTOR}$`),
+    target: (m) => `/sessions/${m[1]}/members/${m[2]}`,
+    labels: ['{id}', '{actor}'],
+    sse: false,
+  },
+  // Remove somebody (the owner), or leave (a member naming themself).
+  {
+    method: 'DELETE',
+    pattern: new RegExp(`^/api/sessions/${SID}/members/${ACTOR}$`),
+    target: (m) => `/sessions/${m[1]}/members/${m[2]}`,
+    labels: ['{id}', '{actor}'],
+    sse: false,
   },
 
   // The untruncated text of one tool result.
@@ -437,7 +486,7 @@ function templateGroups(route: Route): RegExpMatchArray {
  * Whether a matched segment would traverse if the next hop decoded it — in which case this
  * resolver refuses it, whatever route matched.
  *
- * `NOTE`, `JOB`, `PENDING` and `SKILL` admit `.` and `%` deliberately — their ids embed a
+ * `NOTE`, `JOB`, `PENDING`, `SKILL` and `ACTOR` admit `.` and `%` deliberately — their ids embed a
  * model-written slug, a Temporal workflow id or a name a person chose — so `..%2F..%2Fmetrics` and `%2e%2e%2f%2e%2e%2fmetrics` both
  * match. Neither is a legitimate id, and neither costs anything to refuse. Decoding *once* is
  * what the next hop does, so it is what this asks about: a value that becomes a path separator or

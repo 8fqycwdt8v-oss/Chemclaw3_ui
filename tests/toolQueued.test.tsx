@@ -1,276 +1,179 @@
 /**
- * A tool call waiting for a compute slot says so, instead of claiming to be running.
+ * `tool_queued`: a queued tool call says it is waiting for a compute slot, not that it is running.
  *
- * Core #495/#502 routes heavy connector tools through a global queue
- * (`D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`) and sends
- * `tool_queued` while a call waits — once after the first poll, again when the waiting count moves,
- * once when a worker picks it up. Before this file the event was dropped at the gate and the card
- * read "running…" for the whole wait.
- *
- * Kept apart, in every assertion that could blur them, from the `queued` event: that one is a
- * *message* waiting (admission, or a place in a shared session's line — `queuedEvent.test.tsx`);
- * this is one *tool call* waiting inside a turn that is already running.
+ * Backend `connectors/queued.py` routes a manifest's heavy tools through a queue, so on a busy
+ * deployment a call can sit for seconds before a worker picks it up. Until this event the card read
+ * "running…" for that whole wait — false, and the one part of the turn a chemist was watching. The
+ * event annotates the open `tool_call` row (by job id, else the oldest unannotated open row for the tool),
+ * the badge says "queued · N in queue" (the broker's approximate backlog, never a position), and
+ * the activity line says the turn is waiting for a compute slot — as a kind of its own, because the
+ * row announces to a screen reader only when the kind changes.
  */
-
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { normalizeEvent, type ToolQueuedEvent } from '../shared/events.ts';
-import { useChatStore } from '../src/state/chatStore.ts';
+import { normalizeEvent, type ChemclawEvent } from '../shared/events.ts';
 import { TracePanel } from '../src/components/TracePanel.tsx';
-import { ActivityRow } from '../src/components/ActivityLine.tsx';
-import { registerAnnouncer } from '../src/state/announce.ts';
-import { computeBacklog, turnActivity } from '../src/state/turnActivity.ts';
+import { useChatStore } from '../src/state/chatStore.ts';
+import { describeActivity, turnActivity } from '../src/state/turnActivity.ts';
 import type { AssistantMessage } from '../src/state/types.ts';
 
-const TOOL = 'compute_xtb_energy';
-
-const waiting = (n: number | null, jobId = 'q-1'): ToolQueuedEvent => ({
-  type: 'tool_queued',
-  tool: TOOL,
-  job_id: jobId,
-  state: 'queued',
-  waiting: n,
-});
-const pickedUp = (jobId = 'q-1'): ToolQueuedEvent => ({
-  type: 'tool_queued',
-  tool: TOOL,
-  job_id: jobId,
-  state: 'running',
-  waiting: null,
-});
-
-const assistantOf = (conversationId: string, messageId: string): AssistantMessage => {
-  const message = useChatStore
-    .getState()
-    .conversations[conversationId]?.messages.find((m) => m.id === messageId);
-  if (!message || message.role !== 'assistant') throw new Error('no assistant message');
-  return message;
-};
-
-const startTurn = (): { cid: string; mid: string } => {
+function startTurn(): { cid: string; mid: string } {
   const store = useChatStore.getState();
   const cid = store.createConversation();
   const mid = store.startAssistantMessage(cid);
-  store.applyEvent(cid, mid, { type: 'tool_call', tool: TOOL, arguments: '{"smiles":"CCO"}' });
   return { cid, mid };
-};
+}
 
-const callsOf = (cid: string, mid: string) =>
-  assistantOf(cid, mid)
-    .trace.filter((e) => e.kind === 'tool_call')
-    .map((e) => e.toolCall);
+function apply(cid: string, mid: string, raw: Record<string, unknown>): void {
+  const event = normalizeEvent(raw) as ChemclawEvent;
+  expect(event).not.toBeNull();
+  useChatStore.getState().applyEvent(cid, mid, event);
+}
 
-let heard: string[];
-let unregister: (() => void) | null = null;
+function message(cid: string, mid: string): AssistantMessage {
+  const found = useChatStore.getState().conversations[cid]?.messages.find((m) => m.id === mid);
+  if (!found || found.role !== 'assistant') throw new Error('no assistant message');
+  return found;
+}
 
-beforeEach(() => {
+/** Render the trace with its disclosure open, the way the panel's own tests read a row. */
+function show(cid: string, mid: string): void {
   cleanup();
-  heard = [];
-  unregister = registerAnnouncer((message) => heard.push(message));
-  useChatStore.setState({
-    conversations: {},
-    order: [],
-    activeId: null,
-    composerLock: false,
-    banner: null,
-    jobFeed: [],
-    streaming: null,
-  });
-});
+  render(<TracePanel trace={message(cid, mid).trace} />);
+  fireEvent.click(screen.getByRole('button'));
+}
 
-afterEach(() => {
-  unregister?.();
-  unregister = null;
-  cleanup();
-});
-
-describe('normalizeEvent', () => {
-  it('admits tool_queued with every field it carries', () => {
-    expect(
-      normalizeEvent({
-        type: 'tool_queued',
-        tool: TOOL,
-        job_id: 'q-1',
-        state: 'queued',
-        waiting: 3,
-      }),
-    ).toEqual({ type: 'tool_queued', tool: TOOL, job_id: 'q-1', state: 'queued', waiting: 3 });
+describe('a queued tool call', () => {
+  beforeEach(() => {
+    cleanup();
+    useChatStore.setState({
+      conversations: {},
+      order: [],
+      activeId: null,
+      composerLock: false,
+      banner: null,
+      jobFeed: [],
+      streaming: null,
+    });
   });
 
-  it('reads a backlog the broker could not give as null, not as zero', () => {
-    expect(
-      normalizeEvent({ type: 'tool_queued', tool: TOOL, job_id: 'q', state: 'running' }),
-    ).toEqual({ type: 'tool_queued', tool: TOOL, job_id: 'q', state: 'running', waiting: null });
+  it('decodes, keeping "could not say" apart from zero', () => {
+    const unknown = normalizeEvent({
+      type: 'tool_queued',
+      tool: 't',
+      job_id: 'q',
+      state: 'queued',
+    });
+    expect(unknown).toMatchObject({ type: 'tool_queued', state: 'queued', waiting: null });
+    const zero = normalizeEvent({
+      type: 'tool_queued',
+      tool: 't',
+      job_id: 'q',
+      state: 'queued',
+      waiting: 0,
+    });
+    expect(zero).toMatchObject({ waiting: 0 });
+    // An unknown state is read as queued: claiming a call runs when it may not is the falsehood.
+    const odd = normalizeEvent({ type: 'tool_queued', tool: 't', job_id: 'q', state: 'paused' });
+    expect(odd).toMatchObject({ state: 'queued' });
   });
 
-  it('reads a count it cannot use as no count, and a state it does not know as running', () => {
-    // `running` is what an open card already claims, so an unheard-of state adds no claim.
-    expect(
-      normalizeEvent({
-        type: 'tool_queued',
-        tool: TOOL,
-        job_id: 'q',
-        state: 'paused',
-        waiting: -2,
-      }),
-    ).toMatchObject({ state: 'running', waiting: null });
-    expect(normalizeEvent({ type: 'tool_queued', waiting: 2.5 })).toMatchObject({ waiting: null });
-  });
-
-  it('is a different member from the message queue’s `queued`', () => {
-    expect(normalizeEvent({}, 'tool_queued')?.type).toBe('tool_queued');
-    expect(normalizeEvent({ type: 'queued', ticket: 1, position: 0 })?.type).toBe('queued');
-  });
-});
-
-describe('applyEvent', () => {
-  it('annotates the open card for the same tool without adding a row', () => {
+  it('shows "queued · N in queue" on its card, then "running…", then the result', () => {
     const { cid, mid } = startTurn();
-    useChatStore.getState().applyEvent(cid, mid, waiting(4));
-
-    const message = assistantOf(cid, mid);
-    expect(message.trace).toHaveLength(1);
-    expect(message.trace[0]?.toolCall?.computeWait).toEqual({
+    apply(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: '{"smiles":"CCO"}' });
+    apply(cid, mid, {
+      type: 'tool_queued',
+      tool: 'predict_pka',
+      job_id: 'q1',
       state: 'queued',
       waiting: 4,
-      jobId: 'q-1',
     });
-    // The message queue is untouched: the turn was admitted and is running.
-    expect(message.queued).toBe(false);
-    expect(message.queuePlace).toBeUndefined();
-  });
 
-  it('follows the count, then the pick-up, then clears on the result', () => {
-    const { cid, mid } = startTurn();
-    const store = useChatStore.getState();
-    store.applyEvent(cid, mid, waiting(4));
-    store.applyEvent(cid, mid, waiting(2));
-    expect(callsOf(cid, mid)[0]?.computeWait).toMatchObject({ state: 'queued', waiting: 2 });
-
-    store.applyEvent(cid, mid, pickedUp());
-    expect(callsOf(cid, mid)[0]?.computeWait).toMatchObject({ state: 'running' });
-
-    store.applyEvent(cid, mid, {
-      type: 'tool_result',
-      tool: TOOL,
-      preview: '-154.2',
-      result_ref: '',
-      note_ids: [],
-      numbers: [],
-    });
-    const [call] = callsOf(cid, mid);
-    expect(call?.result).toBe('-154.2');
-    expect(call?.computeWait).toBeUndefined();
-  });
-
-  it('clears on a failure too', () => {
-    const { cid, mid } = startTurn();
-    const store = useChatStore.getState();
-    store.applyEvent(cid, mid, waiting(1));
-    store.applyEvent(cid, mid, { type: 'tool_failed', tool: TOOL, message: 'refused' });
-    expect(callsOf(cid, mid)[0]?.computeWait).toBeUndefined();
-  });
-
-  it('keeps a repeat on the card its job id already annotates', () => {
-    const { cid, mid } = startTurn();
-    const store = useChatStore.getState();
-    store.applyEvent(cid, mid, { type: 'tool_call', tool: TOOL, arguments: '{"smiles":"CCN"}' });
-    store.applyEvent(cid, mid, waiting(5, 'first'));
-    store.applyEvent(cid, mid, waiting(6, 'second'));
-    store.applyEvent(cid, mid, pickedUp('second'));
-
-    const [first, second] = callsOf(cid, mid);
-    expect(first?.computeWait).toMatchObject({ jobId: 'first', state: 'queued', waiting: 5 });
-    expect(second?.computeWait).toMatchObject({ jobId: 'second', state: 'running' });
-  });
-
-  it('discards an event with no open card to annotate', () => {
-    const { cid, mid } = startTurn();
-    const store = useChatStore.getState();
-    store.applyEvent(cid, mid, {
-      type: 'tool_result',
-      tool: TOOL,
-      preview: 'done',
-      result_ref: '',
-      note_ids: [],
-      numbers: [],
-    });
-    const before = assistantOf(cid, mid).trace;
-    store.applyEvent(cid, mid, waiting(2));
-    store.applyEvent(cid, mid, { ...waiting(2), tool: 'another_tool' });
-    expect(assistantOf(cid, mid).trace).toEqual(before);
-  });
-});
-
-describe('the wording', () => {
-  it('words the backlog as approximate, and says nothing for null or zero', () => {
-    expect(computeBacklog(3)).toBe('about 3 calls waiting');
-    expect(computeBacklog(1)).toBe('about 1 call waiting');
-    expect(computeBacklog(0)).toBe('');
-    expect(computeBacklog(null)).toBe('');
-  });
-});
-
-describe('the card', () => {
-  const openPanel = (cid: string, mid: string) => {
-    const view = render(<TracePanel trace={assistantOf(cid, mid).trace} />);
-    fireEvent.click(screen.getByRole('button'));
-    return view;
-  };
-
-  it('says waiting for a compute slot with the approximate backlog, not running', () => {
-    const { cid, mid } = startTurn();
-    useChatStore.getState().applyEvent(cid, mid, waiting(3));
-    openPanel(cid, mid);
-
-    expect(screen.getByText(/waiting for a compute slot · about 3 calls waiting/i)).toBeTruthy();
+    show(cid, mid);
+    expect(screen.getByText('queued · 4 in queue')).toBeTruthy();
     expect(screen.queryByText('running…')).toBeNull();
-    // Not the message queue's words.
-    expect(screen.queryByText(/in line|free slot/i)).toBeNull();
-  });
+    expect(turnActivity(message(cid, mid))).toMatchObject({
+      kind: 'tool_queued',
+      label: 'Waiting for a compute slot',
+      tone: 'waiting',
+    });
+    expect(describeActivity(turnActivity(message(cid, mid)))).toBe(
+      'Waiting for a compute slot for predict_pka.',
+    );
 
-  it('says running once a worker has picked the call up', () => {
-    const { cid, mid } = startTurn();
-    const store = useChatStore.getState();
-    store.applyEvent(cid, mid, waiting(3));
-    store.applyEvent(cid, mid, pickedUp());
-    openPanel(cid, mid);
-
+    apply(cid, mid, { type: 'tool_queued', tool: 'predict_pka', job_id: 'q1', state: 'running' });
+    show(cid, mid);
     expect(screen.getByText('running…')).toBeTruthy();
-    expect(screen.queryByText(/compute slot/i)).toBeNull();
+    expect(turnActivity(message(cid, mid))).toMatchObject({ kind: 'tool', tone: 'busy' });
+
+    apply(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'pKa 15.9' });
+    show(cid, mid);
+    expect(screen.queryByText('running…')).toBeNull();
+    expect(screen.queryByText(/queued/)).toBeNull();
+    expect(message(cid, mid).trace.every((e) => !e.toolCall?.queue)).toBe(true);
   });
 
-  it('carries no live region of its own — the count ticks silently', () => {
+  it('keeps two calls to one tool apart by job id', () => {
     const { cid, mid } = startTurn();
-    useChatStore.getState().applyEvent(cid, mid, waiting(3));
-    const { container } = openPanel(cid, mid);
-    expect(container.querySelector('[aria-live]')).toBeNull();
+    apply(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: '{"smiles":"CCO"}' });
+    apply(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: '{"smiles":"CCN"}' });
+    apply(cid, mid, { type: 'tool_queued', tool: 'predict_pka', job_id: 'q1', state: 'running' });
+    apply(cid, mid, {
+      type: 'tool_queued',
+      tool: 'predict_pka',
+      job_id: 'q2',
+      state: 'queued',
+      waiting: 2,
+    });
+    // A later poll of the first call must land on its own row, not on the oldest open one.
+    apply(cid, mid, { type: 'tool_queued', tool: 'predict_pka', job_id: 'q1', state: 'running' });
+    const states = message(cid, mid)
+      .trace.filter((e) => e.kind === 'tool_call')
+      .map((e) => e.toolCall?.queue?.state);
+    expect(states).toEqual(['running', 'queued']);
   });
-});
 
-describe('the activity row and what a screen reader hears', () => {
-  it('announces waiting → running once each, and not on a count tick', () => {
+  it('reads a zero backlog as no count, since the call is itself in it', () => {
     const { cid, mid } = startTurn();
-    const store = useChatStore.getState();
-    const { rerender } = render(<ActivityRow message={assistantOf(cid, mid)} />);
-    expect(heard).toEqual([`Calling ${TOOL}.`]);
+    apply(cid, mid, { type: 'tool_call', tool: 'run_python', arguments: '{}' });
+    apply(cid, mid, {
+      type: 'tool_queued',
+      tool: 'run_python',
+      job_id: 'q3',
+      state: 'queued',
+      waiting: 0,
+    });
+    show(cid, mid);
+    expect(screen.getByText('queued…')).toBeTruthy();
+  });
 
-    store.applyEvent(cid, mid, waiting(4));
-    rerender(<ActivityRow message={assistantOf(cid, mid)} />);
-    expect(screen.getByText(/Waiting for a compute slot · about 4 calls waiting/)).toBeTruthy();
-    expect(turnActivity(assistantOf(cid, mid)).tone).toBe('waiting');
+  it('says "queued…" when the broker could not say how many wait', () => {
+    const { cid, mid } = startTurn();
+    apply(cid, mid, { type: 'tool_call', tool: 'run_python', arguments: '{}' });
+    apply(cid, mid, {
+      type: 'tool_queued',
+      tool: 'run_python',
+      job_id: 'q2',
+      state: 'queued',
+      waiting: null,
+    });
+    show(cid, mid);
+    expect(screen.getByText('queued…')).toBeTruthy();
+  });
 
-    store.applyEvent(cid, mid, waiting(2));
-    rerender(<ActivityRow message={assistantOf(cid, mid)} />);
-    expect(screen.getByText(/about 2 calls waiting/)).toBeTruthy();
-
-    store.applyEvent(cid, mid, pickedUp());
-    rerender(<ActivityRow message={assistantOf(cid, mid)} />);
-
-    expect(heard).toEqual([
-      `Calling ${TOOL}.`,
-      `${TOOL} is waiting for a compute slot.`,
-      `Calling ${TOOL}.`,
-    ]);
+  it('adds no row of its own, and is dropped when its call has already ended', () => {
+    const { cid, mid } = startTurn();
+    apply(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: '{}' });
+    apply(cid, mid, { type: 'tool_result', tool: 'predict_pka', preview: 'done' });
+    const before = message(cid, mid).trace.length;
+    apply(cid, mid, {
+      type: 'tool_queued',
+      tool: 'predict_pka',
+      job_id: 'q1',
+      state: 'queued',
+      waiting: 1,
+    });
+    expect(message(cid, mid).trace).toHaveLength(before);
+    expect(message(cid, mid).trace.every((e) => !e.toolCall?.queue)).toBe(true);
   });
 });

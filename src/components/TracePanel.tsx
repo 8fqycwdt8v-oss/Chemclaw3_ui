@@ -34,7 +34,7 @@ import { ChevronRight, CircleX, ShieldAlert, Table2, Unplug } from 'lucide-react
 import type { TraceEntry } from '../state/types.ts';
 import { cn } from '../lib/cn.ts';
 import { toolLabel } from '../lib/format.ts';
-import { computeBacklog, formatDuration, summarizeTurn } from '../state/turnActivity.ts';
+import { formatDuration, summarizeTurn } from '../state/turnActivity.ts';
 import { refusalCopy } from '../lib/refusals.ts';
 import { JobFailureCard, JobResultCard } from './JobResultCard.tsx';
 import { parsePlanItem } from './PlanItems.tsx';
@@ -417,16 +417,15 @@ function Row({
             label={toolLabel(call.tool)}
             mono={call.tool}
             badge={
-              running && call.computeWait?.state === 'queued' ? (
-                // Queued for a compute slot (`tool_queued`): not started, so "running…" would be
-                // the false claim the service added the event to correct. The backlog is the
-                // broker's approximate count, worded as one. No live region here — the activity
-                // row announces the waiting → running transition once, through `Announcer`, and a
-                // region on this badge would read out every tick of the count.
-                <span className="text-2xs text-ink-muted" data-compute-wait="queued">
-                  waiting for a compute slot
-                  {computeBacklog(call.computeWait.waiting) &&
-                    ` · ${computeBacklog(call.computeWait.waiting)}`}
+              running && call.queue?.state === 'queued' ? (
+                // Waiting for a compute slot, which is not the same claim as running: the call
+                // has not started. The count is the broker's approximate backlog, this call
+                // included, so "in queue", never "position" — and a 0 the approximation can
+                // report while this call is still in it reads as no count at all.
+                <span className="text-2xs text-ink-muted">
+                  {call.queue.waiting === null || call.queue.waiting <= 0
+                    ? 'queued…'
+                    : `queued · ${call.queue.waiting} in queue`}
                 </span>
               ) : running ? (
                 // Not "we are hiding the result" but "the call has not come back".

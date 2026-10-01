@@ -10,12 +10,7 @@
 
 import { create } from 'zustand';
 import { persist, type PersistStorage, type StorageValue } from 'zustand/middleware';
-import type {
-  AwaitingAnswerEvent,
-  ChemclawEvent,
-  JobTerminalEvent,
-  ToolQueuedEvent,
-} from '../../shared/events.ts';
+import type { AwaitingAnswerEvent, ChemclawEvent, JobTerminalEvent } from '../../shared/events.ts';
 import { useEntityStore } from '../chem/entities.ts';
 import type { ApiErrorKind } from '../api/errors.ts';
 // Type-only, so this adds no edge to the module graph: the wire shape of a check-in is declared
@@ -450,54 +445,54 @@ function closeToolCall(
   // Our clock, at the moment the ending reached this process. Nothing on the wire carries a tool
   // duration, so this is the only honest one available — and it is the wait the reader had.
   const endedAt = Date.now();
-  const index = trace.findIndex(
+  const index = openCallIndex(trace, tool);
+  const target = trace[index];
+  if (index === -1 || !target?.toolCall) return trace;
+  // The queue annotation describes a call still out; an ended row keeps no stale "queued".
+  const { queue: _queue, ...call } = target.toolCall;
+  const updated: TraceEntry = { ...target, toolCall: { ...call, ...ending, endedAt } };
+  return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
+}
+
+/** The oldest still-open `tool_call` row for `tool`, or -1 — the pairing rule `closeToolCall`
+ *  documents, shared with `markQueued` so a queue annotation lands on the row a result would. */
+function openCallIndex(trace: TraceEntry[], tool: string): number {
+  return trace.findIndex(
     (entry) =>
       entry.kind === 'tool_call' &&
       entry.toolCall?.tool === tool &&
       entry.toolCall.result === undefined &&
       !entry.toolCall.failed,
   );
-  const target = trace[index];
-  if (index === -1 || !target?.toolCall) return trace;
-  // The compute-queue annotation goes with the ending: a call that has come back is neither
-  // waiting for a slot nor running, and the card must stop saying either.
-  const { computeWait: _ended, ...call } = target.toolCall;
-  const updated: TraceEntry = { ...target, toolCall: { ...call, ...ending, endedAt } };
-  return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
 }
 
 /**
- * Annotate the open `tool_call` row for `tool` with where it stands in its compute queue.
+ * Record where a queued call is, on its open row. Not a row of its own: it qualifies a step that
+ * is already on screen, and a line per poll would bury the turn in "still waiting". An update
+ * whose call already ended (or was dropped by `MAX_TRACE_ENTRIES`) is discarded.
  *
- * `tool_queued` names the tool and not the call, so this pairs the way `closeToolCall` does —
- * by name, oldest open first — with one refinement the event makes possible: a row already
- * annotated with this `job_id` is the one a repeat belongs to, so a count tick or the `running`
- * flip lands on the card that said "waiting" rather than on a later call to the same tool. Failing
- * that, the oldest open row not yet carrying a queue annotation; failing that, the oldest open row.
- * No open row — the call was evicted by `MAX_TRACE_ENTRIES`, or has already ended — and the event
- * is discarded: there is no card left to say anything on.
+ * Paired by job id first: two calls to one tool in one step are two queued runs, and pairing by
+ * name alone would put the second's "queued" on the first while it runs. A job id not yet seen
+ * takes the oldest open row for the tool that carries no annotation, and only then the oldest.
  */
-function annotateComputeWait(trace: TraceEntry[], event: ToolQueuedEvent): TraceEntry[] {
+function markQueued(
+  trace: TraceEntry[],
+  tool: string,
+  queue: { state: 'queued' | 'running'; waiting: number | null; jobId: string },
+): TraceEntry[] {
   const open = (entry: TraceEntry): boolean =>
     entry.kind === 'tool_call' &&
-    entry.toolCall?.tool === event.tool &&
+    entry.toolCall?.tool === tool &&
     entry.toolCall.result === undefined &&
-    !entry.toolCall.failed &&
-    !entry.toolCall.unresolved;
+    !entry.toolCall.failed;
   let index = trace.findIndex(
-    (entry) => open(entry) && !!event.job_id && entry.toolCall?.computeWait?.jobId === event.job_id,
+    (entry) => open(entry) && entry.toolCall?.queue?.jobId === queue.jobId,
   );
-  if (index === -1) index = trace.findIndex((entry) => open(entry) && !entry.toolCall?.computeWait);
-  if (index === -1) index = trace.findIndex(open);
+  if (index === -1) index = trace.findIndex((entry) => open(entry) && !entry.toolCall?.queue);
+  if (index === -1) index = openCallIndex(trace, tool);
   const target = trace[index];
   if (index === -1 || !target?.toolCall) return trace;
-  const updated: TraceEntry = {
-    ...target,
-    toolCall: {
-      ...target.toolCall,
-      computeWait: { state: event.state, waiting: event.waiting, jobId: event.job_id },
-    },
-  };
+  const updated: TraceEntry = { ...target, toolCall: { ...target.toolCall, queue } };
   return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
 }
 
@@ -1878,6 +1873,20 @@ export const useChatStore = create<ChatState>()(
           return;
         }
 
+        if (event.type === 'tool_queued') {
+          set((s) =>
+            updateAssistant(s, conversationId, messageId, (m) => ({
+              ...m,
+              trace: markQueued(m.trace, event.tool, {
+                state: event.state,
+                waiting: event.waiting ?? null,
+                jobId: event.job_id,
+              }),
+            })),
+          );
+          return;
+        }
+
         if (event.type === 'queued') {
           // Not a trace row: the turn has not done anything yet — that is the whole message. The
           // two waits stay apart: a ticket is a place in a shared conversation's line, and no
@@ -1916,18 +1925,6 @@ export const useChatStore = create<ChatState>()(
             updateAssistant(s, conversationId, messageId, (m) => ({
               ...m,
               partialReason: event.message,
-            })),
-          );
-          return;
-        }
-
-        if (event.type === 'tool_queued') {
-          // Not its own row either: it qualifies the open card for the same tool — "waiting for a
-          // compute slot" until a worker picks the call up — and the result then clears it.
-          set((s) =>
-            updateAssistant(s, conversationId, messageId, (m) => ({
-              ...m,
-              trace: annotateComputeWait(m.trace, event),
             })),
           );
           return;

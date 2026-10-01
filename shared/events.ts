@@ -251,11 +251,35 @@ const VERIFIED_BY = ['judge', 'citation-gate'] as const;
 
 /* ── the members ─────────────────────────────────────────────────────────── */
 
+/** A place in a session's line: a whole number of at least zero, or `null`. Not one of the shared
+ *  helpers above because only this event carries one, and a negative or fractional place is a
+ *  service getting it wrong — read as "no place", which is the admission wait's own reading. */
+const placeOrNull = () =>
+  v.fallback(
+    v.nullable(
+      v.pipe(
+        v.number(),
+        v.check((n: number) => Number.isSafeInteger(n) && n >= 0),
+      ),
+    ),
+    null,
+  );
+
 const queuedEvent = v.object({
   type: v.literal('queued'),
-  /* No payload. The backend emits this only when the turn actually had to wait for an admission
-   * permit, and it is then the FIRST event of that turn. A turn that gets a permit immediately —
-   * the normal case — never sends one, so seeing it at all is the information. */
+  /* Two waits share this event, told apart by `ticket`
+   * (`D-2026-10-01-a-queued-message-waits-in-its-senders-request` upstream).
+   *
+   * - **The admission wait** — `ticket` and `position` are `null`. The process had no permit free,
+   *   and this is then the FIRST event of the turn. A turn that gets a permit immediately — the
+   *   normal case — never sends one, so seeing it at all is the information.
+   * - **A place in the session's line** — `ticket` is set. In a shared conversation another
+   *   participant's turn is running, so this message waits for it instead of being refused, and
+   *   the event repeats each time the place changes. */
+  /** What `DELETE /sessions/{id}/queue/{ticket}` takes to withdraw this message before it runs. */
+  ticket: placeOrNull(),
+  /** How many messages are ahead of this one: `0` is next, waiting only for the running turn. */
+  position: placeOrNull(),
 });
 export type QueuedEvent = v.InferOutput<typeof queuedEvent>;
 
@@ -586,6 +610,18 @@ export type ErrorCode =
    * fixes. Never retryable as-is — the same thread overflows the same window.
    */
   | 'context_length'
+  /**
+   * A message that waited in a shared session's line and never ran: its sender withdrew it, the
+   * owner did, the sender was removed while it waited, or the session was deleted. Nothing failed
+   * and nothing was spent, so a surface must not render it as a failed turn.
+   */
+  | 'queue_cancelled'
+  /**
+   * This *view* of a turn fell a full buffer behind and was cut off; the turn itself runs on.
+   * Retryable: reattach with `GET /sessions/{id}/turn/stream`, or read the answer from the
+   * transcript when it lands.
+   */
+  | 'stream_lagged'
   | 'empty_answer';
 
 /** Every member of `ErrorCode`. An array rather than a `Set` because the schema picks from it and
@@ -601,6 +637,8 @@ const ERROR_CODES: readonly ErrorCode[] = [
   'spend_cap_reached',
   'bad_tool_arguments',
   'context_length',
+  'queue_cancelled',
+  'stream_lagged',
   'empty_answer',
 ];
 

@@ -18,6 +18,8 @@ describe('proxy route whitelist', () => {
       ['GET', `/api/sessions/${SID}/messages`, `/sessions/${SID}/messages`],
       ['POST', `/api/sessions/${SID}/messages`, `/sessions/${SID}/messages`],
       ['POST', `/api/sessions/${SID}/turn/stop`, `/sessions/${SID}/turn/stop`],
+      ['GET', `/api/sessions/${SID}/turn/stream`, `/sessions/${SID}/turn/stream`],
+      ['DELETE', `/api/sessions/${SID}/queue/42`, `/sessions/${SID}/queue/42`],
       ['GET', `/api/sessions/${SID}/events`, `/sessions/${SID}/events`],
       ['POST', `/api/sessions/${SID}/attachments`, `/sessions/${SID}/attachments`],
       ['GET', `/api/sessions/${SID}/plan`, `/sessions/${SID}/plan`],
@@ -78,9 +80,12 @@ describe('proxy route whitelist', () => {
     }
   });
 
-  it('marks exactly the two streaming routes as SSE', () => {
+  it('marks exactly the streaming routes as SSE', () => {
     expect(resolveRoute('POST', `/api/sessions/${SID}/messages`)?.sse).toBe(true);
     expect(resolveRoute('GET', `/api/sessions/${SID}/events`)?.sse).toBe(true);
+    // The reattach after `stream_lagged` is the same turn's events by another door.
+    expect(resolveRoute('GET', `/api/sessions/${SID}/turn/stream`)?.sse).toBe(true);
+    expect(resolveRoute('DELETE', `/api/sessions/${SID}/queue/42`)?.sse).toBe(false);
     // A non-streaming route must not get the SSE header handling, or its content-length is
     // stripped for no reason.
     expect(resolveRoute('GET', `/api/sessions/${SID}/messages`)?.sse).toBe(false);
@@ -148,6 +153,18 @@ describe('proxy route whitelist', () => {
     ]) {
       expect(resolveRoute('GET', bad), bad).toBeNull();
     }
+  });
+
+  it('takes only a number as a ticket in a session’s line', () => {
+    // The service's ticket is an identity column. Anything else is a path this proxy would be
+    // inventing — and a `..` here would walk out of the session the path names.
+    for (const bad of ['abc', '..', '%2e%2e', '-1', '1.5', '1'.repeat(20)]) {
+      const path = `/api/sessions/${SID}/queue/${bad}`;
+      expect(resolveRoute('DELETE', path), path).toBeNull();
+    }
+    // The line is withdrawn from, not read through this proxy: nothing here lists it.
+    expect(resolveRoute('GET', `/api/sessions/${SID}/queue/42`)).toBeNull();
+    expect(resolveRoute('GET', `/api/sessions/${SID}/queue`)).toBeNull();
   });
 
   it('matches on method, so a route is not reachable by the wrong verb', () => {

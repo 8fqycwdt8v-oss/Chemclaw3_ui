@@ -36,8 +36,11 @@ export type ApiErrorKind =
    *  LRU. The backend deliberately makes these indistinguishable, so treat all three the same:
    *  the handle is dead, mint a new one. */
   | 'session_not_found'
-  /** 409 — a turn is already running for this session. The backend serialises turns per session
-   *  and sheds rather than queues, so this is a hard error, not a wait. */
+  /** 409 on the turn route — the session could not take this message. Before shared-session
+   *  queueing (Chemclaw3 #499) that meant "a turn is already running"; since, a busy session queues
+   *  the message instead, and the 409 is left for a line that cannot take it — full, or already
+   *  holding one of this sender's. Either way a hard refusal, not a wait, and the service's own
+   *  detail says which. */
   | 'turn_in_flight'
   /** 409 on the plan-decision route only — the plan changed between being shown and being
    *  approved, so the human agreed to something else and the service refuses rather than
@@ -89,6 +92,15 @@ export type ApiErrorKind =
    *  the model's context window. Not a fault and not retryable — the same thread overflows the
    *  same window — so the offer is a fresh session, not Retry. */
   | 'context_length'
+  /** The stream ended with the server's `queue_cancelled` event: this message waited in a shared
+   *  session's line and was withdrawn before it ran — by its sender, by the owner, because the
+   *  sender was removed, or because the session was deleted. Nothing ran and nothing was spent, so
+   *  it is not a failure of the turn: the question goes back to the composer. */
+  | 'queue_cancelled'
+  /** The stream ended with the server's `stream_lagged` event: this browser's view of the turn fell
+   *  a full buffer behind and the service cut it off. The turn itself runs on, so the remedy is to
+   *  reattach (`GET /sessions/{id}/turn/stream`) or read the answer back from the transcript. */
+  | 'stream_lagged'
   /** An `error` event arrived in-stream. Includes the turn timeout, which the backend reports as
    *  a final SSE event rather than an HTTP status. */
   | 'agent'
@@ -321,6 +333,16 @@ export const CONTEXT_LENGTH_MESSAGE =
   'to carry on — asking again here will hit the same limit.';
 
 /**
+ * What a chemist reads when their view of a running turn was cut off for falling behind.
+ *
+ * This app's sentence rather than the event's, for `CONTEXT_LENGTH_MESSAGE`'s reason: what matters
+ * is what to do next, and the one thing that must not be read into it is that the turn failed.
+ */
+export const STREAM_LAGGED_MESSAGE =
+  'This browser fell behind the answer and the service cut its view off. The turn itself is ' +
+  'still running — reconnect to follow it, or wait for the answer to land in the conversation.';
+
+/**
  * Map an in-stream `error` event onto a typed error.
  *
  * The event's `code` is a closed set the service maintains, and each member wants something
@@ -374,6 +396,23 @@ export function errorFromEvent(event: {
       return new ApiError('context_length', CONTEXT_LENGTH_MESSAGE, undefined, {
         ...options,
         retryable: false,
+      });
+    case 'queue_cancelled':
+      // Not a failure and not retryable as-is: the service decided this message will not run, and
+      // the service's sentence says why (withdrawn, or no longer a participant). The caller puts the
+      // question back in the composer rather than painting a failed turn.
+      return new ApiError(
+        'queue_cancelled',
+        event.message || 'Your message was withdrawn before it ran.',
+        undefined,
+        { ...options, retryable: false },
+      );
+    case 'stream_lagged':
+      // Only the *view* ended. Retryable whatever the event says, because the remedy is to look
+      // again, not to send again — the turn this view was of is still running.
+      return new ApiError('stream_lagged', STREAM_LAGGED_MESSAGE, undefined, {
+        ...options,
+        retryable: true,
       });
     default:
       return new ApiError('agent', event.message, undefined, options);

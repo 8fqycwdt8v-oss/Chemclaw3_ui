@@ -1139,6 +1139,41 @@ export const api = {
     }
   },
 
+  /**
+   * Withdraw this person's message from a shared conversation's line before it runs —
+   * `DELETE /sessions/{id}/queue/{ticket}` (Chemclaw3 #499).
+   *
+   * **Not `stopTurn`, and the difference is who it reaches.** While a message waits, the turn that
+   * is running is somebody else's: a member's Stop is refused 403 there, and an *owner's* Stop
+   * would succeed and cancel a colleague's work to make room for a question they meant to take
+   * back. The ticket names this message and nothing else.
+   *
+   * `false` on a 404, which is "no such message is waiting": it started in the race between
+   * pressing the button and the request landing, or somebody already withdrew it. The caller
+   * decides what that means — Stop falls back to stopping the turn that has now started.
+   */
+  async withdrawQueued(
+    sessionId: string,
+    ticket: number,
+    getToken: TokenGetter,
+    options: { keepalive?: boolean } = {},
+  ): Promise<boolean> {
+    try {
+      await request<void>(
+        `/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(String(ticket))}`,
+        getToken,
+        {
+          method: 'DELETE',
+          ...(options.keepalive ? { keepalive: true } : {}),
+        },
+      );
+      return true;
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'session_not_found') return false;
+      throw err;
+    }
+  },
+
   /** A session's transcript. Same graceful degradation as `listSessions`: a backend without this
    *  route, or a session whose history is gone, yields an empty transcript rather than an error. */
   getMessages(sessionId: string, getToken: TokenGetter): Promise<TranscriptMessage[]> {

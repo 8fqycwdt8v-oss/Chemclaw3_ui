@@ -1213,13 +1213,44 @@ are wall-clock-sensitive rather than wrong, but a gate that reds under load teac
 rerun. Make the first assert order rather than elapsed time, and give the contract test a timeout
 derived from what it reads rather than vitest's 5 s default.
 
-## Issue 22: shared sessions will queue turns, and the UI shows none of it yet
+## Issue 22: shared sessions queue turns; following somebody else's turn live is still open
 
-Core Chemclaw3 is adding a per-session turn queue and stream fan-out for shared sessions (claim
-issue Chemclaw3#488, unfinished WIP branch `backlog/shared-session-queue-multireader`). Today a
-second sender gets a 409 and this UI offers Retry (`src/state/sendMessage.ts`). When core lands the
-queue, mirror its events and fields in `shared/events.ts`, show a queued message and its position,
-let the sender cancel it, and let several members follow one live stream. Blocked on that core PR.
+Core Chemclaw3 #499 (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`) replaced the
+409 a second sender got with a place in the session's line, fanned a turn's events out to every
+reader, and let the pending-plans inbox list a member's own plan in somebody else's session.
+
+**Done here, in the PR that merges straight after core #499:**
+
+- `queued` carries `ticket` and `position` (`shared/events.ts`). A message waiting in line says
+  where it stands ("Next in line", "Waiting in line — N messages ahead of yours") rather than the
+  admission wait's "Waiting for a free slot", and the two waits are kept apart on the message
+  (`AssistantMessage.queuePlace` beside `queued`).
+- While it waits, Stop becomes **Withdraw** and sends `DELETE /sessions/{id}/queue/{ticket}`, never
+  `POST /turn/stop`: the turn running then is somebody else's, and an owner's Stop would cancel it.
+  A 404 (it started in the race) falls back to stopping. Unloading the page withdraws the same way.
+- `queue_cancelled` settles the message as withdrawn — not failed — with the service's reason in the
+  bubble, an information banner, and the question back in the composer.
+- `stream_lagged` reattaches through `GET /sessions/{id}/turn/stream`, a bounded number of times,
+  then falls back to reading the answer from the transcript; a 404 on the reattach (the turn ended
+  in the gap, or runs on another replica) goes straight to the transcript and never mints a session.
+- The plan inbox marks a plan in a shared conversation with whose it is, and opening it adopts the
+  conversation as shared — so it opens with a member's rules, not an owner's.
+
+**Still open — following another member's turn while it runs.** A member who opens a shared
+conversation mid-turn sees nothing of that turn until its exchange lands in the transcript. The
+route is there (`GET /sessions/{id}/turn/stream` admits any participant) and so is the line
+(`GET /sessions/{id}/queue`, with senders); neither is called for that purpose yet. It is a
+separate surface rather than a field: deciding when to attach (on open, on focus, on a push-back
+hint the service does not send yet), rendering a turn this browser did not start in a transcript
+that is keyed by this browser's own sends, and the watcher cap's 429 and the other-replica 404 as
+ordinary states. The reattach after `stream_lagged` uses the route only for the turn this browser
+sent. Not blocked on core; it needs a design for where a watched turn lives in `chatStore`.
+
+**Also open, smaller:** a 409 on the turn route now means the line cannot take the message (full,
+or this sender already has one waiting). The banner quotes the service's detail, but for an owner it
+still offers "start a fresh session" (`reset`), the remedy for the old meaning. The detail is prose
+rather than a code, so telling the two 409s apart would mean matching a sentence; a `code` in the
+detail (as the protocol routes send) would let this be exact.
 
 ## Known gaps in the UI rebuild
 

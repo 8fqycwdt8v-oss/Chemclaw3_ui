@@ -44,6 +44,16 @@ export const noteQuery = (noteId: string, auth: TokenGetter) => ({
   ...IMMUTABLE,
 });
 
+/**
+ * The conversations other people have let this person into (`GET /sessions/shared`). One factory
+ * because two places ask: the sidebar adopts them, and the plan inbox needs to know which of its
+ * rows are somebody else's conversation (Chemclaw3 #499).
+ */
+export const sharedSessionsQuery = (auth: TokenGetter) => ({
+  queryKey: keys.sharedSessions,
+  queryFn: () => api.listSharedSessions(auth),
+});
+
 /** The plan inbox. See `PENDING_PLANS_STALE_MS`; `api.decidePlan` invalidates this key. */
 export const pendingPlansQuery = (auth: TokenGetter) => ({
   queryKey: keys.pendingPlans,

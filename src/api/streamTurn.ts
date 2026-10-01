@@ -66,6 +66,17 @@ export interface StreamTurnOptions {
   message: string;
   /** Plan the turn without launching anything expensive (the backend's `dry_run`). */
   dryRun?: boolean;
+  /**
+   * Follow the session's running turn instead of starting one: `GET /sessions/{id}/turn/stream`
+   * (Chemclaw3 #499) in place of the POST, with no body, and `message`/`dryRun` unused.
+   *
+   * What `sendMessage` reattaches with after `stream_lagged` — the service cut this browser's view
+   * off for falling behind, and the turn ran on. A watcher sees events from the moment it attaches,
+   * so whatever streamed in the gap is not replayed; the `answer` event at the end is the whole
+   * answer, which is what makes the gap survivable. A 404 means no turn is running here: it ended
+   * in the gap, or runs on another replica — either way the transcript has it.
+   */
+  watch?: boolean;
   signal: AbortSignal;
   /** Resolves to `null` in dev-auth mode, in which case no Authorization header is sent. */
   getToken: () => Promise<string | null>;
@@ -140,17 +151,27 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
 
   let res: Response;
   try {
-    res = await fetch(`${config.apiBase}/sessions/${encodeURIComponent(opts.sessionId)}/messages`, {
-      method: 'POST',
-      signal: opts.signal,
-      cache: 'no-store',
-      headers: {
-        'content-type': 'application/json',
-        accept: 'text/event-stream',
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({ message: opts.message, dry_run: opts.dryRun ?? false }),
-    });
+    // Each URL written out whole, because the contract check reads the route off the literal.
+    const session = encodeURIComponent(opts.sessionId);
+    const authorization: Record<string, string> = token ? { authorization: `Bearer ${token}` } : {};
+    res = opts.watch
+      ? await fetch(`${config.apiBase}/sessions/${session}/turn/stream`, {
+          method: 'GET',
+          signal: opts.signal,
+          cache: 'no-store',
+          headers: { accept: 'text/event-stream', ...authorization },
+        })
+      : await fetch(`${config.apiBase}/sessions/${session}/messages`, {
+          method: 'POST',
+          signal: opts.signal,
+          cache: 'no-store',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'text/event-stream',
+            ...authorization,
+          },
+          body: JSON.stringify({ message: opts.message, dry_run: opts.dryRun ?? false }),
+        });
   } catch {
     if (opts.signal.aborted) throw new ApiError('aborted', 'Stopped.');
     throw new ApiError('network', 'Could not reach the Chemclaw service.');

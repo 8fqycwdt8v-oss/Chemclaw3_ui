@@ -124,6 +124,12 @@ const DESIGN = '(design-[0-9a-f]{12})';
 const SKILL = "([A-Za-z0-9._:~!*'()%-]{1,1024})";
 
 /**
+ * A ticket in a session's line: the service's `GENERATED ALWAYS AS IDENTITY` integer. Digits only,
+ * bounded to what a Postgres `bigint` can hold, so nothing but a number reaches the upstream path.
+ */
+const TICKET = '([0-9]{1,19})';
+
+/**
  * A session member's actor id — the Entra object id the owner names when admitting somebody.
  *
  * `NOTE`'s closed set and `NOTE`'s cap, for `NOTE`'s reason: this repo does not own the shape.
@@ -212,6 +218,25 @@ export const ROUTES: readonly Route[] = [
     pattern: new RegExp(`^/api/sessions/${SID}/turn/stop$`),
     target: (m) => `/sessions/${m[1]}/turn/stop`,
     sse: false,
+  },
+  // Shared-session queueing (Chemclaw3 #499). A message sent while another participant's turn
+  // runs waits in the session's line; its sender (or the owner) withdraws it by ticket before it
+  // runs. The ticket is the service's identity column — a positive integer, nothing else.
+  {
+    method: 'DELETE',
+    pattern: new RegExp(`^/api/sessions/${SID}/queue/${TICKET}$`),
+    target: (m) => `/sessions/${m[1]}/queue/${m[2]}`,
+    sse: false,
+    labels: ['{id}', '{ticket}'],
+  },
+  // A further view of the running turn. The app opens it after the service cut this browser's own
+  // view off for falling behind (`stream_lagged`): the turn ran on, and this is how to follow it
+  // again. An event stream, so it gets the turn stream's SSE handling.
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/turn/stream$`),
+    target: (m) => `/sessions/${m[1]}/turn/stream`,
+    sse: true,
   },
   // Async job push-back. Long-lived and legitimately silent for minutes at a time.
   {

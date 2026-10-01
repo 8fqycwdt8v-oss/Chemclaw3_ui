@@ -73,6 +73,14 @@ export interface TraceEntry {
      */
     unresolved?: boolean;
     /**
+     * Where a *queued* call is, from the latest `tool_queued` for it (backend
+     * `connectors/queued.py`): waiting for a compute slot, or picked up. Absent for a call that
+     * went straight to its server, which is every call the connector's manifest does not queue.
+     * Without it the row says "running…" for the whole wait, which is false while the call sits
+     * in the queue — the part a chemist on a busy deployment is actually watching.
+     */
+    queue?: { state: 'queued' | 'running'; waiting: number | null; jobId: string };
+    /**
      * When the ending arrived, by our clock.
      *
      * Paired with the entry's own `at` this is the duration of the call — the one number that

@@ -185,6 +185,20 @@ const count = () =>
     0,
   );
 
+/** A count, or `null` where the sender said it could not tell — which is information a `0` would
+ *  erase ("nobody is waiting" and "the broker would not say" are different readings). */
+const countOrNull = () =>
+  v.fallback(
+    v.nullable(
+      v.pipe(
+        v.number(),
+        v.check((n: number) => Number.isFinite(n) && n >= 0),
+        v.transform((n) => Math.trunc(n)),
+      ),
+    ),
+    null,
+  );
+
 /** A real boolean, never merely truthy. A `1` or a `'yes'` is a service getting it wrong, and
  *  every flag on this wire qualifies an answer — so the safe reading is the unqualified one. This
  *  is `o.field === true` written once: anything that is not a boolean falls back to `false`. */
@@ -339,6 +353,24 @@ const jobStartedEvent = v.object({
   plan_step: text(),
 });
 export type JobStartedEvent = Loosen<v.InferOutput<typeof jobStartedEvent>, 'plan_step'>;
+
+const toolQueuedEvent = v.object({
+  type: v.literal('tool_queued'),
+  /** The tool whose open `tool_call` row this annotates — matched like a result, oldest open row
+   *  for the same tool first, because nothing on the wire carries a call id. */
+  tool: text('unknown'),
+  /** The queued run's id; the same id a `job_started` carries if the wait outlasts the turn's. */
+  job_id: text(),
+  /** `queued` while the call waits for a compute slot, `running` once a worker has picked it up.
+   *  An unknown value reads as `queued`: claiming a call runs when it may not is the falsehood the
+   *  event exists to remove. */
+  state: oneOf(['queued', 'running'] as const, 'queued'),
+  /** Calls waiting on the connector's queue — the broker's approximate backlog, not a strict place
+   *  in line. `null` where the broker could not say. Same optionality rule as
+   *  `TokenEvent.agent`: optional in the type, always populated by `normalizeEvent`. */
+  waiting: countOrNull(),
+});
+export type ToolQueuedEvent = Loosen<v.InferOutput<typeof toolQueuedEvent>, 'waiting'>;
 
 /** The one structured chemistry payload the backend produces. The backend types it as a bare
  *  `dict[str, object]`, so every key is unverified — treat all of them as optional. */
@@ -830,6 +862,7 @@ export type ChemclawEvent =
   | ToolCallEvent
   | TokenEvent
   | JobStartedEvent
+  | ToolQueuedEvent
   | JobCompletedEvent
   | JobFailedEvent
   | AwaitingAnswerEvent
@@ -861,6 +894,7 @@ const EVENT_MEMBERS = [
   toolCallEvent,
   tokenEvent,
   jobStartedEvent,
+  toolQueuedEvent,
   jobCompletedEvent,
   jobFailedEvent,
   awaitingAnswerEvent,

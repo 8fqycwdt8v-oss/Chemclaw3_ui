@@ -26,6 +26,7 @@ describe('the event contract admits every member of its own union', () => {
     tool_call: { tool: 'find_notes', arguments: '{}' },
     token: { text: 'hi' },
     job_started: { job_id: 'j1', kind: 'qm' },
+    tool_queued: { tool: 'predict_pka', job_id: 'q1', state: 'queued' },
     job_completed: { job_id: 'j1', summary: {} },
     job_failed: { job_id: 'j1', reason: 'no' },
     awaiting_answer: { request_id: 'await-1' },
@@ -134,6 +135,7 @@ const full: Array<[string, Record<string, unknown>]> = [
   // subagent's working notes into the answer.
   ['token', { text: 'hello', agent: 'subagent' }],
   ['job_started', { job_id: 'j1', kind: 'qm', plan_step: 'run the conformer search' }],
+  ['tool_queued', { tool: 'predict_pka', job_id: 'q1', state: 'running', waiting: 3 }],
   ['job_completed', { job_id: 'j1', summary: { converged: true } }],
   ['job_failed', { job_id: 'j1', reason: 'the solver diverged' }],
   // Both pushes' fields at once, which no single frame from the service carries: the open sends

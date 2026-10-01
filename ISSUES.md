@@ -1157,16 +1157,46 @@ Anchors: `vitest.config.ts`, `tests/webStorage.test.ts`, and `getWindowKeys` in
 
 ---
 
-## Issue 19: the npm minor/patch group is held back, and ketcher 3.18 broke the worker test
+## Issue 19 (closed): the npm minor/patch group is held back, and ketcher 3.18 broke the worker test
 
-Dependabot #104 (18 updates) is red: ketcher 3.18 changed its worker bundle, and
-`tests/ketcherWorker.test.ts` greps the built bundle for `var indigoWorker = new Worker(`. The
-bump was redone by hand on branch `fix/npm-group-ketcher` (WIP commit `75f5773`: `package.json`,
-`package-lock.json`, `src/chem/sketcher.ketcher.tsx`, `src/components/StructureInput.tsx`, the
-test) and stopped on the owner's instruction on 2026-09-27 before CI ran. Finish it by asserting
-what the test guards — that the Indigo worker is a same-origin network worker served under the
-worker CSP route — against the new bundle shape rather than a literal string, check the sketcher
-e2e, open the PR, and close #104 when it lands.
+Closed 2026-10-01 by the PR that supersedes Dependabot #104 (the same 18 updates, redone by hand
+on `fix/npm-group-ketcher`; #104 itself is closed when that lands). `npm run ci` is green on it.
+
+**What 3.18 changed, and what it did not.** `ketcher-standalone@3.18.0` made the Indigo worker
+lazy: `var indigoWorker = new Worker(…)` at module scope became a `_indigoWorker = null` slot that
+`getIndigoWorker()` fills on the first `IndigoService`. The test grepped for the old line, so it
+failed on a rename while the property it stands for held. `tests/ketcherWorker.test.ts` now reads
+the bundle by _shape_ — the one `new Worker(` writes a module-scope slot behind an `if (!slot)`,
+every struct service takes the getter's result, nothing resets the slot — so the next rename
+passes and a real change (a worker per editor, a teardown in `ketcher-react`) fails.
+
+**What the test guards, which the old one never said.** The CSP in `server/config.ts` assumes the
+Indigo worker is a _same-origin network_ worker: `new Worker(new URL('<sibling>.js',
+import.meta.url), { type: 'module' })`, which Vite emits as `assets/indigoWorker-*.js`, which runs
+under its own response's policy, which is the document's (`worker-src 'self'`,
+`'wasm-unsafe-eval'`, no `'unsafe-eval'`) because `isRdkitWorkerScript` matches only RDKit's
+chunk. The test now pins each link: the call's form, the sibling file existing, the emitted name
+not picking up `RDKIT_WORKER_CSP`, and the worker script instantiating WASM without `eval` or
+`Function(`. `e2e/rdkit.spec.ts` gained the browser half: behind the production BFF, Draw opens
+on `OCC`, Indigo initialises, "Use this structure" round-trips to `CCO`, and the Indigo chunk
+arrived same-origin with the document's policy.
+
+**And the sketcher had never drawn behind the production BFF.** The new e2e waits for the editor,
+which nothing did before (`e2e/a11y.spec.ts` deliberately checks only the dialog chrome), and it
+found two breakages. On `main`, with 3.17.2, the chunk threw `ReferenceError: global is not
+defined` — `ketcher-react` reads a Node `global` Vite does not polyfill — and the dialog sat on
+"Loading the structure editor…" until the timeout; `src/chem/ketcher.globals.ts` aliases it to
+`globalThis`, imported first by the adapter so it stays in the lazy chunk. With 3.18 also
+`TypeError: … EventEmitter is not a constructor`: `ketcher-core` now imports `events` bare without
+declaring it (3.17 inlined it), Vite stubs an absent `events` as empty, so `events` is a direct
+dependency here. `tests/ketcherWorker.test.ts` pins both.
+
+**Two other things the gate caught.** React 19.3 grew the first load by 8.4 kB gzip and the group
+by 10.4 kB in all, past `BUDGET`; it is raised to 240,000 / 770,000 with the per-bump measurement in
+`scripts/check-bundle.mjs` and a line in `docs/dependencies.md`. And `npm audit` began failing on
+`main` too (brace-expansion 5.0.9 under `ketcher-core` → `dpdm` → `glob`, GHSA-q2hr-2g5m-vwhr and
+two siblings); `npm audit fix` in the same lockfile moved it to 5.0.12. No runtime breakage from
+the rest of the group.
 
 ## Issue 20: TypeScript 7 waits on typescript-eslint
 

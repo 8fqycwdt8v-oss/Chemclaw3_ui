@@ -137,3 +137,9 @@ one commit — the live figures are whatever `npm run check:bundle` prints.
 | `comlink`               | entry chunk (`src/chem/rdkit.client.ts`) | a request-id counter, a pending map, a dispatch and an envelope   |
 | `immer`                 | the lazy `ProtocolDocument` chunk        | ~90 lines of nested spread chains                                 |
 | `culori`                | nowhere — `devDependencies`              | 15 hand-transcribed matrix constants and the WCAG formulas        |
+| `events`                | the lazy sketcher chunk                  | nothing: `ketcher-core@3.18` imports it bare and does not declare |
+
+**The budget was raised on 2026-10-01** (gzip 220,000 → 240,000, raw 700,000 → 770,000) by no
+dependency taken: React 19.3 grew the first load by 8.4 kB gzip on its own, `lucide-react` 1.48 by
+1.4 kB, and the rest of the npm minor/patch group by under 0.6 kB. The per-bump measurement is in
+`scripts/check-bundle.mjs` above `BUDGET`.

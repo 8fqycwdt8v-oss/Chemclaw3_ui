@@ -42,6 +42,8 @@
 import { lazy, Suspense, useEffect, useRef } from 'react';
 import { Navigate, Route, Routes, useNavigate, useParams } from 'react-router';
 import { useChatStore, newConversation } from './state/chatStore.ts';
+import { keys, queryClient } from './api/queryClient.ts';
+import type { SharedSessionSummary } from './api/client.ts';
 import { useAuth } from './auth/AuthContext.tsx';
 import { AppShell } from './App.tsx';
 import { Loading } from '@/components/chem/Feedback';
@@ -178,12 +180,22 @@ function SessionResolver(): React.JSX.Element {
       void navigate(`/c/${existing.id}`, { replace: true });
       return;
     }
+    // A session somebody else let this person into opens as theirs to *join*, not to own — the
+    // plan inbox links here for a member's own plan in such a session (Chemclaw3 #499). Read from
+    // the shared listing already in the cache; a link that arrives before the listing does is
+    // marked when the sidebar's adoption runs, as before.
+    const shared = queryClient
+      .getQueryData<SharedSessionSummary[]>(keys.sharedSessions)
+      ?.find((row) => row.session_id === sessionId);
     const conversation = {
       ...newConversation(),
       sessionId,
-      title: 'Conversation from another device',
+      title: shared
+        ? shared.title?.trim() || 'Shared conversation'
+        : 'Conversation from another device',
       // The transcript lives on the backend, so the rehydrate effect should go and read it.
       sessionOrigin: 'server' as const,
+      ...(shared ? { membership: { owner: shared.owner ?? null } } : {}),
     };
     useChatStore.setState((s) => ({
       conversations: { ...s.conversations, [conversation.id]: conversation },

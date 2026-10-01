@@ -40,12 +40,18 @@ import { Link } from 'react-router';
 import { keepPreviousData } from '@tanstack/react-query';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { keys, useApiQuery } from '../api/queryClient.ts';
-import { pendingPlansQuery } from '../api/queries.ts';
-import { api, type PendingRequest, type PendingPlans as PendingPlansView } from '../api/client.ts';
+import { pendingPlansQuery, sharedSessionsQuery } from '../api/queries.ts';
+import {
+  api,
+  type PendingRequest,
+  type PendingPlans as PendingPlansView,
+  type SharedSessionSummary,
+} from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { relativeTime } from '../lib/format.ts';
 import { checkInKey, useChatStore } from '../state/chatStore.ts';
 import { BehaviourProposals } from './BehaviourProposals.tsx';
+import { adoptShared } from './Sidebar.tsx';
 import { CitationChip } from './CitationChip.tsx';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -69,8 +75,8 @@ function NoPlansWaiting({ view }: { view: PendingPlansView }): React.JSX.Element
   if (view.considered === 0) {
     return (
       <EmptyState icon={<ListChecks className="size-5" />} title="No conversations to check">
-        This service holds no conversation of yours yet. A plan can only wait on you once the agent
-        has proposed one.
+        This service holds no conversation of yours, and none has been shared with you yet. A plan
+        can only wait on you once the agent has proposed one.
       </EmptyState>
     );
   }
@@ -139,6 +145,22 @@ function PlanInbox(): React.JSX.Element {
     isError: failed,
     isPending,
   } = useApiQuery({ ...pendingPlansQuery(auth), enabled: ready });
+  // **The inbox lists plans in conversations this person does not own** (Chemclaw3 #499): a plan
+  // their own turn wrote in somebody else's session is theirs alone to decide. The plan row does
+  // not say whose conversation it is, so it is read off the shared listing — the same key the
+  // sidebar reads, so this is a cache hit rather than a second request.
+  const { data: shared } = useApiQuery<SharedSessionSummary[], ApiError>({
+    ...sharedSessionsQuery(auth),
+    enabled: ready,
+  });
+  // A listing that is not a list reads as nothing shared rather than taking the inbox down with
+  // it. The plan rows are the point of this section; whose conversation each one sits in is a
+  // qualifier, and a malformed answer to the qualifier must not cost the reader the plans.
+  const sharedBySession = useMemo(
+    () =>
+      new Map((Array.isArray(shared) ? shared : []).map((row) => [row.session_id, row] as const)),
+    [shared],
+  );
 
   // An error is shown as an error even while a refetch is in flight: `isError` stays true across a
   // background refetch, which is the honest reading — the last thing we know is that we could not
@@ -164,47 +186,66 @@ function PlanInbox(): React.JSX.Element {
   return (
     <div className="flex flex-col gap-3">
       <ul className="flex flex-col gap-2">
-        {view.plans.map((pending) => (
-          <li
-            key={pending.session_id}
-            className="rounded-lg border border-warn/40 bg-surface-raised p-3"
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-medium">{pending.title ?? 'Untitled conversation'}</span>
-              <Badge tone="warn">
-                {pending.plan.length} {pending.plan.length === 1 ? 'step' : 'steps'}
-              </Badge>
-              <span className="text-2xs text-ink-subtle">
-                last active {when(pending.updated_at)}
-              </span>
-            </div>
-            {/* The steps themselves, not a count of them: what is being approved is the work, and
+        {view.plans.map((pending) => {
+          const sharedRow = sharedBySession.get(pending.session_id);
+          return (
+            <li
+              key={pending.session_id}
+              className="rounded-lg border border-warn/40 bg-surface-raised p-3"
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">{pending.title ?? 'Untitled conversation'}</span>
+                <Badge tone="warn">
+                  {pending.plan.length} {pending.plan.length === 1 ? 'step' : 'steps'}
+                </Badge>
+                {sharedRow && (
+                  // Whose conversation, because opening it lands in somebody else's thread — and
+                  // the plan is still this person's: only its author may decide it.
+                  <Badge>
+                    {sharedRow.owner ? `Shared by ${sharedRow.owner}` : 'Shared with you'}
+                  </Badge>
+                )}
+                <span className="text-2xs text-ink-subtle">
+                  last active {when(pending.updated_at)}
+                </span>
+              </div>
+              {/* The steps themselves, not a count of them: what is being approved is the work, and
                 a row that hid it would send a chemist into the conversation to find out whether it
                 is even the one they are looking for. */}
-            <ol className="mt-2 flex list-decimal flex-col gap-1 pl-5 text-sm text-ink-muted">
-              {pending.plan.map((step, index) => (
-                <li key={`${index}-${step}`}>{step}</li>
-              ))}
-            </ol>
-            {/* What deciding it would authorise. On the row rather than only in the conversation,
+              <ol className="mt-2 flex list-decimal flex-col gap-1 pl-5 text-sm text-ink-muted">
+                {pending.plan.map((step, index) => (
+                  <li key={`${index}-${step}`}>{step}</li>
+                ))}
+              </ol>
+              {/* What deciding it would authorise. On the row rather than only in the conversation,
                 because a chemist triaging an inbox is choosing which one to open, and "this one
                 writes to the graph" is the fact that decides it. Absent from an older service,
                 which reads as unknown and prints nothing. */}
-            {pending.scope && pending.scope.length > 0 && (
-              <p className="mt-2 text-xs text-ink-muted">
-                Approving authorises <span className="font-mono">{pending.scope.join(' · ')}</span>.
-              </p>
-            )}
-            <div className="mt-3">
-              <Button asChild size="sm" variant="outline">
-                {/* `/open/:sessionId` adopts the server session into a local conversation, which
+              {pending.scope && pending.scope.length > 0 && (
+                <p className="mt-2 text-xs text-ink-muted">
+                  Approving authorises{' '}
+                  <span className="font-mono">{pending.scope.join(' · ')}</span>.
+                </p>
+              )}
+              <div className="mt-3">
+                <Button asChild size="sm" variant="outline">
+                  {/* `/open/:sessionId` adopts the server session into a local conversation, which
                     is the only route that can turn an id from this list into something readable.
                     The decision is answered there, beside the reasoning that produced the plan. */}
-                <Link to={`/open/${pending.session_id}`}>Open the conversation to decide</Link>
-              </Button>
-            </div>
-          </li>
-        ))}
+                  <Link
+                    to={`/open/${pending.session_id}`}
+                    // A shared conversation is adopted *as* shared before the resolver sees it, so
+                    // it opens with the member's rules — no Delete or Branch, and a 404 read as
+                    // "removed", never as a dead handle to replace with a private session.
+                    onClick={sharedRow ? () => adoptShared([sharedRow]) : undefined}
+                  >
+                    Open the conversation to decide
+                  </Link>
+                </Button>
+              </div>
+            </li>
+          );
+        })}
       </ul>
       <PartialScan view={view} />
     </div>

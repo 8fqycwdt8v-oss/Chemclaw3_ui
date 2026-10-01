@@ -40,7 +40,7 @@
  */
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { Hexagon, Paperclip, Send, Square, X } from 'lucide-react';
+import { Hexagon, Paperclip, Send, Square, Undo2, X } from 'lucide-react';
 import { api } from '../api/client.ts';
 import { config } from '../env.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
@@ -355,6 +355,15 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   const streaming = useChatStore((s) =>
     s.streaming?.conversationId === conversationId ? s.streaming : null,
   );
+  // Whether the streaming message is still waiting in a shared conversation's line (Chemclaw3
+  // #499). Then the turn running is somebody else's, and the control takes this message back out of
+  // the line rather than stopping anything — so it says so.
+  const waitingInLine = useChatStore((s) => {
+    const live = s.streaming?.conversationId === conversationId ? s.streaming : null;
+    if (!live) return false;
+    const message = s.conversations[conversationId]?.messages.find((m) => m.id === live.messageId);
+    return message?.role === 'assistant' && Boolean(message.queuePlace);
+  });
   const sessionId = useChatStore((s) => s.conversations[conversationId]?.sessionId ?? null);
   const profile = useChatStore((s) => s.sessionProfiles[conversationId] ?? '');
   const setSessionProfile = useChatStore((s) => s.setSessionProfile);
@@ -959,10 +968,17 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           </Tooltip>
 
           {isStreaming ? (
-            <Button variant="destructive" size="sm" onClick={stopStreaming}>
-              <Square className="size-3.5 fill-current" />
-              Stop
-            </Button>
+            waitingInLine ? (
+              <Button variant="outline" size="sm" onClick={stopStreaming}>
+                <Undo2 className="size-3.5" />
+                Withdraw
+              </Button>
+            ) : (
+              <Button variant="destructive" size="sm" onClick={stopStreaming}>
+                <Square className="size-3.5 fill-current" />
+                Stop
+              </Button>
+            )
           ) : (
             // The label is visually replaced by an icon on narrow screens, so the name has to be
             // carried explicitly — otherwise the primary control of the app is unnamed on a phone.

@@ -38,6 +38,7 @@ import {
 import { ApiError } from '../api/errors.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import { keys, useApiInfiniteQuery, useApiQuery } from '../api/queryClient.ts';
+import { sharedSessionsQuery } from '../api/queries.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore, newConversation, forgetLocalHistory } from '../state/chatStore.ts';
 import type { ChatState } from '../state/chatStore.ts';
@@ -167,12 +168,12 @@ export function adoptShared(remote: SharedSessionSummary[]): void {
 function useSharedSessions(): void {
   const { auth, ready } = useAuth();
   const { data } = useApiQuery<SharedSessionSummary[], ApiError>({
-    queryKey: keys.sharedSessions,
-    queryFn: () => api.listSharedSessions(auth),
+    ...sharedSessionsQuery(auth),
     enabled: ready,
   });
   useEffect(() => {
-    if (data) adoptShared(data);
+    // Same reading as the plan inbox: a listing that is not a list is nothing shared.
+    if (Array.isArray(data)) adoptShared(data);
   }, [data]);
 }
 

@@ -312,6 +312,23 @@ export interface AssistantMessage {
    */
   queued: boolean;
   /**
+   * This message is waiting in a shared conversation's line behind another participant's turn,
+   * and where — `ticket` is what withdrawing it takes, `position` how many are ahead (`0` = next).
+   *
+   * Set from a `queued` event that carries a ticket (Chemclaw3 #499) and cleared by the first event
+   * that is anything else, because that is the turn having started: from then on Stop stops the
+   * turn, and withdrawing would answer 404. Absent on every message that never waited in a line.
+   */
+  queuePlace?: { ticket: number; position: number } | null;
+  /**
+   * The sentence saying why this message never ran — it was withdrawn from the line before its
+   * turn came, by its sender or by somebody the service lets withdraw it.
+   *
+   * Distinct from `error`, because nothing failed and nothing was spent; and from a bare `aborted`,
+   * whose copy says an answer was cut short when there never was one.
+   */
+  withdrawn?: string;
+  /**
    * The turn hit a guard and stopped with work still open, so the answer below is partial.
    *
    * Carries the service's own sentence, which names the limit that fired and the session. On the

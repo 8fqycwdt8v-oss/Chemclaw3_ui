@@ -123,11 +123,10 @@ describe('the event contract admits every member of its own union', () => {
 // adds a field, it is added here in the same change, and this is the assertion that makes
 // "same change" mean something.
 const full: Array<[string, Record<string, unknown>]> = [
-  // Deliberately present with an empty frame rather than omitted. It declares no fields today, so
-  // the value-for-value test has nothing to assert — but a field added to `QueuedEvent` later is
-  // exactly the case this fixture exists to catch, and an absent member cannot catch it. Found by
-  // the declaration check below on its first run.
-  ['queued', {}],
+  // It declared no fields until shared-session queueing (Chemclaw3 #499) gave it a place in line,
+  // and this entry was kept present with an empty frame for exactly that day: the declaration
+  // check below is what failed when `ticket` and `position` arrived.
+  ['queued', { ticket: 12, position: 3 }],
   ['plan', { todos: ['step one'], plan_hash: 'abc123', scope: ['record_knowledge_note'] }],
   ['tool_call', { tool: 'find_notes', arguments: '{"q":1}', agent: 'safety' }],
   // `agent` is load-bearing on this one: the backend stamps every token with it and says a

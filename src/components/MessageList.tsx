@@ -282,9 +282,14 @@ const AssistantBubble = memo(function AssistantBubble({
         {/* Only once the turn has settled: copying half an answer is copying the wrong thing. */}
         {body && !streaming && <CopyAnswer text={body} />}
 
-        {message.status === 'aborted' && (
-          <p className="mt-2 text-xs text-ink-muted">Stopped before the answer was complete.</p>
-        )}
+        {message.status === 'aborted' &&
+          (message.withdrawn ? (
+            // A message taken out of a shared conversation's line never ran, so "stopped before
+            // the answer was complete" would describe an answer that does not exist.
+            <p className="mt-2 text-xs text-ink-muted">{message.withdrawn}</p>
+          ) : (
+            <p className="mt-2 text-xs text-ink-muted">Stopped before the answer was complete.</p>
+          ))}
 
         {message.error && (
           // Deliberately NOT role="alert". `failTurn` raises a banner carrying the same sentence,

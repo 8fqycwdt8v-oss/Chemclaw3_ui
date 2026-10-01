@@ -811,6 +811,12 @@ export interface ChatState {
   /** The stream has gone quiet, or come back. Never ends the turn — see `AssistantMessage.stalled`. */
   setTurnStalled: (conversationId: string, messageId: string, stalled: boolean) => void;
   finishTurn: (conversationId: string, messageId: string, status: 'done' | 'aborted') => void;
+  /**
+   * End a turn that never ran: its message was withdrawn from a shared conversation's line
+   * (`queue_cancelled`, or this person's own withdrawal). Settled as `aborted` — there is no answer
+   * and nothing to retry as-is — with the reason on `AssistantMessage.withdrawn`, not `error`.
+   */
+  withdrawTurn: (conversationId: string, messageId: string, reason: string) => void;
   failTurn: (
     conversationId: string,
     messageId: string,
@@ -1828,6 +1834,19 @@ export const useChatStore = create<ChatState>()(
       },
 
       applyEvent(conversationId, messageId, event) {
+        // A place in the line ends the moment anything but another place arrives: that is the
+        // turn having started. Cleared here, once, rather than in every branch below.
+        if (event.type !== 'queued' || event.ticket === null) {
+          const held = get().conversations[conversationId]?.messages.find(
+            (m) => m.id === messageId,
+          );
+          if (held?.role === 'assistant' && held.queuePlace) {
+            set((s) =>
+              updateAssistant(s, conversationId, messageId, (m) => ({ ...m, queuePlace: null })),
+            );
+          }
+        }
+
         if (event.type === 'token') {
           get().appendTokens(conversationId, messageId, event.text);
           return;
@@ -1869,9 +1888,16 @@ export const useChatStore = create<ChatState>()(
         }
 
         if (event.type === 'queued') {
-          // Not a trace row: the turn has not done anything yet — that is the whole message.
+          // Not a trace row: the turn has not done anything yet — that is the whole message. The
+          // two waits stay apart: a ticket is a place in a shared conversation's line, and no
+          // ticket is the process's admission wait (`QueuedEvent`).
+          const { ticket, position } = event;
           set((s) =>
-            updateAssistant(s, conversationId, messageId, (m) => ({ ...m, queued: true })),
+            updateAssistant(s, conversationId, messageId, (m) =>
+              ticket === null
+                ? { ...m, queued: true }
+                : { ...m, queuePlace: { ticket, position: position ?? 0 } },
+            ),
           );
           return;
         }
@@ -2007,6 +2033,20 @@ export const useChatStore = create<ChatState>()(
             endedAt: Date.now(),
             stalled: false,
             interruptedByReload: false,
+          })),
+        );
+      },
+
+      withdrawTurn(conversationId, messageId, reason) {
+        set((s) =>
+          updateAssistant(s, conversationId, messageId, (m) => ({
+            ...m,
+            status: 'aborted',
+            endedAt: Date.now(),
+            stalled: false,
+            interruptedByReload: false,
+            queuePlace: null,
+            withdrawn: reason,
           })),
         );
       },

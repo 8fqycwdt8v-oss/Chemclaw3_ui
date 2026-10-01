@@ -100,6 +100,17 @@ function openJob(trace: readonly TraceEntry[]): TraceEntry | undefined {
 }
 
 /**
+ * Where a message waiting in a shared conversation's line stands, as one sentence.
+ *
+ * `position` is how many messages are ahead of it, so `0` is next — waiting only for the turn that
+ * is running now.
+ */
+export function linePlace(position: number): string {
+  if (position <= 0) return 'Next in line — waiting for the turn in progress to finish';
+  return `Waiting in line — ${position} ${position === 1 ? 'message' : 'messages'} ahead of yours`;
+}
+
+/**
  * What this streaming turn is doing.
  *
  * Only meaningful while `status === 'streaming'`; a settled turn is described by
@@ -112,6 +123,19 @@ export function turnActivity(message: AssistantMessage): TurnActivity {
   // Admission control, and only before anything else has happened: `queued` is a fact about how
   // the turn started and it is never retracted, so a turn that queued for two seconds and has
   // since called three tools is not "waiting for a slot".
+  // A place in a shared conversation's line (Chemclaw3 #499): somebody else's turn is running and
+  // this message runs after it. Said with the place, because "waiting" alone cannot tell a chemist
+  // whether they are next or fourth.
+  if (message.queuePlace && trace.length === 0 && !message.streamedText) {
+    return {
+      kind: 'queued',
+      label: linePlace(message.queuePlace.position),
+      detail: '',
+      step: null,
+      tone: 'waiting',
+    };
+  }
+
   if (message.queued && trace.length === 0 && !message.streamedText) {
     return {
       kind: 'queued',
@@ -182,7 +206,7 @@ export function describeActivity(activity: TurnActivity): string {
   const where = activity.step ? ` Step ${activity.step.index} of ${activity.step.total}.` : '';
   switch (activity.kind) {
     case 'queued':
-      return 'Waiting for a free slot on the server.';
+      return `${activity.label}.`;
     case 'planning':
       return `Reading the plan.${where}`;
     case 'tool_queued':

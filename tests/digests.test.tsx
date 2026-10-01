@@ -52,9 +52,13 @@ let restore: (() => void) | null = null;
 /** The page under a router, with the other three sections answered and out of the way. */
 function renderQueue(): void {
   const stub = stubFetch((url) => {
+    // `/sessions/shared` is a list route: answering it with the pending-requests object made the
+    // plan inbox throw on `.map` once the read landed, which only a late resolve ever surfaced.
     const body = url.includes('/plans/pending')
       ? { plans: [], considered: 0, gated: 0, unread: 0, truncated: false }
-      : { requests: [], count: 0 };
+      : url.includes('/sessions/shared')
+        ? []
+        : { requests: [], count: 0 };
     return new Response(JSON.stringify(body), {
       status: 200,
       headers: { 'content-type': 'application/json' },

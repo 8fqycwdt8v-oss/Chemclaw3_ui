@@ -18,6 +18,7 @@ import { useEntityStore } from '../chem/entities.ts';
 import { announceStatus, describeAnswer } from './announce.ts';
 import { logger } from '../lib/logger.ts';
 import { backoff } from '../lib/backoff.ts';
+import { linePlace } from './turnActivity.ts';
 
 /**
  * What the reader is told when Stop was pressed and the server never confirmed it.
@@ -40,6 +41,35 @@ const STOP_REFUSED =
 
 /** How long the announcement waits for the stop request before saying the ordinary thing. */
 const STOP_CONFIRM_TIMEOUT_MS = 2_000;
+
+/** What the bubble says about a message its own sender took back out of the line. */
+const WITHDRAWN_BY_YOU =
+  'You withdrew this message before it ran. Your question is back in the box.';
+
+/**
+ * How many times one turn reattaches after its view was cut off for falling behind
+ * (`stream_lagged`). Bounded for `recreatedSession`'s reason: a browser that keeps falling behind
+ * will keep being cut off, and past the bound the transcript read below is the cheaper way to the
+ * answer.
+ */
+const MAX_REATTACH = 2;
+
+/**
+ * What a Stop's request settled as, or `'pending'` once `STOP_CONFIRM_TIMEOUT_MS` has passed —
+ * the bound `announceStop` keeps, for its reason: the service not answering is one of the states
+ * being reported, and an unbounded wait would hang the turn on it.
+ */
+async function settledWithin<T>(pending: Promise<T>): Promise<T | 'pending'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    pending,
+    new Promise<'pending'>((resolve) => {
+      timer = setTimeout(() => resolve('pending'), STOP_CONFIRM_TIMEOUT_MS);
+    }),
+  ]);
+  clearTimeout(timer);
+  return outcome;
+}
 
 export interface SendOptions {
   conversationId: string;
@@ -195,7 +225,26 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
    * and kept the session's turn lock, so their next message came back 409 and was rendered as a
    * "reset the conversation" banner: an app bug to a chemist and nothing at all to an operator.
    */
-  let stopOutcome: Promise<'stopped' | 'unconfirmed' | 'refused'> | null = null;
+  let stopOutcome: Promise<'stopped' | 'unconfirmed' | 'refused' | 'withdrawn'> | null = null;
+
+  /**
+   * Where this message stands in a shared conversation's line, when it is waiting in one.
+   *
+   * Read at the moment Stop is pressed, because it decides what Stop *is*: while the message waits,
+   * the running turn is somebody else's, and `POST /turn/stop` would either be refused (a member)
+   * or cancel a colleague's work (the owner). Withdrawing the ticket is the only stop that reaches
+   * this message and nothing else.
+   */
+  /** Whether Stop chose to withdraw. Only then does the stop's ending wait on the service's answer
+   *  before settling the bubble — an ordinary Stop settles at once, as it always has. */
+  let withdrawing = false;
+
+  const placeInLine = (): { ticket: number; position: number } | null => {
+    const message = useChatStore
+      .getState()
+      .conversations[conversationId]?.messages.find((m) => m.id === messageId);
+    return message?.role === 'assistant' ? (message.queuePlace ?? null) : null;
+  };
 
   /** Assigned inside the try, and read by the catch and finally below. */
   let messageId = '';
@@ -222,7 +271,29 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so aborting the fetch alone would
     // leave the turn running — and the session 409-busy — for its whole remaining duration.
     const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
-    if (sessionId) {
+    const place = placeInLine();
+    if (sessionId && place) {
+      withdrawing = true;
+      // Still waiting: withdraw the ticket. A 404 is the message having started in the race, and
+      // then it *is* this person's running turn, so the ordinary stop below is the right fallback.
+      stopOutcome = api
+        .withdrawQueued(sessionId, place.ticket, () => auth.getAccessToken())
+        .then(async (withdrawn) => {
+          if (withdrawn) return 'withdrawn' as const;
+          return (await api.stopTurn(sessionId, () => auth.getAccessToken()))
+            ? ('stopped' as const)
+            : ('unconfirmed' as const);
+        })
+        .catch((err: unknown) => {
+          if (err instanceof ApiError && err.kind === 'forbidden') return 'refused' as const;
+          logger.error('turn.withdraw_failed', {
+            sessionId,
+            kind: err instanceof ApiError ? err.kind : 'unknown',
+            status: err instanceof ApiError ? err.status : undefined,
+          });
+          return 'unconfirmed' as const;
+        });
+    } else if (sessionId) {
       stopOutcome = api
         .stopTurn(sessionId, () => auth.getAccessToken())
         .then((stopped) => {
@@ -277,6 +348,29 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   const abandon = (): void => {
     const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
     if (!sessionId) return;
+    // A message still waiting in a shared conversation's line is withdrawn, not stopped: the turn
+    // running there is somebody else's, and an owner's unload must not cancel it. A detach does
+    // not lose a waiting message its place, so leaving it would run a question nobody is reading.
+    // A 404 there means the message left the line first — usually because it started, between
+    // the service taking the turn and this client hearing about it — so the fallback is the same
+    // stop the Composer's Withdraw falls back to. Best effort: the second request leaves after
+    // the first one answers, and the page may be gone by then.
+    const place = placeInLine();
+    if (place) {
+      void api
+        .withdrawQueued(sessionId, place.ticket, () => Promise.resolve(lastToken), {
+          keepalive: true,
+        })
+        .then((withdrawn) =>
+          withdrawn
+            ? undefined
+            : api.stopTurn(sessionId, () => Promise.resolve(lastToken), { keepalive: true }),
+        )
+        .catch(() => {
+          // Nothing to report to and nobody to report it: the page is unloading.
+        });
+      return;
+    }
     void api
       .stopTurn(sessionId, () => Promise.resolve(lastToken), { keepalive: true })
       .catch(() => {
@@ -320,6 +414,10 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       warnStopUnconfirmed();
       return;
     }
+    if (outcome === 'withdrawn') {
+      announceStatus('Withdrawn before it ran.');
+      return;
+    }
     if (outcome === 'refused') {
       showBanner({ kind: 'warn', text: STOP_REFUSED });
       announceStatus('Stopped here; the service refused to cancel a turn that is not yours.');
@@ -346,6 +444,16 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   const stillOurs = (): boolean => {
     const streaming = useChatStore.getState().streaming;
     return !streaming || streaming.messageId === messageId;
+  };
+
+  /**
+   * The chemist's question, back where they typed it — only into an empty draft, because whatever
+   * they have typed since is newer than this.
+   */
+  const restoreDraft = (): void => {
+    if (!useChatStore.getState().drafts[conversationId]) {
+      useChatStore.getState().setDraft(conversationId, opts.text);
+    }
   };
 
   const releaseComposer = (lock: ComposerLock): void => {
@@ -390,14 +498,23 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     useChatStore.getState().setBanner(null);
   };
 
+  /**
+   * Whether the next attempt follows the running turn rather than sending the message: set after
+   * the service cut this browser's view off (`stream_lagged`), and the turn it was a view of runs on.
+   */
+  let watching = false;
+  let reattached = 0;
+
   const runOnce = async (sessionId: string): Promise<void> => {
     // Per attempt: a replay after a 401 or a `session_not_found` starts a new turn, and what the
-    // previous attempt got as far as says nothing about this one.
-    turnAccepted = false;
+    // previous attempt got as far as says nothing about this one. A reattach is not a new turn —
+    // the one the service already accepted is still running — so it keeps the flag.
+    if (!watching) turnAccepted = false;
     await streamTurn({
       sessionId,
       message: text,
       dryRun,
+      watch: watching,
       signal: abort.signal,
       getToken: async () => {
         lastToken = await auth.getAccessToken();
@@ -454,7 +571,13 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         }
         // A queued turn is the one state a listener cannot infer from silence: nothing is
         // running yet, and without this the wait is indistinguishable from a hang.
-        if (event.type === 'queued') announceStatus('Waiting for a free slot on the server.');
+        if (event.type === 'queued') {
+          announceStatus(
+            event.ticket === null
+              ? 'Waiting for a free slot on the server.'
+              : `${linePlace(event.position ?? 0)}.`,
+          );
+        }
         useChatStore.getState().applyEvent(conversationId, messageId, event);
         // The conversation's subject index. Fire-and-forget: ingestion canonicalises through
         // RDKit, so it is asynchronous, and the transcript must not wait on a WASM call to render
@@ -500,12 +623,40 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         await runOnce(sessionId);
         useChatStore.getState().finishTurn(conversationId, messageId, 'done');
         releaseComposer(false);
+        // The reconnecting notice, once the view it promised has delivered the answer.
+        if (watching) showBanner(null);
         // Announced, not focused: moving focus here would interrupt a listener mid-sentence.
         // The answer carries tabIndex={-1} so they can navigate to it when ready.
         announceStatus(describeAnswer(answerText(conversationId, messageId)));
         return;
       } catch (err) {
         if (!(err instanceof ApiError)) throw err;
+
+        // The service cut this browser's view of the turn off for falling behind, and the turn
+        // runs on (Chemclaw3 #499). Reattach to it rather than read that as the turn failing — a
+        // bounded number of times, after which the transcript read below takes over.
+        if (err.kind === 'stream_lagged' && reattached < MAX_REATTACH) {
+          reattached += 1;
+          watching = true;
+          batcher?.flush();
+          showBanner({
+            kind: 'info',
+            text: 'This browser fell behind the answer; reconnecting to the turn, which is still running…',
+          });
+          announceStatus('Fell behind the answer; reconnecting.');
+          continue;
+        }
+        // A reattach answered 404: no turn is running here any more. It ended in the gap, or it
+        // runs on another replica — both are a turn whose answer lands in the transcript, so this
+        // is a dropped stream to recover, never a dead session to replace.
+        if (watching && err.kind === 'session_not_found') {
+          throw new ApiError(
+            'stream',
+            'The turn was no longer streaming when this browser reconnected.',
+            undefined,
+            { correlationId: err.correlationId },
+          );
+        }
 
         // The session handle is dead: unknown, someone else's, or evicted from the backend's
         // live-session LRU. Mint a new one and replay the message exactly once. The transcript
@@ -556,9 +707,31 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // surfaces as a `stream` error with the abort already set, and that is a stop, not a drop —
     // recovering it would poll for an answer the user just cancelled.
     if (apiError.kind === 'aborted' || abort.signal.aborted) {
+      // A Stop on a message still waiting in line withdrew it, and whether it did is only known
+      // once the service answers: a 404 there means it had started, and was stopped instead.
+      if (withdrawing && stopOutcome && (await settledWithin(stopOutcome)) === 'withdrawn') {
+        useChatStore.getState().withdrawTurn(conversationId, messageId, WITHDRAWN_BY_YOU);
+        restoreDraft();
+        releaseComposer(false);
+        announceStatus('Withdrawn before it ran.');
+        return;
+      }
       useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
       releaseComposer(false);
       await announceStop();
+      return;
+    }
+
+    // Withdrawn from a shared conversation's line by somebody else — the owner, the service on
+    // the sender's removal, the session's deletion (Chemclaw3 #499). Nothing ran and nothing was
+    // spent, so this is not painted as a failed turn: the bubble says why, the question goes back
+    // in the box, and the banner is information rather than an error.
+    if (apiError.kind === 'queue_cancelled') {
+      useChatStore.getState().withdrawTurn(conversationId, messageId, apiError.message);
+      restoreDraft();
+      releaseComposer(false);
+      showBanner({ kind: 'info', text: `${apiError.message} Your question is back in the box.` });
+      logger.info('turn.queue_cancelled', {});
       return;
     }
 
@@ -578,8 +751,11 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     //    It is also the kind the catch above stamps on any non-`ApiError`, including one thrown by
     //    this function's own setup writes — for which there is nothing to recover and nothing to
     //    wait for. `turnAccepted` is what tells those apart; see its docstring.
+    //  - `stream_lagged` is the service saying so outright: only this view ended, and the
+    //    reattaches above are spent.
     const mayStillBeRunning =
-      apiError.kind === 'network' || (turnAccepted && apiError.kind === 'stream');
+      apiError.kind === 'network' ||
+      (turnAccepted && (apiError.kind === 'stream' || apiError.kind === 'stream_lagged'));
     if (mayStillBeRunning) {
       const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
       if (sessionId) {
@@ -652,9 +828,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // so before this a failed turn also destroyed the message — the "Retry" on the banner is a
     // rehydrate of the transcript and has never re-sent anything. Only into an empty draft:
     // whatever they have typed since is newer than this.
-    if (!useChatStore.getState().drafts[conversationId]) {
-      useChatStore.getState().setDraft(conversationId, opts.text);
-    }
+    restoreDraft();
 
     // A rate limit is a pause with a number on it, and the number is the service's own: the
     // per-principal limiter computes how long until one token refills and sends it as

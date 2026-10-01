@@ -44,7 +44,8 @@ export interface PlanPosition {
   text: string;
 }
 
-export type ActivityKind = 'queued' | 'planning' | 'tool' | 'writing' | 'job' | 'thinking';
+export type ActivityKind =
+  'queued' | 'planning' | 'compute_wait' | 'tool' | 'writing' | 'job' | 'thinking';
 
 export interface TurnActivity {
   kind: ActivityKind;
@@ -110,6 +111,21 @@ export function linePlace(position: number): string {
 }
 
 /**
+ * How far back a queued tool call's compute queue is, as a clause — or empty when there is nothing
+ * honest to say.
+ *
+ * `waiting` is the broker's approximate backlog on the connector's queue (`tool_queued.waiting`):
+ * how many calls are waiting, NOT this call's place in line, so it is worded "about N" and never
+ * "N ahead of yours" — that is `linePlace`'s sentence, about a message, and a different wait. `null`
+ * (the broker could not say) and `0` (an approximate count that has not caught up with this very
+ * call) both say nothing rather than something the reader would take as a position.
+ */
+export function computeBacklog(waiting: number | null | undefined): string {
+  if (typeof waiting !== 'number' || waiting < 1) return '';
+  return `about ${waiting} ${waiting === 1 ? 'call' : 'calls'} waiting`;
+}
+
+/**
  * What this streaming turn is doing.
  *
  * Only meaningful while `status === 'streaming'`; a settled turn is described by
@@ -146,6 +162,21 @@ export function turnActivity(message: AssistantMessage): TurnActivity {
   }
 
   const call = openCall(trace);
+  // The open call is queued for a compute slot (`tool_queued`), so it is not running yet and the
+  // row must not say "Calling". Its own kind rather than a label on `tool`, because the screen
+  // reader is told on a KIND change: waiting → picked up is the transition worth a sentence, and a
+  // count moving from 4 to 3 is not.
+  if (call?.toolCall?.computeWait?.state === 'queued') {
+    const backlog = computeBacklog(call.toolCall.computeWait.waiting);
+    return {
+      kind: 'compute_wait',
+      label: backlog ? `Waiting for a compute slot · ${backlog}` : 'Waiting for a compute slot',
+      detail: call.toolCall.tool,
+      step,
+      // Somebody else's clock: the queue drains at the workers' pace, not this turn's.
+      tone: 'waiting',
+    };
+  }
   if (call?.toolCall) {
     return {
       kind: 'tool',
@@ -195,6 +226,10 @@ export function describeActivity(activity: TurnActivity): string {
       return `${activity.label}.`;
     case 'planning':
       return `Reading the plan.${where}`;
+    case 'compute_wait':
+      // Without the count, on purpose: the sentence is said once, on the transition, and a backlog
+      // read out then would be stale by the time anyone acted on it.
+      return `${activity.detail} is waiting for a compute slot.${where}`;
     case 'tool':
       return `Calling ${activity.detail}.${where}`;
     case 'writing':

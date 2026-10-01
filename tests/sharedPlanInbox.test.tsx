@@ -42,7 +42,7 @@ const SHARED_ROW: SharedSessionSummary = {
 
 let restore: (() => void) | null = null;
 
-function serve(shared: SharedSessionSummary[]): void {
+function serve(shared: SharedSessionSummary[] | Record<string, unknown>): void {
   const original = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();
@@ -126,6 +126,18 @@ describe('a plan in somebody else’s conversation', () => {
     mount();
 
     expect(await screen.findByText('My own route scouting')).toBeTruthy();
+    expect(screen.getByText('Buchwald scale-up')).toBeTruthy();
+    expect(screen.queryByText(/Shared by|Shared with you/)).toBeNull();
+  });
+
+  it('reads a shared listing that is not a list as nothing shared, and keeps the plans', async () => {
+    // A test stub once answered this route with another route's object, and `.map` threw inside
+    // the inbox after the test had already passed — a crash only a late resolve ever showed.
+    serve({ requests: [], count: 0 });
+    mount();
+
+    expect(await screen.findByText('My own route scouting')).toBeTruthy();
+    await waitFor(() => expect(queryClient.getQueryData(['shared-sessions'])).toBeDefined());
     expect(screen.getByText('Buchwald scale-up')).toBeTruthy();
     expect(screen.queryByText(/Shared by|Shared with you/)).toBeNull();
   });

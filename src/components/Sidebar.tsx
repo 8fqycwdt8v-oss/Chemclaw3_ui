@@ -172,7 +172,8 @@ function useSharedSessions(): void {
     enabled: ready,
   });
   useEffect(() => {
-    if (data) adoptShared(data);
+    // Same reading as the plan inbox: a listing that is not a list is nothing shared.
+    if (Array.isArray(data)) adoptShared(data);
   }, [data]);
 }
 

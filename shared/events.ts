@@ -5,7 +5,7 @@
  * and setting BOTH the SSE `event:` name and the JSON `type` field to the same discriminator.
  * We prefer the JSON field and fall back to the SSE name.
  *
- * Verified against 8fqycwdt8v-oss/Chemclaw3 (src/chemclaw/api/events.py). Eighteen members —
+ * Verified against 8fqycwdt8v-oss/Chemclaw3 (src/chemclaw/api/events.py). Nineteen members —
  * `question` and `note_proposed` are easy to miss, and `job_started` carries `kind`.
  *
  * It said ten for a while, and the two it was missing were the two that report trouble:
@@ -57,6 +57,10 @@
  * and expiry since the workflow was built and claimed by nothing, so it aged out undelivered —
  * which is the *sixth* form of the same failure this file keeps recording, one repository further
  * upstream: a producer with no consumer instead of a member with no mirror.
+ *
+ * The nineteenth, `tool_queued` (backend #502), arrived the same way: `tests/backendContract.test.ts`
+ * named it as sent upstream and dropped here. It says a queued compute call is waiting for a slot
+ * rather than running, and it is deliberately a different member from `queued` — see its schema.
  *
  * **And then there were seventeen, because one of them was deleted.** `handoff` is the same seam
  * failing in the direction the paragraphs above never consider: not a member missing from this
@@ -251,9 +255,10 @@ const VERIFIED_BY = ['judge', 'citation-gate'] as const;
 
 /* ── the members ─────────────────────────────────────────────────────────── */
 
-/** A place in a session's line: a whole number of at least zero, or `null`. Not one of the shared
- *  helpers above because only this event carries one, and a negative or fractional place is a
- *  service getting it wrong — read as "no place", which is the admission wait's own reading. */
+/** A place in a session's line, or a compute queue's backlog: a whole number of at least zero, or
+ *  `null`. Not one of the shared helpers above because only `queued` and `tool_queued` carry one,
+ *  and a negative or fractional count is a service getting it wrong — read as "not said", which is
+ *  each field's own reading of `null`. */
 const placeOrNull = () =>
   v.fallback(
     v.nullable(
@@ -336,6 +341,35 @@ const toolCallEvent = v.object({
   agent: text(),
 });
 export type ToolCallEvent = Loosen<v.InferOutput<typeof toolCallEvent>, 'agent'>;
+
+/** What a queued tool call is doing: still waiting for a compute slot, or picked up by a worker. */
+const COMPUTE_STATES = ['queued', 'running'] as const;
+
+const toolQueuedEvent = v.object({
+  type: v.literal('tool_queued'),
+  /* A tool call routed through a connector's compute queue (Chemclaw3 #495/#502,
+   * `D-2026-09-30-a-heavy-tool-call-waits-in-a-queue-rather-than-being-refused`): sent once when
+   * the call is still waiting after the first poll, again when the waiting count moves, and once
+   * when a worker picks it up. It annotates the card of the open `tool_call` for the same `tool`.
+   *
+   * NOT the `queued` event above. That one is about a *message* — the process's admission wait or
+   * a place in a shared session's line — and this is about one *tool call* waiting for a compute
+   * slot inside a turn that is already running. Without it the card read "running…" for the whole
+   * wait, which is the false claim the service added this to correct. */
+  /** The tool whose open card this annotates. Neither this nor `tool_call` carries a call id, so
+   *  the pairing is by name, the rule `tool_result` already follows. */
+  tool: text('unknown'),
+  /** The queue's id for the run. Identical concurrent calls share one run, so two cards can carry
+   *  the same id; it keeps a repeat on the card it already annotates. */
+  job_id: text(),
+  /** An unrecognised state reads as `running`: that is what an open card already claims, so a
+   *  value this build has not heard of adds no claim of its own. */
+  state: oneOf(COMPUTE_STATES, 'running'),
+  /** The broker's APPROXIMATE backlog on that queue — how many calls are waiting, not a strict
+   *  place in line — and `null` where the broker could not say. A surface words it as "about". */
+  waiting: placeOrNull(),
+});
+export type ToolQueuedEvent = v.InferOutput<typeof toolQueuedEvent>;
 
 const tokenEvent = v.object({
   type: v.literal('token'),
@@ -866,6 +900,7 @@ export type ChemclawEvent =
   | QueuedEvent
   | PlanEvent
   | ToolCallEvent
+  | ToolQueuedEvent
   | TokenEvent
   | JobStartedEvent
   | JobCompletedEvent
@@ -897,6 +932,7 @@ const EVENT_MEMBERS = [
   queuedEvent,
   planEvent,
   toolCallEvent,
+  toolQueuedEvent,
   tokenEvent,
   jobStartedEvent,
   jobCompletedEvent,

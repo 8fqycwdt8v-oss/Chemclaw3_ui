@@ -73,6 +73,18 @@ export interface TraceEntry {
      */
     unresolved?: boolean;
     /**
+     * Where this call stands in its connector's compute queue, from `tool_queued` (Chemclaw3 #502).
+     *
+     * Absent for a call that was never queued, which is most of them. `queued` means the call is
+     * waiting for a compute slot and the card must not say "running"; `running` means a worker has
+     * picked it up. `waiting` is the broker's approximate backlog — never a place in line — and
+     * `null` where it could not say. Dropped when the call ends: a returned call is not waiting.
+     *
+     * Not `AssistantMessage.queued` / `queuePlace`. Those are the *message* waiting to be admitted
+     * or for another participant's turn; this is one tool call inside a turn that is running.
+     */
+    computeWait?: { state: 'queued' | 'running'; waiting: number | null; jobId: string };
+    /**
      * When the ending arrived, by our clock.
      *
      * Paired with the entry's own `at` this is the duration of the call — the one number that

@@ -153,8 +153,12 @@ function PlanInbox(): React.JSX.Element {
     ...sharedSessionsQuery(auth),
     enabled: ready,
   });
+  // A listing that is not a list reads as nothing shared rather than taking the inbox down with
+  // it. The plan rows are the point of this section; whose conversation each one sits in is a
+  // qualifier, and a malformed answer to the qualifier must not cost the reader the plans.
   const sharedBySession = useMemo(
-    () => new Map((shared ?? []).map((row) => [row.session_id, row] as const)),
+    () =>
+      new Map((Array.isArray(shared) ? shared : []).map((row) => [row.session_id, row] as const)),
     [shared],
   );
 

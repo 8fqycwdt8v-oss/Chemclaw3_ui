@@ -98,3 +98,57 @@ test('the document refuses eval, and only the RDKit worker is allowed it', async
   // Drawing a structure must not have widened the page: still refused after the worker ran.
   expect(await pageMayEval(page)).toBe(false);
 });
+
+test('the sketcher draws behind the production BFF, its Indigo worker under the document policy', async ({
+  page,
+}) => {
+  // Ketcher's Indigo worker is the other WASM thread, and it gets no relaxation: it is a
+  // same-origin network worker (`tests/ketcherWorker.test.ts` reads that off the package), so it
+  // runs under its own response's policy — the document's, `worker-src 'self'` and
+  // `'wasm-unsafe-eval'` without `'unsafe-eval'`. This is the browser saying that is enough.
+  //
+  // The budget is Ketcher's: ~9 MB of JavaScript and an ~12 MB `.wasm`, fetched cold.
+  test.setTimeout(90_000);
+  const indigo: { url: string; policy: string }[] = [];
+  page.on('response', (response) => {
+    if (/\/assets\/indigoWorker-[A-Za-z0-9_-]+\.js$/.test(new URL(response.url()).pathname)) {
+      indigo.push({
+        url: response.url(),
+        policy: response.headers()['content-security-policy'] ?? '',
+      });
+    }
+  });
+
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Insert a structure' }).click();
+  const field = page.getByRole('textbox', { name: 'SMILES' });
+  await field.fill('OCC');
+  // Confirmed first: the dialog opens on what the panel has already canonicalised, and `Insert`
+  // appearing is that confirmation. Pressing Draw before it would open an empty canvas.
+  await expect(page.getByRole('button', { name: 'Insert', exact: true })).toBeVisible({
+    timeout: 30_000,
+  });
+  await page.getByRole('button', { name: 'Draw', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+
+  // This is where `ReferenceError: global is not defined` used to stop it, on 3.17.2 as on 3.18
+  // (`src/chem/ketcher.globals.ts`), and on 3.18 also a bare `events` import nothing provided.
+  // `ready` is `onInit` having fired and the initial structure handed to Indigo; the button is
+  // disabled until then and the dialog says so if the editor fails instead.
+  const use = dialog.getByRole('button', { name: 'Use this structure' });
+  await expect(use).toBeEnabled({ timeout: 60_000 });
+  await expect(dialog.getByText('The structure editor could not be loaded.')).toHaveCount(0);
+
+  // Indigo answers a molfile, RDKit names it, and the field gets the canonical form back.
+  await use.click();
+  await expect(dialog).toBeHidden();
+  await expect(field).toHaveValue('CCO');
+
+  expect(indigo.length, 'the Indigo worker chunk was never fetched').toBeGreaterThan(0);
+  for (const { url, policy } of indigo) {
+    expect(new URL(url).origin).toBe(new URL(page.url()).origin);
+    expect(policy).toContain("worker-src 'self'");
+    expect(policy).toContain("'wasm-unsafe-eval'");
+    expect(policy).not.toContain("'unsafe-eval'");
+  }
+});

@@ -25,10 +25,15 @@
  * these fail and the decision gets taken again instead of the comment quietly outliving its
  * reason. That is the same shape as the "does no document still claim …" checks in
  * `tests/routes.test.ts`.
+ *
+ * The third block is what the CSP in `server/config.ts` rests on: that this worker is a
+ * same-origin network worker served under the document's policy, and needs nothing that policy
+ * refuses. Read by shape, so a rename upstream (3.18's) passes and a change of kind fails.
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { isRdkitWorkerScript } from '../server/config.ts';
 
 /** The build this application actually imports — `dist/binaryWasm`, not the package root, which
  *  inlines the WASM as base64 in a 21 MB file (see `src/chem/ketcher-standalone.d.ts`). Read off
@@ -87,6 +92,81 @@ describe('the Indigo worker', () => {
     );
     expect(editor).not.toMatch(/structService\w*\.destroy\(\)/);
     expect(editor).not.toMatch(/\.terminate\(\)/);
+  });
+});
+
+describe('where the Indigo worker is served from', () => {
+  /**
+   * What the CSP in `server/config.ts` was written around: Ketcher's Indigo worker is a
+   * *same-origin network* worker — `new Worker(new URL('<sibling>.js', import.meta.url))`, which
+   * Vite compiles into a hashed chunk under `/assets/` — and so it runs under the policy of its own
+   * response. The BFF sends that response the **document's** policy (`worker-src 'self'`,
+   * `script-src 'self' 'wasm-unsafe-eval'`, no `'unsafe-eval'`), because only the RDKit worker's
+   * chunk gets `RDKIT_WORKER_CSP`. Read by shape rather than by a variable name, which is what
+   * 3.18 renamed (`indigoWorker` became `_indigoWorker` behind `getIndigoWorker()`); the browser
+   * half of this is `e2e/rdkit.spec.ts`.
+   */
+  const call =
+    /new Worker\(new URL\((["'])([^"'/]+\.js)\1, import\.meta\.url\), \{\s*type: 'module'\s*\}\)/.exec(
+      worker,
+    );
+  /** The sibling module the worker is built from, `indigoWorker-<hash>.js` in 3.18. */
+  const file = call?.[2] ?? '';
+
+  it('is a module worker built from a same-origin URL, not a blob: or data: one', () => {
+    // A `blob:`/`data:` worker would inherit the document's policy from a different rule, and a
+    // cross-origin URL would be refused by `worker-src 'self'`. This form is the one Vite rewrites
+    // to an emitted chunk next to the app's own.
+    expect(
+      call,
+      'the Indigo worker is not `new Worker(new URL(<sibling>.js, import.meta.url))`',
+    ).not.toBeNull();
+    expect(worker.match(/new Worker\(/g)).toHaveLength(1);
+    expect(
+      existsSync(
+        new URL(`../node_modules/ketcher-standalone/dist/binaryWasm/${file}`, import.meta.url),
+      ),
+      `${file} is not in the package`,
+    ).toBe(true);
+  });
+
+  it('is served under the document policy, not the RDKit relaxation', () => {
+    // The chunk Vite emits for it is `assets/<stem>-<hash>.js`; the relaxed policy is keyed to the
+    // RDKit worker's name alone, so this worker must never match it.
+    const stem = file.replace(/(-[0-9a-f]+)?\.js$/, '');
+    expect(isRdkitWorkerScript(`/assets/${stem}-AbCd1234.js`)).toBe(false);
+    expect(isRdkitWorkerScript(`/assets/${file}`)).toBe(false);
+  });
+
+  it('needs nothing that policy refuses: WASM compilation, but no eval', () => {
+    // Under `script-src 'self' 'wasm-unsafe-eval'` a worker may instantiate WASM and may not
+    // evaluate a string. RDKit's Embind glue does (hence its own policy); Indigo's must not, or the
+    // sketcher would mount and then die on its first chemistry operation.
+    const script = readFileSync(
+      new URL(`../node_modules/ketcher-standalone/dist/binaryWasm/${file}`, import.meta.url),
+      'utf8',
+    );
+    expect(script).toMatch(/WebAssembly\.instantiate/);
+    expect(script).not.toMatch(/\bFunction\(|\beval\(/);
+  });
+});
+
+describe('what Ketcher assumes the bundler provides', () => {
+  // Neither is visible until an editor mounts in a production build, which is where both broke:
+  // `e2e/rdkit.spec.ts` is the browser half.
+  it('gets the `events` package that ketcher-core imports and does not declare', () => {
+    const core = readFileSync(
+      new URL('../node_modules/ketcher-core/dist/application/ketcher.modern.js', import.meta.url),
+      'utf8',
+    );
+    const manifest = JSON.parse(read('package.json')) as { dependencies: Record<string, string> };
+    if (/from 'events'/.test(core)) expect(manifest.dependencies).toHaveProperty('events');
+  });
+
+  it('gets a `global` before Ketcher is evaluated', () => {
+    // First import, because ES modules evaluate theirs in order.
+    const adapter = read('src/chem/sketcher.ketcher.tsx');
+    expect(/^import .*$/m.exec(adapter)?.[0]).toBe("import './ketcher.globals.ts';");
   });
 });
 

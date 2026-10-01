@@ -86,17 +86,30 @@ export function firstLoadFiles(html) {
  *
  * Raising either number is a real decision and belongs in `docs/dependencies.md` with what it
  * bought, next to the row for whatever bought it.
+ *
+ * **Raised on 2026-10-01**, from 220,000 / 700,000, by the npm minor/patch group that superseded
+ * Dependabot #104. Measured the same way, one bump at a time on top of `main` (`d44d5ac`), gzip:
+ *
+ *     main                                   688,869 raw   216,356 gzip
+ *     react-dom 19.3.0 (+ scheduler 0.28)    +28,904 raw    +8,447 gzip
+ *     lucide-react 1.48                       +4,066 raw    +1,408 gzip
+ *     react-router 8.4                        +1,168 raw      +335 gzip
+ *     the other 15, together                    +866 raw      +234 gzip
+ *     after                                  723,873 raw   226,780 gzip   (+35,004 / +10,424)
+ *
+ * Not a dependency taken but the framework growing, and holding React at 19.2 to stay under a
+ * number would be the ratchet this file argues against. The headroom is re-set to the same ~6%.
  */
 export const BUDGET = {
-  firstLoadGzip: 220_000,
-  firstLoadRaw: 700_000,
+  firstLoadGzip: 240_000,
+  firstLoadRaw: 770_000,
 };
 
 /** The measurement this budget was set from, so the headroom is checkable rather than asserted. */
 export const MEASURED = {
-  at: '2026-09-16',
-  firstLoadGzip: 207_927,
-  firstLoadRaw: 657_086,
+  at: '2026-10-01',
+  firstLoadGzip: 226_780,
+  firstLoadRaw: 723_873,
 };
 
 const kb = (bytes) => `${(bytes / 1024).toFixed(1)} kB`;

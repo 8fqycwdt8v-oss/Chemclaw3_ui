@@ -54,10 +54,17 @@
  *    Vite understands natively — no plugin, no config. It is a page-wide singleton inside
  *    ketcher-standalone (a module-scope slot filled on the first struct service), so it outlives
  *    any one editor; see `destroy()` below.
+ *  - **Two things Ketcher assumes a bundler provides, and Vite does not.** A Node `global`, which
+ *    `ketcher.globals.ts` aliases to `globalThis` before Ketcher is evaluated; and, from 3.18, the
+ *    `events` package, which `ketcher-core` imports bare without declaring (3.17 inlined it). Vite
+ *    resolves an absent `events` to an empty browser stub, so `new EventEmitter` threw at mount.
+ *    `events` is therefore a direct dependency of this repository, for Ketcher's sake alone.
  *  - `staticResourcesUrl: ''` resolves Ketcher's own assets against the app origin. Anything it
  *    cannot find surfaces through `errorHandler` rather than throwing.
  */
 
+// First, and on purpose: Ketcher reads a Node `global` when it is evaluated. See the module.
+import './ketcher.globals.ts';
 import { createRoot } from 'react-dom/client';
 import { Editor } from 'ketcher-react';
 import { StandaloneStructServiceProvider } from 'ketcher-standalone/dist/binaryWasm';

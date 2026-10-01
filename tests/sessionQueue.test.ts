@@ -216,6 +216,33 @@ describe('a message waiting in a shared conversation’s line', () => {
     await turn;
   }, 20_000);
 
+  it('is stopped on unload when it started before the withdrawal reached the service', async () => {
+    const stream = holdingStream([inLine(9, 0)]);
+    const stub = stubFetch((url, init) => {
+      if (url.includes('/queue/') && init?.method === 'DELETE') {
+        return jsonError(404, 'no such message is waiting in this session');
+      }
+      if (url.endsWith('/turn/stop')) return json({ stopped: true });
+      return stream.response;
+    });
+    restore = stub.restore;
+
+    const cid = conversation();
+    const turn = sendMessage({ conversationId: cid, text: QUESTION, auth });
+    await until(() => Boolean(latest(cid).queuePlace), 'the place in line');
+    useChatStore.getState().streaming?.abandon();
+    await until(
+      () => stub.calls.some((c) => c.url.endsWith('/turn/stop')),
+      'the stop that follows a withdrawal the service no longer had a place for',
+    );
+
+    const stop = stub.calls.find((c) => c.url.endsWith('/turn/stop'));
+    expect(stop?.init?.keepalive).toBe(true);
+
+    stream.send([answerEvent({ text: 'done' })]);
+    await turn;
+  }, 20_000);
+
   it('is not painted as a failed turn when somebody else withdraws it', async () => {
     const stub = stubFetch(() =>
       sseResponse(

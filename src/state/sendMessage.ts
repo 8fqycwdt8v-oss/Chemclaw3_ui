@@ -351,12 +351,21 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // A message still waiting in a shared conversation's line is withdrawn, not stopped: the turn
     // running there is somebody else's, and an owner's unload must not cancel it. A detach does
     // not lose a waiting message its place, so leaving it would run a question nobody is reading.
+    // A 404 there means the message left the line first — usually because it started, between
+    // the service taking the turn and this client hearing about it — so the fallback is the same
+    // stop the Composer's Withdraw falls back to. Best effort: the second request leaves after
+    // the first one answers, and the page may be gone by then.
     const place = placeInLine();
     if (place) {
       void api
         .withdrawQueued(sessionId, place.ticket, () => Promise.resolve(lastToken), {
           keepalive: true,
         })
+        .then((withdrawn) =>
+          withdrawn
+            ? undefined
+            : api.stopTurn(sessionId, () => Promise.resolve(lastToken), { keepalive: true }),
+        )
         .catch(() => {
           // Nothing to report to and nobody to report it: the page is unloading.
         });

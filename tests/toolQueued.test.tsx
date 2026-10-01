@@ -4,9 +4,10 @@
  * Backend `connectors/queued.py` routes a manifest's heavy tools through a queue, so on a busy
  * deployment a call can sit for seconds before a worker picks it up. Until this event the card read
  * "running…" for that whole wait — false, and the one part of the turn a chemist was watching. The
- * event annotates the open `tool_call` row (matched like a result: oldest open row for the tool),
- * the badge says "queued · N waiting" (the broker's approximate backlog, never a position), and the
- * activity line says the turn is waiting for a compute slot.
+ * event annotates the open `tool_call` row (by job id, else the oldest unannotated open row for the tool),
+ * the badge says "queued · N in queue" (the broker's approximate backlog, never a position), and
+ * the activity line says the turn is waiting for a compute slot — as a kind of its own, because the
+ * row announces to a screen reader only when the kind changes.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
@@ -77,7 +78,7 @@ describe('a queued tool call', () => {
     expect(odd).toMatchObject({ state: 'queued' });
   });
 
-  it('shows "queued · N waiting" on its card, then "running…", then the result', () => {
+  it('shows "queued · N in queue" on its card, then "running…", then the result', () => {
     const { cid, mid } = startTurn();
     apply(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: '{"smiles":"CCO"}' });
     apply(cid, mid, {
@@ -89,10 +90,10 @@ describe('a queued tool call', () => {
     });
 
     show(cid, mid);
-    expect(screen.getByText('queued · 4 waiting')).toBeTruthy();
+    expect(screen.getByText('queued · 4 in queue')).toBeTruthy();
     expect(screen.queryByText('running…')).toBeNull();
     expect(turnActivity(message(cid, mid))).toMatchObject({
-      kind: 'tool',
+      kind: 'tool_queued',
       label: 'Waiting for a compute slot',
       tone: 'waiting',
     });
@@ -109,6 +110,41 @@ describe('a queued tool call', () => {
     show(cid, mid);
     expect(screen.queryByText('running…')).toBeNull();
     expect(screen.queryByText(/queued/)).toBeNull();
+    expect(message(cid, mid).trace.every((e) => !e.toolCall?.queue)).toBe(true);
+  });
+
+  it('keeps two calls to one tool apart by job id', () => {
+    const { cid, mid } = startTurn();
+    apply(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: '{"smiles":"CCO"}' });
+    apply(cid, mid, { type: 'tool_call', tool: 'predict_pka', arguments: '{"smiles":"CCN"}' });
+    apply(cid, mid, { type: 'tool_queued', tool: 'predict_pka', job_id: 'q1', state: 'running' });
+    apply(cid, mid, {
+      type: 'tool_queued',
+      tool: 'predict_pka',
+      job_id: 'q2',
+      state: 'queued',
+      waiting: 2,
+    });
+    // A later poll of the first call must land on its own row, not on the oldest open one.
+    apply(cid, mid, { type: 'tool_queued', tool: 'predict_pka', job_id: 'q1', state: 'running' });
+    const states = message(cid, mid)
+      .trace.filter((e) => e.kind === 'tool_call')
+      .map((e) => e.toolCall?.queue?.state);
+    expect(states).toEqual(['running', 'queued']);
+  });
+
+  it('reads a zero backlog as no count, since the call is itself in it', () => {
+    const { cid, mid } = startTurn();
+    apply(cid, mid, { type: 'tool_call', tool: 'run_python', arguments: '{}' });
+    apply(cid, mid, {
+      type: 'tool_queued',
+      tool: 'run_python',
+      job_id: 'q3',
+      state: 'queued',
+      waiting: 0,
+    });
+    show(cid, mid);
+    expect(screen.getByText('queued…')).toBeTruthy();
   });
 
   it('says "queued…" when the broker could not say how many wait', () => {

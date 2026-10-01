@@ -44,7 +44,8 @@ export interface PlanPosition {
   text: string;
 }
 
-export type ActivityKind = 'queued' | 'planning' | 'tool' | 'writing' | 'job' | 'thinking';
+export type ActivityKind =
+  'queued' | 'planning' | 'tool_queued' | 'tool' | 'writing' | 'job' | 'thinking';
 
 export interface TurnActivity {
   kind: ActivityKind;
@@ -125,8 +126,10 @@ export function turnActivity(message: AssistantMessage): TurnActivity {
   if (call?.toolCall?.queue?.state === 'queued') {
     // A queued call has not started: it waits for a compute slot on a busy server, which is the
     // admission queue's kind of wait — ours to report, not ours to shorten — so it takes that tone.
+    // A kind of its own because the row announces on a change of kind: under 'tool' the move from
+    // "Calling X" to waiting, and from waiting to running, would both be silent.
     return {
-      kind: 'tool',
+      kind: 'tool_queued',
       label: 'Waiting for a compute slot',
       detail: call.toolCall.tool,
       step,
@@ -182,10 +185,10 @@ export function describeActivity(activity: TurnActivity): string {
       return 'Waiting for a free slot on the server.';
     case 'planning':
       return `Reading the plan.${where}`;
+    case 'tool_queued':
+      return `Waiting for a compute slot for ${activity.detail}.${where}`;
     case 'tool':
-      return activity.tone === 'waiting'
-        ? `Waiting for a compute slot for ${activity.detail}.${where}`
-        : `Calling ${activity.detail}.${where}`;
+      return `Calling ${activity.detail}.${where}`;
     case 'writing':
       return 'Writing the answer.';
     case 'job':

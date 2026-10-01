@@ -419,12 +419,13 @@ function Row({
             badge={
               running && call.queue?.state === 'queued' ? (
                 // Waiting for a compute slot, which is not the same claim as running: the call
-                // has not started. The count is the broker's approximate backlog, so "waiting",
-                // never "position".
+                // has not started. The count is the broker's approximate backlog, this call
+                // included, so "in queue", never "position" — and a 0 the approximation can
+                // report while this call is still in it reads as no count at all.
                 <span className="text-2xs text-ink-muted">
-                  {call.queue.waiting === null
+                  {call.queue.waiting === null || call.queue.waiting <= 0
                     ? 'queued…'
-                    : `queued · ${call.queue.waiting} waiting`}
+                    : `queued · ${call.queue.waiting} in queue`}
                 </span>
               ) : running ? (
                 // Not "we are hiding the result" but "the call has not come back".

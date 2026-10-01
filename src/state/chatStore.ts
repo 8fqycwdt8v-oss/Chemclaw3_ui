@@ -448,7 +448,9 @@ function closeToolCall(
   const index = openCallIndex(trace, tool);
   const target = trace[index];
   if (index === -1 || !target?.toolCall) return trace;
-  const updated: TraceEntry = { ...target, toolCall: { ...target.toolCall, ...ending, endedAt } };
+  // The queue annotation describes a call still out; an ended row keeps no stale "queued".
+  const { queue: _queue, ...call } = target.toolCall;
+  const updated: TraceEntry = { ...target, toolCall: { ...call, ...ending, endedAt } };
   return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
 }
 
@@ -468,13 +470,26 @@ function openCallIndex(trace: TraceEntry[], tool: string): number {
  * Record where a queued call is, on its open row. Not a row of its own: it qualifies a step that
  * is already on screen, and a line per poll would bury the turn in "still waiting". An update
  * whose call already ended (or was dropped by `MAX_TRACE_ENTRIES`) is discarded.
+ *
+ * Paired by job id first: two calls to one tool in one step are two queued runs, and pairing by
+ * name alone would put the second's "queued" on the first while it runs. A job id not yet seen
+ * takes the oldest open row for the tool that carries no annotation, and only then the oldest.
  */
 function markQueued(
   trace: TraceEntry[],
   tool: string,
   queue: { state: 'queued' | 'running'; waiting: number | null; jobId: string },
 ): TraceEntry[] {
-  const index = openCallIndex(trace, tool);
+  const open = (entry: TraceEntry): boolean =>
+    entry.kind === 'tool_call' &&
+    entry.toolCall?.tool === tool &&
+    entry.toolCall.result === undefined &&
+    !entry.toolCall.failed;
+  let index = trace.findIndex(
+    (entry) => open(entry) && entry.toolCall?.queue?.jobId === queue.jobId,
+  );
+  if (index === -1) index = trace.findIndex((entry) => open(entry) && !entry.toolCall?.queue);
+  if (index === -1) index = openCallIndex(trace, tool);
   const target = trace[index];
   if (index === -1 || !target?.toolCall) return trace;
   const updated: TraceEntry = { ...target, toolCall: { ...target.toolCall, queue } };

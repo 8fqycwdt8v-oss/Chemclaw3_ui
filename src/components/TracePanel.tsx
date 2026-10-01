@@ -417,7 +417,16 @@ function Row({
             label={toolLabel(call.tool)}
             mono={call.tool}
             badge={
-              running ? (
+              running && call.queue?.state === 'queued' ? (
+                // Waiting for a compute slot, which is not the same claim as running: the call
+                // has not started. The count is the broker's approximate backlog, so "waiting",
+                // never "position".
+                <span className="text-2xs text-ink-muted">
+                  {call.queue.waiting === null
+                    ? 'queued…'
+                    : `queued · ${call.queue.waiting} waiting`}
+                </span>
+              ) : running ? (
                 // Not "we are hiding the result" but "the call has not come back".
                 <span className="text-2xs text-ink-muted">running…</span>
               ) : call.unresolved ? (

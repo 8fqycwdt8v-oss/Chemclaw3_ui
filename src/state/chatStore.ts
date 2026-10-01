@@ -445,16 +445,39 @@ function closeToolCall(
   // Our clock, at the moment the ending reached this process. Nothing on the wire carries a tool
   // duration, so this is the only honest one available — and it is the wait the reader had.
   const endedAt = Date.now();
-  const index = trace.findIndex(
+  const index = openCallIndex(trace, tool);
+  const target = trace[index];
+  if (index === -1 || !target?.toolCall) return trace;
+  const updated: TraceEntry = { ...target, toolCall: { ...target.toolCall, ...ending, endedAt } };
+  return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
+}
+
+/** The oldest still-open `tool_call` row for `tool`, or -1 — the pairing rule `closeToolCall`
+ *  documents, shared with `markQueued` so a queue annotation lands on the row a result would. */
+function openCallIndex(trace: TraceEntry[], tool: string): number {
+  return trace.findIndex(
     (entry) =>
       entry.kind === 'tool_call' &&
       entry.toolCall?.tool === tool &&
       entry.toolCall.result === undefined &&
       !entry.toolCall.failed,
   );
+}
+
+/**
+ * Record where a queued call is, on its open row. Not a row of its own: it qualifies a step that
+ * is already on screen, and a line per poll would bury the turn in "still waiting". An update
+ * whose call already ended (or was dropped by `MAX_TRACE_ENTRIES`) is discarded.
+ */
+function markQueued(
+  trace: TraceEntry[],
+  tool: string,
+  queue: { state: 'queued' | 'running'; waiting: number | null; jobId: string },
+): TraceEntry[] {
+  const index = openCallIndex(trace, tool);
   const target = trace[index];
   if (index === -1 || !target?.toolCall) return trace;
-  const updated: TraceEntry = { ...target, toolCall: { ...target.toolCall, ...ending, endedAt } };
+  const updated: TraceEntry = { ...target, toolCall: { ...target.toolCall, queue } };
   return [...trace.slice(0, index), updated, ...trace.slice(index + 1)];
 }
 
@@ -1811,6 +1834,20 @@ export const useChatStore = create<ChatState>()(
               checksRun: event.checks_run,
               challenged: event.challenged,
               reviewHoldId: event.review_hold_id,
+            })),
+          );
+          return;
+        }
+
+        if (event.type === 'tool_queued') {
+          set((s) =>
+            updateAssistant(s, conversationId, messageId, (m) => ({
+              ...m,
+              trace: markQueued(m.trace, event.tool, {
+                state: event.state,
+                waiting: event.waiting ?? null,
+                jobId: event.job_id,
+              }),
             })),
           );
           return;

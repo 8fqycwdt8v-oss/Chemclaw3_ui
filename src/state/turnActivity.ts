@@ -122,6 +122,17 @@ export function turnActivity(message: AssistantMessage): TurnActivity {
   }
 
   const call = openCall(trace);
+  if (call?.toolCall?.queue?.state === 'queued') {
+    // A queued call has not started: it waits for a compute slot on a busy server, which is the
+    // admission queue's kind of wait — ours to report, not ours to shorten — so it takes that tone.
+    return {
+      kind: 'tool',
+      label: 'Waiting for a compute slot',
+      detail: call.toolCall.tool,
+      step,
+      tone: 'waiting',
+    };
+  }
   if (call?.toolCall) {
     return {
       kind: 'tool',
@@ -172,7 +183,9 @@ export function describeActivity(activity: TurnActivity): string {
     case 'planning':
       return `Reading the plan.${where}`;
     case 'tool':
-      return `Calling ${activity.detail}.${where}`;
+      return activity.tone === 'waiting'
+        ? `Waiting for a compute slot for ${activity.detail}.${where}`
+        : `Calling ${activity.detail}.${where}`;
     case 'writing':
       return 'Writing the answer.';
     case 'job':

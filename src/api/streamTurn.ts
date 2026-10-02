@@ -184,6 +184,8 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       failure.detail,
       res.headers.get('retry-after'),
       failure.correlationId,
+      // The turn route's 409 names which line refusal it is (`queue_full`, `already_waiting`).
+      failure.code,
     );
   }
 

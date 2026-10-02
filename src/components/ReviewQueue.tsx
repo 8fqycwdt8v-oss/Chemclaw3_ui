@@ -43,6 +43,7 @@ import { keys, useApiQuery } from '../api/queryClient.ts';
 import { pendingPlansQuery, sharedSessionsQuery } from '../api/queries.ts';
 import {
   api,
+  type PendingPlan,
   type PendingRequest,
   type PendingPlans as PendingPlansView,
   type SharedSessionSummary,
@@ -129,6 +130,39 @@ function PartialScan({ view }: { view: PendingPlansView }): React.JSX.Element | 
 }
 
 /**
+ * The conversation a pending plan sits in, as `adoptShared` takes it — or `undefined` when it is
+ * this person's own.
+ *
+ * **The plan says whose conversation it is** (`PendingPlan.owner`, Chemclaw3 #503), so the row is
+ * built from the plan and the shared listing is only consulted for what the plan does not carry.
+ * Before the field, the listing was the only source, and a plan whose session the listing had not
+ * returned (a cap, a failed read, a malformed answer) was drawn as the reader's own and opened
+ * with an owner's controls.
+ *
+ * Two cases still fall back to the listing alone, and both are what this did before the field: a
+ * service that does not send `owner` yet, and a reader whose own id is unknown here — comparing an
+ * owner against nobody would call every conversation somebody else's.
+ */
+export function sharedConversationOf(
+  pending: PendingPlan,
+  listed: SharedSessionSummary | undefined,
+  me: string | null | undefined,
+): SharedSessionSummary | undefined {
+  if (pending.owner === undefined || !me) return listed;
+  if (pending.owner === me) return undefined;
+  return (
+    listed ?? {
+      session_id: pending.session_id,
+      owner: pending.owner,
+      title: pending.title,
+      // When this person was let in is not on the plan; its last activity is the nearest honest
+      // date, and it only orders the adopted conversation in the sidebar.
+      added_at: pending.updated_at,
+    }
+  );
+}
+
+/**
  * Plans this chemist has not decided, in every conversation at once.
  *
  * The failure is surfaced rather than folded into an empty list: `api.listPendingPlans` lets the
@@ -146,9 +180,10 @@ function PlanInbox(): React.JSX.Element {
     isPending,
   } = useApiQuery({ ...pendingPlansQuery(auth), enabled: ready });
   // **The inbox lists plans in conversations this person does not own** (Chemclaw3 #499): a plan
-  // their own turn wrote in somebody else's session is theirs alone to decide. The plan row does
-  // not say whose conversation it is, so it is read off the shared listing — the same key the
-  // sidebar reads, so this is a cache hit rather than a second request.
+  // their own turn wrote in somebody else's session is theirs alone to decide. The plan row says
+  // whose conversation it is (`owner`); a service older than that field does not, so the shared
+  // listing is still read — the same key the sidebar reads, so this is a cache hit rather than a
+  // second request. See `sharedConversationOf`.
   const { data: shared } = useApiQuery<SharedSessionSummary[], ApiError>({
     ...sharedSessionsQuery(auth),
     enabled: ready,
@@ -187,7 +222,11 @@ function PlanInbox(): React.JSX.Element {
     <div className="flex flex-col gap-3">
       <ul className="flex flex-col gap-2">
         {view.plans.map((pending) => {
-          const sharedRow = sharedBySession.get(pending.session_id);
+          const sharedRow = sharedConversationOf(
+            pending,
+            sharedBySession.get(pending.session_id),
+            auth.account?.id,
+          );
           return (
             <li
               key={pending.session_id}

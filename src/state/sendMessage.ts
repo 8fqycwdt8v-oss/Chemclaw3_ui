@@ -853,6 +853,26 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       return;
     }
 
+    // The line could not take this message (Chemclaw3 #503's codes). Neither remedy the 409 used to
+    // get applies: "start a fresh session" leaves a conversation whose turn is somebody's real
+    // work, and Retry re-reads a transcript this message never entered. The question is already
+    // back in the draft; the banner says what to wait for. A service that sends these refusals
+    // as a sentence without a code still lands on `turn_in_flight` below, as before.
+    if (apiError.kind === 'queue_full' || apiError.kind === 'already_waiting') {
+      releaseComposer(false);
+      showBanner({
+        kind: 'warn',
+        // The service's `already_waiting` sentence already names its remedy (withdraw or wait);
+        // its `queue_full` one says only that the line is full, and ends without a stop.
+        text:
+          apiError.kind === 'queue_full'
+            ? `${apiError.message.replace(/[.\s]*$/, '')}. Send it again once the line moves.` +
+              (reference ? ` (reference ${reference})` : '')
+            : text,
+      });
+      return;
+    }
+
     // A budget that is genuinely gone is terminal — it does not replenish because somebody
     // pressed a button — so leave the composer locked and say so. A turn the service *shed* is a
     // different code now (`at_capacity`, kind `capacity`) and falls through to the ordinary

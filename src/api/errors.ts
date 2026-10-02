@@ -42,6 +42,16 @@ export type ApiErrorKind =
    *  holding one of this sender's. Either way a hard refusal, not a wait, and the service's own
    *  detail says which. */
   | 'turn_in_flight'
+  /** 409 on the turn route, `{"code": "queue_full"}` — the session's line is full. The remedy is
+   *  to wait for it to move and send again, never "start a fresh session": the turn running is
+   *  somebody's real work, and the line is the service's own bound on how many may wait behind it.
+   *  A service that predates the code sends the same refusal as a sentence, which stays
+   *  `turn_in_flight`. */
+  | 'queue_full'
+  /** 409 on the turn route, `{"code": "already_waiting"}` — this sender already has a message in
+   *  the session's line (one each). Nothing to retry and nothing to reset: the waiting message is
+   *  the one to withdraw or wait for. Same fallback as `queue_full` for an older service. */
+  | 'already_waiting'
   /** 409 on the plan-decision route only — the plan changed between being shown and being
    *  approved, so the human agreed to something else and the service refuses rather than
    *  silently approving the current plan. The status alone cannot be told apart from
@@ -229,12 +239,13 @@ export function errorFromStatus(
   /**
    * The service's own machine-readable discriminator, from an object `detail`'s `code`.
    *
-   * Only 409 reads it, and only because that status genuinely means several things: a turn already
-   * running, an edit against a stale revision, and a sign-off against a status somebody else
-   * already moved. The comment above says the *number* must not be guessed from, and that stands —
-   * this is not the number, it is the service naming which of its own refusals this is. A response
-   * without one falls through to the message-route default exactly as before, which is what keeps
-   * an older deployment working.
+   * Only 409 reads it, and only because that status genuinely means several things: a line that
+   * cannot take another message (full, or already holding one of this sender's), an edit against a
+   * stale revision, and a sign-off against a status somebody else already moved. The comment
+   * above says the *number* must not be guessed from, and that stands — this is not the number,
+   * it is the service naming which of its own refusals this is. A response without one falls
+   * through to the message-route default exactly as before, which is what keeps an older
+   * deployment working.
    */
   code?: string,
 ): ApiError {
@@ -262,6 +273,26 @@ export function errorFromStatus(
     case 409:
       if (code === 'status_conflict' || code === 'revision_conflict') {
         return new ApiError(code, detail || 'Somebody else changed this design.', 409, options);
+      }
+      // The turn route's two queue refusals (Chemclaw3 #503). Read off the code, never the
+      // sentence: a service that sends the sentence alone falls through to `turn_in_flight`, which
+      // is what this client did with both of them before they had codes.
+      if (code === 'queue_full') {
+        return new ApiError(
+          code,
+          detail || 'This conversation already has as many messages waiting as it can hold.',
+          409,
+          options,
+        );
+      }
+      if (code === 'already_waiting') {
+        return new ApiError(
+          code,
+          detail ||
+            'You already have a message waiting in this conversation; withdraw it or wait for it to run.',
+          409,
+          options,
+        );
       }
       return new ApiError(
         'turn_in_flight',

@@ -676,6 +676,13 @@ export interface PendingPlan {
    *  reason the card does, and here it arrives in the same payload as the steps, so there is no
    *  revision to check it against. */
   scope?: string[];
+  /**
+   * Whose conversation this plan is in — the session owner's actor id (Chemclaw3 #503). The inbox
+   * lists plans in conversations the reader was only let into, and opening one of those must adopt
+   * it as shared rather than as the reader's own. `null` when the service does not know the owner;
+   * absent from a service older than the field, where `/sessions/shared` is the only answer.
+   */
+  owner?: string | null;
 }
 
 /**

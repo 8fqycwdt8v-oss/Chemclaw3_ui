@@ -132,6 +132,16 @@ describe('what the registry’s answer becomes', () => {
     expect(terminalEventFrom(status({ status: 'running' }))).toBeNull();
   });
 
+  it('is nothing for a run that is waiting to start, or in a state it does not know', () => {
+    // Chemclaw3 #514: `GET /jobs/{id}` answers `queued` for a run no worker has started. The rule
+    // was "anything but `running` is an ending", which filed that waiting run as failed — with its
+    // own reason ("waiting for a free slot…") as the cause.
+    expect(
+      terminalEventFrom(status({ status: 'queued', summary: 'waiting for a free slot' })),
+    ).toBeNull();
+    expect(terminalEventFrom(status({ status: 'paused' }))).toBeNull();
+  });
+
   it('is a completion carrying the run’s result', () => {
     expect(
       terminalEventFrom(status({ job_id: 'j1', status: 'completed', result: { converged: true } })),

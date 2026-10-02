@@ -81,7 +81,10 @@ bearer token.
 Expects the Chemclaw3 checkout as a sibling directory (override with `CHEMCLAW_REPO`):
 
 ```sh
-export ANTHROPIC_API_KEY=...        # or CHEMCLAW_LLM_PROVIDER=openai_compatible + OPENAI_API_KEY
+# Core talks to one OpenAI-compatible gateway and nothing else (no provider switch, no vendor key)
+export CHEMCLAW_LLM_BASE_URL=https://openrouter.ai/api/v1   # any OpenAI-compatible /v1 base
+export CHEMCLAW_LLM_MODEL=...                               # a model id that gateway serves
+export CHEMCLAW_LLM_API_KEY=...                             # the gateway's credential
 ALLOW_INSECURE_AUTH=true docker compose up --build
 open http://localhost:3000
 ```

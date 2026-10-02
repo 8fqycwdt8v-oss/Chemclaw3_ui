@@ -56,6 +56,29 @@ describe('the launchers this repository ships', () => {
   }
 });
 
+describe('the compose stack', () => {
+  // Core reads exactly one model gateway (`CHEMCLAW_LLM_BASE_URL` / `_MODEL` / `_API_KEY`) and has
+  // no provider selector. Compose went on passing `CHEMCLAW_LLM_PROVIDER` and vendor keys long
+  // after core stopped reading them; core's settings ignore an unknown env var, so the service
+  // silently fell back to its loopback mock-gateway default and refused to boot.
+  const env = read('docker-compose.yml')
+    .split('\n')
+    .filter((line) => !line.trimStart().startsWith('#'))
+    .join('\n');
+
+  it('names the gateway the backend reads', () => {
+    expect(env).toMatch(/^\s*CHEMCLAW_LLM_BASE_URL:/m);
+    expect(env).toMatch(/^\s*CHEMCLAW_LLM_MODEL:/m);
+    expect(env).toMatch(/^\s*CHEMCLAW_LLM_API_KEY:/m);
+  });
+
+  it('passes no provider selector or vendor key the backend no longer reads', () => {
+    for (const retired of ['CHEMCLAW_LLM_PROVIDER', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY']) {
+      expect(env).not.toContain(retired);
+    }
+  });
+});
+
 describe('the production client build', () => {
   it('does not emit source maps into the directory the BFF serves', async () => {
     const config = (await import('../vite.config.ts')).default as {

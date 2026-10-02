@@ -1264,6 +1264,40 @@ a 404 and falls back to stop. An explicit "queued turn started" event from the s
 the guess (Chemclaw3 #503 item 9). Not done here: a new event name has to be admitted by this
 client before the service sends it, and that is a two-step rollout of its own.
 
+## Issue 23: the production sign-in had no browser test; now it has one, outside the gate
+
+**Done.** The MSAL authority was hardcoded to `https://login.microsoftonline.com/<tenant>`, so the
+only authority the production auth path could talk to was a real Entra tenant, and no browser test
+ever ran `AUTH_MODE=msal`. `ENTRA_AUTHORITY` (`server/config.ts`, served through `/config.js`) makes
+it configurable, with the CSP derived from its origin; unset, the authority and the CSP header are
+byte-identical to before (`tests/csp.test.ts` pins the header literally). `e2e/oidc-mock.spec.ts`
+signs alice and bob in through Chemclaw3_mock's stand-in tenant (its auth-code + PKCE flow), in two
+browser contexts, against the production bundle, and checks each page's identity, each page's
+bearer, and what a Chemclaw3-equivalent validator behind the BFF accepted.
+
+**Still open:**
+
+- **Not in the gate.** It needs a sibling Chemclaw3_mock checkout with its venv and Python on the
+  runner; `.github/workflows/ci.yml` has neither. Wiring it in means a second checkout and a
+  `pip install` there, the way the contract check checks out Chemclaw3 — worth it once the lane is
+  trusted, not before.
+- **The validator is a stand-in.** `e2e/oidc-upstream.ts` applies core's four checks; it is not
+  core. Core's own `validate_token` and `create_app()` front door were run by hand against tokens
+  from the same flow (200 for alice and bob, 401 with no token), not by this lane. Running core
+  needs Linux, Postgres and Temporal settings, and it fetches keys with httpx over certifi's bundle,
+  so it does not trust the lane's throwaway certificate — a JWKS CA setting there, or a plain-http
+  twin of the tenant on the same key, is what a lane with core in it needs.
+- **Silent renewal is not exercised.** Within the spec's lifetime MSAL serves every token from its
+  cache; the refresh-token grant and the `prompt=none` iframe are covered by the mock's own tests,
+  not by a browser.
+- **Noise on the signed-out first load, seen for the first time because nothing ran this path
+  before.** Several panels fetch at once on load; the first `getAccessToken` starts `loginRedirect`,
+  and every other one then fails with `interaction_in_progress`, each reported as an
+  `auth.token_acquisition_failed` warning along with `pending.read_failed`, `digests.claim_failed`
+  and `check_ins.claim_failed`. Harmless — the page is navigating away — but it is a burst of
+  warnings per sign-in in every real deployment's browser log. One sign-in in flight, shared by
+  every caller, would remove it.
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.

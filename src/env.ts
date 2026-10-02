@@ -27,6 +27,12 @@ export type AuthMode = 'dev' | 'msal';
 export interface RuntimeConfig {
   authMode: AuthMode;
   entraTenantId: string;
+  /**
+   * The MSAL authority URL. Empty means Entra's public cloud for `entraTenantId` — what every
+   * deployment used before this was configurable, and what a BFF that predates the field implies.
+   * Set by the BFF from `ENTRA_AUTHORITY`; see `msalAuthority` in `src/auth/msalAuth.ts`.
+   */
+  entraAuthority: string;
   entraClientId: string;
   apiScope: string;
   apiBase: string;
@@ -90,6 +96,7 @@ const fromVite = (): Partial<RuntimeConfig> => {
   return {
     authMode: env.VITE_AUTH_MODE === 'msal' ? 'msal' : undefined,
     entraTenantId: env.VITE_ENTRA_TENANT_ID,
+    entraAuthority: env.VITE_ENTRA_AUTHORITY,
     entraClientId: env.VITE_ENTRA_CLIENT_ID,
     apiScope: env.VITE_API_SCOPE,
     apiBase: env.VITE_API_BASE,
@@ -113,6 +120,7 @@ function resolve(): RuntimeConfig {
   return {
     authMode: w.authMode === 'msal' || v.authMode === 'msal' ? 'msal' : 'dev',
     entraTenantId: pick(w.entraTenantId, v.entraTenantId),
+    entraAuthority: pick(w.entraAuthority, v.entraAuthority),
     entraClientId: pick(w.entraClientId, v.entraClientId),
     apiScope: pick(w.apiScope, v.apiScope),
     apiBase: pick(w.apiBase, v.apiBase, '/api'),
@@ -143,6 +151,11 @@ export function configProblems(c: RuntimeConfig = config): string[] {
   if (c.authMode === 'msal') {
     if (!c.entraTenantId) problems.push('ENTRA_TENANT_ID is not set.');
     if (!c.entraClientId) problems.push('ENTRA_CLIENT_ID is not set (the SPA app registration).');
+    // The BFF refuses this at boot; repeated here for a bare `vite dev`, where nothing else would
+    // catch it before MSAL throws `authority_uri_insecure` from inside its constructor.
+    if (c.entraAuthority && !c.entraAuthority.startsWith('https://')) {
+      problems.push(`ENTRA_AUTHORITY "${c.entraAuthority}" is not https, which MSAL refuses.`);
+    }
     if (!c.apiScope) {
       problems.push('API_SCOPE is not set (expected api://<api-client-id>/<scope>).');
     } else if (!c.apiScope.includes('/')) {

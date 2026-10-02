@@ -131,3 +131,78 @@ describe('framing', () => {
     expect((await csp({ ALLOW_FRAMING: 'true' })).get('frame-ancestors')).toEqual(['*']);
   });
 });
+
+/**
+ * The production default, byte for byte.
+ *
+ * `ENTRA_AUTHORITY` made the MSAL origin in this header configurable, and the one property that
+ * must survive that is that a deployment which sets nothing sends **exactly** the header it sent
+ * before. These literals are the header `main` produced before the change (captured from
+ * `cfg.csp` at 55bd5f2), so any drift at all — a reordered directive, a doubled space, a trailing
+ * slash on the origin — fails here rather than in a browser an hour after sign-in.
+ */
+describe('the production default, unchanged', () => {
+  const MSAL_DEFAULT_CSP =
+    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; " +
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; " +
+    "connect-src 'self' https://login.microsoftonline.com; " +
+    'frame-src https://login.microsoftonline.com; ' +
+    "form-action 'self' https://login.microsoftonline.com; base-uri 'none'; " +
+    "frame-ancestors 'none'; object-src 'none'";
+  const DEV_DEFAULT_CSP =
+    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; " +
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; " +
+    "connect-src 'self'; frame-src 'none'; form-action 'self'; base-uri 'none'; " +
+    "frame-ancestors 'none'; object-src 'none'";
+
+  async function header(env: Record<string, string>): Promise<string> {
+    for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+    vi.resetModules();
+    return (await import('../server/config.ts')).cfg.csp;
+  }
+
+  it('sends the pre-change msal header when ENTRA_AUTHORITY is unset', async () => {
+    expect(await header(MSAL)).toBe(MSAL_DEFAULT_CSP);
+  });
+
+  it('sends the same header when ENTRA_AUTHORITY names the default authority explicitly', async () => {
+    expect(await header({ ...MSAL, ENTRA_AUTHORITY: 'https://login.microsoftonline.com/t' })).toBe(
+      MSAL_DEFAULT_CSP,
+    );
+  });
+
+  it('sends the pre-change dev header, which no authority setting reaches', async () => {
+    expect(await header({})).toBe(DEV_DEFAULT_CSP);
+    expect(await header({ ENTRA_AUTHORITY: 'https://127.0.0.1:8443/entra/mock-tenant' })).toBe(
+      DEV_DEFAULT_CSP,
+    );
+  });
+});
+
+describe('a configured authority', () => {
+  it('opens its origin — not its path, and not Entra — in the three MSAL directives', async () => {
+    const directives = await csp({
+      ...MSAL,
+      ENTRA_AUTHORITY: 'https://127.0.0.1:8443/entra/mock-tenant',
+    });
+    const origin = 'https://127.0.0.1:8443';
+    expect(directives.get('connect-src')).toEqual(["'self'", origin]);
+    expect(directives.get('frame-src')).toEqual([origin]);
+    expect(directives.get('form-action')).toEqual(["'self'", origin]);
+    // Replaced, not added to: a deployment pointed elsewhere has no business talking to Entra.
+    expect([...directives.values()].flat()).not.toContain(ENTRA_HOST);
+  });
+
+  it('leaves every other directive exactly as the default sends it', async () => {
+    const configured = await csp({
+      ...MSAL,
+      ENTRA_AUTHORITY: 'https://login.microsoftonline.us/t',
+    });
+    const standard = await csp(MSAL);
+    for (const name of ['connect-src', 'frame-src', 'form-action']) {
+      configured.delete(name);
+      standard.delete(name);
+    }
+    expect(configured).toEqual(standard);
+  });
+});

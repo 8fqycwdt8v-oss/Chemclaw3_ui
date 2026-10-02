@@ -104,6 +104,18 @@ server.listen(cfg.port, cfg.bindHost, () => {
     );
   }
 
+  if (cfg.authMode === 'msal' && cfg.rawEntraAuthority) {
+    // Not refused — a sovereign cloud and the mock tenant are both legitimate — but a sign-in that
+    // goes somewhere other than Entra's public cloud is a decision, so it is stated where the next
+    // reader of these logs will look. The service validates the issuer and keys on its own, so a
+    // wrong authority here fails every request there rather than letting anyone in.
+    log.warn(
+      `ENTRA_AUTHORITY=${cfg.entraAuthority}: sign-in goes to this authority, not to ` +
+        'login.microsoftonline.com, and the CSP opens its origin instead. Chemclaw3 must trust ' +
+        'the same issuer (CHEMCLAW_ENTRA_ISSUER / CHEMCLAW_ENTRA_JWKS_URL).',
+    );
+  }
+
   if (cfg.allowFraming) {
     log.warn(
       'SECURITY: ALLOW_FRAMING=true. This page may be framed by any origin, so a control a ' +

@@ -437,6 +437,14 @@ Option (c) is one field and is the right ask.
 **Covers:** US-1, US-2, US-5, US-12 (as a place to hang artifacts), US-21 (partly), and it is the
 substrate every later concept renders into.
 
+> **The place to hang them now exists, and it is not this rail.** The artefact pane took the rail's
+> column and holds the rail unchanged as its _Index_ tab, beside the documents the agent writes
+> (`src/components/exhibits/`, the service's `exhibit` routes). It does not close US-12 itself:
+> that story is a _calculation's_ artifacts — a geometry, a vibrational spectrum — which live in the
+> service's calc artifact store behind no byte route (`USER-STORIES.md` C4), and the artefact
+> contract defers a `geometry` kind until that route and a reviewed 3D viewer exist. The word is the
+> same and the objects are not, which is why the service named its new one `exhibit`.
+
 **Cost:** medium. The store and its extraction rules are the work; the cards are cheap.
 
 **Risk:** an entity rail full of noise is worse than none. Needs a strict promotion rule — an entity

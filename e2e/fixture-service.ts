@@ -48,6 +48,14 @@ import type {
   DesignSummary,
   ProtocolReceipt,
 } from '../shared/protocols.ts';
+import type {
+  ExhibitDiff,
+  ExhibitHeader,
+  ExhibitListOut,
+  ExhibitRevision,
+  ExhibitView,
+  TableSpec,
+} from '../shared/exhibits.ts';
 
 const port = Number(process.argv[2] ?? 4322);
 const SID = 'a'.repeat(32);
@@ -358,7 +366,7 @@ const TURN: readonly Frame[] = [
 ];
 
 /** One scripted turn. Gaps are what make the incremental assertion meaningful. */
-async function streamTurn(res: ServerResponse): Promise<void> {
+async function streamTurn(res: ServerResponse, frames: readonly Frame[] = TURN): Promise<void> {
   res.writeHead(200, {
     'content-type': 'text/event-stream',
     'cache-control': 'no-cache',
@@ -376,7 +384,7 @@ async function streamTurn(res: ServerResponse): Promise<void> {
     aborted = true;
   });
 
-  for (const [event, gap] of TURN) {
+  for (const [event, gap] of frames) {
     if (aborted) return;
     // The `event:` name comes off the frame's own discriminator rather than being written beside
     // it. sse-starlette sends both, and a fixture that carried two copies could disagree with
@@ -385,6 +393,289 @@ async function streamTurn(res: ServerResponse): Promise<void> {
     if (gap > 0) await sleep(gap);
   }
   res.end();
+}
+
+/* ── Artefacts (exhibits) ─────────────────────────────────────────────────────
+ *
+ * Scenario-scoped rather than added to `TURN`, for the reason the paragraph above `TURN` gives
+ * about turns that change what the turn *is*: an artefact opens the pane beside the transcript, so
+ * putting one in the turn every other spec asserts on would move every other spec's layout. A
+ * session in `EXHIBIT_SESSIONS` streams `EXHIBIT_TURN` instead, and holds its own artefact state.
+ *
+ * Two sessions, one per Playwright project, because both projects run at once against this one
+ * process and an edit is a *write*: a shared artefact would have the desktop run's r2 appear under
+ * the mobile run's first look. `e2e/exhibits.spec.ts` and the a11y spec pick theirs by project.
+ *
+ * The state is the service's contract in miniature, enforced rather than echoed: a revision posted
+ * against anything but the head is a 409 `stale_revision` naming the head, exactly as the service
+ * answers it — a fixture that accepted any parent would let a client that never sent one pass.
+ */
+const EXHIBIT_SESSIONS = new Set(['7'.repeat(32), '6'.repeat(32), '5'.repeat(32)]);
+const EXHIBIT_ID = 'xb-00e2e00e2e00e2e0';
+
+const EXHIBIT_TABLE: TableSpec = {
+  kind: 'table',
+  columns: [
+    { key: 'solvent', label: 'Solvent', unit: '' },
+    { key: 'yield', label: 'Yield', unit: '%' },
+    { key: 'bp', label: 'Boiling point', unit: '°C' },
+  ],
+  rows: [
+    { solvent: '2-MeTHF', yield: 82, bp: 80 },
+    { solvent: 'CPME', yield: 64, bp: 106 },
+    { solvent: 'Toluene', yield: null, bp: 111 },
+  ],
+};
+
+interface StoredRevision {
+  record: ExhibitRevision;
+  spec: TableSpec;
+}
+
+/** Each exhibit session's one artefact, as its revisions, oldest first. */
+const exhibitState = new Map<string, StoredRevision[]>();
+
+function resetExhibit(sessionId: string): void {
+  exhibitState.set(sessionId, [
+    {
+      record: {
+        revision: 1,
+        parent_revision: 0,
+        author_kind: 'agent',
+        author: 'chemclaw',
+        change_note: 'Ranked by isolated yield',
+        created_at: '2026-10-02T14:02:00Z',
+        byte_size: JSON.stringify(EXHIBIT_TABLE).length,
+      },
+      spec: EXHIBIT_TABLE,
+    },
+  ]);
+}
+
+function exhibitHeader(sessionId: string, revisions: StoredRevision[]): ExhibitHeader {
+  const head = revisions[revisions.length - 1]!;
+  return {
+    exhibit_id: EXHIBIT_ID,
+    session_id: sessionId,
+    kind: 'table',
+    title: 'Solvent ranking for the amination',
+    head_revision: head.record.revision,
+    head_author_kind: head.record.author_kind,
+    head_author: head.record.author,
+    created_by: 'chemclaw',
+    created_at: '2026-10-02T14:02:00Z',
+    updated_at: head.record.created_at,
+  };
+}
+
+function exhibitView(sessionId: string, revisions: StoredRevision[], asked: number): ExhibitView {
+  const at = revisions.find((r) => r.record.revision === asked) ?? revisions[revisions.length - 1]!;
+  return {
+    ...exhibitHeader(sessionId, revisions),
+    revision: at.record.revision,
+    parent_revision: at.record.parent_revision,
+    author_kind: at.record.author_kind,
+    author: at.record.author,
+    change_note: at.record.change_note,
+    revision_created_at: at.record.created_at,
+    spec: at.spec,
+    // Phase 2's grounding check, on the agent's revision only: 111 was never returned by a tool.
+    unverified_figures: at.record.author_kind === 'agent' ? ['111'] : [],
+  };
+}
+
+/** A per-cell diff in `DesignDiff`'s shape, as the service's `exhibits/diff.py` writes one. */
+function exhibitDiff(from: StoredRevision, to: StoredRevision): ExhibitDiff {
+  const changes: ExhibitDiff['changes'] = [];
+  to.spec.rows.forEach((row, i) => {
+    for (const column of to.spec.columns) {
+      const before = from.spec.rows[i]?.[column.key] ?? null;
+      const after = row[column.key] ?? null;
+      if (before !== after) {
+        changes.push({
+          path: `rows[${i}].${column.key}`,
+          kind: 'changed',
+          before: before === null ? '' : String(before),
+          after: after === null ? '' : String(after),
+        });
+      }
+    }
+  });
+  return { from_revision: from.record.revision, to_revision: to.record.revision, changes };
+}
+
+/** The agent writes a table as part of its answer: call, result, then the header-only frame. */
+const EXHIBIT_TURN: readonly Frame[] = [
+  [
+    {
+      type: 'tool_call',
+      tool: 'create_exhibit',
+      arguments: '{"title":"Solvent ranking for the amination","spec":{"kind":"table"}}',
+      agent: '',
+    },
+    40,
+  ],
+  [
+    {
+      type: 'tool_result',
+      tool: 'create_exhibit',
+      preview: `{"exhibit_id": "${EXHIBIT_ID}", "revision": 1}`,
+      result_ref: '',
+      note_ids: [],
+      numbers: [1],
+      agent: '',
+    },
+    40,
+  ],
+  [
+    {
+      type: 'exhibit',
+      exhibit_id: EXHIBIT_ID,
+      revision: 1,
+      kind: 'table',
+      title: 'Solvent ranking for the amination',
+      op: 'created',
+      author_kind: 'agent',
+      author: 'chemclaw',
+    },
+    40,
+  ],
+  [
+    {
+      type: 'token',
+      text: 'I ranked the three solvents in the artefact beside this answer.',
+      agent: '',
+    },
+    80,
+  ],
+  [
+    {
+      type: 'answer',
+      text: 'I ranked the three solvents in the artefact beside this answer.',
+      confidence: null,
+      review_required: false,
+      unsupported_claims: [],
+      verified_by: null,
+      checks_run: [],
+      challenged: false,
+      review_hold_id: null,
+    },
+    0,
+  ],
+];
+
+/** Read a JSON request body. */
+function readBody<T>(req: import('node:http').IncomingMessage): Promise<T> {
+  return new Promise((resolve) => {
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk: string) => (body += chunk));
+    req.on('end', () => resolve(JSON.parse(body || '{}') as T));
+  });
+}
+
+/** Every artefact route, for an exhibit session. `null` when the path is not one of them. */
+async function exhibits(
+  req: import('node:http').IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+): Promise<boolean> {
+  const path = url.pathname;
+  if (path === '/exhibits' && req.method === 'GET') {
+    const all = [...exhibitState].map(([sid, revisions]) => exhibitHeader(sid, revisions));
+    json(res, 200, { exhibits: all });
+    return true;
+  }
+  const match =
+    /^\/sessions\/([0-9a-f]{32})\/exhibits(?:\/(xb-[0-9a-f]{16})(\/revisions|\/diff|\/export\.(md|csv|smi))?)?$/.exec(
+      path,
+    );
+  if (!match) return false;
+  const [, sid = '', xid, tail] = match;
+  const revisions = exhibitState.get(sid);
+  if (!xid) {
+    if (req.method === 'GET') {
+      const listed: ExhibitListOut = {
+        enabled: true,
+        exhibits: revisions ? [exhibitHeader(sid, revisions)] : [],
+      };
+      json(res, 200, listed);
+      return true;
+    }
+    req.resume();
+    json(res, 422, { detail: 'this fixture only pins in the a11y and exhibit specs' });
+    return true;
+  }
+  if (!revisions || xid !== EXHIBIT_ID) {
+    req.resume();
+    json(res, 404, { detail: 'unknown artefact' });
+    return true;
+  }
+  const head = revisions[revisions.length - 1]!;
+  if (!tail && req.method === 'GET') {
+    json(res, 200, exhibitView(sid, revisions, Number(url.searchParams.get('revision') ?? 0)));
+    return true;
+  }
+  if (tail === '/revisions' && req.method === 'GET') {
+    json(res, 200, { revisions: revisions.map((r) => r.record) });
+    return true;
+  }
+  if (tail === '/revisions' && req.method === 'POST') {
+    const posted = await readBody<{
+      parent_revision?: number;
+      spec?: TableSpec;
+      change_note?: string;
+    }>(req);
+    if (posted.parent_revision !== head.record.revision) {
+      json(res, 409, {
+        detail: {
+          code: 'stale_revision',
+          head_revision: head.record.revision,
+          message: `revision ${String(posted.parent_revision)} is not the head (${head.record.revision})`,
+        },
+      });
+      return true;
+    }
+    const spec = posted.spec ?? head.spec;
+    revisions.push({
+      record: {
+        revision: head.record.revision + 1,
+        parent_revision: head.record.revision,
+        author_kind: 'human',
+        author: 'dev-user',
+        change_note: posted.change_note ?? '',
+        created_at: '2026-10-02T14:20:00Z',
+        byte_size: JSON.stringify(spec).length,
+      },
+      spec,
+    });
+    json(res, 201, exhibitView(sid, revisions, 0));
+    return true;
+  }
+  if (tail === '/diff' && req.method === 'GET') {
+    const at = (n: number): StoredRevision =>
+      revisions.find((r) => r.record.revision === n) ?? head;
+    json(
+      res,
+      200,
+      exhibitDiff(at(Number(url.searchParams.get('from'))), at(Number(url.searchParams.get('to')))),
+    );
+    return true;
+  }
+  if (tail?.startsWith('/export.') && req.method === 'GET') {
+    const rows = head.spec.rows.map((row) =>
+      head.spec.columns.map((c) => String(row[c.key] ?? '')).join(','),
+    );
+    res.writeHead(200, {
+      'content-type': 'text/csv; charset=utf-8',
+      'content-disposition': 'attachment; filename="solvent-ranking.csv"',
+    });
+    res.end([head.spec.columns.map((c) => c.label).join(','), ...rows].join('\r\n'));
+    return true;
+  }
+  req.resume();
+  json(res, 405, { detail: 'method not allowed' });
+  return true;
 }
 
 const SESSIONS: SessionSummary[] = [];
@@ -953,8 +1244,18 @@ createServer(async (req, res) => {
     if (url.searchParams.get('fail') === 'capacity') {
       return json(res, 503, { detail: 'at capacity' });
     }
+    // An exhibit session's turn writes its artefact afresh, so a spec re-run starts from r1.
+    const session = /^\/sessions\/([0-9a-f]{32})\//.exec(path)?.[1] ?? '';
+    if (EXHIBIT_SESSIONS.has(session)) {
+      resetExhibit(session);
+      return streamTurn(res, EXHIBIT_TURN);
+    }
     return streamTurn(res);
   }
+
+  // The artefact routes. Every other session lists none, with the deployment's switch on — the
+  // shape every spec's shell now reads once per conversation.
+  if (await exhibits(req, res, url)) return;
 
   if (path.endsWith('/events')) {
     // A long-lived, deliberately silent job stream: the UI must not treat quiet as broken.

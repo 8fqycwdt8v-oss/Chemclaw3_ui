@@ -192,6 +192,60 @@ for (const theme of ['light', 'dark'] as const) {
       await scan(page);
     });
 
+    test('a conversation with its artefact pane open, and its index tab', async ({
+      page,
+      isMobile,
+    }) => {
+      // The tabbed right column: a resizable separator (a focusable widget, so axe holds it to its
+      // value attributes), two tabs, a revision picker, a menu trigger, a warning strip, and a
+      // sortable data table whose cells are buttons — or, below `lg`, the same body in a sheet.
+      // Its own fixture session (`EXHIBIT_SESSIONS`), which only ever streams the artefact turn.
+      const conversation = 'e2e-a11y-artefacts';
+      await page.addInitScript(
+        ([key, value]) => window.localStorage.setItem(key as string, value as string),
+        [
+          'chemclaw3.chat.v2.dev-user',
+          JSON.stringify({
+            version: 3,
+            state: {
+              conversations: {
+                [conversation]: {
+                  id: conversation,
+                  sessionId: '5'.repeat(32),
+                  title: 'Amination solvents',
+                  createdAt: 1700000000000,
+                  updatedAt: 1700000000000,
+                  messages: [],
+                  contextLost: false,
+                  sessionOrigin: 'local',
+                },
+              },
+              order: [conversation],
+              activeId: conversation,
+              jobFeed: [],
+              notifyOnJobComplete: false,
+            },
+          }),
+        ],
+      );
+      await page.goto(`/c/${conversation}`);
+      await page.getByPlaceholder(/Ask about a reaction/).fill('Rank the solvents in a table.');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      const open = page.getByRole('button', { name: /^Open artefact / });
+      await expect(open).toBeVisible();
+      if (isMobile) await open.click();
+      const pane = isMobile
+        ? page.getByRole('dialog', { name: 'Artefacts' })
+        : page.getByRole('complementary', { name: 'Artefacts' });
+      await expect(pane.getByRole('columnheader', { name: 'Yield (%)' })).toBeVisible();
+      await expectTheme(page, theme);
+      await scan(page);
+
+      await pane.getByRole('tab', { name: /^Index/ }).click();
+      await expect(pane.getByRole('tabpanel')).toBeVisible();
+      await scan(page);
+    });
+
     test('the conversation that is not on this device', async ({ page }) => {
       // A new page, a new focus target, and the one state reached by a link rather than a click.
       await page.goto('/c/does-not-exist');

@@ -197,6 +197,47 @@ describe('sendMessage', () => {
   });
 
   /**
+   * The turn route's two line refusals carry a `code` (Chemclaw3 #503), as the protocol routes do.
+   * Read off the code, so a full line and a sender already waiting are told apart without matching
+   * the sentence — and neither is offered "start a fresh session", which is the old 409's remedy.
+   */
+  it.each([
+    [
+      'queue_full',
+      'a turn is already running for this session and 3 message(s) are already waiting',
+      /already waiting\. Send it again once the line moves\.$/,
+    ],
+    [
+      'already_waiting',
+      'you already have a message waiting in this session; withdraw it or wait for it to run',
+      /withdraw it or wait for it to run$/,
+    ],
+  ])('reads a %s refusal off its code, and offers no reset', async (code, message, banner) => {
+    const stub = stubFetch((url, init) => {
+      if (url.endsWith('/sessions') && init?.method === 'POST') {
+        return new Response(JSON.stringify({ session_id: 'e'.repeat(32) }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ detail: { code, message } }), {
+        status: 409,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    restore = stub.restore;
+
+    const cid = useChatStore.getState().createConversation();
+    await sendMessage({ conversationId: cid, text: 'hello', auth: devAuth });
+
+    const state = useChatStore.getState();
+    expect(state.banner?.kind).toBe('warn');
+    expect(state.banner?.action).toBeUndefined();
+    expect(state.banner?.text).toMatch(banner);
+    expect(state.composerLock).toBe(false);
+  });
+
+  /**
    * A token that expires *inside* a conversation turn.
    *
    * `handleUnauthorized` has three callers: every `api.*` route (covered by

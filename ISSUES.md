@@ -667,7 +667,9 @@ registry. What stays open is the frame itself, and that part is a core ask.**
 **The registry can tell completion — checked in the service, not assumed.** `GET /jobs/{id}` is
 `job_status` in `chemclaw/agent/durable_tools.py` (read at Chemclaw3 `03807b52`): Temporal while
 it remembers the run, `job_records` after (D-157), mapping every terminal state to `completed`,
-`failed`, `cancelled`, `terminated` or `timed_out`, and `running` otherwise. A failed run's cause
+`failed`, `cancelled`, `terminated` or `timed_out`, and `running` otherwise — or `queued` for a run
+nothing has started (Chemclaw3 #514), which `terminalEventFrom` leaves open: it names the endings
+rather than treating every word but `running` as one. A failed run's cause
 comes back as `summary` on both paths — `failed_job_reason` live, `failure_reason` from the record,
 which the failure path has written since 2026-08-27. That is exactly the fact the lost frame
 carried.
@@ -1246,11 +1248,21 @@ that is keyed by this browser's own sends, and the watcher cap's 429 and the oth
 ordinary states. The reattach after `stream_lagged` uses the route only for the turn this browser
 sent. Not blocked on core; it needs a design for where a watched turn lives in `chatStore`.
 
-**Also open, smaller:** a 409 on the turn route now means the line cannot take the message (full,
-or this sender already has one waiting). The banner quotes the service's detail, but for an owner it
-still offers "start a fresh session" (`reset`), the remedy for the old meaning. The detail is prose
-rather than a code, so telling the two 409s apart would mean matching a sentence; a `code` in the
-detail (as the protocol routes send) would let this be exact.
+**Done since, with Chemclaw3 #503 item 6 (this PR lands before the core one, and reads both
+shapes):**
+
+- A 409 on the turn route is read off its `code` — `queue_full` and `already_waiting` are their own
+  `ApiErrorKind`s, with a warning banner and no `reset` offer — and a service that still sends the
+  bare sentence lands on `turn_in_flight` exactly as before (`errorFromStatus`, `sendMessage`).
+- The plan inbox reads `PendingPlan.owner` for whose conversation a plan is in, and builds the row
+  it adopts from the plan; `/sessions/shared` stays the fallback for a service without the field
+  and for a reader whose own id is unknown (`ReviewQueue.sharedConversationOf`).
+
+**Still open, smaller:** the start of a queued turn is inferred from the first event that is not
+`queued`, so in the gap between the line handing the message over and that event, Withdraw can get
+a 404 and falls back to stop. An explicit "queued turn started" event from the service would remove
+the guess (Chemclaw3 #503 item 9). Not done here: a new event name has to be admitted by this
+client before the service sends it, and that is a two-step rollout of its own.
 
 ## Known gaps in the UI rebuild
 

@@ -13,12 +13,13 @@
  * /jobs/{id}` is `job_status` in `chemclaw/agent/durable_tools.py` (read at Chemclaw3 `03807b52`):
  * Temporal while it remembers the run, `job_records` afterwards, and it maps every terminal
  * Temporal state to one word — `completed`, `failed`, `cancelled`, `terminated`, `timed_out` — or
- * answers `running`. A failed run's cause comes back as `summary` on both paths. That is exactly
- * the fact the lost frame carried, so a new leader can recover it: no acknowledgement protocol is
- * needed for the *fact* of an ending. What it does not return is the lost frame itself: the
- * registry answers with the run's decoded `result` and a one-line `summary`, not the push-back's
- * payload object, so a reconciled card is built from `result` and may show different fields from
- * the card the stream would have produced. Recorded in Issue 12.
+ * answers `running`, or `queued` for a run nothing has started yet (Chemclaw3 #514). A failed run's
+ * cause comes back as `summary` on both paths. That is exactly the fact the lost frame carried, so
+ * a new leader can recover it: no acknowledgement protocol is needed for the *fact* of an ending.
+ * What it does not return is the lost frame itself: the registry answers with the run's decoded
+ * `result` and a one-line `summary`, not the push-back's payload object, so a reconciled card is
+ * built from `result` and may show different fields from the card the stream would have produced.
+ * Recorded in Issue 12.
  *
  * **Which runs are asked about.** The ones this browser saw launched and has not seen end: a
  * `job_started` row in a conversation's trace, not settled, with no ending in the trace and no
@@ -32,9 +33,9 @@
  * **What it does with an answer** is exactly what the stream would have done: the ending goes
  * through `tab.publish`, so every window on the account gets it, and the store's handler is
  * idempotent on `job_id` — so a run whose ending the stream also delivers (the mailbox row was
- * never claimed, or is claimed a second later) costs nothing, in either order. A run still
- * `running`, a registry that errors, or a job id the service no longer knows is left alone: the
- * stream is still the channel for those, and a failed read is not evidence of anything.
+ * never claimed, or is claimed a second later) costs nothing, in either order. A run still open
+ * (`running` or `queued`), a registry that errors, or a job id the service no longer knows is left
+ * alone: the stream is still the channel for those, and a failed read is not evidence of anything.
  */
 
 import { api, type TokenGetter, type DurableJobStatus } from '../api/client.ts';
@@ -101,14 +102,33 @@ export function awaitedJobs(state: ChatState, now = Date.now()): AwaitedJob[] {
 }
 
 /**
+ * The words `GET /jobs/{id}` ends a run with — `_TERMINAL` in `chemclaw/agent/durable_tools.py`,
+ * one per terminal Temporal state.
+ *
+ * **Listed, not inferred from "anything but `running`".** That was the rule, and it closed a
+ * waiting run's card as *failed* the moment the service learned a second open word: Chemclaw3 #514
+ * has the route answer `queued` for a run no worker has started — a queued tool call on a lane
+ * with no free slot, or none polling it — and `queued` is not an ending. Naming the endings makes
+ * every word this client has not been told about an open run, which is the safe misreading: the
+ * stream still delivers the real ending, and reconciling it late costs nothing.
+ */
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'terminated',
+  'timed_out',
+]);
+
+/**
  * The ending the stream would have delivered, from what the registry says — or `null` while the
- * run is still going.
+ * run is still open (`running`, `queued`, or a word this client does not know as an ending).
  *
  * Built through `normalizeEvent`, the stream's own parser, so a reconciled ending is held to the
  * same schema as a streamed one and cannot carry a shape the feed has never seen.
  */
 export function terminalEventFrom(status: DurableJobStatus): JobTerminalEvent | null {
-  if (status.status === 'running') return null;
+  if (!TERMINAL_STATUSES.has(status.status)) return null;
   const event =
     status.status === 'completed'
       ? normalizeEvent({ type: 'job_completed', job_id: status.job_id, summary: status.result })

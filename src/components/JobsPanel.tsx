@@ -35,6 +35,9 @@ const STATUS_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'brand'> = {
   failed: 'danger',
   cancelled: 'warn',
   running: 'brand',
+  // Open too, and not yet started (Chemclaw3 #514): a queued tool call waiting for a slot, or a
+  // run on a queue nothing polls. The service's reason arrives as `summary` and renders below.
+  queued: 'brand',
 };
 
 /**
@@ -131,7 +134,9 @@ function JobSheet({
     }
   };
 
-  const running = status?.status === 'running';
+  // Cancellation is offered on an open run, and a run waiting to start is open: it is the one a
+  // chemist is likeliest to want to call off, because nothing has been spent on it yet.
+  const running = status?.status === 'running' || status?.status === 'queued';
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>

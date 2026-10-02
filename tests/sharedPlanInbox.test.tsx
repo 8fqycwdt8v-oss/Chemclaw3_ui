@@ -2,7 +2,8 @@
  * The plan inbox lists plans in conversations this person does not own (Chemclaw3 #499).
  *
  * A member's own turn in somebody else's session can write a plan only that member may decide, and
- * `GET /plans/pending` now finds it. The row does not say whose conversation it is, and the one way
+ * `GET /plans/pending` now finds it. The row did not say whose conversation it is (it does now, as
+ * `owner` — Chemclaw3 #503 — with the shared listing as the fallback), and the one way
  * from the row into the conversation is `/open/<id>` — which, for a session nobody had adopted yet,
  * created an *owner's* stub: Delete and Branch on a conversation that is somebody else's, and a 404
  * read as a dead handle to replace with a private session (quietly moving the member's next question
@@ -18,7 +19,10 @@ import { queryClient } from '../src/api/queryClient.ts';
 import type { PendingPlan, SharedSessionSummary } from '../src/api/client.ts';
 
 vi.mock('../src/auth/AuthContext.tsx', () => {
-  const value = { auth: { getAccessToken: async () => null, mode: 'dev' }, ready: true };
+  const value = {
+    auth: { getAccessToken: async () => null, mode: 'dev', account: { id: 'me' } },
+    ready: true,
+  };
   return { useAuth: () => value, useIsReviewer: () => true };
 });
 
@@ -42,7 +46,10 @@ const SHARED_ROW: SharedSessionSummary = {
 
 let restore: (() => void) | null = null;
 
-function serve(shared: SharedSessionSummary[] | Record<string, unknown>): void {
+function serve(
+  shared: SharedSessionSummary[] | Record<string, unknown>,
+  plans: PendingPlan[] = [plan(OWNED, 'My own route scouting'), plan(SHARED, 'Buchwald scale-up')],
+): void {
   const original = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL) => {
     const url = typeof input === 'string' ? input : input.toString();
@@ -54,7 +61,7 @@ function serve(shared: SharedSessionSummary[] | Record<string, unknown>): void {
     if (url.includes('/plans/pending')) {
       return Promise.resolve(
         json({
-          plans: [plan(OWNED, 'My own route scouting'), plan(SHARED, 'Buchwald scale-up')],
+          plans,
           considered: 2,
           gated: 2,
           unread: 0,
@@ -119,6 +126,39 @@ describe('a plan in somebody else’s conversation', () => {
       (c) => c.sessionId === SHARED,
     );
     expect(adopted?.membership).toEqual({ owner: 'alice' });
+  });
+
+  it('reads whose conversation it is off the plan, without the shared listing', async () => {
+    // Chemclaw3 #503: the plan carries `owner`. The listing is empty here — a cap, a failed read —
+    // and the plan in alice's conversation must still be marked hers and open as shared.
+    serve(
+      [],
+      [
+        { ...plan(OWNED, 'My own route scouting'), owner: 'me' },
+        { ...plan(SHARED, 'Buchwald scale-up'), owner: 'alice' },
+      ],
+    );
+    mount();
+
+    expect(await screen.findByText('Shared by alice')).toBeTruthy();
+    expect(screen.getAllByText(/Shared by|Shared with you/)).toHaveLength(1);
+
+    const links = screen.getAllByRole('link', { name: 'Open the conversation to decide' });
+    fireEvent.click(links.find((link) => link.getAttribute('href') === `/open/${SHARED}`)!);
+    await waitFor(() => expect(screen.getByText('opened')).toBeTruthy());
+    const adopted = Object.values(useChatStore.getState().conversations).find(
+      (c) => c.sessionId === SHARED,
+    );
+    expect(adopted?.membership).toEqual({ owner: 'alice' });
+  });
+
+  it('trusts the plan over the listing when the plan says the conversation is the reader’s', async () => {
+    serve([SHARED_ROW], [{ ...plan(SHARED, 'Buchwald scale-up'), owner: 'me' }]);
+    mount();
+
+    expect(await screen.findByText('Buchwald scale-up')).toBeTruthy();
+    await waitFor(() => expect(queryClient.getQueryData(['shared-sessions'])).toBeDefined());
+    expect(screen.queryByText(/Shared by|Shared with you/)).toBeNull();
   });
 
   it('reads a service with no shared listing as nothing shared, not as a broken inbox', async () => {

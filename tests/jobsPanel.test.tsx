@@ -283,6 +283,22 @@ describe('JobsPanel', () => {
     expect(await screen.findByText(/will still finish/)).toBeTruthy();
   });
 
+  it('shows a run that has not started as waiting, with the reason, and still cancellable', async () => {
+    // Chemclaw3 #514: the route answers `queued` for a run no worker has started, with why as its
+    // summary. It is open — the one a chemist most wants to call off, since nothing is spent yet.
+    serve([RECORD], {
+      ...STATUS,
+      status: 'queued',
+      summary: 'waiting for a free slot on its connector; it starts when one opens',
+    });
+    mountJobs();
+    fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
+
+    expect(await screen.findByText('queued')).toBeTruthy();
+    expect(screen.getByText(/waiting for a free slot/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Request cancellation' })).toBeTruthy();
+  });
+
   it('does not offer cancellation to someone without the role', async () => {
     mode.current = 'msal';
     mode.roles = [];

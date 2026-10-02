@@ -24,6 +24,8 @@ const base: BffConfig = {
   allowInsecureAuth: false,
   allowFraming: false,
   entraTenantId: '',
+  entraAuthority: 'https://login.microsoftonline.com/',
+  rawEntraAuthority: '',
   entraClientId: '',
   apiScope: '',
   appVersion: 'test',
@@ -277,4 +279,71 @@ describe('an unusable MAX_MESSAGE_CHARS', () => {
     );
     expect(problems.join('\n')).toContain('"0"');
   });
+});
+
+/**
+ * `ENTRA_AUTHORITY`: unset is the production default and changes nothing; set, it must be a URL
+ * MSAL can use, because the alternative is a process that boots and a sign-in that fails in every
+ * browser with an MSAL error code.
+ */
+describe('ENTRA_AUTHORITY', () => {
+  const msal = {
+    authMode: 'msal' as const,
+    entraTenantId: 't',
+    entraClientId: 'c',
+    apiScope: 'a/b',
+  };
+
+  it('defaults to Entra public cloud for the tenant, exactly the string MSAL used to hardcode', async () => {
+    vi.stubEnv('AUTH_MODE', 'msal');
+    vi.stubEnv('ENTRA_TENANT_ID', 'tenant-guid');
+    vi.resetModules();
+    const fresh = await import('../server/config.ts');
+    expect(fresh.cfg.entraAuthority).toBe('https://login.microsoftonline.com/tenant-guid');
+    expect(fresh.cfg.rawEntraAuthority).toBe('');
+  });
+
+  it('is taken as given, without a trailing slash', async () => {
+    vi.stubEnv('ENTRA_AUTHORITY', 'https://127.0.0.1:8443/entra/mock-tenant/');
+    vi.resetModules();
+    const fresh = await import('../server/config.ts');
+    expect(fresh.cfg.entraAuthority).toBe('https://127.0.0.1:8443/entra/mock-tenant');
+  });
+
+  it('accepts an https authority on any host', () => {
+    const raw = 'https://127.0.0.1:8443/entra/mock-tenant';
+    expect(
+      validateConfig(config({ ...msal, rawEntraAuthority: raw, entraAuthority: raw })),
+    ).toEqual([]);
+  });
+
+  it.each(['http://127.0.0.1:8090/entra/mock-tenant', 'http://localhost/t'])(
+    'refuses %s, loopback included: MSAL itself refuses a non-https authority',
+    (raw) => {
+      const problems = validateConfig(
+        config({ ...msal, rawEntraAuthority: raw, entraAuthority: raw }),
+      );
+      expect(problems).toHaveLength(1);
+      expect(problems[0]).toContain('ENTRA_AUTHORITY must be https');
+      expect(problems[0]).toContain('authority_uri_insecure');
+    },
+  );
+
+  it('is not relaxed by ALLOW_INSECURE_AUTH, which is about dev mode and nothing else', () => {
+    const raw = 'http://127.0.0.1:8090/entra/mock-tenant';
+    const problems = validateConfig(
+      config({ ...msal, rawEntraAuthority: raw, entraAuthority: raw, allowInsecureAuth: true }),
+    );
+    expect(problems.some((p) => p.includes('ENTRA_AUTHORITY'))).toBe(true);
+  });
+
+  it.each(['not a url', 'https://login.example/t?x=1', 'https://login.example/t#frag'])(
+    'refuses %s',
+    (raw) => {
+      const problems = validateConfig(
+        config({ ...msal, rawEntraAuthority: raw, entraAuthority: raw }),
+      );
+      expect(problems.some((p) => p.includes('ENTRA_AUTHORITY'))).toBe(true);
+    },
+  );
 });

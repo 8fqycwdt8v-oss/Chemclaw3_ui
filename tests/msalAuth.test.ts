@@ -137,6 +137,29 @@ describe('the MSAL configuration', () => {
     expect(config.cache?.cacheLocation).toBe('sessionStorage');
   });
 
+  it('signs in against a configured authority, trusting that host and no other', async () => {
+    // `ENTRA_AUTHORITY` — the mock tenant `e2e/oidc-mock.spec.ts` signs in against. The host goes
+    // into `knownAuthorities` with its port, which is what MSAL compares; without it MSAL would
+    // first ask login.microsoftonline.com whether 127.0.0.1 is an Entra instance.
+    const { config: env } = (await import('../src/env.ts')) as unknown as {
+      config: { entraAuthority?: string };
+    };
+    env.entraAuthority = 'https://127.0.0.1:8443/entra/mock-tenant';
+    try {
+      const { buildMsalConfig } = await import('../src/auth/msalAuth.ts');
+      const config = buildMsalConfig();
+      expect(config.auth.authority).toBe('https://127.0.0.1:8443/entra/mock-tenant');
+      expect(config.auth.knownAuthorities).toEqual(['127.0.0.1:8443']);
+      // Everything else is the production configuration: same redirect, same per-tab cache, and
+      // MSAL's default protocol mode, so the mock exercises the path production runs.
+      expect(config.auth.redirectUri).toBe(`${window.location.origin}/auth/callback`);
+      expect(config.cache?.cacheLocation).toBe('sessionStorage');
+      expect(config.system?.protocolMode).toBeUndefined();
+    } finally {
+      delete env.entraAuthority;
+    }
+  });
+
   it('requests the API scope, not an OpenID scope', async () => {
     const { apiScopes } = await import('../src/auth/msalAuth.ts');
     // The most common "valid-looking token is rejected" cause: openid/profile yields an ID token

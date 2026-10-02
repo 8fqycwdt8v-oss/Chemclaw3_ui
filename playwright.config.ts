@@ -38,7 +38,10 @@ export default defineConfig({
   // "a solvent question reaches the props server" could not pass here however healthy the stack.
   //
   // Nobody had seen it: `format:check` was failing on `main`, so CI never reached this step.
-  testIgnore: /full-stack\.spec\.ts/,
+  //
+  // `oidc-mock.spec.ts` likewise belongs to its own config (`playwright.oidc-mock.config.ts`): it
+  // signs in through a real authority and needs a sibling Chemclaw3_mock checkout to be one.
+  testIgnore: /(full-stack|oidc-mock)\.spec\.ts/,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

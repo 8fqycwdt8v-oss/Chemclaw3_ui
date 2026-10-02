@@ -132,12 +132,13 @@ Vite inlines `import.meta.env` at build time, browser-facing settings are served
 The backend enforces Entra when `CHEMCLAW_ENTRA_REQUIRED=true`. Set `AUTH_MODE=msal` here at the
 same time, plus:
 
-| Variable          | Value                                                               |
-| ----------------- | ------------------------------------------------------------------- |
-| `ENTRA_TENANT_ID` | your tenant GUID                                                    |
-| `ENTRA_CLIENT_ID` | **this SPA's** app registration (platform: Single-page application) |
-| `API_SCOPE`       | `api://<api-client-id>/<scope>`, e.g. `.../Chat.Access`             |
-| `REVIEWER_ROLES`  | the backend's `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`, comma-separated    |
+| Variable          | Value                                                                         |
+| ----------------- | ----------------------------------------------------------------------------- |
+| `ENTRA_TENANT_ID` | your tenant GUID                                                              |
+| `ENTRA_CLIENT_ID` | **this SPA's** app registration (platform: Single-page application)           |
+| `API_SCOPE`       | `api://<api-client-id>/<scope>`, e.g. `.../Chat.Access`                       |
+| `REVIEWER_ROLES`  | the backend's `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`, comma-separated              |
+| `ENTRA_AUTHORITY` | _optional_ — see below; unset is `https://login.microsoftonline.com/<tenant>` |
 
 Three things account for most "the token looks fine but the API returns 401" incidents:
 
@@ -153,6 +154,19 @@ Three things account for most "the token looks fine but the API returns 401" inc
 Silent token refresh uses a hidden iframe to `login.microsoftonline.com`, so the CSP is built
 conditionally on `AUTH_MODE` (`server/config.ts`). Copying the backend's `connect-src 'self'`
 verbatim breaks refresh about an hour after login — a failure that looks like a random logout.
+
+**`ENTRA_AUTHORITY`** points MSAL at an authority other than Entra's public cloud: a sovereign
+cloud, or the stand-in tenant in Chemclaw3_mock that the OIDC browser test signs in against. It is
+the full authority URL, the same shape as the default (`https://<host>/<tenant>`); the BFF serves it
+to the SPA through `/config.js`, MSAL trusts that host (`knownAuthorities`), and the CSP's
+`connect-src`, `frame-src` and `form-action` open **its origin instead of**
+`login.microsoftonline.com`. Unset, nothing changes — the authority string and the whole CSP header
+are byte-for-byte what they were, and `tests/csp.test.ts` pins the header literally. It must be
+https: MSAL refuses any other scheme itself (`authority_uri_insecure`, loopback included), so the BFF
+refuses one at boot, and unlike `ALLOW_INSECURE_AUTH` there is no flag that relaxes it — a local
+test authority is served over https with a throwaway certificate. The service validates issuer and
+keys on its own (`CHEMCLAW_ENTRA_ISSUER` / `CHEMCLAW_ENTRA_JWKS_URL`), so a UI pointed at the wrong
+authority gets every request refused there; it does not get anyone in.
 
 One response carries a different policy: the RDKit worker's script (`/assets/rdkit.worker-<hash>.js`)
 is sent with `RDKIT_WORKER_CSP`, the only place `'unsafe-eval'` appears, because RDKit's Embind glue
@@ -289,6 +303,7 @@ npm run check:standalone# dist/server.js runs with no node_modules, as the image
 npm run check:no-dev-auth
 npm run check:serving   # the four promises a running UI makes, against any base URL
 npm run test:e2e        # Playwright — layout, focus, keyboard, theme, mobile drawer
+npm run test:e2e:oidc-mock  # real MSAL sign-in against Chemclaw3_mock's tenant (not in the gate)
 ```
 
 `npm run smoke` and `npm run check:openapi` are deliberately **not** in the gate: both need a live
@@ -334,6 +349,18 @@ document does not have fails.
 `check:contrast` converts OKLCH to sRGB rather than comparing lightness values: OKLCH's `L` is
 perceptual and WCAG is defined on sRGB relative luminance, so two tokens that look far apart can
 still fail. That gap is exactly how white-on-accent survived in dark mode at roughly 2:1.
+
+**The production sign-in, in a browser: `npm run test:e2e:oidc-mock`.** Every other browser test
+runs `AUTH_MODE=dev`. This one (`e2e/oidc-mock.spec.ts`, its own `playwright.oidc-mock.config.ts`)
+serves the **production** bundle from the real BFF in `AUTH_MODE=msal` with `ENTRA_AUTHORITY`
+pointed at Chemclaw3_mock's stand-in tenant (over https, with a certificate generated per run),
+signs alice in in one browser context and bob in another through the tenant's login page, and
+checks that each page shows its own person, that each sends a bearer naming its own person, and
+that `e2e/oidc-upstream.ts` — which validates every forwarded bearer with Chemclaw3's four checks
+before handing the request to the fixture — saw both of them and refused nothing. A second test
+signs out through the tenant's end-session endpoint and checks the next sign-in asks again. It
+needs a sibling Chemclaw3_mock checkout with its venv (`MOCK_DIR`, default `../Chemclaw3_mock`)
+and `npm run build` first, so it is not in the gate (`ISSUES.md` Issue 23).
 
 `test:e2e` runs the real BFF against `e2e/fixture-service.ts`, which emits SSE frames with real
 gaps between them. Stubbing the network inside the page would hand the whole body over at once and

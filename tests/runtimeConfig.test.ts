@@ -47,6 +47,9 @@ const clientToServer: Assignable<ClientRuntimeConfig, ServerRuntimeConfig> = tru
 const ENV: Record<string, string> = {
   AUTH_MODE: 'msal',
   ENTRA_TENANT_ID: 'tenant-from-the-server',
+  // Not the public-cloud URL `src/env.ts`'s consumer falls back to, so an authority that failed to
+  // cross the seam would read as that fallback — the sign-in going to Entra rather than here.
+  ENTRA_AUTHORITY: 'https://authority-from-the-server.example/tenant-from-the-server',
   ENTRA_CLIENT_ID: 'client-from-the-server',
   API_SCOPE: 'api://api-client-id/Chat.Access',
   APP_VERSION: '9.9.9-from-the-server',
@@ -121,6 +124,9 @@ describe('what /config.js actually delivers', () => {
     expect(client.reviewerRoles).toEqual(['Chemclaw.Reviewer', 'Chemclaw.Approver']);
     expect(client.apiScope).toBe('api://api-client-id/Chat.Access');
     expect(client.entraTenantId).toBe('tenant-from-the-server');
+    expect(client.entraAuthority).toBe(
+      'https://authority-from-the-server.example/tenant-from-the-server',
+    );
     expect(client.authMode).toBe('msal');
     // The switch support turns on for one tenant. A `logLevel` that silently defaulted would leave
     // a deployment believing its browsers were reporting when they were not.
@@ -152,6 +158,7 @@ describe('what /config.js actually delivers', () => {
     const script = renderConfigScript({
       authMode: 'dev',
       entraTenantId: '</script><script>window.pwned=1</script>',
+      entraAuthority: '',
       entraClientId: '',
       apiScope: '',
       apiBase: '/api',

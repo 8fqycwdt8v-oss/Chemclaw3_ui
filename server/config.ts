@@ -78,6 +78,35 @@ export const isLoopbackHost = (host: string): boolean => LOOPBACK_HOSTS.has(host
 const ENTRA_HOST = 'https://login.microsoftonline.com';
 
 /**
+ * The MSAL authority: `ENTRA_AUTHORITY` as given, or Entra's public cloud for `ENTRA_TENANT_ID`.
+ *
+ * **Unset is the production path and it is exactly what it was** — `https://login.microsoftonline.com/<tenant>`,
+ * the string `src/auth/msalAuth.ts` used to hardcode — and so is the CSP built from it below;
+ * `tests/csp.test.ts` pins the whole header byte for byte. Setting it is for an authority that is
+ * not Entra's public cloud: a sovereign cloud (`login.microsoftonline.us`), or the mock tenant in
+ * Chemclaw3_mock that the OIDC browser test signs in against (`e2e/oidc-mock.spec.ts`).
+ *
+ * A trailing slash is dropped so the value is the same shape as the default; anything else about
+ * it is `validateConfig`'s to refuse, not this line's to repair.
+ */
+const rawEntraAuthority = str('ENTRA_AUTHORITY');
+const entraAuthority =
+  rawEntraAuthority.replace(/\/+$/, '') || `${ENTRA_HOST}/${str('ENTRA_TENANT_ID')}`;
+
+/**
+ * The origin the CSP opens for MSAL — the authority's, so a configured authority is reachable and
+ * nothing else is. `ENTRA_HOST` when the value does not parse: `validateConfig` refuses to serve
+ * that, and until it does the header stays the one this process has always sent.
+ */
+const authorityOrigin = (authority: string): string => {
+  try {
+    return new URL(authority).origin;
+  } catch {
+    return ENTRA_HOST;
+  }
+};
+
+/**
  * Content-Security-Policy for the SPA.
  *
  * Built conditionally on auth mode because MSAL refreshes tokens silently through a hidden
@@ -85,7 +114,7 @@ const ENTRA_HOST = 'https://login.microsoftonline.com';
  * would break that refresh roughly an hour after login — a failure that looks like a random
  * logout and is miserable to trace back to a header.
  */
-function buildCsp(mode: AuthMode, allowFraming: boolean): string {
+function buildCsp(mode: AuthMode, allowFraming: boolean, authority: string = ENTRA_HOST): string {
   const directives: Record<string, string[]> = {
     'default-src': ["'self'"],
     // No inline scripts: /config.js is a real same-origin file precisely so this can stay strict.
@@ -128,10 +157,14 @@ function buildCsp(mode: AuthMode, allowFraming: boolean): string {
     'object-src': ["'none'"],
   };
 
+  // The authority's ORIGIN, not its URL: CSP source expressions with a path match that path
+  // only, and MSAL talks to several under the authority (discovery, token, the iframe's
+  // authorize). For the default authority this is `ENTRA_HOST` itself, so the header is unchanged.
   if (mode === 'msal') {
-    directives['connect-src'] = ["'self'", ENTRA_HOST];
-    directives['frame-src'] = [ENTRA_HOST];
-    directives['form-action'] = ["'self'", ENTRA_HOST];
+    const origin = authorityOrigin(authority);
+    directives['connect-src'] = ["'self'", origin];
+    directives['frame-src'] = [origin];
+    directives['form-action'] = ["'self'", origin];
   }
 
   return Object.entries(directives)
@@ -194,6 +227,10 @@ export interface BffConfig {
   /** Opt-in to being framed by any origin — the Replit preview, and nothing else so far. */
   allowFraming: boolean;
   entraTenantId: string;
+  /** The MSAL authority, resolved: `ENTRA_AUTHORITY`, or Entra's public cloud for the tenant. */
+  entraAuthority: string;
+  /** The raw `ENTRA_AUTHORITY` as given — empty when unset, which is the production default. */
+  rawEntraAuthority: string;
   entraClientId: string;
   apiScope: string;
   appVersion: string;
@@ -268,6 +305,8 @@ export const cfg: BffConfig = {
   // down per deployment rather than inferred from something else.
   allowFraming,
   entraTenantId: str('ENTRA_TENANT_ID'),
+  entraAuthority,
+  rawEntraAuthority,
   // The SPA's own app registration. NOT the API's client id, and note the backend has no
   // CHEMCLAW_ENTRA_CLIENT_ID setting at all — its Settings model is extra="forbid", so
   // exporting one there aborts its startup. The SPA client id is purely a frontend concern.
@@ -411,7 +450,7 @@ export const cfg: BffConfig = {
   // constant of its own, so this knob configured nothing and a deployment that raised it changed
   // no behaviour at all.
   clientEventsRatePerMin: Math.max(1, Math.floor(num('CLIENT_EVENTS_RATE_PER_MIN', 3_000))),
-  csp: buildCsp(authMode, allowFraming),
+  csp: buildCsp(authMode, allowFraming, entraAuthority),
   logLevel: str('LOG_LEVEL', 'info'),
   // Defaults to `info` rather than to this process's own level: the two are independent knobs and
   // an operator debugging the BFF has not asked every open tab to start reporting.
@@ -479,6 +518,36 @@ export function validateConfig(c: BffConfig = cfg): string[] {
     if (!c.entraTenantId) problems.push('ENTRA_TENANT_ID is required when AUTH_MODE=msal');
     if (!c.entraClientId) problems.push('ENTRA_CLIENT_ID is required when AUTH_MODE=msal');
     if (!c.apiScope) problems.push('API_SCOPE is required when AUTH_MODE=msal');
+  }
+
+  // An authority MSAL cannot use is refused here, at boot, rather than in every chemist's browser
+  // — where it is a crash screen naming an MSAL error code nobody on the bench can act on.
+  //
+  // **https only, and there is no flag that relaxes it**, unlike `ALLOW_INSECURE_AUTH` below. That
+  // flag exists because a dev-mode UI on a non-loopback bind *works* and is merely dangerous; an
+  // http authority does not work at all — `@azure/msal-browser` refuses one itself
+  // (`authority_uri_insecure`, `UrlString.validateAsUri` in msal-common 16, loopback included). A
+  // flag would let the process start and then fail in the page. A local test authority is served
+  // over https with a throwaway certificate instead: see `playwright.oidc-mock.config.ts`.
+  if (c.rawEntraAuthority) {
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(c.rawEntraAuthority);
+    } catch {
+      problems.push(`ENTRA_AUTHORITY is not a valid URL: ${JSON.stringify(c.rawEntraAuthority)}`);
+    }
+    if (parsed && parsed.protocol !== 'https:') {
+      problems.push(
+        `ENTRA_AUTHORITY must be https, got ${JSON.stringify(c.rawEntraAuthority)}. MSAL.js ` +
+          'refuses any other scheme (authority_uri_insecure), so this would fail at sign-in in ' +
+          'every browser. Serve a local test authority over https with a throwaway certificate.',
+      );
+    } else if (parsed && (parsed.search || parsed.hash || parsed.username || parsed.password)) {
+      problems.push(
+        `ENTRA_AUTHORITY must be a plain authority URL (scheme, host, tenant path), got ` +
+          `${JSON.stringify(c.rawEntraAuthority)}. MSAL appends its own paths and parameters to it.`,
+      );
+    }
   }
 
   // The docstring above has claimed to mirror `_refuse_unauthenticated_exposure` since this

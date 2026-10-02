@@ -13,6 +13,12 @@ import { cfg } from './config.ts';
 export interface RuntimeConfig {
   authMode: 'dev' | 'msal';
   entraTenantId: string;
+  /**
+   * The MSAL authority, already resolved — `ENTRA_AUTHORITY`, or Entra's public cloud for the
+   * tenant — so the SPA and the CSP this process sends are built from one value. See
+   * `entraAuthority` in `server/config.ts`.
+   */
+  entraAuthority: string;
   entraClientId: string;
   apiScope: string;
   apiBase: string;
@@ -46,6 +52,7 @@ export function runtimeConfig(): RuntimeConfig {
   return {
     authMode: cfg.authMode,
     entraTenantId: cfg.entraTenantId,
+    entraAuthority: cfg.entraAuthority,
     entraClientId: cfg.entraClientId,
     apiScope: cfg.apiScope,
     apiBase: '/api',

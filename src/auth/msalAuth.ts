@@ -62,6 +62,35 @@ export function buildMsalConfig(): Configuration {
 /** The scopes requested for the Chemclaw API. See point (1) in the module docstring. */
 export const apiScopes = (): string[] => [config.apiScope];
 
+/**
+ * Where a sign-in started by somebody *not yet signed in* comes back to.
+ *
+ * MSAL returns to the page the redirect started on (`navigateToLoginRequestUrl`, on by default).
+ * For a signed-out visitor that page is almost always `/c/<id>`: `Bootstrap` in `src/routes.tsx`
+ * mints a conversation and navigates to it on first paint, and the first `/api` call — which is
+ * what starts the sign-in — comes after. That conversation was created in the anonymous history
+ * slot (`chatStorageKey(undefined)`), and once the account is known the store reads *the
+ * account's* slot instead, so returning to it lands every first sign-in on "That conversation
+ * isn't on this device". Measured on the kind cluster against the mock tenant: most sign-ins from
+ * `/` ended on that panel.
+ *
+ * So a conversation path is dropped in favour of `/`, where `Bootstrap` picks the signed-in
+ * person's most recent conversation or makes one in their own slot. Every other path is kept —
+ * `/open/<session>`, `/jobs/<id>`, `/review` are addresses that mean the same thing to whoever
+ * signs in, and a deep link that survived the sign-in is the point of returning at all. A
+ * re-authentication of somebody already signed in (`acquireTokenRedirect`) is not routed through
+ * this: their `/c/<id>` *is* in their slot, and returning to it is right.
+ */
+export function signInStartPage(location: Pick<Location, 'origin' | 'pathname' | 'href'>): string {
+  return /^\/c\/[^/]+\/?$/.test(location.pathname) ? `${location.origin}/` : location.href;
+}
+
+/** A sign-in request for somebody not yet signed in — the API scope, returning somewhere real. */
+const signInRequest = () => ({
+  scopes: apiScopes(),
+  redirectStartPage: signInStartPage(window.location),
+});
+
 const toAccount = (account: AccountInfo | null): AuthAccount | null => {
   if (!account) return null;
   const claims = (account.idTokenClaims ?? {}) as Record<string, unknown>;
@@ -103,7 +132,7 @@ export async function createMsalAuth(): Promise<AuthProvider> {
     async getAccessToken() {
       const account = pca.getActiveAccount();
       if (!account) {
-        await pca.loginRedirect({ scopes: apiScopes() });
+        await pca.loginRedirect(signInRequest());
         return null;
       }
       try {
@@ -125,7 +154,7 @@ export async function createMsalAuth(): Promise<AuthProvider> {
       // configurations, and Conditional Access / MFA / device-compliance flows render badly
       // inside one. The usual objection — that a redirect destroys unsaved UI state — does not
       // apply here because the transcript is persisted before we ever navigate.
-      await pca.loginRedirect({ scopes: apiScopes() });
+      await pca.loginRedirect(signInRequest());
     },
 
     async logout() {
@@ -148,7 +177,7 @@ export async function createMsalAuth(): Promise<AuthProvider> {
 
       const account = pca.getActiveAccount();
       if (account) await pca.acquireTokenRedirect({ account, scopes: apiScopes() });
-      else await pca.loginRedirect({ scopes: apiScopes() });
+      else await pca.loginRedirect(signInRequest());
       return false;
     },
   };

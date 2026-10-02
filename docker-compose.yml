@@ -97,9 +97,21 @@ services:
       # Populates confidence / unsupported_claims / review_required on answers.
       CHEMCLAW_VERIFIER_ENABLED: ${CHEMCLAW_VERIFIER_ENABLED:-false}
 
-      CHEMCLAW_LLM_PROVIDER: ${CHEMCLAW_LLM_PROVIDER:-anthropic}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Every model call goes to ONE OpenAI-compatible gateway, named here; which vendor sits
+      # behind it is the gateway's business (Chemclaw3 `core/config/llm.py`,
+      # D-2026-09-04-a-gateway-is-the-only-provider). Core has no provider selector and reads no
+      # vendor key: the `CHEMCLAW_LLM_PROVIDER` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` this file
+      # used to pass were ignored, so the service fell back to its loopback mock-gateway default
+      # and refused to boot. Required rather than defaulted: there is no gateway in this stack, and
+      # the service's default (`127.0.0.1:8820`) is its own loopback, which in a container is
+      # nothing at all. Set them in the shell or a `.env` beside this file:
+      #
+      #   CHEMCLAW_LLM_BASE_URL=https://openrouter.ai/api/v1   (any OpenAI-compatible /v1 base)
+      #   CHEMCLAW_LLM_MODEL=<model id the gateway serves>
+      #   CHEMCLAW_LLM_API_KEY=<the gateway's credential>
+      CHEMCLAW_LLM_BASE_URL: ${CHEMCLAW_LLM_BASE_URL:?set CHEMCLAW_LLM_BASE_URL to an OpenAI-compatible gateway (see docker-compose.yml)}
+      CHEMCLAW_LLM_MODEL: ${CHEMCLAW_LLM_MODEL:?set CHEMCLAW_LLM_MODEL to a model the gateway serves}
+      CHEMCLAW_LLM_API_KEY: ${CHEMCLAW_LLM_API_KEY:-}
     healthcheck:
       test:
         [

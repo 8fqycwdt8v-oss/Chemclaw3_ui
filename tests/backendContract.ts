@@ -691,6 +691,9 @@ const REQUEST_SOURCES = [
  *  - an interpolation **not** preceded by `/` is a prebuilt query suffix (`/jobs${suffix}`,
  *    `/protocols/${id}${revision}`) rather than a segment — the same rule `pathEncoding.test.ts`
  *    uses to decide what must be encoded — so it goes too, with the query;
+ *  - an interpolation preceded by `.` is a parameter *inside* a segment — the artefact export's
+ *    `/export.${fmt}`, which the service registers as `export.{fmt}` — so it stays, as `.{}`. A
+ *    query suffix is never written after a dot, so this cannot mistake one for the other;
  *  - a brace in the *literal* text means the string is a label rather than a path
  *    (`orEmpty('/sessions/{id}/messages', …)` names the route it degrades), because nothing here
  *    builds a path by writing a brace.
@@ -708,7 +711,7 @@ function pathTemplate(node: ts.Expression): string | null {
     .replace(/\?.*$/, '')
     .replace(new RegExp(`^${HOLE}`), '')
     .replace(new RegExp(`(.?)${HOLE}`, 'g'), (_m, before: string) =>
-      before === '/' ? '/{}' : before,
+      before === '/' || before === '.' ? `${before}{}` : before,
     );
   return path.startsWith('/') ? path : null;
 }

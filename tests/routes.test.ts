@@ -7,6 +7,8 @@ const SID = 'a'.repeat(32);
 const REF = 'b'.repeat(64);
 /** A design id is `design-` plus twelve lowercase hex characters, and nothing else. */
 const DESIGN = 'design-0123456789ab';
+/** An artefact id is `xb-` plus sixteen lowercase hex characters, minted at random. */
+const XID = 'xb-0123456789abcdef';
 
 describe('proxy route whitelist', () => {
   it('resolves every route the UI actually calls', () => {
@@ -53,6 +55,26 @@ describe('proxy route whitelist', () => {
       ['DELETE', '/api/skills/org/house-workup', '/skills/org/house-workup'],
       ['GET', '/api/skills/org/house-workup/versions', '/skills/org/house-workup/versions'],
       ['POST', '/api/skills/org/house-workup/revert', '/skills/org/house-workup/revert'],
+      ['GET', `/api/sessions/${SID}/exhibits`, `/sessions/${SID}/exhibits`],
+      ['POST', `/api/sessions/${SID}/exhibits`, `/sessions/${SID}/exhibits`],
+      ['GET', `/api/sessions/${SID}/exhibits/${XID}`, `/sessions/${SID}/exhibits/${XID}`],
+      [
+        'GET',
+        `/api/sessions/${SID}/exhibits/${XID}/revisions`,
+        `/sessions/${SID}/exhibits/${XID}/revisions`,
+      ],
+      [
+        'POST',
+        `/api/sessions/${SID}/exhibits/${XID}/revisions`,
+        `/sessions/${SID}/exhibits/${XID}/revisions`,
+      ],
+      ['GET', `/api/sessions/${SID}/exhibits/${XID}/diff`, `/sessions/${SID}/exhibits/${XID}/diff`],
+      [
+        'GET',
+        `/api/sessions/${SID}/exhibits/${XID}/export.csv`,
+        `/sessions/${SID}/exhibits/${XID}/export.csv`,
+      ],
+      ['GET', '/api/exhibits', '/exhibits'],
     ];
     for (const [method, path, upstream] of cases) {
       expect(resolveRoute(method, path), `${method} ${path}`).toMatchObject({ path: upstream });
@@ -480,6 +502,70 @@ describe('proxy route whitelist', () => {
       // session id gets its `{id}` for.
       expect(resolveRoute('GET', `/api/protocols/${DESIGN}/diff`)?.template).toBe(
         '/protocols/{id}/diff',
+      );
+    });
+  });
+
+  describe('artefacts (exhibits)', () => {
+    it('takes an artefact id as `xb-` plus sixteen lowercase hex, and nothing else', () => {
+      // As narrow as a design id, for the same reason: the service mints the whole string, so a
+      // segment matching it holds no separator and no escape — the traversal protection is the
+      // pattern itself.
+      for (const bad of [
+        'xb-0123456789ABCDEF', // uppercase
+        'xb-0123456789abcde', // fifteen
+        'xb-0123456789abcdef0', // seventeen
+        'xb_0123456789abcdef',
+        '0123456789abcdef',
+        'xb-..%2F..%2Fmetrics',
+      ]) {
+        expect(resolveRoute('GET', `/api/sessions/${SID}/exhibits/${bad}`), bad).toBeNull();
+      }
+    });
+
+    it('exports only the three formats the service renders', () => {
+      // SDF and SVG are made in the browser; a request for them here could only be a 404 upstream,
+      // and a format list wider than the service's is a door to whatever `export.{x}` means later.
+      for (const format of ['md', 'csv', 'smi']) {
+        expect(
+          resolveRoute('GET', `/api/sessions/${SID}/exhibits/${XID}/export.${format}`),
+        ).not.toBeNull();
+      }
+      for (const format of ['sdf', 'svg', 'pdf', 'csv/x', 'CSV', '']) {
+        expect(
+          resolveRoute('GET', `/api/sessions/${SID}/exhibits/${XID}/export.${format}`),
+          format,
+        ).toBeNull();
+      }
+    });
+
+    it('offers each artefact route by its verbs only — there is no delete', () => {
+      for (const [method, path] of [
+        ['DELETE', `/api/sessions/${SID}/exhibits/${XID}`],
+        ['PUT', `/api/sessions/${SID}/exhibits/${XID}`],
+        ['POST', `/api/sessions/${SID}/exhibits/${XID}`],
+        ['POST', `/api/sessions/${SID}/exhibits/${XID}/diff`],
+        ['POST', `/api/sessions/${SID}/exhibits/${XID}/export.csv`],
+        ['POST', '/api/exhibits'],
+        ['GET', `/api/exhibits/${XID}`],
+      ] as const) {
+        expect(resolveRoute(method, path), `${method} ${path}`).toBeNull();
+      }
+    });
+
+    it('labels an artefact route by its shape, never by the artefact or session it names', () => {
+      expect(resolveRoute('GET', `/api/sessions/${SID}/exhibits/${XID}/export.smi`)?.template).toBe(
+        '/sessions/{id}/exhibits/{xid}/export.{fmt}',
+      );
+      expect(resolveRoute('GET', `/api/sessions/${SID}/exhibits/${XID}`)?.template).toBe(
+        '/sessions/{id}/exhibits/{xid}',
+      );
+    });
+
+    it('is never an event stream', () => {
+      expect(resolveRoute('GET', `/api/sessions/${SID}/exhibits`)?.sse).toBe(false);
+      expect(resolveRoute('GET', `/api/sessions/${SID}/exhibits/${XID}/export.md`)?.sse).toBe(
+        false,
       );
     });
   });

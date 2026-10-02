@@ -473,6 +473,60 @@ describe('streamTurn', () => {
     expect(JSON.parse(String(stub.calls[0]?.init?.body))).toEqual({
       message: 'x',
       dry_run: true,
+      // Always present, `[]` when nothing was attached — the contract's own default, which an
+      // older service ignores as an unknown key rather than refusing.
+      exhibit_refs: [],
+    });
+  });
+
+  it('calls a 422 about the attached artefacts a reference refusal, not a long message', async () => {
+    // Review finding: every turn-route 422 was `message_too_long`, so a chemist who attached a
+    // deleted artefact was told to shorten a short question.
+    const refuse = (detail: string) =>
+      new Response(JSON.stringify({ detail }), {
+        status: 422,
+        headers: { 'content-type': 'application/json' },
+      });
+    const attempt = async (detail: string, withRefs: boolean): Promise<ApiError> => {
+      const stub = stubFetch(() => refuse(detail));
+      restore = stub.restore;
+      const err = await streamTurn({
+        sessionId: SESSION,
+        message: 'x',
+        exhibitRefs: withRefs ? [{ exhibit_id: 'xb-0123456789abcdef', revision: 0 }] : [],
+        signal: new AbortController().signal,
+        getToken: async () => null,
+        onEvent: () => undefined,
+      }).catch((e: unknown) => e as ApiError);
+      stub.restore();
+      restore = null;
+      return err as ApiError;
+    };
+    expect((await attempt("no artefact 'xb-0123456789abcdef' in this session", true)).kind).toBe(
+      'invalid_reference',
+    );
+    expect((await attempt('exhibit_refs: List should have at most 5 items', true)).kind).toBe(
+      'invalid_reference',
+    );
+    // Without references, a 422 is still the message being too long.
+    expect((await attempt('message exceeds the 100000-char limit', false)).kind).toBe(
+      'message_too_long',
+    );
+  });
+
+  it('sends the artefacts attached to the message as exhibit_refs', async () => {
+    const stub = stubFetch(() => sseResponse(sseFrames([answerEvent()])));
+    restore = stub.restore;
+    await streamTurn({
+      sessionId: SESSION,
+      message: 'is row 3 right?',
+      exhibitRefs: [{ exhibit_id: 'xb-0123456789abcdef', revision: 2 }],
+      signal: new AbortController().signal,
+      getToken: async () => null,
+      onEvent: () => undefined,
+    });
+    expect(JSON.parse(String(stub.calls[0]?.init?.body))).toMatchObject({
+      exhibit_refs: [{ exhibit_id: 'xb-0123456789abcdef', revision: 2 }],
     });
   });
 });

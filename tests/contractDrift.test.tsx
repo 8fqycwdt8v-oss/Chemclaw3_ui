@@ -322,3 +322,36 @@ describe('a failed tool call', () => {
     expect(row?.toolFailure).toMatchObject({ tool: 'screen_hazards', agent: 'subagent' });
   });
 });
+
+describe('an artefact event', () => {
+  it('lands every field it carries on the trace row the card is drawn from', () => {
+    // Mirrored, decoded — and then the store is where a field would be dropped, which is this
+    // file's whole subject. The card reads `op` (created or revised), `revision` (which one this
+    // answer wrote) and the author, so each is asserted on the row rather than on the event.
+    const cid = useChatStore.getState().createConversation();
+    useChatStore.getState().appendUserMessage(cid, 'q');
+    const mid = useChatStore.getState().startAssistantMessage(cid);
+    useChatStore.getState().applyEvent(cid, mid, {
+      type: 'exhibit',
+      exhibit_id: 'xb-0123456789abcdef',
+      revision: 3,
+      kind: 'table',
+      title: 'Solvent ranking',
+      op: 'revised',
+      author_kind: 'human',
+      author: 'chemist@example.com',
+    });
+
+    const m = useChatStore.getState().conversations[cid]?.messages.find((x) => x.id === mid);
+    const row = m?.role === 'assistant' ? m.trace.find((e) => e.kind === 'exhibit') : undefined;
+    expect(row?.exhibit).toEqual({
+      exhibitId: 'xb-0123456789abcdef',
+      revision: 3,
+      kind: 'table',
+      title: 'Solvent ranking',
+      op: 'revised',
+      authorKind: 'human',
+      author: 'chemist@example.com',
+    });
+  });
+});

@@ -28,8 +28,36 @@ import type {
   ExperimentDesign,
   ProtocolCheck,
 } from '../../shared/protocols.ts';
-import { ApiError, CORRELATION_HEADER, errorFromStatus, readFailure } from './errors.ts';
+import {
+  ApiError,
+  CORRELATION_HEADER,
+  StaleRevisionError,
+  errorFromStatus,
+  readFailure,
+} from './errors.ts';
+import type {
+  ExhibitDiff,
+  ExhibitHeader,
+  ExhibitListOut,
+  ExhibitRevision,
+  ExhibitRevisionsOut,
+  ExhibitSpec,
+  ExhibitView,
+  ExportFormat,
+  ExhibitIndexOut,
+} from '../../shared/exhibits.ts';
 import { keys, queryClient } from './queryClient.ts';
+
+/**
+ * The artefact decoders, fetched with the first artefact body rather than with the app.
+ *
+ * Every other read here is cast and trusted; the artefact bodies are *decoded* (`shared/exhibits.ts`
+ * says why), and the decoder is the whole valibot schema of the contract. A static import put it in
+ * the first load of every chemist, including every one whose deployment has artefacts turned off,
+ * so it is imported on the first call that has a body to decode — by which time the shell has
+ * already painted. Types above are `import type`, erased, and cost nothing.
+ */
+const exhibitDecoders = () => import('../../shared/exhibits.ts');
 
 /**
  * How a request authenticates.
@@ -124,6 +152,15 @@ async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {
     // Read back rather than sent: the service issues the id and stamps it on its own log records,
     // so quoting it is what joins a banner a chemist screenshotted to one line in the logs.
     const failure = await readFailure(res);
+    // The one refusal that carries a number the caller acts on, so it is raised as its own type
+    // here — the body is consumed by `readFailure`, and nothing after this line can read it again.
+    if (res.status === 409 && failure.code === 'stale_revision') {
+      throw new StaleRevisionError(
+        failure.headRevision ?? null,
+        failure.detail || 'This artefact was revised after you opened it.',
+        failure.correlationId,
+      );
+    }
     throw errorFromStatus(
       res.status,
       failure.detail,
@@ -1747,4 +1784,246 @@ export const api = {
       throw err;
     }
   },
+
+  /* ── Artefacts ─────────────────────────────────────────────────────────────
+   *
+   * The service's `exhibit` routes (`shared/exhibits.ts` for why the code name is not the word a
+   * chemist reads). Every body is cast to the contract's own model name at the `request` call —
+   * which is what `tests/backendContract.test.ts` pairs with the service's declaration — and then
+   * *decoded*, because these bodies feed renderers that switch on a spec's kind and a malformed one
+   * must become a sentence rather than a `TypeError` inside a table.
+   */
+
+  /**
+   * The artefacts of one session, newest activity first, and whether this deployment has them.
+   *
+   * Not `orEmpty`, and the reason is `enabled`: a 404 from a service that predates the route is
+   * *exactly* "this deployment has no artefacts", so it is folded into `enabled: false` — the
+   * answer that leaves the right column as the entity rail — with the same log line `orEmpty`
+   * writes. Folding it into an empty *enabled* list instead would put an "Artefacts" tab on screen
+   * that can never hold anything.
+   */
+  async listExhibits(sessionId: string, getToken: TokenGetter): Promise<ExhibitListOut> {
+    try {
+      const body = await request<ExhibitListOut>(
+        `/sessions/${encodeURIComponent(sessionId)}/exhibits`,
+        getToken,
+      );
+      return (await exhibitDecoders()).decodeExhibitList(body);
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'session_not_found') {
+        logger.warn('api.list_route_missing', { route: '/sessions/{id}/exhibits' });
+        return { enabled: false, exhibits: [] };
+      }
+      throw err;
+    }
+  },
+
+  /**
+   * One artefact at its head, or at the revision asked for (`0` and absent both mean the head).
+   *
+   * Not swallowed: this is opened from a card or a list row that says the artefact exists, so a
+   * 404 is a fault the pane should name.
+   */
+  async getExhibit(
+    sessionId: string,
+    exhibitId: string,
+    getToken: TokenGetter,
+    revision?: number,
+  ): Promise<ExhibitView> {
+    // Coerced rather than interpolated, for `getProtocol`'s reason: the number reaches this from a
+    // picker and from a stream frame, and the BFF forwards the query string untouched.
+    const suffix =
+      revision !== undefined && Number.isFinite(revision) && revision > 0
+        ? `?revision=${encodeURIComponent(String(Math.trunc(revision)))}`
+        : '';
+    const body = await request<ExhibitView>(
+      `/sessions/${encodeURIComponent(sessionId)}/exhibits/${encodeURIComponent(exhibitId)}${suffix}`,
+      getToken,
+    );
+    return (await exhibitDecoders()).decodeExhibitView(body);
+  },
+
+  /** Every revision of one artefact, ascending — what the revision picker lists. */
+  async listExhibitRevisions(
+    sessionId: string,
+    exhibitId: string,
+    getToken: TokenGetter,
+  ): Promise<ExhibitRevision[]> {
+    const body = await request<ExhibitRevisionsOut>(
+      `/sessions/${encodeURIComponent(sessionId)}/exhibits/${encodeURIComponent(exhibitId)}/revisions`,
+      getToken,
+    );
+    return (await exhibitDecoders()).decodeExhibitRevisions(body).revisions;
+  },
+
+  /**
+   * What changed between two revisions, in `DesignDiff`'s shape so `RevisionDiff` draws it.
+   *
+   * `from`/`to`, which is what the contract names — and checked here against the protocol route's
+   * history, where a parameter spelled differently from the route's was silently ignored by
+   * FastAPI and every comparison answered revision 1 against the head under a header naming the
+   * two the chemist clicked. The contract test pins the spelling against the service's own route.
+   */
+  async getExhibitDiff(
+    sessionId: string,
+    exhibitId: string,
+    from: number,
+    to: number,
+    getToken: TokenGetter,
+  ): Promise<ExhibitDiff> {
+    const query = new URLSearchParams({
+      from: String(Math.trunc(from)),
+      to: String(Math.trunc(to)),
+    });
+    const body = await request<ExhibitDiff>(
+      `/sessions/${encodeURIComponent(sessionId)}/exhibits/${encodeURIComponent(exhibitId)}/diff?${query.toString()}`,
+      getToken,
+    );
+    return (await exhibitDecoders()).decodeExhibitDiff(body);
+  },
+
+  /**
+   * Write a chemist's revision of an artefact.
+   *
+   * `parentRevision` is the revision the edit was written against and is deliberately not
+   * defaulted to "whatever the head is now" — `putProtocolRevision`'s argument, and the same
+   * failure if it is dropped: a save that silently rebased onto the agent's newer revision would
+   * discard it while telling the chemist theirs succeeded. The service answers 409 with the head,
+   * and `request` raises that as a `StaleRevisionError` carrying it.
+   *
+   * `title` is sent only when it changes; the contract reads its absence as "keep the title".
+   */
+  async postExhibitRevision(
+    sessionId: string,
+    exhibitId: string,
+    edit: { parentRevision: number; spec: ExhibitSpec; changeNote: string; title?: string },
+    getToken: TokenGetter,
+  ): Promise<ExhibitView> {
+    // The URL written out whole at the call, because the contract check reads the route off the
+    // literal — a path held in a variable is a request it cannot see.
+    const body = await request<ExhibitView>(
+      `/sessions/${encodeURIComponent(sessionId)}/exhibits/${encodeURIComponent(exhibitId)}/revisions`,
+      getToken,
+      {
+        method: 'POST',
+        // `title: undefined` is dropped by `JSON.stringify`, which is exactly "keep the title".
+        body: JSON.stringify({
+          parent_revision: edit.parentRevision,
+          spec: edit.spec,
+          change_note: edit.changeNote,
+          title: edit.title,
+        }),
+      },
+    );
+    return (await exhibitDecoders()).decodeExhibitView(body);
+  },
+
+  /**
+   * A chemist's own artefact — today, a tool result pinned from the answer (`kind: "result"`).
+   *
+   * The agent cannot create a `result` artefact; the chemist can, because the ref they pin is one
+   * the session's own tool-result store already holds, and the service checks that it does. A 409
+   * `exhibit_limit` is its own kind (`errorFromStatus`) so the sentence says what to do.
+   */
+  async createExhibit(
+    sessionId: string,
+    exhibit: { kind: string; title: string; spec: ExhibitSpec },
+    getToken: TokenGetter,
+  ): Promise<ExhibitView> {
+    const body = await request<ExhibitView>(
+      `/sessions/${encodeURIComponent(sessionId)}/exhibits`,
+      getToken,
+      {
+        method: 'POST',
+        body: JSON.stringify({ kind: exhibit.kind, title: exhibit.title, spec: exhibit.spec }),
+      },
+    );
+    return (await exhibitDecoders()).decodeExhibitView(body);
+  },
+
+  /**
+   * Every artefact of the caller's, across every session they own or were let into (phase 3).
+   *
+   * A list route that degrades to `[]` on a 404 like the others: a service without it is a smaller
+   * app, and the page says there is nothing to list.
+   */
+  listMyExhibits(getToken: TokenGetter, limit = 50): Promise<ExhibitHeader[]> {
+    const query = new URLSearchParams({ limit: String(Math.trunc(limit)) });
+    return orEmpty('/exhibits', async () => {
+      const body = await request<ExhibitIndexOut>(`/exhibits?${query.toString()}`, getToken);
+      return (await exhibitDecoders()).decodeMyExhibits(body).exhibits;
+    });
+  },
+
+  /**
+   * Download one artefact in a format the service renders, as a file the browser saves.
+   *
+   * **Fetched, not linked.** An `<a href="/api/…/export.csv">` would be simpler and would not
+   * work: the BFF forwards a bearer token, never a cookie, so a plain navigation reaches the service
+   * unauthenticated. So this is `send` with the same one-shot 401 recovery `request` performs, and
+   * the response is handed to the browser as a blob under the name the service's
+   * `Content-Disposition` gives it — the service owns the filename because it owns the format.
+   */
+  async exportExhibit(
+    sessionId: string,
+    exhibitId: string,
+    format: ExportFormat,
+    getToken: TokenGetter,
+    revision?: number,
+  ): Promise<{ blob: Blob; filename: string }> {
+    const suffix =
+      revision !== undefined && Number.isFinite(revision) && revision > 0
+        ? `?revision=${encodeURIComponent(String(Math.trunc(revision)))}`
+        : '';
+    // Written out whole at the one `send`, for the contract check (see `postExhibitRevision`).
+    const fetchFile = (): Promise<Response> =>
+      send(
+        `/sessions/${encodeURIComponent(sessionId)}/exhibits/${encodeURIComponent(exhibitId)}/export.${encodeURIComponent(format)}${suffix}`,
+        getToken,
+        { headers: { accept: '*/*' } },
+      );
+    let res = await fetchFile();
+    if (res.status === 401 && (await recoverFrom(getToken))) res = await fetchFile();
+    if (!res.ok) {
+      const failure = await readFailure(res);
+      throw errorFromStatus(
+        res.status,
+        failure.detail,
+        res.headers.get('retry-after'),
+        failure.correlationId,
+        failure.code,
+      );
+    }
+    return {
+      blob: await res.blob(),
+      filename: filenameFrom(res.headers.get('content-disposition'), `${exhibitId}.${format}`),
+    };
+  },
 };
+
+/**
+ * The filename a `Content-Disposition: attachment` names, or the fallback.
+ *
+ * `filename*=UTF-8''…` first, because RFC 6266 says a recipient that understands it prefers it —
+ * an artefact titled "Löslichkeit" is the ordinary case here, not an edge. Path separators are
+ * stripped from whatever arrives: the browser does this too, and a name is a name, not a path.
+ */
+export function filenameFrom(header: string | null, fallback: string): string {
+  if (!header) return fallback;
+  const extended = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header)?.[1];
+  let name: string | undefined;
+  if (extended) {
+    try {
+      name = decodeURIComponent(extended.trim());
+    } catch {
+      name = undefined;
+    }
+  }
+  name ??= /filename\s*=\s*"?([^";]+)"?/i.exec(header)?.[1]?.trim();
+  const safe = name?.replace(/[\\/]/g, '_').trim();
+  return safe ? safe : fallback;
+}
+
+export { StaleRevisionError };
+export type { ExhibitDiff, ExhibitHeader, ExhibitRevision, ExhibitView };

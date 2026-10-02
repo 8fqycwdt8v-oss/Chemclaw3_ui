@@ -44,6 +44,7 @@ import { rendererFor, Verdict } from '../results/renderers.tsx';
 import { methodFor } from '../chem/provenance.ts';
 import { Badge } from '@/components/ui/badge';
 import { ResultSheet } from './ResultSheet.tsx';
+import { LazyPinResult as PinResult } from './exhibits/lazy.tsx';
 import { CutResultNotice } from './FullResultText.tsx';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -253,6 +254,10 @@ export function ResultBlock({
             Open full result
           </Button>
         )}
+        {/* Keep this result beside the conversation as an artefact. Only with a stored ref — the
+            service pins a ref its store holds, never an inline copy — and only where the
+            deployment has artefacts; `PinResult` decides both. */}
+        <PinResult sessionId={sessionId} resultRef={resultRef} tool={tool} />
         {/* The table above is what the tool returned; the assistant worked from less. Said on the
             card, because a figure here the answer never mentions is otherwise a puzzle. */}
         {cut && <CutResultNotice sessionId={sessionId} resultRef={resultRef} tool={tool} />}

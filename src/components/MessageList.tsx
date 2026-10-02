@@ -31,6 +31,7 @@ import { StatusStrip } from './StatusStrip.tsx';
 import { PlanStrip } from './PlanStrip.tsx';
 import { ActivityLine } from './ActivityLine.tsx';
 import { ResultBlock } from './ResultBlock.tsx';
+import { LazyExhibitCard as ExhibitCard } from './exhibits/lazy.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
 import { prefill } from '../state/composerEvents.ts';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
@@ -143,6 +144,41 @@ const ResultBlocks = memo(function ResultBlocks({
           {stored.length - shown.length === 1 ? '' : 's'} — each on its own step below.
         </p>
       )}
+    </>
+  );
+});
+
+/**
+ * The artefacts this turn wrote, one card each, after the result blocks.
+ *
+ * One per artefact rather than one per frame: a turn that created a table and then revised it
+ * twice is one table in the pane, and three cards for it would read as three tables. The *last*
+ * frame wins, because the card says which revision this answer left it at. Memoised on the trace
+ * for `ResultBlocks`'s reason — the bubble re-renders per trace mutation, not per token.
+ */
+const ExhibitCards = memo(function ExhibitCards({
+  trace,
+  sessionId,
+}: {
+  trace: TraceEntry[];
+  sessionId: string | null;
+}): React.JSX.Element | null {
+  const latest = useMemo(() => {
+    const byId = new Map<string, NonNullable<TraceEntry['exhibit']>>();
+    for (const entry of trace) {
+      if (entry.kind !== 'exhibit' || !entry.exhibit?.exhibitId) continue;
+      byId.delete(entry.exhibit.exhibitId);
+      byId.set(entry.exhibit.exhibitId, entry.exhibit);
+    }
+    return [...byId.values()];
+  }, [trace]);
+  // The artefact routes are session-scoped, so a card with no session could only fail its Open.
+  if (!sessionId || latest.length === 0) return null;
+  return (
+    <>
+      {latest.map((exhibit) => (
+        <ExhibitCard key={exhibit.exhibitId} sessionId={sessionId} exhibit={exhibit} />
+      ))}
     </>
   );
 });
@@ -277,6 +313,8 @@ const AssistantBubble = memo(function AssistantBubble({
       {/* What the tools returned, as the tables they are, at the same depth as the sentence that
           refers to them. A wide one takes the card's full width; the prose above stays measured. */}
       <ResultBlocks trace={message.trace} sessionId={sessionId} />
+      {/* The artefacts this answer wrote, after the data it was written from. */}
+      <ExhibitCards trace={message.trace} sessionId={sessionId} />
 
       <div className="max-w-prose">
         {/* Only once the turn has settled: copying half an answer is copying the wrong thing. */}

@@ -88,6 +88,12 @@
  * `from` as itself (it is a Python keyword, and its dump omits aliases), so the wire carries
  * `from_agent`/`to_agent` and this mirror follows the wire.
  *
+ * **`exhibit` arrived from a frozen contract rather than from a changelog**, which is the order
+ * this file has been asking for: both repositories built the artefact feature against one written
+ * shape (`shared/exhibits.ts` mirrors the REST half), so the member, its fields and the
+ * `normalizeEvent` branch landed here in the same wave the service added the producer — not one
+ * release after it, discovered by a dropped frame.
+ *
  * ## This file used to say "keep it dependency-free", and now takes one
  *
  * It is imported by the SPA (bundled by Vite), by the mock backend (bundled by esbuild) and by the
@@ -894,6 +900,47 @@ const handoffEvent = v.object({
 });
 export type HandoffEvent = v.InferOutput<typeof handoffEvent>;
 
+/**
+ * An artefact was created or revised — the header only; the body is fetched.
+ *
+ * `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect` upstream, and the frozen artefact
+ * contract both repositories build against. The turn emits it after `create_exhibit` or
+ * `revise_exhibit` returns (`tool_call` → `tool_result` → `exhibit`), and the push-back stream
+ * carries a human's revision or pin so a second tab and a session member see it.
+ *
+ * **The header only, on purpose** — the service's `D-2026-08-09-a-preview-is-not-a-result` again:
+ * a 2,000-row table or a report draft does not ride a stream frame, it is one
+ * `GET /sessions/{id}/exhibits/{xid}?revision=N` when somebody opens it. So nothing renders a body
+ * from this event; it invalidates the session's artefact list, may open the pane, and puts a card
+ * in the answer.
+ *
+ * Code name `exhibit`, user-visible name "Artefact" — see `shared/exhibits.ts` for why the service
+ * could not call it an artifact.
+ */
+const exhibitEvent = v.object({
+  type: v.literal('exhibit'),
+  /** `xb-` plus sixteen hex. What every artefact route is keyed by. */
+  exhibit_id: text(),
+  /** The revision this event announces — `1` on a create. */
+  revision: count(),
+  /** Open rather than narrowed, as `ExhibitHeader.kind` is: a card for a kind this build does not
+   *  know still says that an artefact exists. */
+  kind: text(),
+  title: text(),
+  /**
+   * `created` or `revised`. **Only `created` may open the pane**, and an unknown value reads as
+   * `revised` for that reason: a frame this build does not understand must not take a column of the
+   * screen from somebody who did not ask for it.
+   */
+  op: oneOf(['created', 'revised'] as const, 'revised'),
+  /** Who wrote the revision. An unknown value reads as `agent`, which is the reading that captions
+   *  a chart as transcribed rather than one that vouches for it. */
+  author_kind: oneOf(['agent', 'human'] as const, 'agent'),
+  /** The agent's name or the person's actor id, as the service records it. */
+  author: text(),
+});
+export type ExhibitEvent = v.InferOutput<typeof exhibitEvent>;
+
 export type ChemclawEvent =
   | QueuedEvent
   | PlanEvent
@@ -909,6 +956,7 @@ export type ChemclawEvent =
   | ToolResultEvent
   | EvidenceSourceEvent
   | HandoffEvent
+  | ExhibitEvent
   | QuestionEvent
   | NoteProposedEvent
   | ApprovalRequestEvent
@@ -941,6 +989,7 @@ const EVENT_MEMBERS = [
   toolResultEvent,
   evidenceSourceEvent,
   handoffEvent,
+  exhibitEvent,
   questionEvent,
   noteProposedEvent,
   approvalRequestEvent,

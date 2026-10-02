@@ -12,12 +12,14 @@
  * back 409. Retry policy belongs to the caller, which knows whether a retry is safe.
  */
 
+import type { ExhibitRef } from '../../shared/exhibitConstants.ts';
 import type { AnswerEvent, ChemclawEvent, ErrorCode } from '../../shared/events.ts';
 import {
   ApiError,
   correlationFrom,
   errorFromEvent,
   errorFromStatus,
+  isReferenceRefusal,
   readFailure,
 } from './errors.ts';
 import { config } from '../env.ts';
@@ -66,6 +68,14 @@ export interface StreamTurnOptions {
   message: string;
   /** Plan the turn without launching anything expensive (the backend's `dry_run`). */
   dryRun?: boolean;
+  /**
+   * Artefacts the chemist handed to the agent with this message (`exhibit_refs`, phase 2 of the
+   * artefact contract) — at most five, each `{exhibit_id, revision}` with `0` meaning the head.
+   * The service resolves each within the session (an unknown one is a 422) and puts a framed copy
+   * of that revision in front of the model *as data*, which is what typing the id into the text
+   * could not do.
+   */
+  exhibitRefs?: readonly ExhibitRef[];
   /**
    * Follow the session's running turn instead of starting one: `GET /sessions/{id}/turn/stream`
    * (Chemclaw3 #499) in place of the POST, with no body, and `message`/`dryRun` unused.
@@ -170,7 +180,13 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
             accept: 'text/event-stream',
             ...authorization,
           },
-          body: JSON.stringify({ message: opts.message, dry_run: opts.dryRun ?? false }),
+          // `exhibit_refs` always, `[]` when there are none: the contract's own default, and a
+          // service older than the field ignores an unknown key rather than refusing it.
+          body: JSON.stringify({
+            message: opts.message,
+            dry_run: opts.dryRun ?? false,
+            exhibit_refs: opts.exhibitRefs ?? [],
+          }),
         });
   } catch {
     if (opts.signal.aborted) throw new ApiError('aborted', 'Stopped.');
@@ -179,6 +195,21 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
 
   if (!res.ok) {
     const failure = await readFailure(res);
+    // A 422 about the attached artefacts is its own refusal; `errorFromStatus` alone would call
+    // every turn-route 422 a message that is too long.
+    if (
+      res.status === 422 &&
+      (opts.exhibitRefs?.length ?? 0) > 0 &&
+      isReferenceRefusal(failure.detail)
+    ) {
+      throw new ApiError(
+        'invalid_reference',
+        failure.detail ||
+          'An artefact attached to this message is not one this conversation holds.',
+        422,
+        failure.correlationId ? { correlationId: failure.correlationId } : undefined,
+      );
+    }
     throw errorFromStatus(
       res.status,
       failure.detail,

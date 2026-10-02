@@ -45,6 +45,18 @@ bearer token.
   it rests on, and every revision. It is the one artefact here a human **edits**: a save is a new
   revision posted against the revision it was written on, so two chemists editing one design get a
   refusal and a re-read rather than one of them silently losing their work.
+- **Keeps the agent's working documents beside the conversation, as Artefacts.** A report draft,
+  a table, a structure panel or a chart the agent writes as part of its answer opens in a resizable
+  right-hand pane (tabbed _Artefacts | Index_, the index being the entity rail unchanged), with a
+  card in the answer that wrote it. Every artefact is versioned: a chemist corrects a cell or a
+  paragraph and that is a new revision attributed to them, bound to the revision it was written on
+  — so an edit that meets the agent's newer revision gets the diff and a choice, never a silent
+  overwrite. A chart the agent transcribed says so, and a figure no tool returned is listed as
+  _unchecked_. Exports come from the service (Markdown, CSV, SMILES) or are made here (SDF from
+  RDKit, SVG of the chart); a result block can be pinned as an artefact, an artefact can be handed
+  back to the agent with the next message, and `/artefacts` lists them across conversations. The
+  code name is `exhibit` because the service already spends "artifact" on calculation by-products;
+  a deployment with `agent_exhibits_enabled` off never shows the pane.
 - **Resolves citations.** A `note-…` chip opens the note with its provenance and its validity
   window, so a citation in an old answer that points at a superseded note says so.
 - **Shows what is waiting on you, across conversations.** `/review` is the plan inbox
@@ -413,9 +425,12 @@ proxies answers) and the reasoning are in Chemclaw3: `deploy/jenkins/README.md` 
 
 The UI reads more of the service than it used to, and the degradation is deliberately split in two.
 **List** routes — `GET /sessions`, `GET /sessions/{id}/messages`, `GET /jobs`,
-`GET /protocols` — swallow a 404 into an empty result, so an older service yields a smaller app
-rather than a banner. **Fetch** routes — `GET /notes/{id}`,
-`GET /sessions/{id}/tool-results/{ref}`, `GET /protocols/{id}` — do not, because nothing calls them
+`GET /protocols`, `GET /exhibits` — swallow a 404 into an empty result, so an older service yields a
+smaller app rather than a banner. `GET /sessions/{id}/exhibits` folds its 404 into
+`enabled: false`, which is the same rule stated in the one field that decides whether the artefact
+pane exists. **Fetch** routes — `GET /notes/{id}`,
+`GET /sessions/{id}/tool-results/{ref}`, `GET /protocols/{id}`, `GET /sessions/{id}/exhibits/{xid}` —
+do not, because nothing calls them
 speculatively: the control only exists when the turn or the list said the thing exists, so a 404
 there is a real fault.
 

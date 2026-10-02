@@ -18,6 +18,10 @@
  * 3. **Colour comes from the design tokens** (`stroke-brand`, `fill-warn-soft`, …), so both themes
  *    are one palette rather than two. Nothing here hard-codes a hex.
  *
+ * A third chart obeys the same three rules and lives next door: `SeriesChart.tsx`, the general
+ * line/scatter/bar an artefact draws. It imports the geometry below rather than restating it, and
+ * sits in its own file only so the artefact pane's lazy chunk carries it instead of the first load.
+ *
  * Geometry is in viewBox units, so the drawing scales with its container and the type inside it
  * scales with the drawing. `fontSize` is an SVG attribute here rather than a Tailwind class for that
  * reason: a `px` size would be a fixed size in a coordinate system that is not pixels.
@@ -26,11 +30,11 @@
 import { useId } from 'react';
 
 /** The drawing area, in viewBox units. Wide and short: a progress series is read left to right. */
-const WIDTH = 360;
-const HEIGHT = 168;
-const PAD = { top: 14, right: 16, bottom: 30, left: 48 } as const;
-const INNER_W = WIDTH - PAD.left - PAD.right;
-const INNER_H = HEIGHT - PAD.top - PAD.bottom;
+export const WIDTH = 360;
+export const HEIGHT = 168;
+export const PAD = { top: 14, right: 16, bottom: 30, left: 48 } as const;
+export const INNER_W = WIDTH - PAD.left - PAD.right;
+export const INNER_H = HEIGHT - PAD.top - PAD.bottom;
 
 /**
  * A numeric domain that is never zero-width.
@@ -40,7 +44,7 @@ const INNER_H = HEIGHT - PAD.top - PAD.bottom;
  * the frame. `floor` is the smallest span worth drawing, and every caller passes the assay noise,
  * because a band narrower than the assay is a distinction the data cannot support anyway.
  */
-function domainOf(values: readonly number[], floor: number): { min: number; max: number } {
+export function domainOf(values: readonly number[], floor: number): { min: number; max: number } {
   const min = Math.min(...values);
   const max = Math.max(...values);
   const span = max - min;

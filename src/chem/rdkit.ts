@@ -227,6 +227,15 @@ export async function readCanonicalSmilesFromMolblock(molblock: string): Promise
 }
 
 /**
+ * `smiles` as an MDL molblock, for an SDF built in this browser — or `null` when RDKit cannot read
+ * it or never loaded. The caller says which of those it was by asking `rdkitAvailable()`, the same
+ * way every other surface here does before it reports a negative.
+ */
+export async function molblockOf(smiles: string): Promise<string | null> {
+  return call('molblock', smiles);
+}
+
+/**
  * Drawings already made, newest use last.
  *
  * A depiction is a pure function of its four inputs, and nothing here memoised it, so every

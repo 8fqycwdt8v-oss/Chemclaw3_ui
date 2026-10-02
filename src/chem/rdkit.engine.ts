@@ -505,6 +505,26 @@ export async function drawSvg(smiles: string, opts: DrawOptions): Promise<string
 }
 
 /**
+ * `smiles` as an MDL molblock, or `null` if it is not a molecule.
+ *
+ * What an SDF export is made of. The artefact contract leaves SDF to the browser on purpose — the
+ * service takes no new RDKit path for a file format the client already has a toolkit for — so this
+ * is the one engine call that produces a *file* rather than a name or a picture. 2D coordinates
+ * come from the same depiction `drawSvg` uses, so the structure a chemist opens in another package
+ * is laid out as it was drawn here.
+ */
+export async function molblock(smiles: string): Promise<string | null> {
+  const rdkit = await loadRDKit();
+  if (!rdkit) return null;
+  const attempt = withSmilesMol(rdkit, smiles, (mol) => {
+    mol.normalize_depiction(1);
+    mol.straighten_depiction();
+    return mol.get_molblock() || null;
+  });
+  return 'value' in attempt ? attempt.value : null;
+}
+
+/**
  * Did the toolkit load?
  *
  * `loadRDKit` is not exported — nothing outside this module may hold an `RDKitModule` any more
@@ -535,4 +555,5 @@ export const operations = {
   isMolecule,
   readCanonicalSmilesFromMolblock,
   drawSvg,
+  molblock,
 } as const;

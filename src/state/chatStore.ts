@@ -645,6 +645,23 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
         kind: 'handoff',
         handoff: { from: event.from_agent, to: event.to_agent, reason: event.reason },
       };
+    // A row rather than a field on the message: the trace is what the transcript persists and what
+    // `MessageList` reads its result blocks from, so the artefact card sits beside them on the same
+    // footing — and a turn that revised one artefact twice keeps both announcements in order.
+    case 'exhibit':
+      return {
+        ...base,
+        kind: 'exhibit',
+        exhibit: {
+          exhibitId: event.exhibit_id,
+          revision: event.revision,
+          kind: event.kind,
+          title: event.title,
+          op: event.op,
+          authorKind: event.author_kind,
+          author: event.author,
+        },
+      };
     default:
       return null;
   }

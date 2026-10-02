@@ -19,6 +19,7 @@ import { createContext, useContext, useEffect, useState, type ReactNode } from '
 import { authReady } from './bootstrap.ts';
 import { pendingAuth } from './pendingAuth.ts';
 import { useChatStore, hydrateChatForAccount } from '../state/chatStore.ts';
+import { hydrateExhibitPaneForAccount } from '../state/exhibitPane.ts';
 import { config } from '../env.ts';
 import type { AuthProvider } from './types.ts';
 
@@ -48,6 +49,8 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
         // shared workstation. The store deferred its own hydration (`skipHydration`) for exactly
         // this call.
         hydrateChatForAccount(provider.account?.id);
+        // The artefact pane's width is the reader's too, keyed the same way and for the same reason.
+        hydrateExhibitPaneForAccount(provider.account?.id);
         setAuth(provider);
         setReady(true);
         // `account` is a getter on the MSAL provider, so consumers are told to re-read it rather

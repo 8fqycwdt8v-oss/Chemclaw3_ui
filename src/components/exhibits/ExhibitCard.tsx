@@ -75,14 +75,19 @@ export function ExhibitCard({
           {edited && <Badge tone="brand">{edited}</Badge>}
         </p>
       </div>
-      <Button
-        variant="outline"
-        size="xs"
-        aria-label={`Open artefact ${title}`}
-        onClick={() => useExhibitPane.getState().show(sessionId, exhibit.exhibitId)}
-      >
-        Open
-      </Button>
+      {/* Only where the pane exists to open into. A deployment with artefacts turned off (or one
+          not yet answered) has no pane, and an Open that does nothing is worse than none —
+          `PinResult` holds the same rule. The card itself stays: the answer did write it. */}
+      {data?.enabled === true && (
+        <Button
+          variant="outline"
+          size="xs"
+          aria-label={`Open artefact ${title}`}
+          onClick={() => useExhibitPane.getState().show(sessionId, exhibit.exhibitId)}
+        >
+          Open
+        </Button>
+      )}
     </div>
   );
 }

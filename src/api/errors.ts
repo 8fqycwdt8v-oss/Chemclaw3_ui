@@ -88,6 +88,14 @@ export type ApiErrorKind =
    * instead, and the sentence says so.
    */
   | 'exhibit_limit'
+  /**
+   * 422 on the turn route for the *references* rather than the text — an `exhibit_refs` entry
+   * naming an artefact (or a revision) this session does not hold, or more of them than the
+   * service's cap. It was read as `message_too_long`, the turn route's only 422 before references
+   * existed, so a chemist who attached a deleted artefact was told to shorten a short question.
+   * Re-kinded by `streamTurn`, which is the one caller that knows it sent references.
+   */
+  | 'invalid_reference'
   /** 422 — message over the backend's character cap. */
   | 'message_too_long'
   /** 429 without a `Retry-After` — the turn/token budget is spent, or too many concurrent event
@@ -208,6 +216,18 @@ export class StaleRevisionError extends ApiError {
     this.name = 'StaleRevisionError';
     this.headRevision = headRevision;
   }
+}
+
+/**
+ * Whether a turn-route 422 is about the artefacts the message carried rather than the message.
+ *
+ * Read off the service's own sentence, because it sends no code for either: an unresolvable
+ * reference is `"no artefact 'xb-…' in this session"`, and an over-cap list is pydantic's
+ * `exhibit_refs: List should have at most 5 items`. Asked only when the request *had* references,
+ * so a long message that happens to mention an artefact is still `message_too_long`.
+ */
+export function isReferenceRefusal(detail: string | undefined): boolean {
+  return /exhibit_refs|\bartefact\b|\bexhibit\b/i.test(detail ?? '');
 }
 
 /**

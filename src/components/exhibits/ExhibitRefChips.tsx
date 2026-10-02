@@ -14,7 +14,7 @@
  */
 
 import { AtSign, X } from 'lucide-react';
-import { MAX_EXHIBIT_REFS } from '../../../shared/exhibits.ts';
+import { MAX_EXHIBIT_REFS } from '../../../shared/exhibitConstants.ts';
 import { refsOf, useExhibitPane } from '../../state/exhibitPane.ts';
 import { useSessionExhibits } from './useExhibits.ts';
 

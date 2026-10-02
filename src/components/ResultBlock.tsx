@@ -44,7 +44,7 @@ import { rendererFor, Verdict } from '../results/renderers.tsx';
 import { methodFor } from '../chem/provenance.ts';
 import { Badge } from '@/components/ui/badge';
 import { ResultSheet } from './ResultSheet.tsx';
-import { PinResult } from './exhibits/PinResult.tsx';
+import { LazyPinResult as PinResult } from './exhibits/lazy.tsx';
 import { CutResultNotice } from './FullResultText.tsx';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';

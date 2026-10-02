@@ -15,7 +15,7 @@
 
 import type { TranscriptMessage, TranscriptToolCall } from '../api/client.ts';
 import type { ChatMessage, TraceEntry } from './types.ts';
-import { EXHIBIT_ID_RE } from '../../shared/exhibits.ts';
+import { EXHIBIT_ID_RE } from '../../shared/exhibitConstants.ts';
 
 /**
  * The tool calls of one stored message, as trace rows.

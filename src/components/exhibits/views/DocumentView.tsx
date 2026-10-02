@@ -30,7 +30,16 @@ export function DocumentView({
   spec: DocumentSpec;
   isHead: boolean;
 }): React.JSX.Element {
-  const [draft, setDraft] = useState<string | null>(null);
+  /**
+   * The edit in progress, with the revision it was started on and the text it started from.
+   *
+   * `base` is recorded when Edit is pressed and is what the save names as its parent — never the
+   * revision on screen when Save is pressed. The head refetches under an open editor (an `exhibit`
+   * frame, a window-focus refetch), and a save that took `view.revision` then would be accepted as
+   * the child of a revision the chemist never read, discarding it with no 409. Naming the base the
+   * edit was written on is what makes the service refuse that and the rebase prompt run.
+   */
+  const [draft, setDraft] = useState<{ text: string; base: number; from: string } | null>(null);
   const [note, setNote] = useState('');
   const revise = useRevise(sessionId, view);
   const saving = revise.state.status === 'saving';
@@ -63,7 +72,7 @@ export function DocumentView({
               onClick={() => {
                 revise.reset();
                 setNote('');
-                setDraft(spec.markdown);
+                setDraft({ text: spec.markdown, base: view.revision, from: spec.markdown });
               }}
             >
               <Pencil aria-hidden className="size-3.5" />
@@ -79,7 +88,11 @@ export function DocumentView({
   }
 
   const save = async (): Promise<void> => {
-    const ok = await revise.save({ kind: 'document', markdown: draft }, note.trim());
+    const ok = await revise.save(
+      { kind: 'document', markdown: draft.text },
+      note.trim(),
+      draft.base,
+    );
     if (ok) setDraft(null);
   };
 
@@ -89,8 +102,8 @@ export function DocumentView({
         <label className="flex flex-col gap-1 text-2xs text-ink-subtle">
           Document text (Markdown)
           <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            value={draft.text}
+            onChange={(e) => setDraft({ ...draft, text: e.target.value })}
             rows={16}
             className="min-h-48 rounded-md border border-border-subtle bg-surface-raised p-2 font-mono text-xs text-ink focus-ring"
           />
@@ -100,7 +113,7 @@ export function DocumentView({
           className="rounded-md border border-border-subtle p-2 text-sm"
         >
           <p className="mb-1 text-2xs text-ink-subtle">Preview</p>
-          <Markdown>{draft}</Markdown>
+          <Markdown>{draft.text}</Markdown>
         </section>
       </div>
       <label className="flex flex-col gap-1 text-2xs text-ink-subtle">
@@ -117,8 +130,12 @@ export function DocumentView({
         </p>
       )}
       <div className="flex gap-2">
-        <Button size="sm" onClick={() => void save()} disabled={saving || draft === spec.markdown}>
-          {saving ? 'Saving…' : `Save as revision ${view.head_revision + 1}`}
+        <Button
+          size="sm"
+          onClick={() => void save()}
+          disabled={saving || draft.text === draft.from}
+        >
+          {saving ? 'Saving…' : `Save as revision ${draft.base + 1}`}
         </Button>
         <Button variant="outline" size="sm" onClick={() => setDraft(null)} disabled={saving}>
           Cancel

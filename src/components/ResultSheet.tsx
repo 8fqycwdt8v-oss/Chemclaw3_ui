@@ -22,7 +22,7 @@ import type { StoredToolResult } from '../api/client.ts';
 import { toolLabel } from '../lib/format.ts';
 import { rendererFor, RawText, Verdict } from '../results/renderers.tsx';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
-import { PinResult } from './exhibits/PinResult.tsx';
+import { LazyPinResult as PinResult } from './exhibits/lazy.tsx';
 import { EmptyState, Loading } from '@/components/chem/Feedback';
 
 /**

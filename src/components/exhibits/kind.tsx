@@ -7,7 +7,7 @@
  */
 
 import { ChartLine, FileText, Hexagon, Link2, Pin, Shapes, Table2 } from 'lucide-react';
-import { KIND_LABEL } from '../../../shared/exhibits.ts';
+import { KIND_LABEL } from '../../../shared/exhibitConstants.ts';
 
 const ICONS: Record<string, typeof FileText> = {
   document: FileText,

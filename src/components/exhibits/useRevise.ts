@@ -42,8 +42,16 @@ export type ReviseState =
 
 export interface Revise {
   state: ReviseState;
-  /** Save `spec` as a new revision on top of the one on screen. Resolves `true` on success. */
-  save: (spec: ExhibitSpec, changeNote: string) => Promise<boolean>;
+  /**
+   * Save `spec` as a new revision on top of `base` — the revision the edit was *started* on.
+   * Resolves `true` on success.
+   *
+   * `base` is the caller's, recorded when the editor opened, and never the revision on screen at
+   * the moment of saving: the head refetches while a chemist types (an `exhibit` frame, a focus
+   * refetch), and a save that read `view.revision` then would post its edit as the child of a
+   * revision it never saw — accepted, with no 409, and that revision's changes silently gone.
+   */
+  save: (spec: ExhibitSpec, changeNote: string, base: number) => Promise<boolean>;
   /** Apply the stale edit on top of the head the service named. */
   retryOnHead: () => Promise<boolean>;
   /** Drop the stale edit and show the head. */
@@ -75,7 +83,7 @@ export function useRevise(sessionId: string, view: ExhibitView): Revise {
         auth,
       );
       setState({ status: 'idle' });
-      useExhibitPane.getState().setRevision(0);
+      useExhibitPane.getState().setRevision(sessionId, view.exhibit_id, 0);
       // After the write settles, never before it — `api.decidePlan`'s argument: invalidating
       // refetches an active observer at once, and a read issued before the POST could land the old
       // head and cache it as fresh.
@@ -105,7 +113,7 @@ export function useRevise(sessionId: string, view: ExhibitView): Revise {
 
   return {
     state,
-    save: (spec, changeNote) => write(view.revision, spec, changeNote),
+    save: (spec, changeNote, base) => write(base, spec, changeNote),
     async retryOnHead() {
       if (state.status !== 'stale') return false;
       let head = state.head;
@@ -125,7 +133,7 @@ export function useRevise(sessionId: string, view: ExhibitView): Revise {
     },
     discard() {
       setState({ status: 'idle' });
-      useExhibitPane.getState().setRevision(0);
+      useExhibitPane.getState().setRevision(sessionId, view.exhibit_id, 0);
     },
     reset() {
       setState({ status: 'idle' });

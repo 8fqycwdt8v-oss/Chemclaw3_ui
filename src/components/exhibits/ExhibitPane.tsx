@@ -29,7 +29,7 @@
  * gated tools of their own, and the pane does not get a second door to the knowledge graph.
  */
 
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Tabs } from 'radix-ui';
 import {
   AtSign,
@@ -46,7 +46,7 @@ import { useApiQuery } from '../../api/queryClient.ts';
 import { exhibitDiffQuery, exhibitQuery, exhibitRevisionsQuery } from '../../api/queries.ts';
 import { useChatStore } from '../../state/chatStore.ts';
 import { prefill } from '../../state/composerEvents.ts';
-import { useExhibitPane } from '../../state/exhibitPane.ts';
+import { focusOf, revisionShown, useExhibitPane } from '../../state/exhibitPane.ts';
 import { rdkitAvailable } from '../../chem/rdkit.ts';
 import { saveBlob } from '../../lib/download.ts';
 import {
@@ -346,8 +346,11 @@ function ExhibitDetail({
 }): React.JSX.Element {
   const { auth, ready } = useAuth();
   const viewer = useChatStore((s) => s.viewer);
-  const revision = useExhibitPane((s) => s.revision);
-  const setRevision = useExhibitPane((s) => s.setRevision);
+  // The revision picked on *this* artefact in *this* session, or the head — never one picked on
+  // whatever was shown before (`revisionShown`).
+  const revision = useExhibitPane((s) => revisionShown(s, sessionId, header.exhibit_id));
+  const setRevision = (picked: number): void =>
+    useExhibitPane.getState().setRevision(sessionId, header.exhibit_id, picked);
   const [comparing, setComparing] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -544,8 +547,16 @@ function ArtefactsTab({
   exhibits,
   onAsked,
 }: PaneProps & { onAsked?: () => void }): React.JSX.Element {
-  const focus = useExhibitPane((s) => s.focus);
+  const focus = useExhibitPane((s) => focusOf(s, sessionId));
   const pickerId = useId();
+  const chosen = focus ? exhibits.find((x) => x.exhibit_id === focus.exhibitId) : undefined;
+  const fallback = exhibits[0];
+  // Nothing chosen here yet (or the choice is gone): the fallback is shown, and pinned as the
+  // choice, so a list that reorders under it — the newest-first order moves on every edit — keeps
+  // the same document in front instead of swapping one under an unsaved draft.
+  useEffect(() => {
+    if (!chosen && fallback) useExhibitPane.getState().pin(sessionId, fallback.exhibit_id);
+  }, [chosen, fallback, sessionId]);
   if (exhibits.length === 0) {
     return (
       <p className="p-3 text-sm text-ink-muted">
@@ -554,9 +565,7 @@ function ArtefactsTab({
       </p>
     );
   }
-  const focused =
-    (focus?.sessionId === sessionId && exhibits.find((x) => x.exhibit_id === focus.exhibitId)) ||
-    exhibits[0]!;
+  const focused = chosen ?? exhibits[0]!;
 
   return (
     <div className="flex flex-col gap-3 p-3">
@@ -568,7 +577,7 @@ function ArtefactsTab({
           <select
             id={pickerId}
             value={focused.exhibit_id}
-            onChange={(e) => useExhibitPane.getState().show(sessionId, e.target.value)}
+            onChange={(e) => useExhibitPane.getState().pin(sessionId, e.target.value)}
             className="min-w-0 flex-1 rounded-md border border-border-subtle bg-surface-raised px-1.5 py-0.5 text-xs focus-ring"
           >
             {exhibits.map((x) => (

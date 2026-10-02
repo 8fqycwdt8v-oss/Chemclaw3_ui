@@ -5,7 +5,7 @@
  * store directly via `getState()`.
  */
 
-import type { ExhibitRef } from '../../shared/exhibits.ts';
+import type { ExhibitRef } from '../../shared/exhibitConstants.ts';
 import { exhibitArrived } from './exhibitEvents.ts';
 import { useExhibitPane } from './exhibitPane.ts';
 import { api } from '../api/client.ts';
@@ -454,10 +454,18 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   /**
    * The chemist's question, back where they typed it — only into an empty draft, because whatever
    * they have typed since is newer than this.
+   *
+   * **And the artefacts it carried.** `Composer` clears the `@artefact` chips at submit, as it
+   * clears the text, so a refused turn that put only the text back returned a question about "this
+   * table" with the table no longer attached — sent again, the agent would be asked about an
+   * artefact it was never shown. Same rule as the text: only into an empty set of chips.
    */
   const restoreDraft = (): void => {
     if (!useChatStore.getState().drafts[conversationId]) {
       useChatStore.getState().setDraft(conversationId, opts.text);
+    }
+    if (opts.exhibitRefs?.length) {
+      useExhibitPane.getState().restoreRefs(conversationId, opts.exhibitRefs);
     }
   };
 

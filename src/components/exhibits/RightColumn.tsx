@@ -78,7 +78,9 @@ export function ExhibitPaneTrigger({
           open ? `Hide artefacts (${exhibits.length})` : `Show artefacts (${exhibits.length})`
         }
         onClick={() =>
-          open ? useExhibitPane.getState().close() : useExhibitPane.getState().reveal()
+          open
+            ? useExhibitPane.getState().close()
+            : useExhibitPane.getState().reveal(sessionId, exhibits[0]!.exhibit_id)
         }
       >
         <Shapes aria-hidden />
@@ -91,7 +93,7 @@ export function ExhibitPaneTrigger({
     <Sheet
       open={sheetOpen}
       onOpenChange={(next) => {
-        if (next) useExhibitPane.getState().reveal();
+        if (next) useExhibitPane.getState().reveal(sessionId, exhibits[0]!.exhibit_id);
         else useExhibitPane.getState().close();
       }}
     >

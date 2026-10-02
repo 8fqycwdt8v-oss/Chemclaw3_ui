@@ -58,8 +58,7 @@ beforeEach(() => {
     open: false,
     sheetOpen: false,
     tab: 'artefacts',
-    focus: null,
-    revision: 0,
+    focus: {},
     dismissedThisTurn: false,
     widthPx: PANE_DEFAULT_PX,
     refs: {},
@@ -115,12 +114,22 @@ describe('the resizer', () => {
 });
 
 describe('the auto-open rule', () => {
+  beforeEach(() => {
+    // The conversation on screen is the one whose session the frames name.
+    const conversation = { ...newConversation(), id: 'c-on-screen', sessionId: SID };
+    useChatStore.setState({
+      conversations: { 'c-on-screen': conversation },
+      order: ['c-on-screen'],
+      activeId: 'c-on-screen',
+    });
+  });
+
   it('opens the column on an artefact the agent created during the turn', () => {
     useExhibitPane.getState().turnStarted();
     exhibitArrived(SID, created());
     const state = useExhibitPane.getState();
     expect(state.open).toBe(true);
-    expect(state.focus).toEqual({ sessionId: SID, exhibitId: XID });
+    expect(state.focus).toEqual({ [SID]: { exhibitId: XID, revision: 0 } });
     // The column only: a modal sheet sliding over a phone mid-answer is the app taking the screen.
     expect(state.sheetOpen).toBe(false);
   });
@@ -136,7 +145,17 @@ describe('the auto-open rule', () => {
     useExhibitPane.getState().turnStarted();
     exhibitArrived(SID, created({ exhibit_id: 'xb-2222222222222222' }));
     expect(useExhibitPane.getState().open).toBe(true);
-    expect(useExhibitPane.getState().focus?.exhibitId).toBe('xb-2222222222222222');
+    expect(useExhibitPane.getState().focus[SID]?.exhibitId).toBe('xb-2222222222222222');
+  });
+
+  it('opens nothing for a conversation that is not on screen, and keeps its artefact in front', () => {
+    // Review finding: a turn the reader switched away from opened the column over a different
+    // conversation. Off screen, the artefact is only put in front for when they come back.
+    const OTHER = 'b'.repeat(32);
+    useExhibitPane.getState().turnStarted();
+    exhibitArrived(OTHER, created());
+    expect(useExhibitPane.getState().open).toBe(false);
+    expect(useExhibitPane.getState().focus[OTHER]).toEqual({ exhibitId: XID, revision: 0 });
   });
 
   it('never opens on a revision, nor on a push from somebody else', () => {
@@ -247,6 +266,75 @@ describe('the right column', () => {
     expect(useExhibitPane.getState().dismissedThisTurn).toBe(true);
   });
 
+  it('does not carry a picked revision to the next conversation’s artefact', async () => {
+    // Review finding: the picked revision was one global value, so revision 1 picked here was
+    // asked for on the artefact of the next conversation opened — `?revision=1` on an artefact
+    // that may not have one, which the service answers 404.
+    const SID_B = 'b'.repeat(32);
+    const XID_B = 'xb-bbbbbbbbbbbbbbbb';
+    const viewB = { ...VIEW, session_id: SID_B, exhibit_id: XID_B, title: 'Other conversation' };
+    const stub = stubFetch((url) => {
+      if (url.endsWith(`/sessions/${SID}/exhibits`)) {
+        return json(200, { enabled: true, exhibits: [VIEW] });
+      }
+      if (url.endsWith(`/sessions/${SID_B}/exhibits`)) {
+        return json(200, { enabled: true, exhibits: [viewB] });
+      }
+      if (url.includes('/revisions')) {
+        return json(200, {
+          revisions: [
+            { ...VIEW, revision: 1, byte_size: 1, created_at: VIEW.created_at },
+            { ...VIEW, revision: 2, byte_size: 1, created_at: VIEW.updated_at },
+          ],
+        });
+      }
+      if (url.includes(XID_B)) return json(200, viewB);
+      return json(200, url.includes('?revision=1') ? { ...VIEW, revision: 1 } : VIEW);
+    });
+    restore = stub.restore;
+    const other = { ...newConversation(), id: 'c-other', sessionId: SID_B };
+    useChatStore.setState((s) => ({ conversations: { ...s.conversations, 'c-other': other } }));
+    act(() => useExhibitPane.setState({ open: true }));
+
+    const { rerender } = render(<RightColumn conversationId={CONVERSATION} />);
+    const picker = await screen.findByRole('combobox', { name: 'Revision' });
+    await waitFor(() => expect(picker.querySelectorAll('option')).toHaveLength(2));
+    fireEvent.change(picker, { target: { value: '1' } });
+    await waitFor(() => expect(stub.calls.some((c) => c.url.includes('?revision=1'))).toBe(true));
+
+    rerender(<RightColumn conversationId="c-other" />);
+    await screen.findByRole('heading', { name: 'Other conversation' });
+    const readsOfB = stub.calls
+      .map((c) => c.url)
+      .filter((url) => url.includes(`/exhibits/${XID_B}`));
+    expect(readsOfB.length).toBeGreaterThan(0);
+    expect(readsOfB.some((url) => url.includes('?revision='))).toBe(false);
+  });
+
+  it('keeps the artefact in front when the list reorders under it', async () => {
+    // Review finding: with nothing chosen, the pane showed `exhibits[0]`, so a newer artefact
+    // sorting first swapped the document under an unsaved draft. The fallback is pinned.
+    const second = { ...VIEW, exhibit_id: 'xb-1111111111111111', title: 'Second' };
+    const stub = stubFetch((url) => {
+      if (url.endsWith(`/sessions/${SID}/exhibits`)) {
+        return json(200, { enabled: true, exhibits: [VIEW, second] });
+      }
+      if (url.includes('/revisions')) return json(200, { revisions: [] });
+      if (url.includes('xb-1111111111111111')) return json(200, second);
+      return json(200, VIEW);
+    });
+    restore = stub.restore;
+    act(() => useExhibitPane.setState({ open: true }));
+    render(<RightColumn conversationId={CONVERSATION} />);
+    await screen.findByRole('heading', { name: 'Solvent ranking' });
+    act(() => {
+      queryClient.setQueryData(keys.exhibits(SID), { enabled: true, exhibits: [second, VIEW] });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.getByRole('heading', { name: 'Solvent ranking' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Second' })).toBeNull();
+  });
+
   it('never appears where the deployment has artefacts turned off', async () => {
     stubService(false);
     act(() => useExhibitPane.getState().show(SID, XID));
@@ -258,6 +346,28 @@ describe('the right column', () => {
 });
 
 describe('the card in the answer', () => {
+  it('offers no Open where the deployment has no pane to open into', async () => {
+    const stub = stubFetch(() => json(200, { enabled: false, exhibits: [] }));
+    restore = stub.restore;
+    render(
+      <ExhibitCard
+        sessionId={SID}
+        exhibit={{
+          exhibitId: XID,
+          revision: 1,
+          kind: 'table',
+          title: 'Solvent ranking',
+          op: 'created',
+          authorKind: 'agent',
+          author: '',
+        }}
+      />,
+    );
+    expect(await screen.findByText('Solvent ranking')).toBeTruthy();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(screen.queryByRole('button', { name: /^Open artefact/ })).toBeNull();
+  });
+
   it('names the artefact, the revision this turn wrote, the head and who edited it', async () => {
     useChatStore.setState({ viewer: 'somebody-else' });
     const stub = stubFetch(() => json(200, { enabled: true, exhibits: [VIEW] }));
@@ -286,7 +396,7 @@ describe('the card in the answer', () => {
     expect(useExhibitPane.getState()).toMatchObject({
       open: true,
       sheetOpen: true,
-      focus: { sessionId: SID, exhibitId: XID },
+      focus: { [SID]: { exhibitId: XID, revision: 0 } },
     });
   });
 });

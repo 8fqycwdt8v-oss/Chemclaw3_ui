@@ -12,13 +12,14 @@
  * back 409. Retry policy belongs to the caller, which knows whether a retry is safe.
  */
 
-import type { ExhibitRef } from '../../shared/exhibits.ts';
+import type { ExhibitRef } from '../../shared/exhibitConstants.ts';
 import type { AnswerEvent, ChemclawEvent, ErrorCode } from '../../shared/events.ts';
 import {
   ApiError,
   correlationFrom,
   errorFromEvent,
   errorFromStatus,
+  isReferenceRefusal,
   readFailure,
 } from './errors.ts';
 import { config } from '../env.ts';
@@ -194,6 +195,21 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
 
   if (!res.ok) {
     const failure = await readFailure(res);
+    // A 422 about the attached artefacts is its own refusal; `errorFromStatus` alone would call
+    // every turn-route 422 a message that is too long.
+    if (
+      res.status === 422 &&
+      (opts.exhibitRefs?.length ?? 0) > 0 &&
+      isReferenceRefusal(failure.detail)
+    ) {
+      throw new ApiError(
+        'invalid_reference',
+        failure.detail ||
+          'An artefact attached to this message is not one this conversation holds.',
+        422,
+        failure.correlationId ? { correlationId: failure.correlationId } : undefined,
+      );
+    }
     throw errorFromStatus(
       res.status,
       failure.detail,

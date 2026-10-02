@@ -49,7 +49,7 @@ const json = (status: number, body: unknown): Response =>
 const table = decodeExhibitView(VIEW) as ExhibitView & { spec: TableSpec };
 
 let restore: (() => void) | null = null;
-beforeEach(() => useExhibitPane.setState({ revision: 0 }));
+beforeEach(() => useExhibitPane.setState({ focus: {} }));
 afterEach(() => {
   cleanup();
   restore?.();
@@ -172,6 +172,37 @@ describe('a table artefact', () => {
 describe('a document artefact', () => {
   const spec: DocumentSpec = { kind: 'document', markdown: '# Draft\n\nYield was **82%**.' };
   const doc = { ...table, kind: 'document', spec } as ExhibitView;
+
+  it('names the revision the edit started on, not the one that refetched under it', async () => {
+    // Review finding: the head refetching to r3 while the chemist edited r2 made the save post
+    // `parent_revision: 3` — accepted, no 409, and r3's changes gone. The base is the revision the
+    // editor opened on, so the service refuses and the rebase prompt runs.
+    const stub = stubFetch((url, init) =>
+      init?.method === 'POST'
+        ? json(409, { detail: { code: 'stale_revision', head_revision: 3 } })
+        : json(200, { from_revision: 2, to_revision: 3, changes: [] }),
+    );
+    restore = stub.restore;
+    const { rerender } = render(<DocumentView sessionId={SID} view={doc} spec={spec} isHead />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Document text (Markdown)' }), {
+      target: { value: 'my edit' },
+    });
+    // The agent revised it meanwhile; the list invalidation re-rendered the view at r3.
+    const moved: DocumentSpec = { kind: 'document', markdown: '# Draft\n\nYield was 80%.' };
+    rerender(
+      <DocumentView
+        sessionId={SID}
+        view={{ ...doc, revision: 3, head_revision: 3, spec: moved } as ExhibitView}
+        spec={moved}
+        isHead
+      />,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Save as revision 3' }));
+    const prompt = await screen.findByRole('alert');
+    expect(JSON.parse(String(stub.calls[0]?.init?.body)).parent_revision).toBe(2);
+    expect(prompt.textContent).toContain('revised to revision 3 after you opened revision 2');
+  });
 
   it('saves an edit as a revision, and turns a 409 into the rebase prompt with its diff', async () => {
     let posts = 0;

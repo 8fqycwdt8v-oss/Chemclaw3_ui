@@ -31,7 +31,7 @@ import { StatusStrip } from './StatusStrip.tsx';
 import { PlanStrip } from './PlanStrip.tsx';
 import { ActivityLine } from './ActivityLine.tsx';
 import { ResultBlock } from './ResultBlock.tsx';
-import { ExhibitCard } from './exhibits/ExhibitCard.tsx';
+import { LazyExhibitCard as ExhibitCard } from './exhibits/lazy.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
 import { prefill } from '../state/composerEvents.ts';
 import { ErrorBoundary } from './ErrorBoundary.tsx';

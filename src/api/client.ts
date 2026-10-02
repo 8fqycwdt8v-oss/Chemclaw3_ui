@@ -35,23 +35,29 @@ import {
   errorFromStatus,
   readFailure,
 } from './errors.ts';
-import {
-  decodeExhibitDiff,
-  decodeExhibitList,
-  decodeExhibitRevisions,
-  decodeExhibitView,
-  decodeMyExhibits,
-  type ExhibitDiff,
-  type ExhibitHeader,
-  type ExhibitListOut,
-  type ExhibitRevision,
-  type ExhibitRevisionsOut,
-  type ExhibitSpec,
-  type ExhibitView,
-  type ExportFormat,
-  type ExhibitIndexOut,
+import type {
+  ExhibitDiff,
+  ExhibitHeader,
+  ExhibitListOut,
+  ExhibitRevision,
+  ExhibitRevisionsOut,
+  ExhibitSpec,
+  ExhibitView,
+  ExportFormat,
+  ExhibitIndexOut,
 } from '../../shared/exhibits.ts';
 import { keys, queryClient } from './queryClient.ts';
+
+/**
+ * The artefact decoders, fetched with the first artefact body rather than with the app.
+ *
+ * Every other read here is cast and trusted; the artefact bodies are *decoded* (`shared/exhibits.ts`
+ * says why), and the decoder is the whole valibot schema of the contract. A static import put it in
+ * the first load of every chemist, including every one whose deployment has artefacts turned off,
+ * so it is imported on the first call that has a body to decode — by which time the shell has
+ * already painted. Types above are `import type`, erased, and cost nothing.
+ */
+const exhibitDecoders = () => import('../../shared/exhibits.ts');
 
 /**
  * How a request authenticates.
@@ -1803,7 +1809,7 @@ export const api = {
         `/sessions/${encodeURIComponent(sessionId)}/exhibits`,
         getToken,
       );
-      return decodeExhibitList(body);
+      return (await exhibitDecoders()).decodeExhibitList(body);
     } catch (err) {
       if (err instanceof ApiError && err.kind === 'session_not_found') {
         logger.warn('api.list_route_missing', { route: '/sessions/{id}/exhibits' });
@@ -1835,7 +1841,7 @@ export const api = {
       `/sessions/${encodeURIComponent(sessionId)}/exhibits/${encodeURIComponent(exhibitId)}${suffix}`,
       getToken,
     );
-    return decodeExhibitView(body);
+    return (await exhibitDecoders()).decodeExhibitView(body);
   },
 
   /** Every revision of one artefact, ascending — what the revision picker lists. */
@@ -1848,7 +1854,7 @@ export const api = {
       `/sessions/${encodeURIComponent(sessionId)}/exhibits/${encodeURIComponent(exhibitId)}/revisions`,
       getToken,
     );
-    return decodeExhibitRevisions(body).revisions;
+    return (await exhibitDecoders()).decodeExhibitRevisions(body).revisions;
   },
 
   /**
@@ -1874,7 +1880,7 @@ export const api = {
       `/sessions/${encodeURIComponent(sessionId)}/exhibits/${encodeURIComponent(exhibitId)}/diff?${query.toString()}`,
       getToken,
     );
-    return decodeExhibitDiff(body);
+    return (await exhibitDecoders()).decodeExhibitDiff(body);
   },
 
   /**
@@ -1910,7 +1916,7 @@ export const api = {
         }),
       },
     );
-    return decodeExhibitView(body);
+    return (await exhibitDecoders()).decodeExhibitView(body);
   },
 
   /**
@@ -1933,7 +1939,7 @@ export const api = {
         body: JSON.stringify({ kind: exhibit.kind, title: exhibit.title, spec: exhibit.spec }),
       },
     );
-    return decodeExhibitView(body);
+    return (await exhibitDecoders()).decodeExhibitView(body);
   },
 
   /**
@@ -1946,7 +1952,7 @@ export const api = {
     const query = new URLSearchParams({ limit: String(Math.trunc(limit)) });
     return orEmpty('/exhibits', async () => {
       const body = await request<ExhibitIndexOut>(`/exhibits?${query.toString()}`, getToken);
-      return decodeMyExhibits(body).exhibits;
+      return (await exhibitDecoders()).decodeMyExhibits(body).exhibits;
     });
   },
 

@@ -29,7 +29,7 @@
 
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
-import { MAX_EXHIBIT_REFS, type ExhibitRef } from '../../shared/exhibits.ts';
+import { MAX_EXHIBIT_REFS, type ExhibitRef } from '../../shared/exhibitConstants.ts';
 
 /**
  * The column's bounds, in CSS pixels.
@@ -62,12 +62,17 @@ interface ExhibitPaneState {
   sheetOpen: boolean;
   tab: PaneTab;
   /**
-   * The artefact in front, *with the session it belongs to*. A focus from another conversation is
-   * ignored by the pane rather than cleared, so switching away mid-turn and back keeps it.
+   * The artefact in front **per session**, and the revision picked on it (`0` is the head).
+   *
+   * Per session, and the revision inside it, because both used to be single global values and
+   * that leaked in two directions. A revision picked on one artefact was the revision asked for on
+   * whatever artefact was shown next — switch conversation and the other session's artefact was
+   * fetched at `?revision=2`, which it may not have. And a focus set for a conversation that is
+   * not on screen (an artefact created by a turn the reader switched away from) had to either
+   * overwrite the one on screen or be lost. Keyed by session, neither can touch the other, and a
+   * revision only applies to the artefact it was picked on (`revisionShown`).
    */
-  focus: { sessionId: string; exhibitId: string } | null;
-  /** The revision on screen; `0` is the head. Reset on every change of focus. */
-  revision: number;
+  focus: Record<string, PaneFocus>;
   /** Set by a close and cleared at the start of a turn — see the module docstring. */
   dismissedThisTurn: boolean;
   /** Persisted, per account. */
@@ -81,12 +86,23 @@ interface ExhibitPaneState {
 
   /** Open the pane on one artefact — a card's Open, a "My artefacts" row. Never auto. */
   show: (sessionId: string, exhibitId: string, revision?: number) => void;
-  /** Open the pane where it was. The top bar's toggle and the sheet trigger. */
-  reveal: () => void;
+  /**
+   * Open the pane where it was — the top bar's toggle and the sheet trigger. A session with no
+   * focus yet is pinned to `fallback`, the artefact that will be shown, so nothing that reorders
+   * the list afterwards can swap the document in front.
+   */
+  reveal: (sessionId: string, fallback: string) => void;
   /** The reader closed it. Disarms the auto-open until the next turn. */
   close: () => void;
   setTab: (tab: PaneTab) => void;
-  setRevision: (revision: number) => void;
+  /** Show `revision` of one artefact in one session (`0` is the head). */
+  setRevision: (sessionId: string, exhibitId: string, revision: number) => void;
+  /**
+   * Make `exhibitId` the one in front for `sessionId` unless it already is — what the pane calls
+   * when it falls back to an artefact nobody chose, so the fallback becomes a choice and a list that
+   * reorders under it (a newer artefact, a colleague's edit) cannot swap the document under a draft.
+   */
+  pin: (sessionId: string, exhibitId: string) => void;
   setWidth: (px: number) => void;
   /** A turn began: the auto-open is re-armed. */
   turnStarted: () => void;
@@ -95,12 +111,41 @@ interface ExhibitPaneState {
    * pane this turn. Returns whether it opened, for the test that holds the rule.
    */
   autoOpen: (sessionId: string, exhibitId: string) => boolean;
+  /** Put `exhibitId` in front for `sessionId` without opening anything — a turn's new artefact in
+   *  a conversation that is not on screen, waiting for the reader to come back to it. */
+  focusOnly: (sessionId: string, exhibitId: string) => void;
   /** Add an artefact chip to a conversation's composer. False when it is already there or full. */
   addRef: (conversationId: string, ref: ExhibitRef) => boolean;
   removeRef: (conversationId: string, exhibitId: string) => void;
+  /** A refused message's chips, put back — only where none have been attached since. */
+  restoreRefs: (conversationId: string, refs: readonly ExhibitRef[]) => void;
   /** The chips went out with a message; the composer starts clean. */
   clearRefs: (conversationId: string) => void;
 }
+
+/** What the pane holds in front for one session. */
+export interface PaneFocus {
+  exhibitId: string;
+  /** `0` is the head. */
+  revision: number;
+}
+
+/** The artefact in front for a session, or `null` when nothing was chosen there yet. */
+export const focusOf = (s: Pick<ExhibitPaneState, 'focus'>, sessionId: string): PaneFocus | null =>
+  s.focus[sessionId] ?? null;
+
+/**
+ * The revision to show of `exhibitId` in `sessionId`: the one picked on *that* artefact, or the
+ * head. A revision picked on another artefact never applies — the leak this replaced.
+ */
+export const revisionShown = (
+  s: Pick<ExhibitPaneState, 'focus'>,
+  sessionId: string,
+  exhibitId: string,
+): number => {
+  const f = focusOf(s, sessionId);
+  return f && f.exhibitId === exhibitId ? f.revision : 0;
+};
 
 const NO_REFS: ExhibitRef[] = [];
 
@@ -155,23 +200,27 @@ export const useExhibitPane = create<ExhibitPaneState>()(
       open: false,
       sheetOpen: false,
       tab: 'artefacts',
-      focus: null,
-      revision: 0,
+      focus: {},
       dismissedThisTurn: false,
       widthPx: PANE_DEFAULT_PX,
       refs: {},
 
       show(sessionId, exhibitId, revision = 0) {
-        set({
+        set((s) => ({
           open: true,
           sheetOpen: true,
           tab: 'artefacts',
-          focus: { sessionId, exhibitId },
-          revision,
-        });
+          focus: { ...s.focus, [sessionId]: { exhibitId, revision } },
+        }));
       },
-      reveal() {
-        set({ open: true, sheetOpen: true });
+      reveal(sessionId, fallback) {
+        set((s) => ({
+          open: true,
+          sheetOpen: true,
+          focus: s.focus[sessionId]
+            ? s.focus
+            : { ...s.focus, [sessionId]: { exhibitId: fallback, revision: 0 } },
+        }));
       },
       close() {
         set({ open: false, sheetOpen: false, dismissedThisTurn: true });
@@ -179,8 +228,20 @@ export const useExhibitPane = create<ExhibitPaneState>()(
       setTab(tab) {
         set({ tab });
       },
-      setRevision(revision) {
-        set({ revision: Math.max(0, Math.trunc(revision)) });
+      setRevision(sessionId, exhibitId, revision) {
+        set((s) => ({
+          focus: {
+            ...s.focus,
+            [sessionId]: { exhibitId, revision: Math.max(0, Math.trunc(revision)) },
+          },
+        }));
+      },
+      pin(sessionId, exhibitId) {
+        if (get().focus[sessionId]?.exhibitId === exhibitId) return;
+        set((s) => ({ focus: { ...s.focus, [sessionId]: { exhibitId, revision: 0 } } }));
+      },
+      focusOnly(sessionId, exhibitId) {
+        set((s) => ({ focus: { ...s.focus, [sessionId]: { exhibitId, revision: 0 } } }));
       },
       setWidth(px) {
         set({ widthPx: clampWidth(px) });
@@ -191,7 +252,11 @@ export const useExhibitPane = create<ExhibitPaneState>()(
       autoOpen(sessionId, exhibitId) {
         if (get().dismissedThisTurn) return false;
         // The column only — see `sheetOpen`.
-        set({ open: true, tab: 'artefacts', focus: { sessionId, exhibitId }, revision: 0 });
+        set((s) => ({
+          open: true,
+          tab: 'artefacts',
+          focus: { ...s.focus, [sessionId]: { exhibitId, revision: 0 } },
+        }));
         return true;
       },
       addRef(conversationId, ref) {
@@ -208,6 +273,10 @@ export const useExhibitPane = create<ExhibitPaneState>()(
             [conversationId]: refsOf(s, conversationId).filter((r) => r.exhibit_id !== exhibitId),
           },
         }));
+      },
+      restoreRefs(conversationId, refs) {
+        if (refsOf(get(), conversationId).length > 0 || refs.length === 0) return;
+        set((s) => ({ refs: { ...s.refs, [conversationId]: [...refs] } }));
       },
       clearRefs(conversationId) {
         set((s) => {

@@ -96,9 +96,13 @@ export function TableView({
 }): React.JSX.Element {
   const [sort, setSort] = useState<Sort>(null);
   const [all, setAll] = useState(false);
-  const [editing, setEditingState] = useState<{ row: number; key: string; text: string } | null>(
-    null,
-  );
+  const [editing, setEditingState] = useState<{
+    row: number;
+    key: string;
+    text: string;
+    /** The revision this cell edit was started on — what the save names as its parent. */
+    base: number;
+  } | null>(null);
   // Mirrored in a ref because a cell commits on Enter *and* on blur, and the input unmounting after
   // an Enter can blur it: the second commit must find nothing to commit, not the stale closure's
   // copy of the edit, or one keystroke would write two revisions.
@@ -158,6 +162,7 @@ export function TableView({
     await revise.save(
       { kind: 'table', columns: spec.columns, rows },
       `Edited ${column ? headerOf(column) : edit.key} in row ${edit.row + 1}`,
+      edit.base,
     );
   };
 
@@ -252,6 +257,7 @@ export function TableView({
                             aria-label={`Edit ${headerOf(column)}, row ${rowIndex + 1}: ${shown(value)}`}
                             onClick={() =>
                               setEditing({
+                                base: view.revision,
                                 row: rowIndex,
                                 key: column.key,
                                 text: value === null || value === undefined ? '' : String(value),

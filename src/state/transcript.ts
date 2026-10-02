@@ -15,6 +15,7 @@
 
 import type { TranscriptMessage, TranscriptToolCall } from '../api/client.ts';
 import type { ChatMessage, TraceEntry } from './types.ts';
+import { EXHIBIT_ID_RE } from '../../shared/exhibits.ts';
 
 /**
  * The tool calls of one stored message, as trace rows.
@@ -49,6 +50,59 @@ function traceFrom(calls: TranscriptToolCall[], key: string, at: number): TraceE
       ...(call.result == null ? { unresolved: true } : { result: call.result }),
     },
   }));
+}
+
+/** The agent tools whose result names an artefact, and what each did to it. */
+const EXHIBIT_TOOLS: Readonly<Record<string, 'created' | 'revised'>> = {
+  create_exhibit: 'created',
+  revise_exhibit: 'revised',
+};
+
+/**
+ * The artefact cards a reloaded answer had, recovered from the calls that made them.
+ *
+ * The `exhibit` frame is streamed and never stored, so a transcript read back from the service has
+ * no event to rebuild a card from — and without this, every answer that produced a report draft
+ * lost its card on reload while the pane beside it still listed the draft. What *is* stored is the
+ * call: `create_exhibit` and `revise_exhibit` return `{exhibit_id, revision}`, and the transcript
+ * keeps the first 400 characters of every result, which is ten times what that needs.
+ *
+ * Only the id and the revision are recovered. The kind and title are left empty for the card to
+ * read off the session's artefact list — a title guessed from the call's arguments would be the
+ * agent's *request*, and the service may have refused or renamed it.
+ */
+function exhibitsFrom(calls: TranscriptToolCall[], key: string, at: number): TraceEntry[] {
+  return calls.flatMap((call, i): TraceEntry[] => {
+    const op = EXHIBIT_TOOLS[call.tool];
+    if (!op || !call.result) return [];
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(call.result);
+    } catch {
+      return [];
+    }
+    const { exhibit_id: id, revision } = (parsed ?? {}) as {
+      exhibit_id?: unknown;
+      revision?: unknown;
+    };
+    if (typeof id !== 'string' || !EXHIBIT_ID_RE.test(id)) return [];
+    return [
+      {
+        id: `${key}x${i}`,
+        at,
+        kind: 'exhibit',
+        exhibit: {
+          exhibitId: id,
+          revision: typeof revision === 'number' && Number.isSafeInteger(revision) ? revision : 0,
+          kind: '',
+          title: '',
+          op,
+          authorKind: 'agent',
+          author: '',
+        },
+      },
+    ];
+  });
 }
 
 export function transcriptToMessages(remote: TranscriptMessage[]): ChatMessage[] {
@@ -105,7 +159,7 @@ export function transcriptToMessages(remote: TranscriptMessage[]): ChatMessage[]
       partialReason: null,
       // A rehydrated message is finished, so it is not waiting on anything.
       queued: false,
-      trace: traceFrom(calls, key, at),
+      trace: [...traceFrom(calls, key, at), ...exhibitsFrom(calls, key, at)],
       latestPlan: null,
       latestPlanHash: null,
       latestPlanScope: null,

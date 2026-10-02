@@ -23,7 +23,7 @@ import { TopBar } from './components/TopBar.tsx';
 import { MessageList } from './components/MessageList.tsx';
 import { JobFeed } from './components/JobFeed.tsx';
 import { Composer } from './components/Composer.tsx';
-import { EntityRail } from './components/EntityRail.tsx';
+import { RightColumn } from './components/exhibits/RightColumn.tsx';
 // The transcript→messages mapping used to be inline here (which is why this file imported
 // `ChatMessage`); it moved to its own module so it could be tested against real backend payloads
 // rather than only through a rendered shell.
@@ -435,7 +435,10 @@ export function AppShell({
                 </>
               ))}
           </main>
-          {conversationId && !children && <EntityRail conversationId={conversationId} />}
+          {/* The rail, or — where the deployment has artefacts and this conversation has one — the
+              tabbed artefact pane that holds the rail as its Index tab. Same slot, same landmark
+              rule: a sibling of <main>, never inside it. */}
+          {conversationId && !children && <RightColumn conversationId={conversationId} />}
         </div>
       </div>
     </div>

@@ -5,6 +5,9 @@
  * store directly via `getState()`.
  */
 
+import type { ExhibitRef } from '../../shared/exhibits.ts';
+import { exhibitArrived } from './exhibitEvents.ts';
+import { useExhibitPane } from './exhibitPane.ts';
 import { api } from '../api/client.ts';
 import type { TranscriptMessage } from '../api/client.ts';
 import { config } from '../env.ts';
@@ -76,6 +79,8 @@ export interface SendOptions {
   text: string;
   dryRun?: boolean;
   auth: AuthProvider;
+  /** Artefacts handed to the agent with this message — the composer's `@artefact` chips. */
+  exhibitRefs?: readonly ExhibitRef[];
 }
 
 /**
@@ -514,6 +519,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       sessionId,
       message: text,
       dryRun,
+      exhibitRefs: opts.exhibitRefs ?? [],
       watch: watching,
       signal: abort.signal,
       getToken: async () => {
@@ -579,6 +585,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           );
         }
         useChatStore.getState().applyEvent(conversationId, messageId, event);
+        // Refetch the session's artefacts and, for one the agent just created, open the pane on it
+        // — unless the reader closed the pane during this turn (`useExhibitPane.autoOpen`).
+        if (event.type === 'exhibit') exhibitArrived(sessionId, event);
         // The conversation's subject index. Fire-and-forget: ingestion canonicalises through
         // RDKit, so it is asynchronous, and the transcript must not wait on a WASM call to render
         // the event it has already applied. Named with this conversation's id rather than the
@@ -614,6 +623,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     store.setStreaming({ conversationId, messageId, abort, stop, abandon });
     store.setComposerLock('turn_in_flight');
     store.setBanner(null);
+    // A new question re-arms the artefact pane's auto-open: a close during the *previous* answer
+    // was about that answer.
+    useExhibitPane.getState().turnStarted();
     batcher = createTokenBatcher(conversationId, messageId);
 
     for (;;) {

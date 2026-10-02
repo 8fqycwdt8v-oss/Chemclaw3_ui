@@ -180,6 +180,10 @@ export const INTEREST_LEASE_MS = 5 * 60 * 1_000;
 export type Note =
   | { kind: 'job'; event: JobTerminalEvent; sessionId: string }
   | { kind: 'awaiting'; event: AwaitingAnswerEvent }
+  /** An artefact moved in a session this account watches — a colleague's revision or pin. Only the
+   *  session travels: the receiving tab refetches that session's list, and the header on the frame
+   *  is not something a follower needs to hold. */
+  | { kind: 'exhibit'; sessionId: string }
   | { kind: 'health'; failing: readonly string[]; throttled: boolean };
 
 /**

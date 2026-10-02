@@ -27,6 +27,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { config } from '../env.ts';
 import { retryAfterSeconds } from '../api/errors.ts';
+import { exhibitPushed } from '../state/exhibitEvents.ts';
 import { useAuth } from '../auth/AuthContext.tsx';
 import type { AuthProvider } from '../auth/types.ts';
 import { useChatStore } from '../state/chatStore.ts';
@@ -170,6 +171,11 @@ function applyNote(note: Note): void {
       return;
     case 'awaiting':
       store.noteAwaiting(note.event);
+      return;
+    case 'exhibit':
+      // Refetch, never open: a push is somebody else's act, not an answer to a question this
+      // reader asked, so it must not take a column of their screen. See `exhibitPushed`.
+      exhibitPushed(note.sessionId);
       return;
     case 'health': {
       // A follower holds no streams, so without this it would show a chemist no warning while
@@ -580,6 +586,11 @@ async function openStream(
             // finished. The expiry push matters as much as the open: `noteAwaiting` removes on it,
             // which is what keeps the badge from counting a question nobody can answer any more.
             tab.publish({ kind: 'awaiting', event });
+          } else if (event.type === 'exhibit') {
+            // A human's revision or pin, pushed best-effort so a second tab and a session member
+            // see it (the artefact contract). Published for the same reason a job ending is: this
+            // tab may hold the account's only stream.
+            tab.publish({ kind: 'exhibit', sessionId });
           }
         } catch {
           // one bad frame is not worth dropping the stream

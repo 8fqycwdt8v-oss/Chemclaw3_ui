@@ -26,6 +26,7 @@ import { useOffline } from '../hooks/useOffline.ts';
 import { resetSession } from '../state/sendMessage.ts';
 import { SidebarBody } from './Sidebar.tsx';
 import { EntityRailTrigger } from './EntityRail.tsx';
+import { ExhibitPaneTrigger } from './exhibits/RightColumn.tsx';
 import { MembersTrigger } from './MembersPanel.tsx';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
@@ -190,6 +191,9 @@ export function TopBar({
         <div className="ml-auto flex items-center gap-1">
           {/* Before the theme toggle: this one changes what a chemist can read, and the other
               changes how it looks. */}
+          {/* The documents the agent wrote beside this conversation — a toggle for the column at
+              `lg`, a sheet below it. Absent where the deployment has none. */}
+          {conversationId && <ExhibitPaneTrigger conversationId={conversationId} />}
           {conversationId && <EntityRailTrigger conversationId={conversationId} />}
           {/* Who else is in this conversation (Chemclaw3 #483). Beside the subjects rather than in
               the account menu: it is a fact about the conversation on screen, not about you. */}

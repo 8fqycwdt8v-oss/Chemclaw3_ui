@@ -78,6 +78,49 @@ export function NoteSheet({
   onFollow: (noteId: string) => void;
   onAsk: (noteId: string) => void;
 }): React.JSX.Element {
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="right" title={`Note ${noteId}`} className="w-[min(32rem,92vw)]">
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-5">
+          <NoteBody
+            noteId={noteId}
+            enabled={open}
+            onFollow={onFollow}
+            onAsk={(id) => {
+              onOpenChange(false);
+              onAsk(id);
+            }}
+            onUsed={() => onOpenChange(false)}
+          />
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+/**
+ * The note itself — provenance, validity, structure, body and neighbours — without the sheet.
+ *
+ * Split out when an artefact of kind `link` with `target: "note"` needed to show a note *in the
+ * pane*: one rendering of a note, so a citation chip's panel and an artefact's link cannot come to
+ * disagree about what a note says or whether it still holds.
+ */
+export function NoteBody({
+  noteId,
+  enabled,
+  onFollow,
+  onAsk,
+  onUsed,
+}: {
+  noteId: string;
+  /** Fetch only while somebody can see it — the sheet stays mounted behind a closed panel. */
+  enabled: boolean;
+  onFollow: (noteId: string) => void;
+  /** The note could not be read: ask the agent about it instead. */
+  onAsk: (noteId: string) => void;
+  /** A structure in the note was put into the composer. */
+  onUsed: () => void;
+}): React.JSX.Element {
   const { auth } = useAuth();
   /**
    * The note, keyed on which note.
@@ -91,137 +134,117 @@ export function NoteSheet({
    * returns once `noteId` moves — and it holds the half the token could not: the neighbour a reader
    * follows and then comes back from is not fetched twice.
    *
-   * `enabled: open` rather than the `loadedFor !== noteId` render-phase call this replaces, which
+   * `enabled` (the sheet's `open`) rather than the `loadedFor !== noteId` render-phase call this replaces, which
    * existed because the panel stays mounted behind a closed sheet and an effect on `open` alone
    * would never fire again when the note changed underneath it.
    */
-  const {
-    data: view,
-    error,
-    isPending,
-  } = useApiQuery({ ...noteQuery(noteId, auth), enabled: open });
+  const { data: view, error, isPending } = useApiQuery({ ...noteQuery(noteId, auth), enabled });
 
   const note = view?.note ?? null;
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent side="right" title={`Note ${noteId}`} className="w-[min(32rem,92vw)]">
-        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-5">
-          <div>
-            <p className="font-mono text-xs break-all text-ink-muted">{noteId}</p>
-            {note && (
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                <Badge tone="neutral">{note.type}</Badge>
-                {/* A number without its scale is noise; the label says what 0.72 is a measure of.
-                    And `null` is the ordinary case rather than the exception — four of the five
-                    producers in the service's `memory/` package score nothing — so the absence is
-                    stated instead of being rendered as a number or as a silent gap. */}
-                {note.confidence === null ? (
-                  <Badge tone="neutral">no confidence recorded</Badge>
-                ) : (
-                  <Badge tone={note.confidence >= 0.7 ? 'ok' : 'warn'}>
-                    <span className="font-mono tabular-nums">{note.confidence.toFixed(2)}</span>
-                    <span className="font-normal opacity-80">confidence</span>
-                  </Badge>
-                )}
-                {isExpired(note) && <Badge tone="warn">superseded</Badge>}
-              </div>
+    <>
+      <div>
+        <p className="font-mono text-xs break-all text-ink-muted">{noteId}</p>
+        {note && (
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <Badge tone="neutral">{note.type}</Badge>
+            {/* A number without its scale is noise; the label says what 0.72 is a measure of.
+                And `null` is the ordinary case rather than the exception — four of the five
+                producers in the service's `memory/` package score nothing — so the absence is
+                stated instead of being rendered as a number or as a silent gap. */}
+            {note.confidence === null ? (
+              <Badge tone="neutral">no confidence recorded</Badge>
+            ) : (
+              <Badge tone={note.confidence >= 0.7 ? 'ok' : 'warn'}>
+                <span className="font-mono tabular-nums">{note.confidence.toFixed(2)}</span>
+                <span className="font-normal opacity-80">confidence</span>
+              </Badge>
             )}
+            {isExpired(note) && <Badge tone="warn">superseded</Badge>}
+          </div>
+        )}
+      </div>
+
+      {isPending && !error && <Loading>Reading the note…</Loading>}
+
+      {error && (
+        <EmptyState title="That note could not be read">
+          <p>{error.message}</p>
+          {/* The path this panel replaced, kept for when it cannot serve. Not every citation
+              is a note id — a `qm-…` reference names a job whose note may never have been
+              written — and the agent can still say what it knows about one. */}
+          <Button variant="outline" size="sm" className="mt-3" onClick={() => onAsk(noteId)}>
+            Ask the agent about it instead
+          </Button>
+        </EmptyState>
+      )}
+
+      {view && (
+        <>
+          {isExpired(view.note) && (
+            <p
+              role="alert"
+              className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
+            >
+              This note’s validity window has closed, so the graph no longer retrieves it. An answer
+              that cited it may have been written while it still held.
+            </p>
+          )}
+
+          <Provenance note={view.note} />
+
+          {view.note.tags.length > 0 && (
+            <ul className="flex flex-wrap gap-1.5">
+              {view.note.tags.map((tag) => (
+                <li key={tag}>
+                  <Badge tone="neutral">{tag}</Badge>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {view.note.compound_smiles && (
+            <div>
+              <Molecule smiles={view.note.compound_smiles} />
+              {/* The compound a note is about is very often the next thing a chemist wants to
+                  ask about, and copying it out of a panel by hand was the only way. Closing
+                  the sheet is part of the action: the message they are now editing is behind
+                  it. */}
+              <div className="mt-1 flex justify-end">
+                <UseStructure smiles={view.note.compound_smiles} label onUsed={onUsed} />
+              </div>
+            </div>
+          )}
+
+          <div className="border-t border-border-subtle pt-4 text-sm">
+            <Markdown>{view.body}</Markdown>
           </div>
 
-          {isPending && !error && <Loading>Reading the note…</Loading>}
-
-          {error && (
-            <EmptyState title="That note could not be read">
-              <p>{error.message}</p>
-              {/* The path this panel replaced, kept for when it cannot serve. Not every citation
-                  is a note id — a `qm-…` reference names a job whose note may never have been
-                  written — and the agent can still say what it knows about one. */}
-              <Button
-                variant="outline"
-                size="sm"
-                className="mt-3"
-                onClick={() => {
-                  onOpenChange(false);
-                  onAsk(noteId);
-                }}
-              >
-                Ask the agent about it instead
-              </Button>
-            </EmptyState>
+          {view.neighbors.length > 0 && (
+            <div className="border-t border-border-subtle pt-4">
+              <h3 className="mb-2 text-2xs font-medium tracking-wide text-ink-subtle uppercase">
+                Linked notes
+              </h3>
+              <ul className="flex flex-col items-start gap-1">
+                {view.neighbors.map((neighbor) => (
+                  <li key={neighbor.id}>
+                    <Button
+                      variant="link"
+                      size="xs"
+                      className="h-auto p-0 font-mono text-2xs"
+                      onClick={() => onFollow(neighbor.id)}
+                    >
+                      {neighbor.id}
+                      <span className="font-sans text-ink-subtle">{neighbor.type}</span>
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
-
-          {view && (
-            <>
-              {isExpired(view.note) && (
-                <p
-                  role="alert"
-                  className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
-                >
-                  This note’s validity window has closed, so the graph no longer retrieves it. An
-                  answer that cited it may have been written while it still held.
-                </p>
-              )}
-
-              <Provenance note={view.note} />
-
-              {view.note.tags.length > 0 && (
-                <ul className="flex flex-wrap gap-1.5">
-                  {view.note.tags.map((tag) => (
-                    <li key={tag}>
-                      <Badge tone="neutral">{tag}</Badge>
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              {view.note.compound_smiles && (
-                <div>
-                  <Molecule smiles={view.note.compound_smiles} />
-                  {/* The compound a note is about is very often the next thing a chemist wants to
-                      ask about, and copying it out of a panel by hand was the only way. Closing
-                      the sheet is part of the action: the message they are now editing is behind
-                      it. */}
-                  <div className="mt-1 flex justify-end">
-                    <UseStructure
-                      smiles={view.note.compound_smiles}
-                      label
-                      onUsed={() => onOpenChange(false)}
-                    />
-                  </div>
-                </div>
-              )}
-
-              <div className="border-t border-border-subtle pt-4 text-sm">
-                <Markdown>{view.body}</Markdown>
-              </div>
-
-              {view.neighbors.length > 0 && (
-                <div className="border-t border-border-subtle pt-4">
-                  <h3 className="mb-2 text-2xs font-medium tracking-wide text-ink-subtle uppercase">
-                    Linked notes
-                  </h3>
-                  <ul className="flex flex-col items-start gap-1">
-                    {view.neighbors.map((neighbor) => (
-                      <li key={neighbor.id}>
-                        <Button
-                          variant="link"
-                          size="xs"
-                          className="h-auto p-0 font-mono text-2xs"
-                          onClick={() => onFollow(neighbor.id)}
-                        >
-                          {neighbor.id}
-                          <span className="font-sans text-ink-subtle">{neighbor.type}</span>
-                        </Button>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      </SheetContent>
-    </Sheet>
+        </>
+      )}
+    </>
   );
 }

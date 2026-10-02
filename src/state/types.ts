@@ -24,7 +24,8 @@ export type TraceKind =
   | 'question'
   | 'note_proposed'
   | 'approval_request'
-  | 'handoff';
+  | 'handoff'
+  | 'exhibit';
 
 /**
  * One entry in the "show your work" panel, in arrival order.
@@ -208,6 +209,23 @@ export interface TraceEntry {
    * and both agents are named on it.
    */
   handoff?: { from: string; to: string; reason: string };
+  /**
+   * An artefact this turn created or revised — the `exhibit` frame's header, which is all the
+   * stream carries (the body is fetched). What the answer's artefact card is drawn from.
+   *
+   * `kind` and `title` are empty on a row rebuilt from a reloaded transcript: the stored tool call
+   * carries only the id and revision `create_exhibit`/`revise_exhibit` returned, and the card reads
+   * the rest off the session's artefact list rather than inventing a title.
+   */
+  exhibit?: {
+    exhibitId: string;
+    revision: number;
+    kind: string;
+    title: string;
+    op: 'created' | 'revised';
+    authorKind: 'agent' | 'human';
+    author: string;
+  };
 }
 
 export interface UserMessage {

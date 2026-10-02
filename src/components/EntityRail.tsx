@@ -244,8 +244,12 @@ function Row({
   );
 }
 
-/** The rail's contents. Shared by the persistent column and the sheet, so the two cannot drift. */
-function RailBody({
+/**
+ * The rail's contents. Shared by the persistent column, the sheet — and, where a deployment has
+ * artefacts, the pane's **Index** tab — so the three cannot drift. Exported for that third one,
+ * which renders it unchanged.
+ */
+export function RailBody({
   conversationId,
   onSelected,
 }: {
@@ -301,7 +305,7 @@ function RailBody({
 }
 
 /** How many subjects this conversation has. Drives whether the rail exists at all. */
-function useSubjectCount(conversationId: string): number {
+export function useSubjectCount(conversationId: string): number {
   return useEntityStore((s) => entitiesOf(s, conversationId).order.length);
 }
 

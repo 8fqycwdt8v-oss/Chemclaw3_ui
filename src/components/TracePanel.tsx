@@ -639,8 +639,11 @@ function Row({
         </Step>
       );
 
+    // An artefact is a card in the answer, under the result blocks — and the `create_exhibit` call
+    // that produced it is already a row above this one, so a second row would say it twice.
     case 'question':
     case 'approval_request':
+    case 'exhibit':
       // Rendered as interactive cards in the message body, not as inert trace lines.
       return null;
 

@@ -22,9 +22,17 @@ import type { StoredToolResult } from '../api/client.ts';
 import { toolLabel } from '../lib/format.ts';
 import { rendererFor, RawText, Verdict } from '../results/renderers.tsx';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
+import { PinResult } from './exhibits/PinResult.tsx';
 import { EmptyState, Loading } from '@/components/chem/Feedback';
 
-function Body({
+/**
+ * One stored result, rendered in full — the registry's renderer, or the raw text.
+ *
+ * Exported for the artefact pane: a tool result pinned as an artefact is *this* rendering in a
+ * different container, never a third renderer, so the block in the answer, this sheet and the pane
+ * cannot come to describe one payload three ways.
+ */
+export function ResultBody({
   result,
   onUsed,
 }: {
@@ -119,9 +127,12 @@ export function ResultSheet({
 
           {result && (
             <>
-              <Body result={result} onUsed={() => onOpenChange(false)} />
+              <ResultBody result={result} onUsed={() => onOpenChange(false)} />
+              <div className="flex flex-wrap items-center gap-2 border-t border-border-subtle pt-3">
+                <PinResult sessionId={sessionId} resultRef={resultRef} tool={tool} />
+              </div>
               {/* The join a GxP reviewer asks for, and the one a reference alone cannot make. */}
-              <p className="border-t border-border-subtle pt-3 text-2xs text-ink-subtle">
+              <p className="text-2xs text-ink-subtle">
                 {result.byte_size.toLocaleString()} bytes · correlation{' '}
                 <span className="font-mono">{result.correlation_id || 'not recorded'}</span>
               </p>

@@ -90,12 +90,15 @@ const loadProtocolsPanel = () =>
   import('./components/ProtocolsPanel.tsx').then((m) => ({ default: m.ProtocolsPanel }));
 const loadProtocolDocument = () =>
   import('./components/ProtocolDocument.tsx').then((m) => ({ default: m.ProtocolDocument }));
+const loadMyExhibits = () =>
+  import('./components/exhibits/MyExhibits.tsx').then((m) => ({ default: m.MyExhibits }));
 
 const ReviewQueue = lazy(loadReviewQueue);
 const SkillsPanel = lazy(loadSkillsPanel);
 const JobsPanel = lazy(loadJobsPanel);
 const ProtocolsPanel = lazy(loadProtocolsPanel);
 const ProtocolDocument = lazy(loadProtocolDocument);
+const MyExhibits = lazy(loadMyExhibits);
 
 let prefetched = false;
 
@@ -411,6 +414,18 @@ export function AppRoutes(): React.JSX.Element {
           <AppShell>
             <Panel what="Opening the protocol…">
               <ProtocolDocument />
+            </Panel>
+          </AppShell>
+        }
+      />
+      {/* Every artefact of the reader's, across conversations. Not a conversation, so it renders
+          inside the shell with none; a row opens its conversation through `/open/:sessionId`. */}
+      <Route
+        path="/artefacts"
+        element={
+          <AppShell>
+            <Panel what="Opening your artefacts…">
+              <MyExhibits />
             </Panel>
           </AppShell>
         }

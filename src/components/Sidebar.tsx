@@ -26,6 +26,7 @@ import {
   Plus,
   Search,
   Server,
+  Shapes,
   Trash2,
   TriangleAlert,
 } from 'lucide-react';
@@ -799,6 +800,12 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
               id, the same argument `/jobs` is here on. */}
           <SidebarLink to="/protocols" icon={<FlaskConical />} onNavigate={onNavigate}>
             Experiment protocols
+          </SidebarLink>
+          {/* The agent's working documents outlive the conversation beside which they were written,
+              and a report draft is wanted by somebody holding no session id — `/protocols`' own
+              argument, one row up. */}
+          <SidebarLink to="/artefacts" icon={<Shapes />} onNavigate={onNavigate}>
+            My artefacts
           </SidebarLink>
           <SidebarLink to="/jobs" icon={<Server />} onNavigate={onNavigate}>
             Durable runs

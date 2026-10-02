@@ -54,6 +54,8 @@ import {
   type InsertStructureDetail,
   type PrefillDetail,
 } from '../state/composerEvents.ts';
+import { refsOf, useExhibitPane } from '../state/exhibitPane.ts';
+import { ExhibitRefChips } from './exhibits/ExhibitRefChips.tsx';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Label, Switch } from '@/components/ui/misc';
@@ -544,7 +546,11 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     if (!canSend) return;
     const message = text;
     setDraft(conversationId, '');
-    void sendMessage({ conversationId, text: message, dryRun, auth });
+    // The artefacts the reader attached ride with this message and no other: read at the moment of
+    // sending, and cleared with the draft they were attached to.
+    const exhibitRefs = refsOf(useExhibitPane.getState(), conversationId);
+    useExhibitPane.getState().clearRefs(conversationId);
+    void sendMessage({ conversationId, text: message, dryRun, auth, exhibitRefs });
   };
 
   /**
@@ -828,6 +834,8 @@ export function Composer({ conversationId }: { conversationId: string }): React.
             )}
           </div>
         )}
+
+        <ExhibitRefChips conversationId={conversationId} />
 
         {pasted && (
           <PasteConfirmation

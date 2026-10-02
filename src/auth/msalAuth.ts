@@ -22,13 +22,31 @@ import { config } from '../env.ts';
 import { forgetLocalHistory } from '../state/chatStore.ts';
 import type { AuthAccount, AuthProvider } from './types.ts';
 
+/**
+ * The authority MSAL signs in against: the configured one, or Entra's public cloud for the tenant.
+ *
+ * The fallback is the exact string this module hardcoded before the authority was configurable,
+ * so a deployment that sets nothing — and a BFF old enough not to send `entraAuthority` — behaves
+ * as it always did. `ENTRA_AUTHORITY` exists for an authority that is not Entra's public cloud: a
+ * sovereign cloud, or the Chemclaw3_mock tenant `e2e/oidc-mock.spec.ts` signs in against.
+ */
+export const msalAuthority = (): string =>
+  config.entraAuthority || `https://login.microsoftonline.com/${config.entraTenantId}`;
+
 export function buildMsalConfig(): Configuration {
+  const authority = msalAuthority();
   return {
     auth: {
       // The SPA's app registration — not the API's.
       clientId: config.entraClientId,
-      authority: `https://login.microsoftonline.com/${config.entraTenantId}`,
-      knownAuthorities: ['login.microsoftonline.com'],
+      authority,
+      // The authority's own host (with its port, which is what MSAL compares). Listing it is what
+      // tells MSAL to trust the host's discovery document rather than first asking
+      // login.microsoftonline.com whether the host is a known Entra instance — a question about
+      // a mock tenant on 127.0.0.1 that Microsoft can only answer "no". For the default authority
+      // this is `login.microsoftonline.com`, as it always was. The protocol mode stays MSAL's
+      // default (`AAD`), so the mock exercises the code path production runs.
+      knownAuthorities: [new URL(authority).host],
       redirectUri: `${window.location.origin}/auth/callback`,
       postLogoutRedirectUri: window.location.origin,
     },

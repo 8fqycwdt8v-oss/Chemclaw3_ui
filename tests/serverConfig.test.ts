@@ -337,13 +337,17 @@ describe('ENTRA_AUTHORITY', () => {
     expect(problems.some((p) => p.includes('ENTRA_AUTHORITY'))).toBe(true);
   });
 
-  it.each(['not a url', 'https://login.example/t?x=1', 'https://login.example/t#frag'])(
-    'refuses %s',
-    (raw) => {
-      const problems = validateConfig(
-        config({ ...msal, rawEntraAuthority: raw, entraAuthority: raw }),
-      );
-      expect(problems.some((p) => p.includes('ENTRA_AUTHORITY'))).toBe(true);
-    },
-  );
+  it.each([
+    'not a url',
+    'https://login.example/t?x=1',
+    'https://login.example/t#frag',
+    'https://*/t',
+    'https://*.microsoftonline.com/t',
+    'https://x;frame-ancestors/t',
+  ])('refuses %s', (raw) => {
+    const problems = validateConfig(
+      config({ ...msal, rawEntraAuthority: raw, entraAuthority: raw }),
+    );
+    expect(problems.some((p) => p.includes('ENTRA_AUTHORITY'))).toBe(true);
+  });
 });

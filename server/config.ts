@@ -90,6 +90,10 @@ const ENTRA_HOST = 'https://login.microsoftonline.com';
  * it is `validateConfig`'s to refuse, not this line's to repair.
  */
 const rawEntraAuthority = str('ENTRA_AUTHORITY');
+
+/** A hostname CSP reads as a host and nothing else: DNS labels, IPv4, or a bracketed IPv6 literal. */
+const AUTHORITY_HOSTNAME =
+  /^(\[[0-9a-f:.]+\]|[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*)$/i;
 const entraAuthority =
   rawEntraAuthority.replace(/\/+$/, '') || `${ENTRA_HOST}/${str('ENTRA_TENANT_ID')}`;
 
@@ -546,6 +550,14 @@ export function validateConfig(c: BffConfig = cfg): string[] {
       problems.push(
         `ENTRA_AUTHORITY must be a plain authority URL (scheme, host, tenant path), got ` +
           `${JSON.stringify(c.rawEntraAuthority)}. MSAL appends its own paths and parameters to it.`,
+      );
+    } else if (parsed && !AUTHORITY_HOSTNAME.test(parsed.hostname)) {
+      // The origin is written into connect-src, frame-src and form-action, and the URL parser
+      // accepts host characters CSP reads as syntax: `https://*/t` would allow every https host,
+      // and `https://x;frame-ancestors/t` would inject a directive.
+      problems.push(
+        `ENTRA_AUTHORITY must name a plain DNS host or IP address, got ` +
+          `${JSON.stringify(c.rawEntraAuthority)}. Its origin is written into the CSP.`,
       );
     }
   }

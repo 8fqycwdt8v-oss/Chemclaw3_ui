@@ -41,6 +41,18 @@ interface LinkNode extends Node {
  * `qm-` stays, and gains its siblings: a durable job id is minted by the workflow as
  * `<connector>-<hash>`, and a job's `job-result` note may never have been written — which is why
  * `CitationChip` falls back to asking the agent rather than assuming the graph can answer.
+ *
+ * **`reaction-` came back, and this time the corpus is what says so.** An ELN or ORD run is not a
+ * file in `knowledge/` — it is a row in the service's reaction store — and its citation spelling
+ * is `reaction-<source>.<id>` (or the bare `reaction-<id>`), minted by core's
+ * `kg.note.note_id_for_reaction` and handed to the model by `gather_evidence`'s reaction retriever
+ * and by `similar_reactions`. `GET /notes/{id}` resolves both forms (driven on the kind cluster:
+ * `reaction-eln-ord.suzuki-flow-hte-04620` → 200, a citation-only record whose species read
+ * "structure not given by the source"). So every citation of an experimental record — the
+ * citations a chemist most needs to check — rendered as plain text. It has its own, narrower
+ * pattern below, because "reaction-" also opens ordinary English compounds ("the reaction-energy
+ * job") that must stay prose: a record id carries a digit or a `<source>.` qualifier, and a
+ * compound word carries neither.
  */
 const NOTE_PREFIXES = [
   'compound',
@@ -60,6 +72,12 @@ const PATTERNS: { kind: string; re: RegExp }[] = [
   {
     kind: 'note',
     re: new RegExp(`\\b(?:${NOTE_PREFIXES.join('|')})-[A-Za-z0-9][A-Za-z0-9_.-]*\\b`, 'g'),
+  },
+  // An experimental record: `reaction-<source>.<id>` or `reaction-<id>`, told apart from prose
+  // ("reaction-energy", "reaction-level") by a digit or a qualifier dot followed by more id.
+  {
+    kind: 'note',
+    re: /\breaction-(?=[A-Za-z0-9_-]*(?:[0-9]|\.[A-Za-z0-9]))[A-Za-z0-9][A-Za-z0-9_.-]*\b/g,
   },
   { kind: 'job', re: /\b(?:qm|calc|bo|report)-[A-Za-z0-9]{4,64}\b/g },
 ];

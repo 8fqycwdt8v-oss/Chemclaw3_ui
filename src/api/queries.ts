@@ -101,3 +101,60 @@ export const protocolQuery = (designId: string, at: number | undefined, auth: To
   queryKey: keys.protocol(designId, at),
   queryFn: () => api.getProtocol(designId, auth, at),
 });
+
+/**
+ * One session's artefacts, and whether the deployment has them at all.
+ *
+ * **The one read in this app that refetches on window focus**, and it asks by name, the way the
+ * health probe does (`queryClient.ts`'s default is off, deliberately). A human revision in a shared
+ * session is pushed on `/events` best-effort; a colleague's edit made while this tab was in the
+ * background is exactly the case a best-effort push misses, and coming back to the tab is exactly
+ * when the reader looks. The route is one indexed query on the service, nothing like the plan
+ * inbox's scan, so the focus refetch costs what it should.
+ */
+export const exhibitsQuery = (sessionId: string, auth: TokenGetter) => ({
+  queryKey: keys.exhibits(sessionId),
+  queryFn: () => api.listExhibits(sessionId, auth),
+  refetchOnWindowFocus: true,
+});
+
+/**
+ * One artefact at one revision. A *numbered* revision is immutable — the table is append-only —
+ * so it is cached like a content-addressed read; the head (`0`) moves, and is left to the list's
+ * invalidation.
+ */
+export const exhibitQuery = (
+  sessionId: string,
+  exhibitId: string,
+  revision: number,
+  auth: TokenGetter,
+) => ({
+  queryKey: keys.exhibit(sessionId, exhibitId, revision),
+  queryFn: () => api.getExhibit(sessionId, exhibitId, auth, revision),
+  ...(revision > 0 ? IMMUTABLE : {}),
+});
+
+/** One artefact's revision log, for the picker. */
+export const exhibitRevisionsQuery = (sessionId: string, exhibitId: string, auth: TokenGetter) => ({
+  queryKey: keys.exhibitRevisions(sessionId, exhibitId),
+  queryFn: () => api.listExhibitRevisions(sessionId, exhibitId, auth),
+});
+
+/** A comparison between two numbered revisions — both immutable, so the answer is too. */
+export const exhibitDiffQuery = (
+  sessionId: string,
+  exhibitId: string,
+  from: number,
+  to: number,
+  auth: TokenGetter,
+) => ({
+  queryKey: keys.exhibitDiff(sessionId, exhibitId, from, to),
+  queryFn: () => api.getExhibitDiff(sessionId, exhibitId, from, to, auth),
+  ...IMMUTABLE,
+});
+
+/** Every artefact of the caller's, across sessions. */
+export const myExhibitsQuery = (auth: TokenGetter) => ({
+  queryKey: keys.myExhibits,
+  queryFn: () => api.listMyExhibits(auth),
+});

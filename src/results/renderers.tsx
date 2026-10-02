@@ -31,6 +31,7 @@
 import { useState } from 'react';
 import { Download } from 'lucide-react';
 import { formatScientificNumber, toolLabel } from '../lib/format.ts';
+import { saveBlob } from '../lib/download.ts';
 import { Molecule } from '../components/Molecule.tsx';
 import { Sparkline } from '../components/Sparkline.tsx';
 import { UseStructure } from '@/components/chem/UseStructure';
@@ -137,27 +138,13 @@ export function DownloadCsv({
   records: Json[];
   name: string;
 }): React.JSX.Element {
-  // An object URL rather than a data: URI — a large table exceeds what some browsers will accept
-  // in a URL.
-  const download = (): void => {
-    const blob = new Blob([toCsv(headers, records)], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `${name}.csv`;
-    // In the document, and revoked a tick later. Both matter: Firefox ignores a click on a
-    // detached anchor, and every browser starts the download asynchronously — revoking in the
-    // same tick races the fetch the click just scheduled and yields an empty or failed save. A
-    // timeout is the only handle available, since there is no event for "the download has read
-    // the blob".
-    link.style.display = 'none';
-    document.body.appendChild(link);
-    link.click();
-    window.setTimeout(() => {
-      link.remove();
-      URL.revokeObjectURL(url);
-    }, 0);
-  };
+  // `saveBlob` carries the two rules a browser download needs (object URL, anchor in the document
+  // and revoked a tick later); the artefact export menu saves through it too.
+  const download = (): void =>
+    saveBlob(
+      new Blob([toCsv(headers, records)], { type: 'text/csv;charset=utf-8' }),
+      `${name}.csv`,
+    );
   return (
     <Button variant="outline" size="xs" onClick={download}>
       <Download aria-hidden className="size-3.5" />

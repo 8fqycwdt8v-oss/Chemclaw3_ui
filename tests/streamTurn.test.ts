@@ -473,6 +473,25 @@ describe('streamTurn', () => {
     expect(JSON.parse(String(stub.calls[0]?.init?.body))).toEqual({
       message: 'x',
       dry_run: true,
+      // Always present, `[]` when nothing was attached — the contract's own default, which an
+      // older service ignores as an unknown key rather than refusing.
+      exhibit_refs: [],
+    });
+  });
+
+  it('sends the artefacts attached to the message as exhibit_refs', async () => {
+    const stub = stubFetch(() => sseResponse(sseFrames([answerEvent()])));
+    restore = stub.restore;
+    await streamTurn({
+      sessionId: SESSION,
+      message: 'is row 3 right?',
+      exhibitRefs: [{ exhibit_id: 'xb-0123456789abcdef', revision: 2 }],
+      signal: new AbortController().signal,
+      getToken: async () => null,
+      onEvent: () => undefined,
+    });
+    expect(JSON.parse(String(stub.calls[0]?.init?.body))).toMatchObject({
+      exhibit_refs: [{ exhibit_id: 'xb-0123456789abcdef', revision: 2 }],
     });
   });
 });

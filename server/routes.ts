@@ -143,6 +143,24 @@ const TICKET = '([0-9]{1,19})';
  */
 const ACTOR = "([A-Za-z0-9._:~!*'()%-]{1,512})";
 
+/**
+ * An artefact's id: `xb-` plus sixteen lowercase hex characters, minted at random by the service.
+ *
+ * As narrow as `DESIGN`, and for `DESIGN`'s reason: the whole set is known (`shared/exhibits.ts`'s
+ * `EXHIBIT_ID_RE`), so a segment matching it cannot contain `/`, `.` or an escape, and it embeds
+ * nothing the service did not mint. The code name is `exhibit` because the service's tree already
+ * spends `artifact` on calculation by-products; a chemist only ever reads "Artefact".
+ */
+const XID = '(xb-[0-9a-f]{16})';
+
+/**
+ * What an artefact can be downloaded as from the service. A closed list rather than a pattern,
+ * because it is one: the contract's export table names three formats and the service 404s every
+ * other one, so admitting a fourth here would forward a request with no answer. SDF and SVG are
+ * made in the browser and never reach this route.
+ */
+const FMT = '(md|csv|smi)';
+
 /** What a proposal proposes. Two values, because the service's `ProposalKind` has exactly two. */
 const KIND = '(skill|profile)';
 
@@ -477,6 +495,71 @@ export const ROUTES: readonly Route[] = [
     target: (m) => `/protocols/${m[1]}/status`,
     sse: false,
   },
+
+  // Artefacts (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect` upstream) — the
+  // agent's working documents, shown beside the chat. Every route is session-scoped through the
+  // service's `resolve_owned_session`, owner or member, and a stranger gets the session gate's
+  // 404, so the ownership the turn stream already passed covers these too.
+  //
+  // There is deliberately no DELETE, for the protocols block's reason: revisions accumulate, and
+  // a new one is POSTed to the collection naming the `parent_revision` it was written against, so
+  // the service can refuse an edit built on a revision that is no longer the head.
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/exhibits$`),
+    target: (m) => `/sessions/${m[1]}/exhibits`,
+    sse: false,
+  },
+  // A chemist's own create — used to pin a tool result from the answer as a `result` artefact.
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/sessions/${SID}/exhibits$`),
+    target: (m) => `/sessions/${m[1]}/exhibits`,
+    sse: false,
+  },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/exhibits/${XID}$`),
+    target: (m) => `/sessions/${m[1]}/exhibits/${m[2]}`,
+    labels: ['{id}', '{xid}'],
+    sse: false,
+  },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/exhibits/${XID}/revisions$`),
+    target: (m) => `/sessions/${m[1]}/exhibits/${m[2]}/revisions`,
+    labels: ['{id}', '{xid}'],
+    sse: false,
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/api/sessions/${SID}/exhibits/${XID}/revisions$`),
+    target: (m) => `/sessions/${m[1]}/exhibits/${m[2]}/revisions`,
+    labels: ['{id}', '{xid}'],
+    sse: false,
+  },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/exhibits/${XID}/diff$`),
+    target: (m) => `/sessions/${m[1]}/exhibits/${m[2]}/diff`,
+    labels: ['{id}', '{xid}'],
+    sse: false,
+  },
+  // A file, not JSON: the service answers with its own `Content-Type` and a
+  // `Content-Disposition: attachment`, and both pass through `proxy.ts` untouched because neither
+  // is hop-by-hop nor one this process owns. Not `upload` — that flag widens the *request* body cap,
+  // and this request has no body.
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/exhibits/${XID}/export\\.${FMT}$`),
+    target: (m) => `/sessions/${m[1]}/exhibits/${m[2]}/export.${m[3]}`,
+    labels: ['{id}', '{xid}', '{fmt}'],
+    sse: false,
+  },
+  // Every artefact of the caller's, across sessions (phase 3's "My artefacts"). Not session-scoped
+  // because it is what answers "which session" — the same argument `/plans/pending` makes — and
+  // the service scopes it to sessions the caller owns or is a member of.
+  { method: 'GET', pattern: /^\/api\/exhibits$/, target: () => '/exhibits', sse: false },
 ] as const;
 
 export interface ResolvedRoute {
@@ -524,7 +607,7 @@ function templateGroups(route: Route): RegExpMatchArray {
  * would reach `DELETE /skills/mine/` — routes other than the one the whitelist matched. No
  * legitimate id is a lone dot; the service refuses a leading `.` in a skill name outright.
  *
- * The narrow segments (`SID`, `RESULT_REF`, `DESIGN`) cannot fail this and are checked anyway: a
+ * The narrow segments (`SID`, `RESULT_REF`, `DESIGN`, `XID`, `FMT`) cannot fail this and are checked anyway: a
  * rule applied to every capture is one nobody has to remember to apply to the next route.
  */
 function isTraversal(segment: string): boolean {

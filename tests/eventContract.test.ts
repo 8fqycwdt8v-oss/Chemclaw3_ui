@@ -35,6 +35,7 @@ describe('the event contract admits every member of its own union', () => {
     tool_result: { tool: 'find_notes', preview: 'x' },
     evidence_source: { source: 'graph', chunks: 4 },
     handoff: { from_agent: 'default', to_agent: 'safety', reason: 'hazard check' },
+    exhibit: { exhibit_id: 'xb-0123456789abcdef', revision: 1, kind: 'table', op: 'created' },
     question: { question: 'which?', options: [] },
     note_proposed: { note_id: 'n1', reference: 'ref' },
     approval_request: { prompt: 'ok?', approval_id: 'a1' },
@@ -180,6 +181,21 @@ const full: Array<[string, Record<string, unknown>]> = [
   // Distinguishable values on every field, so a mirror that crossed two of them fails here rather
   // than round-tripping. `from_agent` and `to_agent` are deliberately unlike each other.
   ['handoff', { from_agent: 'default', to_agent: 'safety', reason: 'hazard check' }],
+  // Every field away from its fallback: `revised` is what an unknown op reads as and `agent` what an
+  // unknown author kind reads as, so the frame carries the other value of each — a mirror that
+  // dropped either would round-trip the default and pass.
+  [
+    'exhibit',
+    {
+      exhibit_id: 'xb-0123456789abcdef',
+      revision: 3,
+      kind: 'table',
+      title: 'Solvent ranking',
+      op: 'created',
+      author_kind: 'human',
+      author: 'chemist@example.com',
+    },
+  ],
   ['question', { question: 'which?', options: ['a'] }],
   ['note_proposed', { note_id: 'n1', reference: 'branch/x' }],
   ['approval_request', { prompt: 'ok?', approval_id: 'a1' }],

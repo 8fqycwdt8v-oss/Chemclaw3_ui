@@ -184,6 +184,8 @@ export const keys = {
   /** Who is in one session: its owner and the members that owner admitted. */
   members: (sessionId: string) => ['members', sessionId] as const,
   jobs: (text: string) => ['jobs', text] as const,
+  /** One durable run's status — what an artefact linking to a job reads. */
+  job: (jobId: string) => ['job', jobId] as const,
   protocols: (status: string, project: string) => ['protocols', status, project] as const,
   protocol: (designId: string, at: number | undefined) =>
     ['protocol', designId, at ?? 'head'] as const,
@@ -202,6 +204,26 @@ export const keys = {
    */
   skillBody: (tier: 'mine' | 'org', name: string) => ['skills', tier, name, 'body'] as const,
   health: ['health'] as const,
+  /**
+   * One session's artefacts — the list the pane, the cards and the shell's "is there a pane at
+   * all" read. An `exhibit` frame invalidates exactly this key, and a revision write invalidates
+   * its prefix, which reaches every body and history under it.
+   */
+  exhibits: (sessionId: string) => ['exhibits', sessionId] as const,
+  /**
+   * One artefact at one revision, nested under the list's prefix on purpose — the `skillBody`
+   * argument: a write that invalidates `['exhibits', sessionId]` reaches the head body, every
+   * pinned revision and the history at once. `0` is the head, which *moves*, so it is a separate
+   * entry from the number it currently resolves to rather than an alias of it.
+   */
+  exhibit: (sessionId: string, exhibitId: string, revision: number) =>
+    ['exhibits', sessionId, exhibitId, revision] as const,
+  exhibitRevisions: (sessionId: string, exhibitId: string) =>
+    ['exhibits', sessionId, exhibitId, 'revisions'] as const,
+  exhibitDiff: (sessionId: string, exhibitId: string, from: number, to: number) =>
+    ['exhibits', sessionId, exhibitId, 'diff', from, to] as const,
+  /** Every artefact of the caller's, across sessions — "My artefacts". */
+  myExhibits: ['my-exhibits'] as const,
 } as const;
 
 /**

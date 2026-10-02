@@ -73,6 +73,21 @@ export type ApiErrorKind =
    *  *document* alone and two people at revision 1 could approve and abandon it with both told
    *  204, so the case had no 409 to carry a code at all. */
   | 'status_conflict'
+  /**
+   * 409 on the artefact-revision route, `{"code": "stale_revision", "head_revision": N}` — the
+   * artefact moved between being opened for editing and being saved (the agent revised it, or a
+   * colleague in a shared session did). Its own kind rather than `revision_conflict` because the
+   * service hands back the head it moved to, and that number is the whole remedy: the editor
+   * fetches that head, shows what changed against the base the edit was written on, and offers to
+   * apply the edit on top. Always raised as a `StaleRevisionError`, which carries it.
+   */
+  | 'stale_revision'
+  /**
+   * 409 on the artefact-create route, `{"code": "exhibit_limit"}` — the session already holds as
+   * many artefacts as the deployment allows. Nothing to retry: an existing one has to be revised
+   * instead, and the sentence says so.
+   */
+  | 'exhibit_limit'
   /** 422 — message over the backend's character cap. */
   | 'message_too_long'
   /** 429 without a `Retry-After` — the turn/token budget is spent, or too many concurrent event
@@ -176,6 +191,26 @@ export class ApiError extends Error {
 }
 
 /**
+ * An artefact edit written against a revision that is no longer the head.
+ *
+ * A subclass rather than a field on `ApiError`, because only one route can raise it and only one
+ * caller can act on it: `ExhibitPane`'s editors catch exactly this type and read `headRevision`
+ * off it, and every other caller sees an ordinary 409 `ApiError` with the service's sentence.
+ *
+ * `headRevision` is `null` when the 409 named no head — an older or misbehaving service — and the
+ * editor then re-reads the artefact's head itself rather than guessing a number to rebase onto.
+ */
+export class StaleRevisionError extends ApiError {
+  readonly headRevision: number | null;
+
+  constructor(headRevision: number | null, message: string, correlationId = '') {
+    super('stale_revision', message, 409, correlationId ? { correlationId } : undefined);
+    this.name = 'StaleRevisionError';
+    this.headRevision = headRevision;
+  }
+}
+
+/**
  * The response header the service stamps its per-request correlation id on.
  *
  * Read, never sent. Sending one is a dead end twice over: the BFF strips every `x-chemclaw-*`
@@ -271,6 +306,15 @@ export function errorFromStatus(
     case 404:
       return new ApiError('session_not_found', detail || 'unknown session', 404, options);
     case 409:
+      if (code === 'exhibit_limit') {
+        return new ApiError(
+          code,
+          detail ||
+            'This conversation already holds as many artefacts as this deployment allows. Revise one instead.',
+          409,
+          options,
+        );
+      }
       if (code === 'status_conflict' || code === 'revision_conflict') {
         return new ApiError(code, detail || 'Somebody else changed this design.', 409, options);
       }
@@ -490,6 +534,22 @@ function detailCode(detail: unknown): string | undefined {
   return undefined;
 }
 
+/**
+ * The head revision a `stale_revision` 409 names — `{"detail": {"code": …, "head_revision": N}}`.
+ *
+ * Read beside `detailCode` rather than by the one caller that needs it, because `request` consumes
+ * the body before any caller sees the response: the number has to be lifted out here or it is
+ * gone. A non-integer is dropped rather than coerced — a rebase onto a revision the service did
+ * not name would be the silent overwrite the 409 exists to prevent.
+ */
+function detailHead(detail: unknown): number | undefined {
+  if (detail && !Array.isArray(detail) && typeof detail === 'object') {
+    const head = (detail as { head_revision?: unknown }).head_revision;
+    return typeof head === 'number' && Number.isSafeInteger(head) && head >= 0 ? head : undefined;
+  }
+  return undefined;
+}
+
 function detailText(detail: unknown): string | undefined {
   if (typeof detail === 'string') return detail;
   if (detail && !Array.isArray(detail) && typeof detail === 'object') {
@@ -515,13 +575,15 @@ function detailText(detail: unknown): string | undefined {
 
 export async function readFailure(
   res: Response,
-): Promise<{ detail?: string; code?: string; correlationId: string }> {
+): Promise<{ detail?: string; code?: string; headRevision?: number; correlationId: string }> {
   const fromHeader = correlationFrom(res);
   try {
     const body = (await res.json()) as { detail?: unknown; correlation_id?: unknown };
+    const head = detailHead(body?.detail);
     return {
       detail: detailText(body?.detail),
       code: detailCode(body?.detail),
+      ...(head === undefined ? {} : { headRevision: head }),
       correlationId:
         fromHeader || (typeof body?.correlation_id === 'string' ? body.correlation_id : ''),
     };

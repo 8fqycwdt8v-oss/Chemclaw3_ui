@@ -117,6 +117,8 @@ const SAMPLES = [
   'design-0123456789ab', // an experiment design id: `design-` plus twelve lowercase hex
   'house-workup', // a skill name: lowercase and hyphens, the shape both stored tiers store under
   'skill', // what a behaviour proposal proposes — the other value is `profile`
+  'xb-0123456789abcdef', // an artefact (exhibit) id: `xb-` plus sixteen lowercase hex
+  'csv', // an artefact export format, the `{fmt}` of `export.{fmt}` — one of md, csv, smi
 ];
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];
@@ -133,8 +135,9 @@ const backendRoutes = Object.entries(openapi.paths ?? {}).flatMap(([path, item])
  *
  * The combination matters on the two-parameter routes: `/sessions/{id}/tool-results/{ref}` takes a
  * uuid4 hex in the first hole and something quite different in the second, so substituting one
- * sample into both would report a live whitelist entry as dead. Two holes and five samples is
- * twenty-five strings; there is no route here with more holes than that.
+ * sample into both would report a live whitelist entry as dead. The artefact export has three holes
+ * (`/sessions/{id}/exhibits/{xid}/export.{fmt}`), which over ten samples is a thousand strings —
+ * still nothing worth optimising.
  */
 const concretePaths = (template) =>
   template

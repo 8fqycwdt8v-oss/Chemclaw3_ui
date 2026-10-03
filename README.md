@@ -193,11 +193,30 @@ through per path, not overwrite every response with one policy — or no structu
 ### HTML sandbox (artefacts)
 
 An `html` artefact is markup and script the agent wrote. It never runs on the app's origin, which
-holds the bearer token: it runs in a frame served by the BFF's **second listener**, on a different
-origin, embedded with `sandbox="allow-scripts"` and nothing else (no `allow-same-origin`,
+holds the bearer token: it is shown in a frame served by the BFF's **second listener**, on a
+different origin, embedded with `sandbox="allow-scripts"` and nothing else (no `allow-same-origin`,
 `allow-popups`, `allow-top-navigation`, `allow-forms` or `allow-modals`). That listener serves
 `GET /sandbox/frame` and nothing else, under `default-src 'none'; connect-src 'none'` and
 `frame-ancestors <APP_ORIGIN>`; the app listener answers that path with a 404.
+
+**Scripts are off by default.** The script `allow-scripts` permits is the shell's own: it puts the
+artefact in a nested `srcdoc` frame with `sandbox=""`, so the artefact's own script does not run. A
+per-view **Run scripts** button (never persisted; a new revision or a reload turns it off again)
+re-renders it with `allow-scripts`, after a warning naming what that still allows:
+
+- **Network egress over WebRTC.** CSP does not govern WebRTC — measured under this shell, a scripted
+  page sent UDP carrying data it read to an arbitrary host through a STUN candidate, and Chromium
+  ignores `webrtc 'block'`. A scripted render gets a prelude that removes `RTCPeerConnection`,
+  `webkitRTCPeerConnection` and `RTCDataChannel` from the page's realm; that is defence in depth and
+  **bypassable** (a nested `srcdoc` realm is untouched). So this is not a "no network" sandbox. A
+  deployment that can should set the browser policy **`WebRtcIPHandling=disable_non_proxied_udp`**
+  (Chrome/Edge enterprise policy), which stops non-proxied UDP from WebRTC.
+- **Clipboard writes** after one click in the frame.
+- **Self-navigation, bounded by `frame-src`.** The outer frame can only be navigated to an origin the
+  app's CSP lists in `frame-src`: the sandbox origin — and, in MSAL mode, the Entra authority, which
+  the hidden-iframe token refresh needs. Measured: self-navigation, meta refresh, anchor clicks and
+  `data:`/`blob:` navigations to anywhere else are refused. The nested content frame is bounded by
+  the shell's `default-src 'none'`, which lists no frame source at all.
 
 | Variable            | Value                                                                                                 |
 | ------------------- | ----------------------------------------------------------------------------------------------------- |
@@ -217,8 +236,9 @@ path. Unset, the second listener does not start, `/config.js` serves `sandboxOri
 artefacts are shown as escaped source with the notice "HTML preview needs a separate sandbox origin".
 The CSP gains `frame-src <SANDBOX_ORIGIN>` only when the sandbox is on.
 
-What the sandbox does not stop: a page navigating _its own frame_ to another site with data in the
-URL — no CSP directive bounds that. What such a page could carry is the artefact's own HTML.
+Locally, `npm run dev` and `docker compose` set both origins for you; `start.sh` does not (it is
+also what a hosted preview runs, where `localhost` would be the _viewer's_ machine), so set
+`SANDBOX_ORIGIN`/`APP_ORIGIN` there yourself or HTML artefacts are shown as source.
 
 ## Layout
 

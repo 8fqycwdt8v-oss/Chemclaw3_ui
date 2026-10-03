@@ -334,11 +334,16 @@ for (const theme of ['light', 'dark'] as const) {
       await picker.selectOption('xb-3b0000000000b003');
       const frame = pane.locator('iframe[title="Sandbox probe — sandboxed HTML preview"]');
       await expect(frame).toBeVisible();
+      // Scanned with scripts running: with them off (the default) the content frame is
+      // `sandbox=""`, where no script runs — axe's included, so it could not look inside. The
+      // markup is the same in both modes, and so are the two frames' titles.
+      await pane.getByRole('button', { name: 'Run scripts' }).click();
       await expect(
         page
           .frameLocator('iframe[title="Sandbox probe — sandboxed HTML preview"]')
-          .locator('#popup'),
-      ).not.toHaveText('pending');
+          .frameLocator('iframe[title="Sandbox probe — sandboxed HTML preview — content"]')
+          .getByRole('heading', { name: 'Sandbox probe' }),
+      ).toBeVisible();
       await expectTheme(page, theme);
       await scan(page);
     });

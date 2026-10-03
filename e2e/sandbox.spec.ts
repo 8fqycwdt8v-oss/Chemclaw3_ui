@@ -1,14 +1,24 @@
-import { expect, test, type Page } from '@playwright/test';
+import dgram from 'node:dgram';
+import { expect, test, type Frame, type Page } from '@playwright/test';
 
 /**
  * The HTML sandbox (artefacts wave 3), proved by a real browser against the real headers.
  *
  * The page under test is the agent's worst case written down (`SANDBOX_PROBE_HTML` in the fixture
  * service): it tries to fetch, read cookies and storage, reach into the app's document, navigate
- * the top window and open a popup, and writes what happened into its own document — where this
- * spec reads it through the frame. Each probe's answer is what the *browser* decided, under the
- * shell's CSP and the frame's `sandbox="allow-scripts"`; nothing here is asserted about a header
- * string that a unit test does not already pin (`tests/sandboxServer.test.ts`).
+ * the top window, open a popup and send its secret out over WebRTC, and writes what happened into
+ * its own document — where this spec reads it through the frames. Each probe's answer is what the
+ * *browser* decided; nothing here is asserted about a header string that a unit test does not
+ * already pin (`tests/sandboxServer.test.ts`).
+ *
+ * **By default none of that script runs** (the wave-3 amendment): the shell puts the artefact in a
+ * nested `srcdoc` frame with `sandbox=""`. The probes run only after **Run scripts**, and then with
+ * the prelude that removes the WebRTC constructors from the content's realm.
+ *
+ * **Known residual, deliberately not asserted as safe:** the prelude reaches one realm. A scripted
+ * page that creates its own nested `srcdoc` frame gets a fresh realm with `RTCPeerConnection`
+ * intact (and `allow-scripts` inherited), and can send UDP from there. That is why scripts are
+ * opt-in per view, and why the README recommends `WebRtcIPHandling=disable_non_proxied_udp`.
  *
  * Then the other direction: the app takes a height from that frame and from nothing else — not
  * from its own window, and not from a second sandboxed frame, which posts from the very same
@@ -55,6 +65,9 @@ async function seed(page: Page): Promise<void> {
   );
 }
 
+/** The fixture service's `RTC_PROBE_PORT`: where the probe aims its STUN traffic. */
+const RTC_PROBE_PORT = 47140;
+
 /** Open the conversation's artefact pane on the HTML probe; hand back the frame element. */
 async function openProbe(page: Page, isMobile: boolean) {
   await seed(page);
@@ -68,63 +81,181 @@ async function openProbe(page: Page, isMobile: boolean) {
   await pane.getByRole('combobox', { name: 'Artefact' }).selectOption(HTML_ID);
   const frame = pane.locator(`iframe[title="${FRAME_TITLE}"]`);
   await expect(frame).toBeVisible();
-  return { pane, frame };
+  // The artefact's own document: the shell's nested frame.
+  const content = page.frameLocator(`iframe[title="${FRAME_TITLE}"]`).frameLocator('iframe');
+  await expect(content.getByRole('heading', { name: 'Sandbox probe' })).toBeVisible();
+  return { pane, frame, content };
 }
 
-test('agent-written HTML runs sealed: no network, no app storage, no top, no popups', async ({
-  page,
-  context,
-  isMobile,
-}) => {
-  const popups: string[] = [];
-  context.on('page', (opened) => popups.push(opened.url()));
-  const { frame } = await openProbe(page, isMobile);
-  const startedAt = page.url();
+/** The shell's frame and the content frame inside it, as Playwright frames. */
+function frames(page: Page): { shell: Frame; content: Frame } {
+  const shell = page.frames().find((f) => f.url().startsWith(SANDBOX));
+  const content = shell?.childFrames()[0];
+  if (!shell || !content) throw new Error('the sandbox frames are not on the page');
+  return { shell, content };
+}
 
-  // Exactly the contract's attribute set, on a frame from the other origin.
-  await expect(frame).toHaveAttribute('sandbox', 'allow-scripts');
-  await expect(frame).toHaveAttribute('referrerpolicy', 'no-referrer');
-  await expect(frame).toHaveAttribute('src', `${SANDBOX}/sandbox/frame`);
+/** A UDP listener on the probe's port, counting packets and those carrying the probe's secret. */
+async function udpListener(): Promise<{
+  packets: () => number;
+  secrets: () => number;
+  close: () => void;
+}> {
+  let packets = 0;
+  let secrets = 0;
+  const socket = dgram.createSocket('udp4');
+  socket.on('message', (message) => {
+    packets += 1;
+    if (message.toString('latin1').includes('USERTYPED42')) secrets += 1;
+  });
+  await new Promise<void>((resolve) => socket.bind(RTC_PROBE_PORT, '127.0.0.1', resolve));
+  // The listener itself works: a packet sent here is counted, so a zero below means none came.
+  const sender = dgram.createSocket('udp4');
+  await new Promise<void>((resolve) =>
+    sender.send('control', RTC_PROBE_PORT, '127.0.0.1', () => resolve()),
+  );
+  sender.close();
+  await expect.poll(() => packets).toBe(1);
+  packets = 0;
+  return { packets: () => packets, secrets: () => secrets, close: () => socket.close() };
+}
 
-  const inside = page.frameLocator(`iframe[title="${FRAME_TITLE}"]`);
-  await expect(inside.getByRole('heading', { name: 'Sandbox probe' })).toBeVisible();
-  const probe = (id: string) => inside.locator(`#${id}`);
+/**
+ * The two tests that listen on the probe's UDP port, in one worker, one after the other: run in
+ * parallel the second could not bind it.
+ */
+test.describe('WebRTC', () => {
+  test.describe.configure({ mode: 'serial' });
 
-  // `connect-src 'none'` on the shell: even a fetch of a `data:` URL — no network, no CORS, no
-  // CORP — is refused, and the browser names the directive that refused it.
-  await expect(probe('fetch')).toHaveText(/^blocked: TypeError/);
-  await expect(probe('csp')).toHaveText('connect-src');
-  // Opaque origin (no `allow-same-origin`): its own cookie jar and storage do not exist, and the
-  // app's document is another origin's.
-  await expect(probe('cookie')).toHaveText(/^blocked: SecurityError/);
-  await expect(probe('storage')).toHaveText(/^blocked: SecurityError/);
-  await expect(probe('parent')).toHaveText(/^blocked: SecurityError/);
-  // No `allow-top-navigation`, no `allow-popups`.
-  await expect(probe('top')).toHaveText(/^blocked: SecurityError/);
-  await expect(probe('popup')).toHaveText('blocked: null');
+  test('by default the page’s script never runs, and nothing leaves over WebRTC', async ({
+    page,
+    isMobile,
+  }) => {
+    // One UDP port, so one project at a time; the browser behaviour is not viewport-dependent.
+    test.skip(isMobile, 'the UDP listener is a single port');
+    const udp = await udpListener();
+    try {
+      const { frame, content, pane } = await openProbe(page, isMobile);
+      await expect(frame).toHaveAttribute('sandbox', 'allow-scripts');
+      await expect(frame).toHaveAttribute('referrerpolicy', 'no-referrer');
+      await expect(frame).toHaveAttribute('src', `${SANDBOX}/sandbox/frame`);
+      // The shell's nested frame runs no script at all.
+      await expect(
+        page.frameLocator(`iframe[title="${FRAME_TITLE}"]`).locator('iframe'),
+      ).toHaveAttribute('sandbox', '');
+      // The marker every probe would have changed first, and every probe, untouched.
+      await page.waitForTimeout(2_500);
+      await expect(content.locator('#ran')).toHaveText('no script ran');
+      for (const id of ['fetch', 'cookie', 'storage', 'parent', 'top', 'popup', 'rtc']) {
+        await expect(content.locator(`#${id}`)).toHaveText('pending');
+      }
+      expect(udp.packets()).toBe(0);
+      // Off is said, with the risks of turning it on.
+      await expect(pane.getByRole('button', { name: 'Run scripts' })).toBeVisible();
+      await expect(pane.getByText(/through WebRTC/)).toBeVisible();
+    } finally {
+      udp.close();
+    }
+  });
 
-  // And from the outside: the app is where it was, and no window opened.
-  expect(page.url()).toBe(startedAt);
-  expect(popups).toEqual([]);
-  // The app's cookie is still there and was never the frame's to see.
-  expect(await page.evaluate(() => document.cookie)).toContain('e2e_app_secret=hunter2');
+  test('after Run scripts the page runs sealed, and without the WebRTC constructors', async ({
+    page,
+    context,
+    isMobile,
+  }) => {
+    const popups: string[] = [];
+    context.on('page', (opened) => popups.push(opened.url()));
+    // One UDP port, so the desktop run listens and the mobile run does not.
+    const udp = isMobile ? null : await udpListener();
+    const { pane } = await openProbe(page, isMobile);
+    const startedAt = page.url();
+    await pane.getByRole('button', { name: 'Run scripts' }).click();
+    const content = page.frameLocator(`iframe[title="${FRAME_TITLE}"]`).frameLocator('iframe');
+    await expect(
+      page.frameLocator(`iframe[title="${FRAME_TITLE}"]`).locator('iframe'),
+    ).toHaveAttribute('sandbox', 'allow-scripts');
+    const probe = (id: string) => content.locator(`#${id}`);
+    await expect(probe('ran')).toHaveText('script ran');
+
+    // `connect-src 'none'` on the shell, inherited by the content: even a fetch of a `data:` URL —
+    // no network, no CORS, no CORP — is refused, and the browser names the directive.
+    await expect(probe('fetch')).toHaveText(/^blocked: TypeError/);
+    await expect(probe('csp')).toHaveText('connect-src');
+    // Opaque origin (no `allow-same-origin`): no cookie jar, no storage, no reach into the app.
+    await expect(probe('cookie')).toHaveText(/^blocked: SecurityError/);
+    await expect(probe('storage')).toHaveText(/^blocked: SecurityError/);
+    await expect(probe('parent')).toHaveText(/^blocked: SecurityError/);
+    // No `allow-top-navigation`, no `allow-popups`.
+    await expect(probe('top')).toHaveText(/^blocked: SecurityError/);
+    await expect(probe('popup')).toHaveText('blocked: null');
+    // The prelude: the constructors are gone from the content's realm, so the probe's attempt threw.
+    // Defence in depth only — see the residual in this file's header.
+    await expect(probe('rtc')).toHaveText(/^blocked: TypeError/);
+    expect(
+      await frames(page).content.evaluate(() => [
+        typeof (window as unknown as Record<string, unknown>).RTCPeerConnection,
+        typeof (window as unknown as Record<string, unknown>).webkitRTCPeerConnection,
+        typeof (window as unknown as Record<string, unknown>).RTCDataChannel,
+      ]),
+    ).toEqual(['undefined', 'undefined', 'undefined']);
+    if (udp) {
+      // And the probe's own attempt sent nothing. (Without the prelude it sends its secret here.)
+      await page.waitForTimeout(2_000);
+      udp.close();
+      expect(udp.packets()).toBe(0);
+    }
+
+    // From the outside: the app is where it was, no window opened, its cookie never the frame's.
+    expect(page.url()).toBe(startedAt);
+    expect(popups).toEqual([]);
+    expect(await page.evaluate(() => document.cookie)).toContain('e2e_app_secret=hunter2');
+
+    // Never persisted: Stop, or loading the page again, is back to no script.
+    await pane.getByRole('button', { name: 'Stop scripts' }).click();
+    await expect(content.locator('#ran')).toHaveText('no script ran');
+    const again = await openProbe(page, isMobile);
+    await expect(again.content.locator('#ran')).toHaveText('no script ran');
+    await expect(again.pane.getByRole('button', { name: 'Run scripts' })).toBeVisible();
+  });
+});
+
+test('the frame cannot navigate itself off the sandbox origin', async ({ page, isMobile }) => {
+  const { pane } = await openProbe(page, isMobile);
+  await pane.getByRole('button', { name: 'Run scripts' }).click();
+  await expect(
+    page.frameLocator(`iframe[title="${FRAME_TITLE}"]`).frameLocator('iframe').locator('#ran'),
+  ).toHaveText('script ran');
+  const { shell, content } = frames(page);
+  // Somewhere that would answer, and is not the sandbox: the fixture service.
+  const elsewhere = 'http://127.0.0.1:4322/healthz';
+  const asked: string[] = [];
+  page.on('request', (request) => {
+    if (request.url().startsWith('http://127.0.0.1:4322')) asked.push(request.url());
+  });
+  // The content tries to navigate itself, then the shell's frame does: the shell's
+  // `default-src 'none'` bounds the first, the app's `frame-src` (the sandbox origin; in MSAL mode
+  // also the Entra authority) bounds the second.
+  await content.evaluate((url) => {
+    window.location.href = url;
+  }, elsewhere);
+  await shell.evaluate((url) => {
+    window.location.href = url;
+  }, elsewhere);
+  await page.waitForTimeout(1_000);
+  expect(asked).toEqual([]);
+  for (const frame of page.frames()) expect(frame.url()).not.toContain('127.0.0.1:4322');
 });
 
 test('the app takes a height from its frame and from nothing else', async ({ page, isMobile }) => {
   const { frame } = await openProbe(page, isMobile);
-  const inside = page.frameLocator(`iframe[title="${FRAME_TITLE}"]`);
-  await expect(inside.locator('#popup')).not.toHaveText('pending');
 
-  // The shell measured the written page and posted its height: well past the 320 px the spec
-  // started at, because the probe page is taller than that. The probe's own `navigate` message
-  // and its non-numeric height changed nothing.
-  await expect.poll(async () => (await frame.boundingBox())?.height ?? 0).toBeGreaterThan(600);
+  // The shell sized the content at the spec's height and posted its own: that is what the app took.
+  await expect.poll(async () => Math.round((await frame.boundingBox())?.height ?? 0)).toBe(520);
   const settled = (await frame.boundingBox())?.height ?? 0;
-  expect(settled).toBeLessThan(1_500);
 
-  // Forged: the app's own window, and a second sandbox frame — a real one, from the same sandbox
-  // origin, so it posts from `"null"` exactly as the probe's frame does and differs only in being
-  // a different window. (A `srcdoc` frame would prove nothing: the app's CSP blocks its script.)
+  // Forged: the app's own window, and the content of a second sandbox frame — a real one, from the
+  // same sandbox origin, so it posts from `"null"` exactly as the probe's frame does and differs
+  // only in being a different window.
   await page.evaluate((sandbox) => {
     (window as unknown as { forged: number }).forged = 0;
     window.addEventListener('message', (event) => {
@@ -142,7 +273,8 @@ test('the app takes a height from its frame and from nothing else', async ({ pag
       forger.contentWindow?.postMessage(
         {
           type: 'html',
-          html: "<script>parent.postMessage({ type: 'height', px: 3333 }, '*');</" + 'script>',
+          scripts: true,
+          html: "<script>top.postMessage({ type: 'height', px: 3333 }, '*');</" + 'script>',
         },
         '*',
       );

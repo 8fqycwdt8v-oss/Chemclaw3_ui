@@ -12,17 +12,23 @@
  *
  * ## The page
  *
- * A static shell with one inline script, under the contract's policy: no network at all
+ * A static shell with one inline script, under the contract's policy: no network the CSP governs
  * (`connect-src 'none'`, `default-src 'none'`), inline script and style only, images and fonts
  * only from `data:`/`blob:`, no form submissions, no `<base>`, and framable **only by the app
- * origin**. It accepts one message — `{type: "html", html}` from its parent window *and* from the
- * app origin injected below — writes that HTML into its own document, and from then on posts back
+ * origin**. It accepts one message — `{type: "html", html, scripts, height, title}` from its parent
+ * window *and* from the app origin injected below — and from then on posts back
  * `{type: "height", px}` and nothing else, debounced and clamped (`shared/sandbox.ts`).
  *
- * `document.write` rather than `innerHTML`, because script inserted by `innerHTML` does not run and
- * an interactive figure is the reason the kind exists. `document.open()` keeps the Document — and
- * so this response's CSP — and erases the window's listeners, which is what makes the handshake
- * one-shot: after the write there is no listener left to hand the frame a second document.
+ * ## Scripts are off unless a person turned them on (wave-3 amendment)
+ *
+ * The shell does not write the artefact into its own document. It puts it in a nested `srcdoc`
+ * frame with `sandbox=""` — no script at all — at the spec's height. Only a message carrying
+ * `scripts: true`, which the app sends after a click on "Run scripts", gets `sandbox="allow-scripts"`,
+ * and then with `RTC_PRELUDE` in front. The reason is measured, not argued: CSP does not govern
+ * WebRTC, so a scripted page can send data out over STUN/UDP whatever `connect-src` says, and can
+ * write the clipboard after one click. The nested frame inherits this response's CSP, and its
+ * navigations are bounded by this document's `default-src 'none'` (no `frame-src`), so it cannot
+ * navigate itself anywhere; the shell's own frame is bounded by the app's `frame-src`.
  *
  * No cookies are set, no credential is read, and nothing about a caller is logged beyond the
  * access line every response gets.
@@ -70,26 +76,46 @@ export function sandboxHeaders(appOrigin: string): Record<string, string> {
  */
 const scriptLiteral = (value: string): string => JSON.stringify(value).replace(/</g, '\\u003c');
 
+/**
+ * The prelude a **scripted** render puts in front of the artefact (wave-3 amendment): it removes the
+ * WebRTC constructors from the content's realm, because WebRTC is the one egress no CSP directive
+ * governs — measured, a page under this shell's `connect-src 'none'` sent UDP carrying data it had
+ * read to an arbitrary host through a STUN candidate, and Chromium ignores `webrtc 'block'`.
+ *
+ * **Defence in depth only, and bypassable.** It reaches the realm it runs in and no other: a page
+ * that creates a nested `srcdoc` frame gets a fresh realm whose constructors were never touched, and
+ * a scripted render inherits `allow-scripts` into it. The control that holds is the *default*: no
+ * script runs at all until a person presses "Run scripts" — and, for a deployment, the browser
+ * policy `WebRtcIPHandling=disable_non_proxied_udp` (README, "HTML sandbox").
+ */
+export const RTC_PRELUDE =
+  '<script>(function () {' +
+  "var names = ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel'];" +
+  'for (var i = 0; i < names.length; i++) {' +
+  'try { Object.defineProperty(window, names[i], { value: undefined, writable: false, configurable: false }); }' +
+  'catch (e) {}' +
+  '}' +
+  '})();</script>';
+
 /** The shell page itself, for one app origin. */
 export function renderSandboxShell(appOrigin: string): string {
   const script = `(function () {
   var APP = ${scriptLiteral(appOrigin)};
   var MIN = ${SANDBOX_MIN_HEIGHT};
   var MAX = ${SANDBOX_MAX_HEIGHT};
+  var PRELUDE = ${scriptLiteral(RTC_PRELUDE)};
   var up = window.parent;
   var done = false;
   var timer = 0;
   var last = -1;
-  function measure() {
-    var root = document.documentElement;
-    var px = root ? root.getBoundingClientRect().height : 0;
-    if (!px && document.body) px = document.body.scrollHeight;
-    return Math.min(MAX, Math.max(MIN, Math.ceil(px || 0)));
+  function clamp(px) {
+    return Math.min(MAX, Math.max(MIN, Math.ceil(typeof px === 'number' && isFinite(px) ? px : 0)));
   }
   function report() {
     clearTimeout(timer);
     timer = setTimeout(function () {
-      var px = measure();
+      var root = document.documentElement;
+      var px = clamp(root ? root.getBoundingClientRect().height : 0);
       if (px === last) return;
       last = px;
       up.postMessage({ type: 'height', px: px }, APP);
@@ -100,19 +126,27 @@ export function renderSandboxShell(appOrigin: string): string {
     var data = event.data;
     if (!data || data.type !== 'html' || typeof data.html !== 'string') return;
     done = true;
-    document.open();
-    document.write(data.html);
-    document.close();
-    if (typeof ResizeObserver === 'function' && document.documentElement) {
-      new ResizeObserver(report).observe(document.documentElement);
+    var scripts = data.scripts === true;
+    var html = data.html;
+    if (scripts) {
+      // After a doctype, never before it: a script ahead of the doctype would put the page in quirks mode.
+      var doctype = /^\\s*<!doctype[^>]*>/i.exec(html);
+      html = doctype ? doctype[0] + PRELUDE + html.slice(doctype[0].length) : PRELUDE + html;
     }
+    var frame = document.createElement('iframe');
+    frame.setAttribute('sandbox', scripts ? 'allow-scripts' : '');
+    frame.setAttribute('title', typeof data.title === 'string' ? data.title : 'Artefact content');
+    frame.style.cssText = 'display:block;border:0;width:100%;height:' + clamp(data.height) + 'px';
+    frame.srcdoc = html;
+    document.body.appendChild(frame);
+    if (typeof ResizeObserver === 'function') new ResizeObserver(report).observe(document.documentElement);
     report();
   });
 })();`;
   return (
-    '<!doctype html><html><head><meta charset="utf-8">' +
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
     '<meta name="viewport" content="width=device-width, initial-scale=1">' +
-    '<title>Artefact sandbox</title></head><body>' +
+    '<title>Artefact sandbox</title><style>html,body{margin:0;padding:0}</style></head><body>' +
     `<script>${script}</script></body></html>`
   );
 }

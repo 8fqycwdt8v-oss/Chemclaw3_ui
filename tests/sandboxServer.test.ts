@@ -22,7 +22,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
-import { renderSandboxShell, sandboxCsp } from '../server/sandbox.ts';
+import { RTC_PRELUDE, renderSandboxShell, sandboxCsp } from '../server/sandbox.ts';
 import { validateConfig, type BffConfig } from '../server/config.ts';
 
 const APP = 'http://127.0.0.1:4321';
@@ -75,6 +75,14 @@ describe('the sandbox listener', () => {
     expect(body).toContain(`var APP = ${JSON.stringify(APP)};`);
     expect(body).toContain('event.origin !== APP');
     expect(body).toContain('event.source !== up');
+    // Scripts off unless the app's message says otherwise (wave-3 amendment): the artefact goes in
+    // a nested frame whose sandbox is empty, and the WebRTC prelude rides only a scripted render.
+    // What the browser does with that is e2e/sandbox.spec.ts's to prove.
+    expect(body).toContain('var scripts = data.scripts === true;');
+    expect(body).toContain("frame.setAttribute('sandbox', scripts ? 'allow-scripts' : '');");
+    expect(body).toContain('frame.srcdoc = html;');
+    expect(body).not.toContain('document.write');
+    expect(RTC_PRELUDE).toMatch(/RTCPeerConnection.*webkitRTCPeerConnection.*RTCDataChannel/);
   });
 
   it('answers HEAD, refuses other methods, and serves nothing else at all', async () => {
@@ -177,6 +185,39 @@ describe('turning the sandbox on', () => {
     expect(frameSrc(msal.csp)).toBe(
       'frame-src https://login.microsoftonline.com https://sandbox.example',
     );
+  });
+
+  it('never lets the app frame anything but the sandbox and the sign-in authority', async () => {
+    // frame-src is what bounds the sandbox frame's own navigation (README, "HTML sandbox"): a page
+    // that navigates its frame elsewhere is refused only because nothing else is listed. Widening
+    // it — a wildcard, a scheme, `'self'`, a second host — re-opens that exit, so it fails here.
+    const sandbox = {
+      SANDBOX_ORIGIN: 'https://sandbox.example',
+      APP_ORIGIN: 'https://app.example',
+    };
+    const msal = {
+      AUTH_MODE: 'msal',
+      ENTRA_TENANT_ID: 't',
+      ENTRA_CLIENT_ID: 'c',
+      API_SCOPE: 'api://c/x',
+    };
+    const cases: [Record<string, string>, string[]][] = [
+      [{}, ["'none'"]],
+      [sandbox, ['https://sandbox.example']],
+      [msal, ['https://login.microsoftonline.com']],
+      [{ ...msal, ...sandbox }, ['https://login.microsoftonline.com', 'https://sandbox.example']],
+      [
+        { ...msal, ...sandbox, ENTRA_AUTHORITY: 'https://login.example.us/t' },
+        ['https://login.example.us', 'https://sandbox.example'],
+      ],
+    ];
+    for (const [env, allowed] of cases) {
+      const c = await configFrom(env);
+      const sources = frameSrc(c.csp).split(/\s+/).slice(1);
+      expect(sources, JSON.stringify(env)).toEqual(allowed);
+      // And no directive that would also govern frames by fallback says more.
+      expect(c.csp, JSON.stringify(env)).not.toMatch(/child-src|default-src [^;]*\*/);
+    }
   });
 
   it.each([

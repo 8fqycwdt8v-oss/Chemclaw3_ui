@@ -1,35 +1,48 @@
 /**
- * An `html` artefact (wave 3): agent-written HTML, run only in the sandbox origin's frame.
+ * An `html` artefact (wave 3): agent-written HTML, shown only in the sandbox origin's frame — and,
+ * unless a person asks, with **no script running at all** (the wave-3 amendment).
  *
  * Lazy (`ExhibitPane` imports it with `React.lazy`), because almost no conversation holds one.
  *
- * ## Two walls, and the fallback when there is only one
+ * ## The walls, and what they do not hold
  *
- * The frame is `sandbox="allow-scripts"` and nothing else — no `allow-same-origin`, so its document
- * has an opaque origin and cannot read this app's cookies, storage or DOM; no `allow-popups`,
- * `allow-top-navigation`, `allow-forms` or `allow-modals`. And it is loaded from a **different
- * origin** (`config.sandboxOrigin`, the BFF's second listener), whose shell page's CSP has
- * `connect-src 'none'`. Either wall alone would stop the obvious attack; both are there so that
- * losing one in some later edit is not the end of it. When this deployment has no sandbox origin,
- * or names the app's own, the artefact is shown as **escaped source** with a notice — never inline.
+ * The outer frame is `sandbox="allow-scripts"` and nothing else — no `allow-same-origin`, so its
+ * document has an opaque origin and cannot read this app's cookies, storage or DOM; no
+ * `allow-popups`, `allow-top-navigation`, `allow-forms` or `allow-modals`. It is loaded from a
+ * **different origin** (`config.sandboxOrigin`, the BFF's second listener) whose shell page's CSP has
+ * `connect-src 'none'`. The script it allows is the shell's own: the shell puts the artefact in a
+ * nested `srcdoc` frame with `sandbox=""`, so by default the artefact's own script never runs.
+ *
+ * **"No network" is not a claim this view makes.** CSP does not govern WebRTC: measured under this
+ * exact shell, a scripted page sent UDP to an arbitrary host through a STUN candidate, carrying
+ * data it read from the page, and Chromium ignores `webrtc 'block'`. A scripted page can also write
+ * the clipboard after one click. So scripts are off by default, and **Run scripts** — per view,
+ * never persisted, reset by a new revision or a remount — says those risks before it is pressed.
+ * A scripted render gets a prelude that removes the WebRTC constructors from the page's realm; that
+ * is defence in depth and bypassable (a nested `srcdoc` realm is untouched). What holds for a
+ * deployment is the browser policy `WebRtcIPHandling=disable_non_proxied_udp` (README).
+ *
+ * **Navigation is bounded, by `frame-src`.** The outer frame may only be navigated to an origin the
+ * app's own CSP lists in `frame-src` — the sandbox origin, plus the Entra authority in MSAL mode —
+ * so a page cannot carry data off by navigating its frame to another site (measured: self-navigation,
+ * meta refresh, anchor clicks and `data:`/`blob:` URLs are all refused). The nested content frame is
+ * bounded by the shell's `default-src 'none'`, which lists no frame source at all.
+ *
+ * When this deployment has no sandbox origin, or names the app's own, the artefact is shown as
+ * **escaped source** with a notice — never inline.
  *
  * ## The handshake
  *
  * The HTML is posted once, on the frame's first `load` — by then the shell's inline script has run
  * and is listening, so no "ready" message is needed and the frame posts back nothing but heights
  * (the contract's "only `{type: "height", px}`"). Target `'*'`, because an opaque origin has no
- * name to target: what that leaves is a frame that navigated *itself* elsewhere before loading,
- * and it is why the post happens on the first load only — a later load is the frame's own
- * navigation, and it is not handed the HTML again. Heights are accepted only from this frame's
- * window with the opaque origin, through `heightMessage`, which reads nothing else and clamps.
- *
- * What the sandbox does **not** stop is a page navigating its own frame to another site with data
- * in the URL; CSP has no directive that bounds a frame's own navigation in the browsers this app
- * supports. The data such a page could carry is the artefact's own HTML — which it already is.
+ * name to target; the post happens on the first load only. Heights are accepted only from this
+ * frame's window with the opaque origin, through `heightMessage`, which reads nothing else and
+ * clamps.
  */
 
-import { useEffect, useRef, useState } from 'react';
-import { ShieldCheck, TriangleAlert } from 'lucide-react';
+import { useEffect, useId, useRef, useState } from 'react';
+import { Play, ShieldCheck, Square, TriangleAlert } from 'lucide-react';
 import type { ExhibitView, HtmlSpec } from '../../../../shared/exhibits.ts';
 import {
   SANDBOX_FRAME_PATH,
@@ -38,19 +51,30 @@ import {
   usableSandboxOrigin,
 } from '../../../../shared/sandbox.ts';
 import { config } from '../../../env.ts';
+import { Button } from '@/components/ui/button';
 
 /** The notice shown in place of a preview — the contract's sentence, then what to do about it. */
 export const NO_SANDBOX_NOTICE = 'HTML preview needs a separate sandbox origin';
+
+/** What pressing "Run scripts" risks, said before it is pressed — the amendment's three residuals. */
+export const RUN_SCRIPTS_WARNING =
+  'Scripts written into this page will run. The sandbox keeps them away from this app and your ' +
+  'sign-in, but not everything: they can send data over the network through WebRTC, which no ' +
+  'content policy blocks; they can write to your clipboard after a click; and they can navigate ' +
+  'their own frame, bounded only by this app’s frame policy. Run them only if you trust this page.';
 
 /** The frame, and the two messages it is allowed to exchange with this page. */
 function SandboxFrame({
   origin,
   html,
+  scripts,
   initialHeight,
   title,
 }: {
   origin: string;
   html: string;
+  /** Whether the shell may give the content `allow-scripts`. A change is a new frame (`key`). */
+  scripts: boolean;
   initialHeight: number;
   title: string;
 }): React.JSX.Element {
@@ -84,7 +108,10 @@ function SandboxFrame({
       onLoad={() => {
         if (posted.current) return;
         posted.current = true;
-        frame.current?.contentWindow?.postMessage({ type: 'html', html }, '*');
+        frame.current?.contentWindow?.postMessage(
+          { type: 'html', html, scripts, height: initialHeight, title: `${title} — content` },
+          '*',
+        );
       }}
     />
   );
@@ -93,6 +120,12 @@ function SandboxFrame({
 export function HtmlView({ view, spec }: { view: ExhibitView; spec: HtmlSpec }): React.JSX.Element {
   const origin = usableSandboxOrigin(config.sandboxOrigin, window.location.origin);
   const name = view.title || 'HTML artefact';
+  // Which revision a person chose to run, here, in this mount — never stored anywhere, so a new
+  // revision, another artefact or a reload is back to scripts off.
+  const shown = `${view.exhibit_id}:${view.revision}`;
+  const [ranFor, setRanFor] = useState<string | null>(null);
+  const scripts = ranFor === shown;
+  const warningId = useId();
 
   if (!origin) {
     return (
@@ -123,18 +156,42 @@ export function HtmlView({ view, spec }: { view: ExhibitView; spec: HtmlSpec }):
   return (
     <div className="flex flex-col gap-2">
       <SandboxFrame
-        // A new revision is a new frame: the shell takes one document per load, by design.
-        key={`${view.exhibit_id}:${view.revision}`}
+        // A new revision, or a change of mode, is a new frame: the shell takes one document per load.
+        key={`${shown}:${scripts ? 'scripts' : 'static'}`}
         origin={origin}
         html={spec.html}
+        scripts={scripts}
         initialHeight={clampHeight(spec.height) ?? 480}
         title={`${name} — sandboxed HTML preview`}
       />
       <p className="flex items-center gap-1.5 text-2xs text-ink-muted">
         <ShieldCheck aria-hidden className="size-3.5 shrink-0" />
-        Written by {view.author_kind === 'agent' ? 'the agent' : view.author || 'a person'}. Runs in
-        an isolated frame with no network access and no access to this app or your sign-in.
+        Written by {view.author_kind === 'agent' ? 'the agent' : view.author || 'a person'}. Shown
+        in an isolated frame with no access to this app or your sign-in
+        {scripts ? '; its scripts are running.' : ', with its scripts turned off.'}
       </p>
+      {scripts ? (
+        <Button variant="outline" size="xs" className="self-start" onClick={() => setRanFor(null)}>
+          <Square aria-hidden className="size-3.5" />
+          Stop scripts
+        </Button>
+      ) : (
+        <div className="flex flex-col gap-1">
+          <p id={warningId} className="text-2xs text-ink-muted">
+            {RUN_SCRIPTS_WARNING}
+          </p>
+          <Button
+            variant="outline"
+            size="xs"
+            className="self-start"
+            aria-describedby={warningId}
+            onClick={() => setRanFor(shown)}
+          >
+            <Play aria-hidden className="size-3.5" />
+            Run scripts
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

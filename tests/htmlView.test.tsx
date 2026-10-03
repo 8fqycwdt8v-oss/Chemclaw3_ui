@@ -14,7 +14,11 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { HtmlView, NO_SANDBOX_NOTICE } from '../src/components/exhibits/views/HtmlView.tsx';
+import {
+  HtmlView,
+  NO_SANDBOX_NOTICE,
+  RUN_SCRIPTS_WARNING,
+} from '../src/components/exhibits/views/HtmlView.tsx';
 import { config } from '../src/env.ts';
 import {
   SANDBOX_MAX_HEIGHT,
@@ -63,17 +67,30 @@ describe('without a sandbox origin', () => {
 
 describe('with a sandbox origin', () => {
   /** Render, and hand back the frame with its window's `postMessage` recorded. */
-  function framed() {
-    config.sandboxOrigin = SANDBOX;
-    render(<HtmlView view={view} spec={spec} />);
+  /** The frame on screen now, with its window's `postMessage` recorded into `sent`. */
+  function grab(sent: [unknown, string][]) {
     const frame = screen.getByTitle('Dose–response — sandboxed HTML preview') as HTMLIFrameElement;
-    const sent: [unknown, string][] = [];
     const frameWindow = {
       postMessage: (data: unknown, target: string) => sent.push([data, target]),
     } as unknown as Window;
     Object.defineProperty(frame, 'contentWindow', { value: frameWindow, configurable: true });
-    return { frame, frameWindow, sent };
+    return { frame, frameWindow };
   }
+
+  function framed(shown: ExhibitView = view) {
+    config.sandboxOrigin = SANDBOX;
+    const rendered = render(<HtmlView view={shown} spec={spec} />);
+    const sent: [unknown, string][] = [];
+    return { ...grab(sent), sent, rendered };
+  }
+
+  const message = (scripts: boolean) => ({
+    type: 'html',
+    html: HTML,
+    scripts,
+    height: 300,
+    title: 'Dose–response — sandboxed HTML preview — content',
+  });
 
   it('frames the sandbox origin with allow-scripts and nothing else', () => {
     const { frame } = framed();
@@ -95,10 +112,53 @@ describe('with a sandbox origin', () => {
   it('hands the frame its HTML once, on the first load only', () => {
     const { frame, sent } = framed();
     fireEvent.load(frame);
-    expect(sent).toEqual([[{ type: 'html', html: HTML }, '*']]);
+    // Scripts off: the shell will put it in a `sandbox=""` frame (wave-3 amendment).
+    expect(sent).toEqual([[message(false), '*']]);
     // A second load is the frame navigating itself: it is not handed the HTML again.
     fireEvent.load(frame);
     expect(sent).toHaveLength(1);
+  });
+
+  it('runs scripts only when asked, says what that risks, and forgets it on a new revision', () => {
+    const { frame, sent, rendered } = framed();
+    fireEvent.load(frame);
+    const run = screen.getByRole('button', { name: 'Run scripts' });
+    // The warning is the button's description, and it names all three residual risks.
+    const warning = document.getElementById(run.getAttribute('aria-describedby') ?? '');
+    expect(warning?.textContent).toBe(RUN_SCRIPTS_WARNING);
+    expect(RUN_SCRIPTS_WARNING).toMatch(/WebRTC/);
+    expect(RUN_SCRIPTS_WARNING).toMatch(/clipboard/);
+    expect(RUN_SCRIPTS_WARNING).toMatch(/navigate/);
+
+    fireEvent.click(run);
+    // A new frame (the shell takes one document per load), handed the HTML with scripts on.
+    const scripted: [unknown, string][] = [];
+    const again = grab(scripted);
+    expect(again.frame).not.toBe(frame);
+    fireEvent.load(again.frame);
+    expect(scripted).toEqual([[message(true), '*']]);
+    expect(sent).toHaveLength(1);
+
+    // A new revision of the same artefact is back to scripts off — the choice is not carried.
+    rendered.rerender(<HtmlView view={{ ...view, revision: 3, head_revision: 3 }} spec={spec} />);
+    const next: [unknown, string][] = [];
+    fireEvent.load(grab(next).frame);
+    expect(next).toEqual([[message(false), '*']]);
+    expect(screen.getByRole('button', { name: 'Run scripts' })).toBeTruthy();
+  });
+
+  it('never stores the choice: a remount is scripts off', () => {
+    const first = framed();
+    fireEvent.click(screen.getByRole('button', { name: 'Run scripts' }));
+    first.rendered.unmount();
+    const { frame, sent } = framed();
+    fireEvent.load(frame);
+    expect(sent).toEqual([[message(false), '*']]);
+  });
+
+  it('says it is no network sandbox nowhere', () => {
+    framed();
+    expect(document.body.textContent).not.toMatch(/no network/i);
   });
 
   it('takes a height only from its own frame, from the opaque origin, and clamps it', () => {

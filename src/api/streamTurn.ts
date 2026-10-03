@@ -38,6 +38,9 @@ import { readEventStream } from '../lib/sse.ts';
  */
 export const TURN_STALL_MS = 90_000;
 
+/** The header a watch response names its turn in — see `StreamTurnOptions.onWatching`. */
+export const TURN_CORRELATION_HEADER = 'x-chemclaw-turn-correlation-id';
+
 /**
  * Error codes that qualify the answer still to come, rather than replacing it.
  *
@@ -90,6 +93,15 @@ export interface StreamTurnOptions {
    * (`followSharedConversation`, Chemclaw3_ui #130): the same route admits any participant.
    */
   watch?: boolean;
+  /**
+   * With `watch`: which turn the service says this is a view of, `''` when it does not say.
+   *
+   * Read off `X-Chemclaw-Turn-Correlation-Id` (Chemclaw3 `D-2026-10-03-an-unload-stop-waits-for-a-reload`),
+   * which is the id the turn's sender's own POST carried. Not `onCorrelationId`: a watch response's
+   * `X-Chemclaw-Correlation-Id` names the *watch request*. Called before the first frame, so a
+   * caller that finds another participant's turn there can abort before rendering any of it.
+   */
+  onWatching?: (turnCorrelationId: string) => void;
   signal: AbortSignal;
   /** Resolves to `null` in dev-auth mode, in which case no Authorization header is sent. */
   getToken: () => Promise<string | null>;
@@ -233,6 +245,7 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
   // between us and the service swallowed the stream — the turn is still the service's, and
   // recovery is still the right answer for it.
   opts.onAccepted?.();
+  if (opts.watch) opts.onWatching?.(res.headers.get(TURN_CORRELATION_HEADER)?.trim() ?? '');
 
   // Known before the first frame, so every error below can quote it — including the ones that
   // happen when no frame ever arrives.

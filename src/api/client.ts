@@ -1187,15 +1187,23 @@ export const api = {
    * page. It is not the default because `keepalive` requests are capped at 64 KiB by the browser
    * and share a small per-page budget with the log sink's own final batch, and because every other
    * caller is alive to await the answer.
+   *
+   * `reason: 'unload'` is the same caller saying *why*: the page is being discarded, which a
+   * reload and a closed tab both are, and the browser cannot tell them apart. The service defers
+   * such a stop for a grace window and cancels it if this person's reloaded page reattaches to the
+   * turn (Chemclaw3 `D-2026-10-03-an-unload-stop-waits-for-a-reload`), answering
+   * `{stopped: false, deferred: true}`. A service older than that ignores the query parameter and
+   * stops at once, as it always did — so sending it is safe before the service understands it.
    */
   async stopTurn(
     sessionId: string,
     getToken: TokenGetter,
-    options: { keepalive?: boolean } = {},
+    options: { keepalive?: boolean; reason?: 'unload' } = {},
   ): Promise<boolean> {
+    const reason = options.reason ? `?reason=${encodeURIComponent(options.reason)}` : '';
     try {
-      await request<{ stopped: boolean }>(
-        `/sessions/${encodeURIComponent(sessionId)}/turn/stop`,
+      await request<{ stopped: boolean; deferred?: boolean }>(
+        `/sessions/${encodeURIComponent(sessionId)}/turn/stop${reason}`,
         getToken,
         {
           method: 'POST',

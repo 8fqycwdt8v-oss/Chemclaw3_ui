@@ -942,7 +942,19 @@ export interface ChatState {
    * Keyed on the flag still being set, so a newer turn that has taken this message's place is
    * left alone — the same ownership rule the rest of the recovery path follows.
    */
-  giveUpOnInterruptedTurn: (conversationId: string, messageId: string) => void;
+  giveUpOnInterruptedTurn: (
+    conversationId: string,
+    messageId: string,
+    /** What the bubble now says, when the reason it ended is known better than "interrupted". */
+    why?: string,
+  ) => void;
+  /**
+   * A reload-interrupted turn is still running and this page has reattached to it: show it as
+   * streaming again (Chemclaw3_ui#131) — or, with `false`, the follow ended without an answer and
+   * it goes back to what `partialize` left. `interruptedByReload` stays set until the turn settles,
+   * so a second reload mid-follow is recovered the same way as the first.
+   */
+  followInterruptedTurn: (conversationId: string, messageId: string, following: boolean) => void;
   setJobStreamsThrottled: (throttled: boolean) => void;
   setJobStreamsThrottledElsewhere: (throttled: boolean) => void;
   setJobStreamFailing: (sessionId: string, failing: boolean) => void;
@@ -2150,13 +2162,31 @@ export const useChatStore = create<ChatState>()(
         );
       },
 
-      giveUpOnInterruptedTurn(conversationId, messageId) {
+      giveUpOnInterruptedTurn(conversationId, messageId, why) {
         set((s) => {
           const message = s.conversations[conversationId]?.messages.find((m) => m.id === messageId);
           if (!message || message.role !== 'assistant' || !message.interruptedByReload) return {};
           return updateAssistant(s, conversationId, messageId, (m) => ({
             ...m,
             interruptedByReload: false,
+            ...(why
+              ? { status: 'aborted' as const, error: { kind: 'stream' as const, message: why } }
+              : {}),
+          }));
+        });
+      },
+
+      followInterruptedTurn(conversationId, messageId, following) {
+        set((s) => {
+          const message = s.conversations[conversationId]?.messages.find((m) => m.id === messageId);
+          if (!message || message.role !== 'assistant' || !message.interruptedByReload) return {};
+          return updateAssistant(s, conversationId, messageId, (m) => ({
+            ...m,
+            status: following ? ('streaming' as const) : ('aborted' as const),
+            stalled: false,
+            error: following
+              ? null
+              : { kind: 'stream' as const, message: 'Interrupted by a page reload.' },
           }));
         });
       },

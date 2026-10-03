@@ -131,13 +131,45 @@ describe('a calculation file (the C4 byte route)', () => {
         }),
     );
     restore = stub.restore;
-    const file = await api.getCalcArtifact('xtb_opt@6.7.1:ab:cd#xtbopt.xyz', auth);
+    const file = await api.getCalcArtifact(
+      'xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0:ab:cd#xtbopt.xyz',
+      auth,
+    );
     expect(stub.calls[0]!.url).toBe(
-      '/api/calc-artifacts/content?ref=xtb_opt%406.7.1%3Aab%3Acd%23xtbopt.xyz',
+      '/api/calc-artifacts/content?ref=xtb_opt%40gfn2%2Bxtb%2Bxtb-6.7.1%2Ftblite-0.4.0%3Aab%3Acd%23xtbopt.xyz',
     );
     expect(file.filename).toBe('xtbopt.xyz');
     expect(file.mediaType).toBe('chemical/x-xyz');
     expect(await file.blob.text()).toMatch(/^3\n/);
+  });
+
+  it('asks for a real calc key, slashes and all, encoded whole', async () => {
+    const stub = stubFetch(() => new Response('x', { status: 200 }));
+    restore = stub.restore;
+    const key = 'xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0:abc:def';
+    await api.getCalcArtifact(`${key}#xtbopt.xyz`, auth);
+    expect(stub.calls[0]!.url).toBe(
+      `/api/calc-artifacts/content?ref=${encodeURIComponent(`${key}#xtbopt.xyz`)}`,
+    );
+    expect(stub.calls[0]!.url).toContain('%2F');
+  });
+
+  it('calls a ref that is not one "not a calculation file", never "no longer stored"', async () => {
+    // Refused before asking: no request is made for a ref the BFF would not forward.
+    const stub = stubFetch(() => json(200, {}));
+    restore = stub.restore;
+    for (const bad of ['xtbopt.xyz', 'k@1:a:b#', 'a b#x', 'k#..']) {
+      const err = (await api.getCalcArtifact(bad, auth).catch((e: unknown) => e)) as Error;
+      expect(err.message, bad).toMatch(/not a calculation file/);
+      expect(err.message).not.toMatch(/no longer stored/);
+    }
+    expect(stub.calls).toHaveLength(0);
+    stub.restore();
+    // And when the BFF itself refuses (its bare `not found`), the same sentence.
+    const refused = stubFetch(() => json(404, { detail: 'not found' }));
+    restore = refused.restore;
+    const err = (await api.getCalcArtifact('k@1:a:b#x', auth).catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(/not a calculation file/);
   });
 
   it('names the file after the ref when the service sent no disposition', async () => {

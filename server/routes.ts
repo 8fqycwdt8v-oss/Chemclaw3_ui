@@ -13,6 +13,8 @@
  * Route list verified against 8fqycwdt8v-oss/Chemclaw3 @ d5ed9e3 (service/app.py).
  */
 
+import { CALC_ARTIFACT_REF } from '../shared/exhibitConstants.ts';
+
 const SID = '([0-9a-f]{32})';
 
 /**
@@ -163,26 +165,13 @@ const XID = '(xb-[0-9a-f]{16})';
 const FMT = '(md|csv|smi|xyz)';
 
 /**
- * A calculation by-product's reference, `<calc_key>#<name>` — `ArtifactRef.as_str()` upstream.
- *
- * The one id on this whitelist that travels in the **query string** (`GET /calc-artifacts/content
- * ?ref=…`), because its `#` cannot be a path segment and its calc key is the service's own
- * punctuation (`calc_type@version:input_hash:params_hash`). The resolver is handed only the
- * pathname, so a route that forwards a query has to say what that query may hold — otherwise the
- * whitelist would be a path filter with an open side door. This is that statement.
- *
- * As tight as the shape allows without restating another repository's numbers: the key is the
- * alphabet its four parts are written in, the name is a producer's filename (`xtbopt.xyz`,
- * `hessian`), and neither may be only dots. The lengths bound the URL, not the service's fields.
- */
-export const CALC_ARTIFACT_REF = /^[A-Za-z0-9._+@:-]{1,512}#(?!\.+$)[A-Za-z0-9._+-]{1,128}$/;
-
-/**
  * Whether a query string is exactly one `ref` that is a calc artifact reference — nothing else.
  * A second `ref`, an extra key or a malformed escape is refused, because each is a request this
  * app never makes and a forwarded one would be the service's to interpret.
  */
 function onlyCalcArtifactRef(search: string): boolean {
+  // `CALC_ARTIFACT_REF` (in `shared/`, so the client checks a ref against it before it asks) is
+  // the one statement of what this query may hold: any key but whitespace and `#`, a strict name.
   let params: URLSearchParams;
   try {
     // `URLSearchParams` decodes leniently; a malformed escape is refused by asking first.

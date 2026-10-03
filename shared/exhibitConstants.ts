@@ -52,3 +52,22 @@ export const KIND_LABEL: Readonly<Record<string, string>> = {
   link: 'Link',
   geometry: '3D structure',
 };
+
+/**
+ * A calculation by-product's reference, `<calc_key>#<name>` — `ArtifactRef.as_str()` upstream.
+ *
+ * The one id the BFF whitelist reads out of a **query string** (`GET /calc-artifacts/content
+ * ?ref=…`, `server/routes.ts`), because its `#` cannot be a path segment. Here rather than there
+ * so the client holds a ref to the same rule before it asks (`api.getCalcArtifact`), and says
+ * "not a calculation file" instead of reporting a refused ref as an evicted one.
+ *
+ * **The key is anything but whitespace and `#`.** The first version allowed the alphabet a key
+ * *looked* written in, and refused every real one: the calc server's engine version is
+ * `tblite-{v}/rdkit-{v}/scipy-{v}/{rev}`, so a stored key reads like
+ * `xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0:abc:def` — slashes included (the frozen contract's
+ * wave-2 amendment). The key travels encoded inside one query parameter and the service resolves
+ * it by lookup, so a `/` in it reaches no path. The **name** stays strict — a producer's filename
+ * (`xtbopt.xyz`, `hessian`), never only dots — because it becomes the download's filename. The
+ * lengths bound the URL, not the service's fields.
+ */
+export const CALC_ARTIFACT_REF = /^[^\s#]{1,512}#(?!\.+$)[A-Za-z0-9._+-]{1,128}$/;

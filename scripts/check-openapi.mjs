@@ -119,7 +119,7 @@ const SAMPLES = [
   'skill', // what a behaviour proposal proposes — the other value is `profile`
   'xb-0123456789abcdef', // an artefact (exhibit) id: `xb-` plus sixteen lowercase hex
   'csv', // an artefact export format, the `{fmt}` of `export.{fmt}` — one of md, csv, smi, xyz
-  'xtb_opt@6.7.1:0123abcd:89efcdab#xtbopt.xyz', // a calc artifact ref, `<calc_key>#<name>`
+  'xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0:0123abcd:89efcdab#xtbopt.xyz', // a calc artifact ref, real-shaped
 ];
 
 /**
@@ -129,7 +129,7 @@ const SAMPLES = [
  */
 const QUERY_SAMPLES = [
   '',
-  `?ref=${encodeURIComponent('xtb_opt@6.7.1:0123abcd:89efcdab#xtbopt.xyz')}`,
+  `?ref=${encodeURIComponent('xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0:0123abcd:89efcdab#xtbopt.xyz')}`,
 ];
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];

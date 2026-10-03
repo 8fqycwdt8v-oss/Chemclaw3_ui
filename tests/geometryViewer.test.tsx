@@ -219,25 +219,34 @@ describe('a geometry artefact in the pane', () => {
     );
     restore = stub.restore;
     const view = geometryView({
-      source: { calc_key: 'xtb_opt@6.7.1:abc123:def456', name: 'xtbopt.xyz' },
+      source: {
+        calc_key: 'xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0:abc123:def456',
+        name: 'xtbopt.xyz',
+      },
     });
     render(<GeometryView view={view} spec={view.spec} />);
     await screen.findByRole('img');
     expect(stub.calls[0]!.url).toBe(
-      '/api/calc-artifacts/content?ref=xtb_opt%406.7.1%3Aabc123%3Adef456%23xtbopt.xyz',
+      '/api/calc-artifacts/content?ref=xtb_opt%40gfn2%2Bxtb%2Bxtb-6.7.1%2Ftblite-0.4.0%3Aabc123%3Adef456%23xtbopt.xyz',
     );
     // The ref is shown, and the file itself can be taken away (C4).
-    expect(screen.getByText('xtb_opt@6.7.1:abc123:def456#xtbopt.xyz')).toBeTruthy();
+    expect(
+      screen.getByText('xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0:abc123:def456#xtbopt.xyz'),
+    ).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Download xtbopt.xyz' })).toBeTruthy();
   });
 
   it('says an evicted file is gone, rather than drawing anything', async () => {
     const stub = stubFetch(
       () =>
-        new Response(JSON.stringify({ detail: 'not found' }), {
-          status: 404,
-          headers: { 'content-type': 'application/json' },
-        }),
+        // The service's own 404 (`routes/calc_artifacts.py`), not the BFF's bare `not found`.
+        new Response(
+          JSON.stringify({ detail: "'xtb_opt@6.7.1:a:b#gone.xyz' is no longer stored" }),
+          {
+            status: 404,
+            headers: { 'content-type': 'application/json' },
+          },
+        ),
     );
     restore = stub.restore;
     const view = geometryView({ source: { calc_key: 'xtb_opt@6.7.1:a:b', name: 'gone.xyz' } });

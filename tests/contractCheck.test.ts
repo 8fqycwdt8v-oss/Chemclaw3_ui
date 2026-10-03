@@ -109,13 +109,13 @@ describe('every story this document marks SERVED names a route the BFF can reach
     .filter((line) => line.startsWith('| **') && line.includes('`SERVED`'));
 
   /** Every concrete path a documented template could produce, over every combination of samples. */
-  const concrete = (template: string): string[] =>
+  const concrete = (template: string, encode: (sample: string) => string = (x) => x): string[] =>
     template
       .split(/(\{[^}]+\})/)
       .reduce<string[]>(
         (paths, part) =>
           /^\{[^}]+\}$/.test(part)
-            ? paths.flatMap((prefix) => SAMPLES.map((sample) => prefix + sample))
+            ? paths.flatMap((prefix) => SAMPLES.map((sample) => prefix + encode(sample)))
             : paths.map((prefix) => prefix + part),
         [''],
       );
@@ -136,7 +136,10 @@ describe('every story this document marks SERVED names a route the BFF can reach
       const unreachable = claimed.filter(
         ([method, path, query]) =>
           !concrete(path).some((p) =>
-            concrete(query).some((q) => resolveRoute(method, `/api${p}`, q) !== null),
+            // Encoded, as the client sends it: a real calc key's `+` is a space otherwise.
+            concrete(query, encodeURIComponent).some(
+              (q) => resolveRoute(method, `/api${p}`, q) !== null,
+            ),
           ),
       );
       expect(

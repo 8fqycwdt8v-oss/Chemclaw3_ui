@@ -576,7 +576,13 @@ describe('proxy route whitelist', () => {
   describe('calculation files (the C4 byte route)', () => {
     const PATH = '/api/calc-artifacts/content';
     const ref = (value: string): string => `?ref=${encodeURIComponent(value)}`;
-    const KEY = 'xtb_opt@6.7.1:0123abcd:89efcdab';
+    /**
+     * A key shaped as the calc server writes one: its engine version is
+     * `tblite-{v}/rdkit-{v}/scipy-{v}/{rev}`, so a real key carries `/` and `+`. The first pattern
+     * here allowed only the alphabet a key looked written in and refused every real one.
+     */
+    const KEY =
+      'xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0/rdkit-2025.03.4/scipy-1.15.2/a1b2c3d:abc:def';
 
     it('forwards one encoded `ref` naming `<calc_key>#<name>`, query and all', () => {
       const resolved = resolveRoute('GET', PATH, ref(`${KEY}#xtbopt.xyz`));
@@ -589,6 +595,20 @@ describe('proxy route whitelist', () => {
       expect(
         resolveRoute('GET', PATH, ref('crest@3.0.2+gfn2:aa:bb#crest_conformers.xyz')),
       ).not.toBeNull();
+    });
+
+    it('takes a real calc key — slashes, plusses, at-signs and colons — and refuses whitespace or a second `#`', () => {
+      for (const key of [
+        KEY,
+        'xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0:abc:def',
+        'crest@3.0.2:aa:bb',
+        'k',
+      ]) {
+        expect(resolveRoute('GET', PATH, ref(`${key}#xtbopt.xyz`)), key).not.toBeNull();
+      }
+      for (const key of ['a b', 'a\tb', 'a\nb', 'a#b', '']) {
+        expect(resolveRoute('GET', PATH, ref(`${key}#xtbopt.xyz`)), JSON.stringify(key)).toBeNull();
+      }
     });
 
     it('is not whitelisted at all without exactly that query', () => {

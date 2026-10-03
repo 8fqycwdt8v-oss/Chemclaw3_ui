@@ -368,7 +368,7 @@ npm run check:standalone# dist/server.js runs with no node_modules, as the image
 npm run check:no-dev-auth
 npm run check:serving   # the four promises a running UI makes, against any base URL
 npm run test:e2e        # Playwright — layout, focus, keyboard, theme, mobile drawer
-npm run test:e2e:oidc-mock  # real MSAL sign-in against Chemclaw3_mock's tenant (not in the gate)
+npm run test:e2e:oidc-mock  # real MSAL sign-in against Chemclaw3_mock's tenant (CI's oidc-mock job)
 ```
 
 `npm run smoke` and `npm run check:openapi` are deliberately **not** in the gate: both need a live
@@ -423,9 +423,14 @@ signs alice in in one browser context and bob in another through the tenant's lo
 checks that each page shows its own person, that each sends a bearer naming its own person, and
 that `e2e/oidc-upstream.ts` — which validates every forwarded bearer with Chemclaw3's four checks
 before handing the request to the fixture — saw both of them and refused nothing. A second test
-signs out through the tenant's end-session endpoint and checks the next sign-in asks again. It
-needs a sibling Chemclaw3_mock checkout with its venv (`MOCK_DIR`, default `../Chemclaw3_mock`)
-and `npm run build` first, so it is not in the gate (`ISSUES.md` Issue 23).
+signs out through the tenant's end-session endpoint and checks the next sign-in asks again. Three
+more sign in from `/`, from a deep link and from a signed-out `/open/<id>`, and count: one code
+back on `/auth/callback`, one redeemed, and a URL that stops moving on the person's own
+conversation — the sign-in loop #126 shipped made 534 navigations and redeemed nothing. It needs a
+Chemclaw3_mock checkout with its venv (`MOCK_DIR`, default `../Chemclaw3_mock`;
+`npm run provision:mock-tenant` makes the venv) and `npm run build` first, so it is not
+in `npm run ci` (`ISSUES.md` Issue 23) — it is the workflow's own `oidc-mock` job instead, on every
+pull request.
 
 `test:e2e` runs the real BFF against `e2e/fixture-service.ts`, which emits SSE frames with real
 gaps between them. Stubbing the network inside the page would hand the whole body over at once and

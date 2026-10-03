@@ -16,9 +16,10 @@
  *     turn ends, and when the line says a turn it saw running has stopped. A merge never touches a
  *     turn this browser holds — least of all one it is streaming.
  *  2. **Follows somebody else's running turn live.** It reads the session's line
- *     (`GET /sessions/{id}/queue`) every `QUEUE_POLL_MS`, and when a turn is running that is not
- *     this browser's, attaches a watcher and renders the answer as it streams, in a placeholder
- *     the re-read replaces with the stored question and answer, attributed to their sender.
+ *     (`GET /sessions/{id}/queue`) every `config.sharedPollMs`, and when a turn is running that is
+ *     not this browser's, attaches a watcher and renders the answer as it streams, in a
+ *     placeholder the re-read replaces with the stored question and answer, attributed to their
+ *     sender.
  *
  * **Bounded on purpose.** One watcher per open conversation; none while this browser has its own
  * turn running there (its own stream already carries everything, and a second view would be a
@@ -38,6 +39,7 @@ import { api } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { streamTurn } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
+import { config } from '../env.ts';
 import { logger } from '../lib/logger.ts';
 import { announceStatus } from './announce.ts';
 import { useChatStore } from './chatStore.ts';
@@ -45,8 +47,10 @@ import { createTokenBatcher } from './sendMessage.ts';
 import { transcriptToMessages } from './transcript.ts';
 
 /** How often an open shared conversation asks whether somebody's turn is running. The cost is one
- *  small GET; the delay is how long after a colleague presses Send their turn appears here. */
-export const QUEUE_POLL_MS = 5_000;
+ *  small GET; the delay is how long after a colleague presses Send their turn appears here. The
+ *  deployment's (`SHARED_POLL_MS`, through `/config.js`), read per tick rather than captured at
+ *  import, so it is the value the page was served. */
+const queuePollMs = (): number => config.sharedPollMs;
 
 /** How long the watcher stands down after the service refused it or had nothing to show. */
 export const REFUSED_BACKOFF_MS = 15_000;
@@ -250,7 +254,7 @@ export function followSharedConversation(conversationId: string, auth: AuthProvi
     timer = setTimeout(() => {
       timer = null;
       void poll();
-    }, QUEUE_POLL_MS);
+    }, queuePollMs());
   };
 
   const poll = async (): Promise<void> => {

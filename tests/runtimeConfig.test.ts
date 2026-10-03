@@ -59,6 +59,8 @@ const ENV: Record<string, string> = {
   // seam reads as the default rather than as this.
   CLIENT_LOG_LEVEL: 'debug',
   MAX_MESSAGE_CHARS: '250000',
+  // Not the 5 s default, so a cadence that failed to cross reads as the default.
+  SHARED_POLL_MS: '1500',
   // Wave 3: both set and different, so the sandbox is on and its origin crosses the seam.
   SANDBOX_ORIGIN: 'https://sandbox-from-the-server.example',
   APP_ORIGIN: 'https://app-from-the-server.example',
@@ -138,6 +140,9 @@ describe('what /config.js actually delivers', () => {
     // (`CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`), so one that fails to cross leaves the composer
     // refusing at the built-in default while the service would have accepted the message.
     expect(client.maxMessageChars).toBe(250_000);
+    // The line's cadence: one that failed to cross reads as the 5 s default, and a deployment
+    // that tuned it would find every shared conversation still polling at the old rate.
+    expect(client.sharedPollMs).toBe(1_500);
     // Wave 3: an origin that failed to cross reads as `''`, which shows every HTML artefact as
     // source — a working-looking downgrade nobody would trace to this seam.
     expect(client.sandboxOrigin).toBe('https://sandbox-from-the-server.example');
@@ -173,6 +178,7 @@ describe('what /config.js actually delivers', () => {
       reviewerRoles: [],
       logLevel: 'info',
       maxMessageChars: 100_000,
+      sharedPollMs: 5_000,
       sandboxOrigin: '',
     });
 

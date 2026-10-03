@@ -39,6 +39,9 @@ export interface RuntimeConfig {
   logLevel: 'silent' | 'error' | 'warn' | 'info' | 'debug';
   /** The service's message-length cap, so the composer refuses where the service refuses. */
   maxMessageChars: number;
+  /** How often an open shared conversation reads its session's line, in ms — `SHARED_POLL_MS`.
+   *  See `sharedPollMs` in src/env.ts. */
+  sharedPollMs: number;
   /**
    * The HTML sandbox's origin (wave 3), or `''` when the second listener is not running — so the
    * SPA never frames an origin this process is not serving. See `sandboxOrigin` in src/env.ts.
@@ -66,6 +69,7 @@ export function runtimeConfig(): RuntimeConfig {
     reviewerRoles: cfg.reviewerRoles,
     logLevel: clientLogLevel(),
     maxMessageChars: cfg.maxMessageChars,
+    sharedPollMs: cfg.sharedPollMs,
     sandboxOrigin: cfg.sandboxEnabled ? cfg.sandboxOrigin : '',
   };
 }

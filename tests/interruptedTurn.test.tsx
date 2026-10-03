@@ -75,6 +75,7 @@ let restore: (() => void) | null = null;
 beforeEach(() => {
   cleanup();
   useChatStore.setState({
+    viewer: null,
     conversations: {},
     order: [],
     activeId: null,
@@ -341,5 +342,51 @@ describe('the interrupted answer on screen', () => {
     expect(retryQuestionOf(messages, 1)).toBe('asked once');
     expect(retryQuestionOf(messages, 3)).toBeUndefined();
     expect(retryQuestionOf(messages, 0)).toBeUndefined();
+  });
+});
+
+describe('in a shared conversation, Retry belongs to the question’s sender', () => {
+  const ANA = 'oid-ana';
+  const BEN = 'oid-ben';
+  /** An interrupted question as the service stores it in a shared session: with its author. */
+  const asked = (author: string): ChatMessage[] =>
+    transcriptToMessages([
+      { ...question('a shared question', 'interrupted'), author: { actor: author, agent: null } },
+    ]);
+
+  it('decides from the question’s author, the reader, and whether anyone else is here', () => {
+    expect(retryQuestionOf(asked(ANA), 1, true, ANA)).toBe('a shared question');
+    expect(retryQuestionOf(asked(ANA), 1, true, BEN)).toBeUndefined();
+    // Not shared: every question is the reader's, whoever the stored author says.
+    expect(retryQuestionOf(asked(ANA), 1, false, null)).toBe('a shared question');
+    // A question this browser sent live carries no author, and is the reader's by construction.
+    const live = transcriptToMessages([question('sent here', 'interrupted')]);
+    expect(retryQuestionOf(live, 1, true, BEN)).toBe('sent here');
+  });
+
+  it('shows another member the interrupted marker and no Retry', async () => {
+    useChatStore.setState({ viewer: BEN });
+    const cid = useChatStore.getState().createConversation();
+    useChatStore.getState().hydrateTranscript(cid, asked(ANA));
+    render(<MessageList conversationId={cid} />);
+    expect(await screen.findByText(TURN_INTERRUPTED_TEXT)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('shows the sender their Retry', async () => {
+    useChatStore.setState({ viewer: ANA });
+    const cid = useChatStore.getState().createConversation();
+    useChatStore.getState().hydrateTranscript(cid, [
+      ...transcriptToMessages([
+        {
+          ...question('ben asked first', 'done', 'e'.repeat(32)),
+          author: { actor: BEN, agent: null },
+        },
+        answer('an answer', 'e'.repeat(32)),
+      ]),
+      ...asked(ANA),
+    ]);
+    render(<MessageList conversationId={cid} />);
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeTruthy();
   });
 });

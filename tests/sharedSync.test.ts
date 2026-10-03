@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { mergeTranscript, transcriptToMessages } from '../src/state/transcript.ts';
 import { followSharedConversation } from '../src/state/sharedSync.ts';
+import { config } from '../src/env.ts';
 import type { TranscriptMessage } from '../src/api/client.ts';
 import type { AuthProvider } from '../src/auth/types.ts';
 import type { AssistantMessage, ChatMessage } from '../src/state/types.ts';
@@ -487,6 +488,53 @@ describe('followSharedConversation', () => {
     stop = followSharedConversation(cid, auth);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(stub.calls.filter((c) => c.url.endsWith('/queue'))).toHaveLength(1);
+  });
+
+  it('asks the line at the cadence the deployment served, not a built-in one', async () => {
+    // `SHARED_POLL_MS`, through `/config.js`. The browser suite relies on it to follow a turn as it
+    // starts rather than racing the 5 s default against its own assertion timeout.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const served = config.sharedPollMs;
+    config.sharedPollMs = 1_000;
+    try {
+      const cid = alicesConversation();
+      const stub = stubFetch((url) => {
+        if (url.endsWith(`/sessions/${SID}/messages`)) return json(ALICE_TURN);
+        if (url.endsWith(`/sessions/${SID}/queue`)) return json({ running: false, waiting: [] });
+        return jsonError(404, 'unexpected');
+      });
+      restore = stub.restore;
+      const asked = (): number => stub.calls.filter((c) => c.url.endsWith('/queue')).length;
+
+      stop = followSharedConversation(cid, auth);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(asked()).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(asked()).toBe(2);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(asked()).toBe(5);
+    } finally {
+      config.sharedPollMs = served;
+    }
+  });
+
+  it('asks the line every five seconds by default', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    expect(config.sharedPollMs).toBe(5_000);
+    const cid = alicesConversation();
+    const stub = stubFetch((url) => {
+      if (url.endsWith(`/sessions/${SID}/messages`)) return json(ALICE_TURN);
+      if (url.endsWith(`/sessions/${SID}/queue`)) return json({ running: false, waiting: [] });
+      return jsonError(404, 'unexpected');
+    });
+    restore = stub.restore;
+    const asked = (): number => stub.calls.filter((c) => c.url.endsWith('/queue')).length;
+
+    stop = followSharedConversation(cid, auth);
+    await vi.advanceTimersByTimeAsync(4_900);
+    expect(asked()).toBe(1);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(asked()).toBe(2);
   });
 
   it('closes the watch and removes its placeholder when the conversation is closed', async () => {

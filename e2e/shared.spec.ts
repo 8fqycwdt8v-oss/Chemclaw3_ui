@@ -82,6 +82,9 @@ test.describe('as a member of somebody else’s conversation', () => {
 });
 
 const MEMBER_SID = '9'.repeat(32);
+/** The line's cadence for the page that follows a turn — `sharedPollMs`, served through
+ *  `/config.js` — so it notices the turn promptly instead of up to 5 s later. */
+const POLL_MS = 500;
 
 /** One SSE frame, the way the service writes it. */
 const frame = (event: Record<string, unknown> & { type: string }): string =>
@@ -92,14 +95,32 @@ test.describe('in a conversation somebody else is talking in (Chemclaw3_ui #130)
     page,
     isMobile,
   }) => {
+    // **Why this test waits on the line rather than on the clock.** The page notices the owner's
+    // turn on its next read of the line, and at the production cadence (`SHARED_POLL_MS`, 5 s)
+    // that read can land up to five seconds after `started` — exactly the default `expect`
+    // timeout. The answer's assertion used to start that 5 s clock at `started`, so it passed only
+    // when the poll timer happened to fire with a few hundred milliseconds to spare, and failed
+    // (16 of 60 runs locally, and on CI) whenever it did not. So the page is served a short
+    // cadence through the runtime knob, and the test waits for the *observable* event — the line
+    // has told the page a turn is running — before asking for the answer within the usual bound.
+    await page.route('**/config.js', async (route) => {
+      const response = await route.fetch();
+      const body = `${await response.text()}\nwindow.__CHEMCLAW_CONFIG__.sharedPollMs=${POLL_MS};`;
+      return route.fulfill({ response, body });
+    });
+
     // The owner's turn starts once the member is looking (`started`): the line says so, and the
     // turn's view streams an answer.
     let started = false;
     let streamed = false;
     let readsAfter = 0;
-    await page.route(`**/api/sessions/${MEMBER_SID}/queue`, (route) =>
-      route.fulfill({ json: { running: started && !streamed, waiting: [] } }),
-    );
+    let lineSaidRunning!: () => void;
+    const turnNoticed = new Promise<void>((resolve) => (lineSaidRunning = resolve));
+    await page.route(`**/api/sessions/${MEMBER_SID}/queue`, (route) => {
+      const running = started && !streamed;
+      if (running) lineSaidRunning();
+      return route.fulfill({ json: { running, waiting: [] } });
+    });
     await page.route(`**/api/sessions/${MEMBER_SID}/turn/stream`, (route) => {
       streamed = true;
       return route.fulfill({
@@ -157,6 +178,9 @@ test.describe('in a conversation somebody else is talking in (Chemclaw3_ui #130)
     const answers = transcript.getByRole('article', { name: 'Assistant answer', exact: true });
     await expect(answers).toHaveCount(2);
     started = true;
+    // Bounded by the test's own timeout, not by `expect`'s: what is awaited is the page reading
+    // the line, which no assertion on the transcript can hurry.
+    await turnNoticed;
 
     // The answer arrives without anybody pressing anything — said to be somebody else's turn,
     // and one answer, not a second copy of anything.

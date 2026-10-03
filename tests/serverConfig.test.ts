@@ -47,6 +47,9 @@ const base: BffConfig = {
   maxMessageChars: 100_000,
   rawMaxMessageChars: '',
   maxMessageCharsIsValid: true,
+  sharedPollMs: 5_000,
+  rawSharedPollMs: '',
+  sharedPollMsIsValid: true,
   csp: '',
   rawSandboxOrigin: '',
   rawAppOrigin: '',
@@ -291,6 +294,38 @@ describe('an unusable MAX_MESSAGE_CHARS', () => {
       config({ rawMaxMessageChars: '0', maxMessageCharsIsValid: false }),
     );
     expect(problems.join('\n')).toContain('"0"');
+  });
+});
+
+/**
+ * `SHARED_POLL_MS`: the line's cadence for an open shared conversation (Chemclaw3_ui #130). Unset
+ * is the 5 s default; a value that is not an interval is refused rather than clamped, because the
+ * clamp's direction is a guess and the wrong guess is every open tab asking the service in a loop.
+ */
+describe('SHARED_POLL_MS', () => {
+  it('defaults to five seconds', async () => {
+    vi.resetModules();
+    const fresh = await import('../server/config.ts');
+    expect(fresh.cfg.sharedPollMs).toBe(5_000);
+    expect(fresh.cfg.sharedPollMsIsValid).toBe(true);
+  });
+
+  it('takes an interval the deployment meant', async () => {
+    vi.stubEnv('SHARED_POLL_MS', '2000');
+    vi.resetModules();
+    const fresh = await import('../server/config.ts');
+    expect(fresh.cfg.sharedPollMs).toBe(2_000);
+    expect(fresh.validateConfig(fresh.cfg).filter((p) => p.includes('SHARED_POLL_MS'))).toEqual([]);
+  });
+
+  it.each(['0', '-1', '100', '1500.5', 'abc'])('refuses %s and keeps the default', async (raw) => {
+    vi.stubEnv('SHARED_POLL_MS', raw);
+    vi.resetModules();
+    const fresh = await import('../server/config.ts');
+    expect(fresh.cfg.sharedPollMsIsValid).toBe(false);
+    expect(fresh.cfg.sharedPollMs).toBe(5_000);
+    const problems = fresh.validateConfig(fresh.cfg);
+    expect(problems.some((p) => p.includes('SHARED_POLL_MS') && p.includes(raw))).toBe(true);
   });
 });
 

@@ -22,6 +22,7 @@
 import type { LogLevel } from './lib/logger.ts';
 import { MAX_MESSAGE_CHARS, isUsableMessageCap } from '../shared/events.ts';
 import { DEFAULT_DOCS_BASE_URL } from '../shared/sandbox.ts';
+import { SHARED_POLL_MS, isUsablePollInterval } from '../shared/sharedPoll.ts';
 
 export type AuthMode = 'dev' | 'msal';
 
@@ -81,6 +82,18 @@ export interface RuntimeConfig {
    * older BFF that predates the field, or a `vite dev` with no server behind it.
    */
   maxMessageChars: number;
+  /**
+   * How often an open shared conversation reads its session's line (`GET /sessions/{id}/queue`)
+   * to notice somebody else's running turn, in milliseconds (`src/state/sharedSync.ts`).
+   *
+   * Runtime because it is a trade-off a deployment owns — how soon a colleague's turn appears
+   * here, against one small GET per open shared conversation per tick — and because the browser
+   * suite needs a page that follows a turn *when it starts*, not up to five seconds later: a test
+   * that waits through the production cadence is a test racing it. Set by the BFF from
+   * `SHARED_POLL_MS`; anything that is not a usable interval (`isUsablePollInterval`) keeps the
+   * default, `SHARED_POLL_MS` in `shared/sharedPoll.ts`.
+   */
+  sharedPollMs: number;
   /**
    * The origin of the HTML sandbox (wave 3) — `SANDBOX_ORIGIN`, served by the BFF's second
    * listener — or `''` when this deployment has none.
@@ -169,6 +182,7 @@ function resolve(): RuntimeConfig {
     // is what made this guard unreachable: the BFF clamped a bad value up to 1 before it crossed
     // `/config.js`, and 1 passes any test for "usable" that only asks about the sign.
     maxMessageChars: isUsableMessageCap(w.maxMessageChars) ? w.maxMessageChars : MAX_MESSAGE_CHARS,
+    sharedPollMs: isUsablePollInterval(w.sharedPollMs) ? w.sharedPollMs : SHARED_POLL_MS,
     sandboxOrigin: pick(w.sandboxOrigin),
     appOrigin: pick(w.appOrigin),
     htmlScriptsDefault: w.htmlScriptsDefault === true,

@@ -7,6 +7,7 @@
  */
 
 import { MAX_MESSAGE_CHARS, isUsableMessageCap } from '../shared/events.ts';
+import { MIN_SHARED_POLL_MS, SHARED_POLL_MS, isUsablePollInterval } from '../shared/sharedPoll.ts';
 
 export type AuthMode = 'dev' | 'msal';
 
@@ -65,6 +66,16 @@ const rawMaxMessageChars = str('MAX_MESSAGE_CHARS');
 const parsedMaxMessageChars = rawMaxMessageChars ? Number(rawMaxMessageChars) : MAX_MESSAGE_CHARS;
 const maxMessageCharsIsValid = isUsableMessageCap(parsedMaxMessageChars);
 const maxMessageChars = maxMessageCharsIsValid ? parsedMaxMessageChars : MAX_MESSAGE_CHARS;
+
+/**
+ * `SHARED_POLL_MS` as given, resolved beside a validity flag — the `MAX_MESSAGE_CHARS` pair again.
+ * A value that is not an interval is refused by `validateConfig` rather than clamped, so a typo
+ * cannot quietly turn every open shared conversation into a tight loop against the service.
+ */
+const rawSharedPollMs = str('SHARED_POLL_MS');
+const parsedSharedPollMs = rawSharedPollMs ? Number(rawSharedPollMs) : SHARED_POLL_MS;
+const sharedPollMsIsValid = isUsablePollInterval(parsedSharedPollMs);
+const sharedPollMs = sharedPollMsIsValid ? parsedSharedPollMs : SHARED_POLL_MS;
 
 /** Read once, because both `cfg.allowFraming` and the CSP built below have to agree. */
 const allowFraming = bool('ALLOW_FRAMING', false);
@@ -338,6 +349,12 @@ export interface BffConfig {
    *  refusal rather than guessed at. */
   rawMaxMessageChars: string;
   maxMessageCharsIsValid: boolean;
+  /** How often an open shared conversation reads its session's line, in ms — served to the SPA
+   *  through `/config.js`. See `shared/sharedPoll.ts`. */
+  sharedPollMs: number;
+  /** The raw `SHARED_POLL_MS` as given, so a refusal can quote it. */
+  rawSharedPollMs: string;
+  sharedPollMsIsValid: boolean;
   csp: string;
   /** `SANDBOX_ORIGIN` and `APP_ORIGIN` as given, so a refusal can quote them. */
   rawSandboxOrigin: string;
@@ -407,6 +424,12 @@ export const cfg: BffConfig = {
   maxMessageChars,
   rawMaxMessageChars,
   maxMessageCharsIsValid,
+  // How soon a member sees somebody else's turn start, against one small GET per open shared
+  // conversation per tick. The default suits a deployment; the browser suite shortens it for the
+  // one page that waits on it rather than sleeping through the production cadence.
+  sharedPollMs,
+  rawSharedPollMs,
+  sharedPollMsIsValid,
   sseHeartbeatMs: num('SSE_HEARTBEAT_MS', 15_000),
   upstreamConnectTimeoutMs: num('UPSTREAM_CONNECT_TIMEOUT_MS', 10_000),
   // Deliberately generous rather than tight. It bounds time-to-first-response-*header*, and the
@@ -586,6 +609,13 @@ export function validateConfig(c: BffConfig = cfg): string[] {
       `MAX_MESSAGE_CHARS ${JSON.stringify(c.rawMaxMessageChars)} is not a message cap (expected a ` +
         'whole number of characters above zero, e.g. 100000). Zero is not "unlimited" here — it ' +
         'is a composer that refuses every message — so this is refused rather than clamped.',
+    );
+  }
+
+  if (!c.sharedPollMsIsValid) {
+    problems.push(
+      `SHARED_POLL_MS ${JSON.stringify(c.rawSharedPollMs)} is not a poll interval (expected a ` +
+        `whole number of milliseconds, at least ${MIN_SHARED_POLL_MS}, e.g. 5000).`,
     );
   }
 

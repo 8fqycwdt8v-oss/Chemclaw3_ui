@@ -18,3 +18,6 @@ test-results
 .chemclaw3
 .chemclaw3-mock
 .jenkins-lib
+
+# Example manifests an operator applies with `oc`; nothing in the image reads them.
+deploy

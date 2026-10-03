@@ -1,0 +1,18 @@
+# One Service, two named ports — `http` for the app Route and `sandbox` for the sandbox Route.
+# The Routes target these by NAME (routes.yaml), so renumbering a port is a change here only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: chemclaw3-ui
+  labels:
+    app.kubernetes.io/name: chemclaw3-ui
+spec:
+  selector:
+    app.kubernetes.io/name: chemclaw3-ui
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+    - name: sandbox
+      port: 8081
+      targetPort: sandbox

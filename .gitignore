@@ -4,7 +4,9 @@ dist/
 .env.local
 *.log
 playwright-report/
+playwright-report-kind/
 test-results/
+test-results-kind/
 .DS_Store
 tsconfig.tsbuildinfo
 

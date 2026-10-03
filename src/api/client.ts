@@ -390,6 +390,30 @@ export interface SessionMembersOut {
 }
 
 /**
+ * One message waiting in a shared session's line — an entry of `GET /sessions/{id}/queue`
+ * (Chemclaw3 #499). No text: the line holds the order and never the message.
+ */
+export interface QueuedMessageOut {
+  ticket: number;
+  sender: string;
+  enqueued_at: string;
+  /** How many are ahead of it; `0` is next. */
+  position: number;
+  /** Whether the caller sent it. */
+  mine: boolean;
+}
+
+/**
+ * A session's line, and whether a turn is running ahead of it **on the replica that answered** —
+ * `GET /sessions/{id}/queue`. What an open shared conversation reads to learn that somebody else's
+ * turn has started or ended (Chemclaw3_ui #130).
+ */
+export interface SessionQueueOut {
+  running: boolean;
+  waiting: QueuedMessageOut[];
+}
+
+/**
  * A session somebody else owns that the caller has been let into — `GET /sessions/shared`.
  *
  * `owner` and `title` are `null` under the service's in-process session store, which keeps
@@ -1214,6 +1238,25 @@ export const api = {
       return true;
     } catch (err) {
       if (err instanceof ApiError && err.kind === 'session_not_found') return false;
+      throw err;
+    }
+  },
+
+  /**
+   * A shared session's line and whether a turn is running — `GET /sessions/{id}/queue`.
+   *
+   * `null` on a 404: a service older than the route, or a session this person is no longer in.
+   * Either way there is nothing to follow, and the caller stops asking rather than raising a
+   * banner — following somebody else's turn is a courtesy, never something a chemist waits on.
+   */
+  async getQueue(sessionId: string, getToken: TokenGetter): Promise<SessionQueueOut | null> {
+    try {
+      return await request<SessionQueueOut>(
+        `/sessions/${encodeURIComponent(sessionId)}/queue`,
+        getToken,
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.kind === 'session_not_found') return null;
       throw err;
     }
   },

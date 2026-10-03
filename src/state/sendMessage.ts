@@ -153,7 +153,7 @@ export function warmSession(conversationId: string, auth: AuthProvider): void {
  * turn's tokens before the tool calls of the same update, so a trace entry landing ahead of its
  * pending text would misrepresent what happened.
  */
-function createTokenBatcher(conversationId: string, messageId: string) {
+export function createTokenBatcher(conversationId: string, messageId: string) {
   let pending = '';
   let scheduled = false;
 

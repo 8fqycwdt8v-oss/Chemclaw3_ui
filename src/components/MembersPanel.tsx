@@ -93,17 +93,20 @@ export async function leaveConversation(id: string, auth: AuthProvider): Promise
 }
 
 /**
- * The roster read, shared by the panel and anything else that wants to know who is here.
+ * The roster read, shared by the panel and anything else that wants to know who is here — the
+ * shell reads it too, to learn whether a conversation this person owns has anybody else in it
+ * (`useSharedConversationSync` in `App.tsx`).
  *
  * Reconciles `Conversation.membership` as a side effect of the answer, because this is the one
  * read that can say "you own this" — a conversation adopted from `GET /sessions/shared` whose
  * owner has since handed it over, or an owned one a stale store marked shared, is corrected the
  * first time somebody looks.
  */
-function useMembers(
+export function useMembers(
   conversationId: string,
   sessionId: string | null,
   enabled: boolean,
+  staleTime: number = MEMBERS_STALE_MS,
 ): UseQueryResult<SessionMembersOut, ApiError> {
   const { auth, ready } = useAuth();
   return useApiQuery<SessionMembersOut, ApiError>({
@@ -119,7 +122,7 @@ function useMembers(
       return roster;
     },
     enabled: enabled && ready && Boolean(sessionId),
-    staleTime: MEMBERS_STALE_MS,
+    staleTime,
   });
 }
 

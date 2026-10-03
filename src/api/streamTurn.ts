@@ -85,6 +85,9 @@ export interface StreamTurnOptions {
    * so whatever streamed in the gap is not replayed; the `answer` event at the end is the whole
    * answer, which is what makes the gap survivable. A 404 means no turn is running here: it ended
    * in the gap, or runs on another replica — either way the transcript has it.
+   *
+   * And what an open shared conversation follows somebody else's running turn with
+   * (`followSharedConversation`, Chemclaw3_ui #130): the same route admits any participant.
    */
   watch?: boolean;
   signal: AbortSignal;

@@ -15,15 +15,16 @@
  * finish regardless, so the wording never claims the job stopped.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { Search, Server } from 'lucide-react';
 import { useAuth, useIsReviewer } from '../auth/AuthContext.tsx';
-import { api, type DurableJobStatus } from '../api/client.ts';
+import { api, type DurableJobStatus, type JobRecordSummary } from '../api/client.ts';
 import { useNewestRead } from '../hooks/useNewestRead.ts';
-import { useApiInfiniteQuery } from '../api/queryClient.ts';
+import { queryClient, useApiInfiniteQuery } from '../api/queryClient.ts';
 import { jobsQuery } from '../api/queries.ts';
 import { relativeTime } from '../lib/format.ts';
+import { isTerminalJobStatus } from '../state/jobReconcile.ts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
@@ -68,6 +69,42 @@ const CAMPAIGN_DESCRIPTION =
   'many rounds as its spec asked for, so expect hours rather than the minutes a single calculation ' +
   'takes.';
 
+/**
+ * How long to wait before each re-read of a run the sheet has just asked to cancel — about 30 s in
+ * all, then it stops.
+ *
+ * One immediate re-read was the rule, and it lost the race every time it mattered: Temporal had
+ * the cancellation within a second, but the read went out first, came back `running`, and nothing
+ * asked again — so the sheet said `running` for as long as it stayed open while `GET /jobs/{id}`
+ * had long since said `cancelled`. Backing off rather than polling at a fixed rate because the
+ * first second is when the answer usually changes, and bounded because a run past its last
+ * cancellation point may legitimately keep going for hours; past this the sheet's own "Try again"
+ * is the way to ask.
+ *
+ * Exported so the test can advance through it.
+ */
+export const CANCEL_REREAD_DELAYS_MS: readonly number[] = [500, 1000, 2000, 4000, 8000, 8000, 8000];
+
+/**
+ * A wait that unmounting cuts short. `wakers` is the sheet's set of pending waits: the effect's
+ * cleanup ends every one of them at once, so a follow-up asleep when the panel goes away stops
+ * *then* — and does its `finally` then — rather than whenever its timer happened to come due.
+ */
+const sleep = (ms: number, wakers: Set<() => void>): Promise<void> =>
+  new Promise((resolve) => {
+    const wake = (): void => {
+      clearTimeout(timer);
+      wakers.delete(wake);
+      resolve();
+    };
+    const timer = setTimeout(wake, ms);
+    wakers.add(wake);
+  });
+
+/** The registry list under every search text — a cancelled run's row changes in all of them. */
+const invalidateJobList = (): Promise<void> =>
+  queryClient.invalidateQueries({ queryKey: ['jobs'] });
+
 function JobSheet({
   jobId,
   jobName,
@@ -98,7 +135,7 @@ function JobSheet({
       // not only the displayed state that would be another job's: Cancel is offered on
       // `status.status === 'running'` and posts to `jobId`, so a stale status decides whether a
       // state-changing control appears for a job it does not describe. The same-id case is real
-      // here too — `cancel` re-reads the job it just asked to stop. See `useNewestRead`.
+      // here too — `cancel` follows the job it just asked to stop. See `useNewestRead`.
       const isNewest = claim();
       setStatus(null);
       setFailed(false);
@@ -114,6 +151,61 @@ function JobSheet({
     [auth, claim],
   );
 
+  // A follow-up still sleeping when the panel unmounts stops there rather than reading on for half
+  // a minute. A flag set in the effect body, not a `claim()` in the cleanup: StrictMode's
+  // mount-unmount-mount would make that cleanup retire the first read issued during render, and
+  // the sheet would spin for ever in development.
+  //
+  // **And it stops at the unmount, not at the end of its current wait.** It used to sleep on and
+  // find the flag down up to 8 s later, then invalidate the app-wide `['jobs']` list from its
+  // `finally` — against whatever list was on screen by then. Measured in this suite: a sheet
+  // closed in one case refetched every page of the paginated list another case had open, 5 runs
+  // in 50. Waking the sleepers here makes that invalidation happen while the sheet goes away.
+  const mounted = useRef(true);
+  const wakers = useRef(new Set<() => void>());
+  useEffect(() => {
+    mounted.current = true;
+    const pending = wakers.current;
+    return () => {
+      mounted.current = false;
+      for (const wake of [...pending]) wake();
+    };
+  }, []);
+
+  /**
+   * Re-read a run just asked to cancel until the registry says it ended, or the backoff runs out.
+   *
+   * Unlike `load`, the status already shown stays on screen between reads — blanking it to a
+   * spinner every few seconds would read as the sheet losing the job. Each read is behind the same
+   * newest-read guard, so opening another job, pressing "Try again" or closing the sheet stops it.
+   * A failed read in between is not reported: the request was accepted, the status on screen is
+   * still the last true one, and the next read may well answer.
+   */
+  const follow = async (id: string): Promise<void> => {
+    const isNewest = claim();
+    try {
+      for (const delay of CANCEL_REREAD_DELAYS_MS) {
+        await sleep(delay, wakers.current);
+        if (!isNewest() || !mounted.current) return;
+        let next: DurableJobStatus;
+        try {
+          next = await api.getJob(id, auth);
+        } catch {
+          continue;
+        }
+        if (!isNewest()) return;
+        setStatus(next);
+        setFailed(false);
+        if (isTerminalJobStatus(next.status)) return;
+      }
+    } finally {
+      // On every way out, including a superseded or unmounted follow-up: the list's row carries
+      // the state too, and the cache is the app's rather than this sheet's, so it would otherwise
+      // keep saying the run was open until something else happened to refetch it.
+      void invalidateJobList();
+    }
+  };
+
   if (open && loadedFor !== jobId) {
     setLoadedFor(jobId);
     setNotice(null);
@@ -128,7 +220,7 @@ function JobSheet({
       setNotice(
         'Cancellation requested. A run already past its last checkpoint will still finish.',
       );
-      load(jobId);
+      void follow(jobId);
     } catch (err) {
       setNotice(err instanceof Error ? err.message : 'The cancellation was not accepted.');
     }
@@ -239,6 +331,26 @@ function JobSheet({
   );
 }
 
+/**
+ * One row per run, however the pages that brought them in overlap.
+ *
+ * They can overlap in the real registry, not only in a fixture. The cursor is the last row's
+ * `job_id` and the next page is everything older than *that row's* `(completed_at, job_id)` — read
+ * at the time the next page is asked for. `job_record_store`'s upsert sets `completed_at = now()`,
+ * so a run that is re-recorded (a rejoined workflow, a cancelled run reaching its end) between the
+ * two reads moves to the top, and if it was the anchor every row of the first page is "older" than
+ * it again. Each would then render twice, under one React key, which React says may duplicate or
+ * drop rows. The first sighting wins: it is where the reader already saw the row.
+ */
+function uniqueRuns(jobs: JobRecordSummary[]): JobRecordSummary[] {
+  const seen = new Set<string>();
+  return jobs.filter((job) => {
+    if (seen.has(job.job_id)) return false;
+    seen.add(job.job_id);
+    return true;
+  });
+}
+
 export function JobsPanel(): React.JSX.Element {
   const { auth, ready } = useAuth();
   // `/jobs/:jobId` opens this panel with that run's sheet already up, so a run can be *sent* to
@@ -277,7 +389,7 @@ export function JobsPanel(): React.JSX.Element {
   // real failure, and a chemist searching during a rollout was told no run matched. Before that it
   // was a spinner for ever, which is "failed" and "still loading" being one screen instead.
   const failed = isError && !data;
-  const jobs = data ? data.pages.flatMap((page) => page.jobs) : null;
+  const jobs = data ? uniqueRuns(data.pages.flatMap((page) => page.jobs)) : null;
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-4">

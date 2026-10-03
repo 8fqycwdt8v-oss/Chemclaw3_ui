@@ -39,11 +39,31 @@ export interface RuntimeConfig {
   logLevel: 'silent' | 'error' | 'warn' | 'info' | 'debug';
   /** The service's message-length cap, so the composer refuses where the service refuses. */
   maxMessageChars: number;
+  /** How often an open shared conversation reads its session's line, in ms — `SHARED_POLL_MS`.
+   *  See `sharedPollMs` in src/env.ts. */
+  sharedPollMs: number;
   /**
    * The HTML sandbox's origin (wave 3), or `''` when the second listener is not running — so the
    * SPA never frames an origin this process is not serving. See `sandboxOrigin` in src/env.ts.
    */
   sandboxOrigin: string;
+  /**
+   * The origin the browser is meant to reach the app at (`APP_ORIGIN`), or `''` when unset — the
+   * one origin the sandbox shell takes content from and may be framed by. Published so a page
+   * opened at some other address shows the artefact as source with both origins named, rather
+   * than a frame that stays blank because the shell ignored it (contract, hardening item 5).
+   */
+  appOrigin: string;
+  /**
+   * Whether an `html` artefact's script runs as soon as it is shown (`HTML_SCRIPTS_DEFAULT`, on by
+   * the owner's decision of 2026-10-03). Off puts back the per-view "Run scripts".
+   */
+  htmlScriptsDefault: boolean;
+  /**
+   * Where the browser reads the README (`DOCS_BASE_URL`): the html view's "How the sandbox works"
+   * link. Configurable because the default is github.com, which an air-gapped browser cannot reach.
+   */
+  docsBaseUrl: string;
 }
 
 const LOG_LEVELS = ['silent', 'error', 'warn', 'info', 'debug'] as const;
@@ -66,7 +86,11 @@ export function runtimeConfig(): RuntimeConfig {
     reviewerRoles: cfg.reviewerRoles,
     logLevel: clientLogLevel(),
     maxMessageChars: cfg.maxMessageChars,
+    sharedPollMs: cfg.sharedPollMs,
     sandboxOrigin: cfg.sandboxEnabled ? cfg.sandboxOrigin : '',
+    appOrigin: cfg.appOrigin,
+    htmlScriptsDefault: cfg.htmlScriptsDefault,
+    docsBaseUrl: cfg.docsBaseUrl,
   };
 }
 

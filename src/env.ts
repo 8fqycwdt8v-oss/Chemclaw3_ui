@@ -21,6 +21,8 @@
 
 import type { LogLevel } from './lib/logger.ts';
 import { MAX_MESSAGE_CHARS, isUsableMessageCap } from '../shared/events.ts';
+import { DEFAULT_DOCS_BASE_URL } from '../shared/sandbox.ts';
+import { SHARED_POLL_MS, isUsablePollInterval } from '../shared/sharedPoll.ts';
 
 export type AuthMode = 'dev' | 'msal';
 
@@ -81,6 +83,18 @@ export interface RuntimeConfig {
    */
   maxMessageChars: number;
   /**
+   * How often an open shared conversation reads its session's line (`GET /sessions/{id}/queue`)
+   * to notice somebody else's running turn, in milliseconds (`src/state/sharedSync.ts`).
+   *
+   * Runtime because it is a trade-off a deployment owns — how soon a colleague's turn appears
+   * here, against one small GET per open shared conversation per tick — and because the browser
+   * suite needs a page that follows a turn *when it starts*, not up to five seconds later: a test
+   * that waits through the production cadence is a test racing it. Set by the BFF from
+   * `SHARED_POLL_MS`; anything that is not a usable interval (`isUsablePollInterval`) keeps the
+   * default, `SHARED_POLL_MS` in `shared/sharedPoll.ts`.
+   */
+  sharedPollMs: number;
+  /**
    * The origin of the HTML sandbox (wave 3) — `SANDBOX_ORIGIN`, served by the BFF's second
    * listener — or `''` when this deployment has none.
    *
@@ -92,6 +106,26 @@ export interface RuntimeConfig {
    * (`HtmlView`), never inline.
    */
   sandboxOrigin: string;
+  /**
+   * The origin this app is meant to be reached at (`APP_ORIGIN`), or `''` when the BFF was told
+   * none. The sandbox shell takes content only from this origin, so a page opened at another
+   * address (a second hostname, `localhost` for `127.0.0.1`) would frame a shell that ignores it;
+   * `HtmlView` compares it with `window.location.origin` and shows the source, naming both,
+   * instead of a blank frame.
+   */
+  appOrigin: string;
+  /**
+   * Whether an `html` artefact's own script runs as soon as it is shown (`HTML_SCRIPTS_DEFAULT`).
+   * On by the owner's decision of 2026-10-03, with the per-view control "Disable scripts"; off is
+   * the kill switch that restores "Run scripts". Absent — a `vite dev` with no BFF — reads as off:
+   * a security default nobody stated is the closed one.
+   */
+  htmlScriptsDefault: boolean;
+  /**
+   * Where the README is read from (`DOCS_BASE_URL`; `DEFAULT_DOCS_BASE_URL` when absent): an
+   * internal mirror in an air-gapped deployment, where github.com is a dead link.
+   */
+  docsBaseUrl: string;
 }
 
 declare global {
@@ -148,7 +182,11 @@ function resolve(): RuntimeConfig {
     // is what made this guard unreachable: the BFF clamped a bad value up to 1 before it crossed
     // `/config.js`, and 1 passes any test for "usable" that only asks about the sign.
     maxMessageChars: isUsableMessageCap(w.maxMessageChars) ? w.maxMessageChars : MAX_MESSAGE_CHARS,
+    sharedPollMs: isUsablePollInterval(w.sharedPollMs) ? w.sharedPollMs : SHARED_POLL_MS,
     sandboxOrigin: pick(w.sandboxOrigin),
+    appOrigin: pick(w.appOrigin),
+    htmlScriptsDefault: w.htmlScriptsDefault === true,
+    docsBaseUrl: pick(w.docsBaseUrl, DEFAULT_DOCS_BASE_URL),
   };
 }
 

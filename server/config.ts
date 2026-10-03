@@ -7,6 +7,8 @@
  */
 
 import { MAX_MESSAGE_CHARS, isUsableMessageCap } from '../shared/events.ts';
+import { DEFAULT_DOCS_BASE_URL } from '../shared/sandbox.ts';
+import { MIN_SHARED_POLL_MS, SHARED_POLL_MS, isUsablePollInterval } from '../shared/sharedPoll.ts';
 
 export type AuthMode = 'dev' | 'msal';
 
@@ -65,6 +67,16 @@ const rawMaxMessageChars = str('MAX_MESSAGE_CHARS');
 const parsedMaxMessageChars = rawMaxMessageChars ? Number(rawMaxMessageChars) : MAX_MESSAGE_CHARS;
 const maxMessageCharsIsValid = isUsableMessageCap(parsedMaxMessageChars);
 const maxMessageChars = maxMessageCharsIsValid ? parsedMaxMessageChars : MAX_MESSAGE_CHARS;
+
+/**
+ * `SHARED_POLL_MS` as given, resolved beside a validity flag — the `MAX_MESSAGE_CHARS` pair again.
+ * A value that is not an interval is refused by `validateConfig` rather than clamped, so a typo
+ * cannot quietly turn every open shared conversation into a tight loop against the service.
+ */
+const rawSharedPollMs = str('SHARED_POLL_MS');
+const parsedSharedPollMs = rawSharedPollMs ? Number(rawSharedPollMs) : SHARED_POLL_MS;
+const sharedPollMsIsValid = isUsablePollInterval(parsedSharedPollMs);
+const sharedPollMs = sharedPollMsIsValid ? parsedSharedPollMs : SHARED_POLL_MS;
 
 /** Read once, because both `cfg.allowFraming` and the CSP built below have to agree. */
 const allowFraming = bool('ALLOW_FRAMING', false);
@@ -148,7 +160,60 @@ const rawSandboxOrigin = str('SANDBOX_ORIGIN');
 const rawAppOrigin = str('APP_ORIGIN');
 const sandboxOrigin = plainOrigin(rawSandboxOrigin);
 const appOrigin = plainOrigin(rawAppOrigin);
-const sandboxEnabled = Boolean(sandboxOrigin && appOrigin && sandboxOrigin !== appOrigin);
+
+/**
+ * Whether the sandbox runs, and the sentence the startup line says about it (hardening, 2026-10-03).
+ *
+ * On only when both origins are origins, they differ, **and the app is not framable by anyone**
+ * (`ALLOW_FRAMING`). The last is a choice, documented in README "HTML sandbox": the shell's
+ * `frame-ancestors` names `APP_ORIGIN` alone, and CSP checks *every* ancestor, so inside a preview
+ * host's iframe the sandbox frame is blocked by the browser and the artefact is a blank box. That
+ * combination is not refused — every launcher this repository ships now sets the sandbox origins,
+ * so a refusal would turn the preview opt-in into a process that cannot start — it is turned off
+ * with its reason logged, and HTML artefacts are shown as escaped source, which is what a framed
+ * app can honestly offer.
+ *
+ * Exported for the tests and for `index.ts`'s one line; `cfg` carries the result.
+ */
+export function sandboxState(c: {
+  rawSandboxOrigin: string;
+  sandboxOrigin: string;
+  appOrigin: string;
+  allowFraming: boolean;
+}): { on: boolean; reason: string } {
+  if (!c.rawSandboxOrigin) {
+    return { on: false, reason: 'SANDBOX_ORIGIN is unset; HTML artefacts are shown as source' };
+  }
+  if (!c.sandboxOrigin || !c.appOrigin || c.sandboxOrigin === c.appOrigin) {
+    // `validateConfig` refuses every one of these before anything serves; said for completeness.
+    return { on: false, reason: 'SANDBOX_ORIGIN/APP_ORIGIN do not name two distinct origins' };
+  }
+  if (c.allowFraming) {
+    return {
+      on: false,
+      reason:
+        'ALLOW_FRAMING=true: a framed app cannot frame the sandbox (its frame-ancestors names ' +
+        'APP_ORIGIN only, and every ancestor is checked), so HTML artefacts are shown as source',
+    };
+  }
+  return {
+    on: true,
+    reason: `SANDBOX_ORIGIN ${c.sandboxOrigin} is a separate origin from APP_ORIGIN ${c.appOrigin}`,
+  };
+}
+
+const sandbox = sandboxState({ rawSandboxOrigin, sandboxOrigin, appOrigin, allowFraming });
+const sandboxEnabled = sandbox.on;
+
+/**
+ * Whether an `html` artefact's own script runs without anybody pressing a button (contract,
+ * hardening item 4). **On by default — an owner decision of 2026-10-03**, taken with the residual
+ * risks written down (README "HTML sandbox"); `HTML_SCRIPTS_DEFAULT=off` is the kill switch that
+ * puts back "Run scripts". Anything but `on`/`off` is refused by `validateConfig` rather than read
+ * as either: a typo in a security switch must not silently pick a side.
+ */
+const rawHtmlScriptsDefault = str('HTML_SCRIPTS_DEFAULT', 'on').toLowerCase();
+const htmlScriptsDefaultIsValid = rawHtmlScriptsDefault === 'on' || rawHtmlScriptsDefault === 'off';
 
 /**
  * Content-Security-Policy for the SPA.
@@ -338,6 +403,12 @@ export interface BffConfig {
    *  refusal rather than guessed at. */
   rawMaxMessageChars: string;
   maxMessageCharsIsValid: boolean;
+  /** How often an open shared conversation reads its session's line, in ms — served to the SPA
+   *  through `/config.js`. See `shared/sharedPoll.ts`. */
+  sharedPollMs: number;
+  /** The raw `SHARED_POLL_MS` as given, so a refusal can quote it. */
+  rawSharedPollMs: string;
+  sharedPollMsIsValid: boolean;
   csp: string;
   /** `SANDBOX_ORIGIN` and `APP_ORIGIN` as given, so a refusal can quote them. */
   rawSandboxOrigin: string;
@@ -345,16 +416,29 @@ export interface BffConfig {
   /** Both as plain origins, or `''` where the value is not one. See `plainOrigin`. */
   sandboxOrigin: string;
   appOrigin: string;
-  /** Whether the second listener runs: both origins set, valid, and different. */
+  /** Whether the second listener runs: both origins set, valid, and different, and the app not
+   *  framable (`sandboxState`). */
   sandboxEnabled: boolean;
+  /** Why the sandbox is on or off, as the startup line says it (`sandboxState`). */
+  sandboxReason: string;
   /** Where the second listener binds. Its own port, and by default the app's own host. */
   sandboxPort: number;
+  /** `SANDBOX_PORT` as given, so a port that is not one can be quoted in the refusal. */
+  rawSandboxPort: string;
   sandboxBindHost: string;
+  /** `HTML_SCRIPTS_DEFAULT`, lower-cased: `on` (the default) or `off`; anything else is refused. */
+  rawHtmlScriptsDefault: string;
+  htmlScriptsDefaultIsValid: boolean;
+  /** Whether an `html` artefact's script runs until somebody presses "Disable scripts". */
+  htmlScriptsDefault: boolean;
   logLevel: string;
   /** How much the BROWSER records, served through `/config.js`. Separate from `logLevel`, which
    *  is this process's own verbosity: turning the pod's logs up is not the same decision as
    *  turning every chemist's browser up. */
   clientLogLevel: string;
+  /** `DOCS_BASE_URL`: where the browser reads this repository's README (an internal mirror when
+   *  air-gapped), as an absolute http(s) URL or a path on this origin. */
+  docsBaseUrl: string;
 }
 
 export const cfg: BffConfig = {
@@ -407,6 +491,12 @@ export const cfg: BffConfig = {
   maxMessageChars,
   rawMaxMessageChars,
   maxMessageCharsIsValid,
+  // How soon a member sees somebody else's turn start, against one small GET per open shared
+  // conversation per tick. The default suits a deployment; the browser suite shortens it for the
+  // one page that waits on it rather than sleeping through the production cadence.
+  sharedPollMs,
+  rawSharedPollMs,
+  sharedPollMsIsValid,
   sseHeartbeatMs: num('SSE_HEARTBEAT_MS', 15_000),
   upstreamConnectTimeoutMs: num('UPSTREAM_CONNECT_TIMEOUT_MS', 10_000),
   // Deliberately generous rather than tight. It bounds time-to-first-response-*header*, and the
@@ -524,12 +614,18 @@ export const cfg: BffConfig = {
   sandboxOrigin,
   appOrigin,
   sandboxEnabled,
+  sandboxReason: sandbox.reason,
   sandboxPort: num('SANDBOX_PORT', 8081),
+  rawSandboxPort: str('SANDBOX_PORT'),
+  rawHtmlScriptsDefault,
+  htmlScriptsDefaultIsValid,
+  htmlScriptsDefault: rawHtmlScriptsDefault !== 'off',
   sandboxBindHost: str('SANDBOX_BIND_HOST', str('BIND_HOST', '0.0.0.0')),
   logLevel: str('LOG_LEVEL', 'info'),
   // Defaults to `info` rather than to this process's own level: the two are independent knobs and
   // an operator debugging the BFF has not asked every open tab to start reporting.
   clientLogLevel: str('CLIENT_LOG_LEVEL', 'info'),
+  docsBaseUrl: str('DOCS_BASE_URL', DEFAULT_DOCS_BASE_URL),
 };
 
 /**
@@ -586,6 +682,13 @@ export function validateConfig(c: BffConfig = cfg): string[] {
       `MAX_MESSAGE_CHARS ${JSON.stringify(c.rawMaxMessageChars)} is not a message cap (expected a ` +
         'whole number of characters above zero, e.g. 100000). Zero is not "unlimited" here — it ' +
         'is a composer that refuses every message — so this is refused rather than clamped.',
+    );
+  }
+
+  if (!c.sharedPollMsIsValid) {
+    problems.push(
+      `SHARED_POLL_MS ${JSON.stringify(c.rawSharedPollMs)} is not a poll interval (expected a ` +
+        `whole number of milliseconds, at least ${MIN_SHARED_POLL_MS}, e.g. 5000).`,
     );
   }
 
@@ -656,7 +759,27 @@ export function validateConfig(c: BffConfig = cfg): string[] {
 
   problems.push(...sandboxProblems(c));
 
+  // The docs link is rendered as an `href`, so the value must be something a link may be: an
+  // http(s) URL or a path on this origin — never `javascript:` or `data:`, which a link would run.
+  if (!docsBaseIsUsable(c.docsBaseUrl)) {
+    problems.push(
+      `DOCS_BASE_URL ${JSON.stringify(c.docsBaseUrl)} is not an http(s) URL or a path starting ` +
+        'with "/". It is where the app links to its README (an internal mirror when air-gapped).',
+    );
+  }
+
   return problems;
+}
+
+/** An http(s) URL, or a path on this origin (`/docs/`, never the scheme-relative `//host`). */
+function docsBaseIsUsable(base: string): boolean {
+  if (base.startsWith('/')) return !base.startsWith('//');
+  try {
+    const url = new URL(base);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -671,6 +794,13 @@ export function validateConfig(c: BffConfig = cfg): string[] {
  */
 function sandboxProblems(c: BffConfig): string[] {
   const problems: string[] = [];
+  if (!c.htmlScriptsDefaultIsValid) {
+    problems.push(
+      `HTML_SCRIPTS_DEFAULT ${JSON.stringify(c.rawHtmlScriptsDefault)} is not "on" or "off". It ` +
+        'decides whether agent-written script runs without a click, so a typo is refused rather ' +
+        'than read as either.',
+    );
+  }
   if (c.rawSandboxOrigin && !c.sandboxOrigin) {
     problems.push(
       `SANDBOX_ORIGIN must be a plain http(s) origin (scheme, host, optional port — no path), got ` +
@@ -681,6 +811,21 @@ function sandboxProblems(c: BffConfig): string[] {
     problems.push(
       `APP_ORIGIN must be a plain http(s) origin (scheme, host, optional port — no path), got ` +
         `${JSON.stringify(c.rawAppOrigin)}. It is written into the sandbox shell's CSP and script.`,
+    );
+  }
+  // Unconditionally, sandbox configured or not — a bad value is a typo whoever reads it, and the
+  // README states the rule without a condition. Whole digits as typed *and* in range: `num()` falls back to 8081 on a non-number, so only the
+  // raw value can show that `SANDBOX_PORT=abc` was asked for; and a `0` would make Node bind a
+  // random port no Route points at, while 70000 throws at listen.
+  if (
+    (c.rawSandboxPort && !/^\d+$/.test(c.rawSandboxPort)) ||
+    !Number.isInteger(c.sandboxPort) ||
+    c.sandboxPort < 1 ||
+    c.sandboxPort > 65_535
+  ) {
+    problems.push(
+      `SANDBOX_PORT ${JSON.stringify(c.rawSandboxPort || String(c.sandboxPort))} is not a port ` +
+        '(expected a whole number from 1 to 65535).',
     );
   }
   if (!c.sandboxOrigin) return problems;

@@ -22,7 +22,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
-import { JobsPanel } from '../src/components/JobsPanel.tsx';
+import { CANCEL_REREAD_DELAYS_MS, JobsPanel } from '../src/components/JobsPanel.tsx';
+import { queryClient } from '../src/api/queryClient.ts';
 import { stubFetch } from './helpers.ts';
 import type { DurableJobStatus, JobRecordSummary } from '../src/api/client.ts';
 
@@ -86,6 +87,11 @@ let cursors: Record<string, string> = {};
 /** How many times the job read has been asked for, and whether it is currently failing. */
 let jobReads = 0;
 let jobReadFails = false;
+/**
+ * What the job read answers once a cancellation has been accepted, one per read; the last one
+ * repeats. Empty means the status `serve` was given, as before.
+ */
+let afterCancel: DurableJobStatus[] = [];
 
 function serve(records = [RECORD], status: DurableJobStatus = STATUS): void {
   const stub = stubFetch((url, init) => {
@@ -105,7 +111,13 @@ function serve(records = [RECORD], status: DurableJobStatus = STATUS): void {
           headers: { 'content-type': 'application/json' },
         });
       }
-      return new Response(JSON.stringify(status), {
+      const answer =
+        deletes.length && afterCancel.length
+          ? afterCancel.length > 1
+            ? afterCancel.shift()!
+            : afterCancel[0]!
+          : status;
+      return new Response(JSON.stringify(answer), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });
@@ -115,7 +127,12 @@ function serve(records = [RECORD], status: DurableJobStatus = STATUS): void {
     const after = query.get('after') ?? '';
     pagesAsked.push(after);
     const next = cursors[after] ?? '';
-    return new Response(JSON.stringify(searched ? [] : records.filter((r) => r.job_id !== after)), {
+    // A keyset, as the registry pages: strictly after the anchor, up to and including the row the
+    // cursor will name. This used to answer every row but the anchor, so the first page already
+    // held the "older" run and the case below found it without the click it exists to test.
+    const start = after ? records.findIndex((r) => r.job_id === after) + 1 : 0;
+    const end = next ? records.findIndex((r) => r.job_id === next) + 1 : records.length;
+    return new Response(JSON.stringify(searched ? [] : records.slice(start, end)), {
       status: 200,
       // The registry advertises the cursor only when the store saw a further row.
       headers: { 'content-type': 'application/json', ...(next ? { 'x-next-cursor': next } : {}) },
@@ -132,10 +149,12 @@ beforeEach(() => {
   cursors = {};
   jobReads = 0;
   jobReadFails = false;
+  afterCancel = [];
   mode.current = 'dev';
   mode.roles = [];
 });
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   restore?.();
   restore = null;
@@ -281,6 +300,66 @@ describe('JobsPanel', () => {
     expect(deletes[0]).toContain('/jobs/calc-9f2c');
     // The wording the service's 202 actually supports.
     expect(await screen.findByText(/will still finish/)).toBeTruthy();
+  });
+
+  it('follows a cancelled run until the registry says it ended, then stops asking', async () => {
+    // The one immediate re-read lost the race every time: Temporal had the cancellation within a
+    // second, but that read went out first, said `running`, and nothing asked again — so the sheet
+    // said `running` for minutes while `GET /jobs/{id}` already said `cancelled`.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    afterCancel = [STATUS, { ...STATUS, status: 'cancelled' }];
+    serve();
+    mountJobs();
+    fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
+    await screen.findByText('running');
+    expect(jobReads).toBe(1);
+    const listReads = pagesAsked.length;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Request cancellation' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Request cancellation' }));
+    await waitFor(() => expect(deletes).toHaveLength(1));
+
+    // The first follow-up still says running — the race the old single read always lost.
+    await vi.advanceTimersByTimeAsync(CANCEL_REREAD_DELAYS_MS[0]!);
+    await waitFor(() => expect(jobReads).toBe(2));
+    expect(screen.getByText('running')).toBeTruthy();
+
+    // The next one has the ending, and the sheet shows it.
+    await vi.advanceTimersByTimeAsync(CANCEL_REREAD_DELAYS_MS[1]!);
+    expect(await screen.findByText('cancelled')).toBeTruthy();
+    expect(screen.queryByText('running')).toBeNull();
+    expect(jobReads).toBe(3);
+    // And the list is asked again, so its row stops saying the run is open.
+    await waitFor(() => expect(pagesAsked.length).toBeGreaterThan(listReads));
+
+    // An ending is an ending: nothing further is read.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(jobReads).toBe(3);
+  });
+
+  it('gives up following a run that will not stop, after the bounded backoff', async () => {
+    // A run past its last cancellation point may keep going for hours; the sheet does not poll it
+    // for that long. "Try again" is still there to ask by hand.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    serve();
+    mountJobs();
+    fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
+    await screen.findByText('running');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Request cancellation' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Request cancellation' }));
+    await waitFor(() => expect(deletes).toHaveLength(1));
+
+    const total = CANCEL_REREAD_DELAYS_MS.reduce((a, b) => a + b, 0);
+    expect(total).toBeLessThanOrEqual(35_000);
+    await vi.advanceTimersByTimeAsync(total + 1_000);
+    await waitFor(() => expect(jobReads).toBe(1 + CANCEL_REREAD_DELAYS_MS.length));
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(jobReads).toBe(1 + CANCEL_REREAD_DELAYS_MS.length);
+    expect(screen.getByText('running')).toBeTruthy();
   });
 
   it('shows a run that has not started as waiting, with the reason, and still cancellable', async () => {
@@ -432,12 +511,69 @@ describe('JobsPanel', () => {
     serve([RECORD, older]);
     mountJobs();
     await screen.findByText('compare_solvents');
+    // Not on the first page — otherwise finding it below proves nothing about the cursor.
+    expect(screen.queryByText('search_conformers_older')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Load older runs' }));
 
     expect(await screen.findByText('search_conformers_older')).toBeTruthy();
     // The cursor the service advertised, sent back as `after` — not a page number of our own.
     expect(pagesAsked).toEqual(['', RECORD.job_id]);
+  });
+
+  it('shows a run once when the registry pages overlap', async () => {
+    // Not a fixture artefact: the next page is "older than the anchor row", read when it is asked
+    // for, and the store's upsert moves a re-recorded run to `now()`. Re-record the anchor between
+    // the two reads and the second page starts over from the top, repeating the first.
+    restore?.();
+    const older: JobRecordSummary = { ...RECORD, job_id: 'calc-0001', job: 'older_run' };
+    const stub = stubFetch((url) => {
+      const after = new URL(url, 'http://x').searchParams.get('after');
+      return new Response(JSON.stringify(after ? [RECORD, older] : [RECORD]), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          ...(after ? {} : { 'x-next-cursor': RECORD.job_id }),
+        },
+      });
+    });
+    restore = stub.restore;
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      mountJobs();
+      fireEvent.click(await screen.findByRole('button', { name: 'Load older runs' }));
+      await screen.findByText('older_run');
+
+      expect(screen.getAllByText('compare_solvents')).toHaveLength(1);
+      expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it('a sheet closed mid-follow-up refreshes the list then, not seconds later', async () => {
+    // It used to sleep out its current wait and invalidate `['jobs']` up to 8 s after the panel
+    // was gone — in this suite, into a later case's paginated list, which re-read every page.
+    serve();
+    mountJobs();
+    fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
+    await screen.findByText('running');
+    fireEvent.click(screen.getByRole('button', { name: 'Request cancellation' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Request cancellation' }));
+    await waitFor(() => expect(deletes).toHaveLength(1));
+
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+    try {
+      cleanup();
+      // Well inside the first 500 ms wait: only the unmount can have ended it.
+      await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['jobs'] }), {
+        timeout: CANCEL_REREAD_DELAYS_MS[0]! / 2,
+      });
+      expect(jobReads).toBe(1);
+    } finally {
+      invalidate.mockRestore();
+    }
   });
 
   it('offers nothing further when the registry advertised no cursor', async () => {

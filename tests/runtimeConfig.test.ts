@@ -59,9 +59,15 @@ const ENV: Record<string, string> = {
   // seam reads as the default rather than as this.
   CLIENT_LOG_LEVEL: 'debug',
   MAX_MESSAGE_CHARS: '250000',
+  // Not the 5 s default, so a cadence that failed to cross reads as the default.
+  SHARED_POLL_MS: '1500',
   // Wave 3: both set and different, so the sandbox is on and its origin crosses the seam.
   SANDBOX_ORIGIN: 'https://sandbox-from-the-server.example',
   APP_ORIGIN: 'https://app-from-the-server.example',
+  // Hardening: `on` crosses as `true`, which is not what the SPA falls back to (`false`).
+  HTML_SCRIPTS_DEFAULT: 'on',
+  // Not the github.com default the SPA falls back to.
+  DOCS_BASE_URL: 'https://docs-from-the-server.example/ui/',
 };
 
 /** Boot the server half against `ENV` and hand back its config plus the script it would serve. */
@@ -138,9 +144,17 @@ describe('what /config.js actually delivers', () => {
     // (`CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`), so one that fails to cross leaves the composer
     // refusing at the built-in default while the service would have accepted the message.
     expect(client.maxMessageChars).toBe(250_000);
+    // The line's cadence: one that failed to cross reads as the 5 s default, and a deployment
+    // that tuned it would find every shared conversation still polling at the old rate.
+    expect(client.sharedPollMs).toBe(1_500);
     // Wave 3: an origin that failed to cross reads as `''`, which shows every HTML artefact as
     // source — a working-looking downgrade nobody would trace to this seam.
     expect(client.sandboxOrigin).toBe('https://sandbox-from-the-server.example');
+    // Hardening: the app origin, which the html view compares with the page's own, and the scripts
+    // default — `true` here, against the SPA's closed `false` fallback.
+    expect(client.appOrigin).toBe('https://app-from-the-server.example');
+    expect(client.htmlScriptsDefault).toBe(true);
+    expect(client.docsBaseUrl).toBe('https://docs-from-the-server.example/ui/');
     // `false` and not the `true` default: a boolean that failed to cross reads as its fallback,
     // which for this one is the *on* state and therefore invisible.
     expect(client.warmSessions).toBe(false);
@@ -173,7 +187,11 @@ describe('what /config.js actually delivers', () => {
       reviewerRoles: [],
       logLevel: 'info',
       maxMessageChars: 100_000,
+      sharedPollMs: 5_000,
       sandboxOrigin: '',
+      appOrigin: '',
+      htmlScriptsDefault: false,
+      docsBaseUrl: '',
     });
 
     expect(script).not.toContain('</script>');

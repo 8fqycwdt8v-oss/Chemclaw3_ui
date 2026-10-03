@@ -316,6 +316,37 @@ describe('what is acting on a chemist', () => {
     expect(posted).toEqual([BODY]);
   });
 
+  it('still says it kept your first skill once the list has it', async () => {
+    // The first skill moves the tier from its empty state to its list, and the sentence that
+    // confirms the save lives in the form's state — which the move used to throw away, so the
+    // only word that it worked vanished as it appeared. Driven on the kind cluster.
+    let kept: string[] = [];
+    restore = stubFetch((url, init) => {
+      if (url.includes('/skills/mine') && init?.method === 'POST') {
+        kept = ['my-workup'];
+        return json({ name: 'my-workup', body: BODY });
+      }
+      if (url.includes('/skills/mine')) return json({ skills: kept });
+      if (url.includes('/skills/org')) return json({ skills: [] });
+      return json({});
+    }).restore;
+    render(
+      <MemoryRouter>
+        <SkillsPanel />
+      </MemoryRouter>,
+    );
+
+    fireEvent.change(await screen.findByLabelText(/Your skill, as a whole SKILL.md/), {
+      target: { value: BODY },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Keep it/ }));
+
+    // The list has re-read and now holds it …
+    expect(await screen.findByRole('heading', { name: 'my-workup', level: 3 })).toBeTruthy();
+    // … and the confirmation is still there beside it.
+    expect(screen.getByText(/Kept my-workup\./)).toBeTruthy();
+  });
+
   it('shows why a save was refused, in the service’s words', async () => {
     // A name a shipped skill already uses is a 409 whose detail names the collision; rewording it
     // here would lose the one fact the chemist needs, which is what to rename.

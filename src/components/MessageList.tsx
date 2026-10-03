@@ -262,6 +262,16 @@ const AssistantBubble = memo(function AssistantBubble({
           it, a chip for what they consult. Above the text, because a qualifier placed after it is
           read once the reader has already believed it. */}
       <div className="max-w-prose">
+        {/* Somebody else's turn, followed live (Chemclaw3_ui #130). Said, because a watcher never
+            sees the question — the service stores the exchange whole, at the turn's end — and an
+            answer arriving under nobody's question reads as the agent volunteering it. */}
+        {message.watched && (
+          <p className="mb-1.5 text-2xs text-ink-muted">
+            {streaming
+              ? 'Another person’s turn, followed live. Their question appears here once it is answered.'
+              : 'Another person’s turn. Loading their question…'}
+          </p>
+        )}
         <StatusStrip message={message} />
         <PlanStrip message={message} trace={message.trace} />
         {/* Only when there is no plan to fold it into: the strip above carries the same live row,

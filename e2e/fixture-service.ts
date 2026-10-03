@@ -1188,6 +1188,16 @@ createServer(async (req, res) => {
   ) {
     return json(res, 403, { detail: 'only the session’s owner may do this' });
   }
+  // A shared session's line, and the view of its running turn (Chemclaw3 #499). An open shared
+  // conversation reads the line on a timer to learn when somebody else's turn is running
+  // (Chemclaw3_ui #130); here nobody else's ever is, so the line is empty and there is no turn to
+  // follow — the service's own 404. `e2e/shared.spec.ts` swaps both per test when it wants one.
+  if (/^\/sessions\/[0-9a-f]{32}\/queue$/.test(path) && req.method === 'GET') {
+    return json(res, 200, { running: false, waiting: [] });
+  }
+  if (/^\/sessions\/[0-9a-f]{32}\/turn\/stream$/.test(path) && req.method === 'GET') {
+    return json(res, 404, { detail: 'no turn is running for this session' });
+  }
   // Two, so the picker has a choice to offer — with one it stays hidden.
   if (path === '/profiles') return json(res, 200, ['default', 'property-lookup']);
   if (path.endsWith('/messages') && req.method === 'GET') {

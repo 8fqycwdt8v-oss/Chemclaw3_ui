@@ -22,6 +22,7 @@ describe('proxy route whitelist', () => {
       ['POST', `/api/sessions/${SID}/turn/stop`, `/sessions/${SID}/turn/stop`],
       ['GET', `/api/sessions/${SID}/turn/stream`, `/sessions/${SID}/turn/stream`],
       ['DELETE', `/api/sessions/${SID}/queue/42`, `/sessions/${SID}/queue/42`],
+      ['GET', `/api/sessions/${SID}/queue`, `/sessions/${SID}/queue`],
       ['GET', `/api/sessions/${SID}/events`, `/sessions/${SID}/events`],
       ['POST', `/api/sessions/${SID}/attachments`, `/sessions/${SID}/attachments`],
       ['GET', `/api/sessions/${SID}/plan`, `/sessions/${SID}/plan`],
@@ -184,9 +185,11 @@ describe('proxy route whitelist', () => {
       const path = `/api/sessions/${SID}/queue/${bad}`;
       expect(resolveRoute('DELETE', path), path).toBeNull();
     }
-    // The line is withdrawn from, not read through this proxy: nothing here lists it.
+    // One ticket is withdrawn, never read: the line is read whole (`GET …/queue`), so a ticket's
+    // own path answers only DELETE.
     expect(resolveRoute('GET', `/api/sessions/${SID}/queue/42`)).toBeNull();
-    expect(resolveRoute('GET', `/api/sessions/${SID}/queue`)).toBeNull();
+    expect(resolveRoute('DELETE', `/api/sessions/${SID}/queue`)).toBeNull();
+    expect(resolveRoute('GET', `/api/sessions/${SID}/queue`)?.sse).toBe(false);
   });
 
   it('matches on method, so a route is not reachable by the wrong verb', () => {

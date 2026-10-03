@@ -242,6 +242,14 @@ export interface UserMessage {
    * question a bubble is, is also whose roles and memories answered it.
    */
   author?: string;
+  /**
+   * The turn that stored this message (`TranscriptMessage.correlation_id`), on a message read back
+   * from the service. With the answer's own `correlationId` it is what lets a re-read transcript be
+   * merged into one this browser already holds by identity rather than by matching text
+   * (`mergeTranscript`). Absent on a question this browser sent live — its turn's id lands on the
+   * answer — and on a row stored before the column existed.
+   */
+  correlationId?: string;
 }
 
 export interface AssistantMessage {
@@ -425,6 +433,17 @@ export interface AssistantMessage {
    * left running. Cleared the moment a frame arrives, so it describes now rather than ever.
    */
   stalled?: boolean;
+  /**
+   * This is somebody else's turn in a shared conversation, followed live through
+   * `GET /sessions/{id}/turn/stream` (Chemclaw3_ui #130) — not a turn this browser sent.
+   *
+   * What it changes is ownership: no Stop, no Withdraw, no recovery poll, and **never persisted**.
+   * A watcher sees events from the moment it attaches and never the question (the service stores
+   * the exchange whole, at the turn's end), so this bubble is a placeholder for an exchange the
+   * transcript will hold: the re-read after the turn ends replaces it with the stored question and
+   * answer, attributed to whoever sent them (`mergeTranscript`).
+   */
+  watched?: boolean;
   error: { kind: ApiErrorKind; message: string } | null;
 }
 

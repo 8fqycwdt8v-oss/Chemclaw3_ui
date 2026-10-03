@@ -29,6 +29,8 @@ import { RightColumn } from './components/exhibits/RightColumn.tsx';
 // rather than only through a rendered shell.
 import { transcriptToMessages } from './state/transcript.ts';
 import { resumeInterruptedTurn } from './state/sendMessage.ts';
+import { followSharedConversation } from './state/sharedSync.ts';
+import { useMembers } from './components/MembersPanel.tsx';
 
 function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
   return (
@@ -193,6 +195,48 @@ function useResumeInterruptedTurn(conversationId: string | undefined): void {
     if (!ready || !conversationId || !interrupted) return;
     return resumeInterruptedTurn(conversationId, auth);
   }, [auth, ready, conversationId, interrupted]);
+}
+
+/** How long the shell trusts "does anybody else share this conversation" for one this person owns.
+ *  The people panel invalidates the same key whenever it admits or removes somebody, so a change
+ *  made here is seen at once; a minute is how long one made from another device may take. */
+const ROSTER_STALE_MS = 60_000;
+
+/**
+ * Keep the conversation on screen in step with the other people in it, when there are any
+ * (Chemclaw3_ui #130). `useRemoteTranscript` reads a transcript once, into an empty conversation;
+ * a shared one changes under the reader, so it is re-read and merged on open, on focus and after
+ * every turn, and somebody else's running turn is followed live. All of that is
+ * `followSharedConversation`; this decides only *whether* to run it.
+ *
+ * Shared means: this person is a member of somebody else's conversation (`membership`), or they
+ * own it and the roster names anybody else. The roster is read only for a conversation that has
+ * been spoken in — a conversation nobody has written in yet has nothing to keep in step — and is
+ * the people panel's own read under its own key, so opening the panel costs nothing extra.
+ */
+function useSharedConversationSync(conversationId: string | undefined): void {
+  const { auth, ready } = useAuth();
+  const sessionId = useChatStore((s) =>
+    conversationId ? (s.conversations[conversationId]?.sessionId ?? null) : null,
+  );
+  const member = useChatStore((s) =>
+    conversationId ? Boolean(s.conversations[conversationId]?.membership) : false,
+  );
+  const spoken = useChatStore((s) =>
+    conversationId ? (s.conversations[conversationId]?.messages.length ?? 0) > 0 : false,
+  );
+  const roster = useMembers(
+    conversationId ?? '',
+    sessionId,
+    Boolean(conversationId) && !member && spoken,
+    ROSTER_STALE_MS,
+  );
+  const shared = member || (roster.data?.members.length ?? 0) > 0;
+
+  useEffect(() => {
+    if (!ready || !conversationId || !sessionId || !shared) return;
+    return followSharedConversation(conversationId, auth);
+  }, [auth, ready, conversationId, sessionId, shared]);
 }
 
 /**
@@ -388,6 +432,7 @@ export function AppShell({
   useVisualViewport();
   useRemoteTranscript(conversationId, rehydrateNonce);
   useResumeInterruptedTurn(conversationId);
+  useSharedConversationSync(conversationId);
   useDigests();
   useCheckIns();
   useAwaitingBadge();

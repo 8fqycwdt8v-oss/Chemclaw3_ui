@@ -92,7 +92,8 @@
  * this file has been asking for: both repositories built the artefact feature against one written
  * shape (`shared/exhibits.ts` mirrors the REST half), so the member, its fields and the
  * `normalizeEvent` branch landed here in the same wave the service added the producer — not one
- * release after it, discovered by a dropped frame.
+ * release after it, discovered by a dropped frame. Its wave-2 sibling `exhibit_draft` (a document
+ * streamed while it is written) came the same way, from the contract's frozen wave-2 addendum.
  *
  * ## This file used to say "keep it dependency-free", and now takes one
  *
@@ -409,6 +410,15 @@ export interface JobSummary {
   molecule_smiles?: string;
   total_energy_hartree?: number;
   converged?: boolean;
+  /** A development report's `report` note (`request_development_report`). */
+  note_id?: string;
+  /**
+   * The `document` artefact a development report also wrote into the session that asked for it
+   * (artefacts wave 2, G1) — `xb-` plus sixteen hex, deterministic per workflow so a retried
+   * activity names the same one. What the job card's **Open report** focuses. Unverified like every
+   * key here: `reportExhibitOf` holds it to `EXHIBIT_ID_RE` before anything opens on it.
+   */
+  exhibit_id?: string;
   [key: string]: unknown;
 }
 
@@ -938,8 +948,61 @@ const exhibitEvent = v.object({
   author_kind: oneOf(['agent', 'human'] as const, 'agent'),
   /** The agent's name or the person's actor id, as the service records it. */
   author: text(),
+  /**
+   * The provider tool-call id of the `create_exhibit`/`revise_exhibit` call that wrote this
+   * revision — the same id the `exhibit_draft` frames of that call carried (the frozen contract's
+   * wave-2 amendment). **Empty** for a human write, a report artefact and every push.
+   *
+   * It is what makes a draft's replacement a matter of identity rather than of order: settled by
+   * position, a refused create's stale draft took the retry's artefact, and a table created beside
+   * a streaming document took the document's place (`src/state/exhibitDrafts.ts`). Optional in the
+   * type and always populated by `normalizeEvent`, for `agent`'s reason — an older service sends
+   * nothing, and every construction site would otherwise have to name a field that means "none".
+   */
+  call_id: text(),
 });
-export type ExhibitEvent = v.InferOutput<typeof exhibitEvent>;
+export type ExhibitEvent = Loosen<v.InferOutput<typeof exhibitEvent>, 'call_id'>;
+
+/**
+ * A document artefact **while the model is still writing it** (artefacts wave 2).
+ *
+ * The service derives it from the argument chunks of a `create_exhibit` / `revise_exhibit` call
+ * whose partial spec is a `document`, so a long report appears as it is written instead of after a
+ * silent minute. Turn stream only: never persisted, never on `/events`, never in the transcript — a
+ * draft is not an artefact, and the `exhibit` frame that follows the tool's result is still the
+ * only thing that says one exists.
+ *
+ * **`markdown` is the whole text so far, not a delta**, by the contract's choice: a dropped or
+ * coalesced frame then costs nothing, and the reader here never has to reassemble anything. The
+ * service throttles to one frame per `exhibit_draft_min_interval_ms` and sends one only when the
+ * text grew, and stops past `exhibit_max_spec_bytes`.
+ *
+ * Replaced by the next `exhibit` frame of the turn (a create, matched in call order) or by the
+ * `exhibit` frame naming the same `exhibit_id` (a revise); discarded when the turn ends without one
+ * — the tool was refused, or the turn failed. `src/state/exhibitDrafts.ts` holds that rule.
+ */
+const exhibitDraftEvent = v.object({
+  type: v.literal('exhibit_draft'),
+  /** The provider's tool-call id — what tells two drafts in one turn apart. */
+  call_id: text(),
+  /**
+   * `create` or `revise`. An unknown value reads as `revise`, for the `exhibit` frame's reason:
+   * only a create may open the pane, and a frame this build does not understand must not take a
+   * column of the screen.
+   */
+  op: oneOf(['create', 'revise'] as const, 'revise'),
+  /** Empty on a create (the service mints the id when the tool runs); the artefact on a revise. */
+  exhibit_id: text(),
+  /** `document`, or empty while the partial spec has not said yet. Open, as every kind field is. */
+  kind: text(),
+  title: text(),
+  /** The Markdown written so far — the whole of it. Rendered, never edited. */
+  markdown: text(),
+  /** Whether the service has seen the end of the call's arguments. Nothing waits on it: the
+   *  `exhibit` frame is the end that matters, and a call that ends refused never sends one. */
+  done: isTrue(),
+});
+export type ExhibitDraftEvent = v.InferOutput<typeof exhibitDraftEvent>;
 
 export type ChemclawEvent =
   | QueuedEvent
@@ -957,6 +1020,7 @@ export type ChemclawEvent =
   | EvidenceSourceEvent
   | HandoffEvent
   | ExhibitEvent
+  | ExhibitDraftEvent
   | QuestionEvent
   | NoteProposedEvent
   | ApprovalRequestEvent
@@ -990,6 +1054,7 @@ const EVENT_MEMBERS = [
   evidenceSourceEvent,
   handoffEvent,
   exhibitEvent,
+  exhibitDraftEvent,
   questionEvent,
   noteProposedEvent,
   approvalRequestEvent,

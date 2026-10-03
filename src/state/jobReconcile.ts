@@ -152,7 +152,11 @@ export async function reconcileAfterTakeover(
   tab: StreamLeader,
   state: ChatState,
   getToken: TokenGetter,
-  getJob: (jobId: string, getToken: TokenGetter) => Promise<DurableJobStatus> = api.getJob,
+  getJob: (
+    jobId: string,
+    getToken: TokenGetter,
+    sessionId?: string,
+  ) => Promise<DurableJobStatus> = api.getJob,
 ): Promise<number> {
   const awaited = awaitedJobs(state);
   if (awaited.length === 0) return 0;
@@ -160,7 +164,9 @@ export async function reconcileAfterTakeover(
   await Promise.all(
     awaited.map(async (job) => {
       try {
-        const event = terminalEventFrom(await getJob(job.jobId, getToken));
+        // The launch's own session, so a report's `exhibit_id` survives the registry's read and
+        // the reconciled card still offers Open report (`api.getJob`).
+        const event = terminalEventFrom(await getJob(job.jobId, getToken, job.sessionId));
         if (!event) return;
         tab.publish({ kind: 'job', event, sessionId: job.sessionId });
         published += 1;

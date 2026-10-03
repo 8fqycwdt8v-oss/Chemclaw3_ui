@@ -13,6 +13,8 @@
  * Route list verified against 8fqycwdt8v-oss/Chemclaw3 @ d5ed9e3 (service/app.py).
  */
 
+import { CALC_ARTIFACT_REF } from '../shared/exhibitConstants.ts';
+
 const SID = '([0-9a-f]{32})';
 
 /**
@@ -155,11 +157,57 @@ const XID = '(xb-[0-9a-f]{16})';
 
 /**
  * What an artefact can be downloaded as from the service. A closed list rather than a pattern,
- * because it is one: the contract's export table names three formats and the service 404s every
- * other one, so admitting a fourth here would forward a request with no answer. SDF and SVG are
+ * because it is one: the contract's export table names four formats (`xyz` arrived with the
+ * `geometry` kind in wave 2) and the service 404s every
+ * other one, so admitting a fifth here would forward a request with no answer. SDF and SVG are
  * made in the browser and never reach this route.
  */
-const FMT = '(md|csv|smi)';
+const FMT = '(md|csv|smi|xyz)';
+
+/**
+ * Whether a query string is exactly one `ref` that is a calc artifact reference — nothing else.
+ * A second `ref`, an extra key or a malformed escape is refused, because each is a request this
+ * app never makes and a forwarded one would be the service's to interpret.
+ */
+function onlyCalcArtifactRef(search: string): boolean {
+  // `CALC_ARTIFACT_REF` (in `shared/`, so the client checks a ref against it before it asks) is
+  // the one statement of what this query may hold: any key but whitespace and `#`, a strict name.
+  let params: URLSearchParams;
+  try {
+    // `URLSearchParams` decodes leniently; a malformed escape is refused by asking first.
+    decodeURIComponent(search.replace(/\+/g, ' '));
+    params = new URLSearchParams(search);
+  } catch {
+    return false;
+  }
+  const keys = [...params.keys()];
+  const ref = params.get('ref');
+  return keys.length === 1 && keys[0] === 'ref' && ref !== null && CALC_ARTIFACT_REF.test(ref);
+}
+
+/**
+ * Whether a query string is empty or exactly one `session_id` that is a session id — the one query
+ * `GET /jobs/{id}` takes from this app. Same refusals as `onlyCalcArtifactRef`: a repeat, a second
+ * key or a malformed escape is a request this app never makes.
+ */
+function onlySessionId(search: string): boolean {
+  if (search === '') return true;
+  let params: URLSearchParams;
+  try {
+    decodeURIComponent(search.replace(/\+/g, ' '));
+    params = new URLSearchParams(search);
+  } catch {
+    return false;
+  }
+  const keys = [...params.keys()];
+  const sid = params.get('session_id');
+  return (
+    keys.length === 1 &&
+    keys[0] === 'session_id' &&
+    sid !== null &&
+    new RegExp(`^${SID}$`).test(sid)
+  );
+}
 
 /** What a proposal proposes. Two values, because the service's `ProposalKind` has exactly two. */
 const KIND = '(skill|profile)';
@@ -181,6 +229,14 @@ export interface Route {
    * own path template is the spelling to copy.
    */
   labels?: readonly string[];
+  /**
+   * What the route's query string may hold, for the one route whose id travels there.
+   *
+   * Absent means the query is forwarded untouched and the service validates it — the arrangement
+   * every revision selector runs under. Present, the query is checked *here*, and a request whose
+   * query fails it is not whitelisted at all.
+   */
+  query?: (search: string) => boolean;
 }
 
 export const ROUTES: readonly Route[] = [
@@ -400,10 +456,14 @@ export const ROUTES: readonly Route[] = [
   // whitelisted here anyway, because hiding a control the caller is entitled to use is the
   // frontend's job and refusing to proxy it would break the caller who *is* entitled.
   { method: 'GET', pattern: /^\/api\/jobs$/, target: () => '/jobs', sse: false },
+  // `?session_id=` and nothing else (the artefacts contract's wave-2 amendment): naming the run's
+  // origin session is what keeps a report's `exhibit_id` in the answer, and a 32-hex value is the
+  // whole set of session ids, so the query is held to it here rather than forwarded open.
   {
     method: 'GET',
     pattern: new RegExp(`^/api/jobs/${JOB}$`),
     target: (m) => `/jobs/${m[1]}`,
+    query: onlySessionId,
     sse: false,
   },
   {
@@ -569,6 +629,17 @@ export const ROUTES: readonly Route[] = [
   // because it is what answers "which session" — the same argument `/plans/pending` makes — and
   // the service scopes it to sessions the caller owns or is a member of.
   { method: 'GET', pattern: /^\/api\/exhibits$/, target: () => '/exhibits', sse: false },
+  // A calculation by-product's bytes (artefacts wave 2; the C4 story's byte route) — a geometry
+  // artefact that cites a calculation reads its XYZ here, and a `list_artifacts` row downloads
+  // through it. Any authenticated caller, as with notes and jobs: the calc cache is shared, not
+  // session-owned. A file, like the export above, so its type and disposition pass through.
+  {
+    method: 'GET',
+    pattern: /^\/api\/calc-artifacts\/content$/,
+    target: () => '/calc-artifacts/content',
+    query: onlyCalcArtifactRef,
+    sse: false,
+  },
 ] as const;
 
 export interface ResolvedRoute {
@@ -629,8 +700,13 @@ function isTraversal(segment: string): boolean {
   return decoded.includes('/') || decoded.includes('\\') || decoded === '..' || decoded === '.';
 }
 
-/** Resolve a request to an upstream path, or `null` if it is not whitelisted. */
-export function resolveRoute(method: string, path: string): ResolvedRoute | null {
+/**
+ * Resolve a request to an upstream path, or `null` if it is not whitelisted.
+ *
+ * `search` is the raw query string (with or without its `?`), consulted only by a route that
+ * declares `query`; every other route forwards it untouched, as before.
+ */
+export function resolveRoute(method: string, path: string, search = ''): ResolvedRoute | null {
   for (const route of ROUTES) {
     if (route.method !== method) continue;
     const match = path.match(route.pattern);
@@ -638,6 +714,7 @@ export function resolveRoute(method: string, path: string): ResolvedRoute | null
       if (match.slice(1).some((group) => group !== undefined && isTraversal(group))) {
         return null;
       }
+      if (route.query && !route.query(search.replace(/^\?/, ''))) return null;
       return {
         path: route.target(match),
         sse: route.sse,

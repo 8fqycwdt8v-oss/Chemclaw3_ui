@@ -111,6 +111,13 @@ interface ExhibitPaneState {
    * pane this turn. Returns whether it opened, for the test that holds the rule.
    */
   autoOpen: (sessionId: string, exhibitId: string) => boolean;
+  /**
+   * The agent began *drafting* a new document (wave 2's `exhibit_draft`). The same rule as
+   * `autoOpen` — the column only, and not if the reader closed the pane this turn — without a
+   * focus to set: the artefact has no id until the tool runs, and the pane shows the draft in front
+   * of whatever was focused until it does. Returns whether it opened.
+   */
+  openForDraft: () => boolean;
   /** Put `exhibitId` in front for `sessionId` without opening anything — a turn's new artefact in
    *  a conversation that is not on screen, waiting for the reader to come back to it. */
   focusOnly: (sessionId: string, exhibitId: string) => void;
@@ -257,6 +264,11 @@ export const useExhibitPane = create<ExhibitPaneState>()(
           tab: 'artefacts',
           focus: { ...s.focus, [sessionId]: { exhibitId, revision: 0 } },
         }));
+        return true;
+      },
+      openForDraft() {
+        if (get().dismissedThisTurn) return false;
+        set({ open: true, tab: 'artefacts' });
         return true;
       },
       addRef(conversationId, ref) {

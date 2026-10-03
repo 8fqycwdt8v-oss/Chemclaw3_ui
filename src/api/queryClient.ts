@@ -224,6 +224,12 @@ export const keys = {
     ['exhibits', sessionId, exhibitId, 'diff', from, to] as const,
   /** Every artefact of the caller's, across sessions — "My artefacts". */
   myExhibits: ['my-exhibits'] as const,
+  /**
+   * A calculation by-product's text, by its `<calc_key>#<name>` ref. Outside the `exhibits` prefix
+   * on purpose: the calc store is shared across sessions, and an artefact's revision write says
+   * nothing about the bytes a calculation produced.
+   */
+  calcArtifact: (ref: string) => ['calc-artifact', ref] as const,
 } as const;
 
 /**

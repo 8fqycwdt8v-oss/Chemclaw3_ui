@@ -136,7 +136,12 @@ export function JobFeed(): React.JSX.Element | null {
                   {item.event.type === 'job_failed' ? (
                     <JobFailureCard jobId={item.event.job_id} reason={item.event.reason} />
                   ) : (
-                    <JobResultCard jobId={item.event.job_id} summary={item.event.summary} />
+                    <JobResultCard
+                      jobId={item.event.job_id}
+                      summary={item.event.summary}
+                      sessionId={item.sessionId}
+                      conversationId={item.conversationId}
+                    />
                   )}
 
                   <p className="mt-2 flex flex-wrap items-center gap-x-2 text-2xs text-ink-subtle">

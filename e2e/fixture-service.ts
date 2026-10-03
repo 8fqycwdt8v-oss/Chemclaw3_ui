@@ -366,7 +366,12 @@ const TURN: readonly Frame[] = [
 ];
 
 /** One scripted turn. Gaps are what make the incremental assertion meaningful. */
-async function streamTurn(res: ServerResponse, frames: readonly Frame[] = TURN): Promise<void> {
+async function streamTurn(
+  res: ServerResponse,
+  frames: readonly Frame[] = TURN,
+  /** Called before each frame is written — the moment the service's own state would change. */
+  before?: (event: ChemclawEvent) => void,
+): Promise<void> {
   res.writeHead(200, {
     'content-type': 'text/event-stream',
     'cache-control': 'no-cache',
@@ -389,6 +394,7 @@ async function streamTurn(res: ServerResponse, frames: readonly Frame[] = TURN):
     // The `event:` name comes off the frame's own discriminator rather than being written beside
     // it. sse-starlette sends both, and a fixture that carried two copies could disagree with
     // itself — which is a defect shape no consumer of this file could diagnose.
+    before?.(event);
     res.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
     if (gap > 0) await sleep(gap);
   }
@@ -563,6 +569,304 @@ const EXHIBIT_TURN: readonly Frame[] = [
     0,
   ],
 ];
+
+/* ── A document drafted while it is written (artefacts wave 2) ───────────────
+ *
+ * The agent writes a report with `create_exhibit`, and the service streams the document as the
+ * model generates the call's arguments: `exhibit_draft` frames, each carrying the WHOLE text so far,
+ * then the tool's result and the `exhibit` frame that makes it an artefact. Its own sessions, for
+ * `EXHIBIT_SESSIONS`'s reason — the pane it opens would move every other spec's layout — and its
+ * own minimal state: the artefact exists only once the turn has reached its `exhibit` frame, so the
+ * list a browser reads mid-draft is empty, exactly as the service's would be.
+ *
+ * The gaps are long on purpose. `e2e/exhibits.spec.ts` asserts the text *grows* on screen, which it
+ * can only see if a frame is on screen long enough to be read before the next replaces it.
+ */
+const DRAFT_SESSIONS = new Set(['4'.repeat(32), '3'.repeat(32)]);
+const DRAFT_EXHIBIT_ID = 'xb-d4af7d4af7d4af70';
+const DRAFT_TITLE = 'Amination process report';
+const DRAFT_PARTS = [
+  `# ${DRAFT_TITLE}\n\n`,
+  '## Summary\n\nThe Buchwald–Hartwig amination ran in 2-MeTHF at 80 °C.',
+  '\n\n## Yield\n\nIsolated yield was 82 % on the 50 g scale.',
+  '\n\n## Next step\n\nRepeat with CPME to compare the work-up.',
+];
+const DRAFT_MARKDOWN = DRAFT_PARTS.join('');
+/** Sessions whose turn has reached its `exhibit` frame, so the artefact is listed. */
+const draftCreated = new Set<string>();
+
+const DRAFT_TURN: readonly Frame[] = [
+  [
+    {
+      type: 'tool_call',
+      tool: 'create_exhibit',
+      arguments: `{"title":"${DRAFT_TITLE}","spec":{"kind":"document"}}`,
+      agent: '',
+    },
+    40,
+  ],
+  ...DRAFT_PARTS.map((_, i): Frame => [
+    {
+      type: 'exhibit_draft',
+      call_id: 'toolu_e2e_draft',
+      op: 'create',
+      exhibit_id: '',
+      kind: 'document',
+      title: DRAFT_TITLE,
+      markdown: DRAFT_PARTS.slice(0, i + 1).join(''),
+      done: i === DRAFT_PARTS.length - 1,
+    },
+    700,
+  ]),
+  [
+    {
+      type: 'tool_result',
+      tool: 'create_exhibit',
+      preview: `{"exhibit_id": "${DRAFT_EXHIBIT_ID}", "revision": 1}`,
+      result_ref: '',
+      note_ids: [],
+      numbers: [1],
+      agent: '',
+    },
+    40,
+  ],
+  [
+    {
+      type: 'exhibit',
+      exhibit_id: DRAFT_EXHIBIT_ID,
+      revision: 1,
+      kind: 'document',
+      title: DRAFT_TITLE,
+      op: 'created',
+      author_kind: 'agent',
+      author: 'chemclaw',
+      // The call that streamed the draft — what the UI settles the draft by.
+      call_id: 'toolu_e2e_draft',
+    },
+    40,
+  ],
+  [{ type: 'token', text: 'The report is in the artefact beside this answer.', agent: '' }, 80],
+  [
+    {
+      type: 'answer',
+      text: 'The report is in the artefact beside this answer.',
+      confidence: null,
+      review_required: false,
+      unsupported_claims: [],
+      verified_by: null,
+      checks_run: [],
+      challenged: false,
+      review_hold_id: null,
+    },
+    0,
+  ],
+];
+
+const DRAFT_RECORD: ExhibitRevision = {
+  revision: 1,
+  parent_revision: 0,
+  author_kind: 'agent',
+  author: 'chemclaw',
+  change_note: '',
+  created_at: '2026-10-03T09:00:00Z',
+  byte_size: DRAFT_MARKDOWN.length,
+};
+
+function draftHeader(sessionId: string): ExhibitHeader {
+  return {
+    exhibit_id: DRAFT_EXHIBIT_ID,
+    session_id: sessionId,
+    kind: 'document',
+    title: DRAFT_TITLE,
+    head_revision: 1,
+    head_author_kind: 'agent',
+    head_author: 'chemclaw',
+    created_by: 'chemclaw',
+    created_at: DRAFT_RECORD.created_at,
+    updated_at: DRAFT_RECORD.created_at,
+  };
+}
+
+/** The artefact routes of a draft session. `false` when the request is not for one. */
+function draftExhibits(
+  req: import('node:http').IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+): boolean {
+  const match = /^\/sessions\/([0-9a-f]{32})\/exhibits(?:\/(xb-[0-9a-f]{16})(\/revisions)?)?$/.exec(
+    url.pathname,
+  );
+  if (!match || !DRAFT_SESSIONS.has(match[1]!) || req.method !== 'GET') return false;
+  const [, sid = '', xid, tail] = match;
+  const created = draftCreated.has(sid);
+  if (!xid) {
+    const listed: ExhibitListOut = { enabled: true, exhibits: created ? [draftHeader(sid)] : [] };
+    json(res, 200, listed);
+  } else if (!created || xid !== DRAFT_EXHIBIT_ID) {
+    json(res, 404, { detail: 'unknown artefact' });
+  } else if (tail) {
+    json(res, 200, { revisions: [DRAFT_RECORD] });
+  } else {
+    const view: ExhibitView = {
+      ...draftHeader(sid),
+      revision: 1,
+      parent_revision: 0,
+      author_kind: 'agent',
+      author: 'chemclaw',
+      change_note: '',
+      revision_created_at: DRAFT_RECORD.created_at,
+      spec: { kind: 'document', markdown: DRAFT_MARKDOWN },
+      unverified_figures: [],
+    };
+    json(res, 200, view);
+  }
+  return true;
+}
+
+/* ── Geometry artefacts and the calc file route (artefacts wave 2) ───────────
+ *
+ * A conversation that already holds two 3D structures — one inline, one citing the calculation file
+ * it came from — so the viewer, its accessible table, the `.xyz` export and the calc byte route are
+ * all reached through the real BFF. Read-only, so one session serves every project and both themes
+ * at once without any of them seeing another's write.
+ */
+const GEOMETRY_SESSION = '2'.repeat(32);
+const GEOMETRY_INLINE_ID = 'xb-9e0000000000a001';
+const GEOMETRY_CITED_ID = 'xb-9e0000000000a002';
+/** The calc artifact the cited geometry names, as `ArtifactRef.as_str()` spells it. */
+/** Shaped as the calc server writes one — its engine version carries `/` and `+` (the contract's
+ *  wave-2 amendment) — so the browser suite proves the whitelist takes a real key end to end. */
+const CALC_KEY = 'xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0/rdkit-2025.03.4:0123abcd:89efcdab';
+const CALC_NAME = 'xtbopt.xyz';
+const WATER_XYZ = `3
+ energy: -5.070544440612 gnorm: 0.000123 xtb: 6.7.1
+O      0.00000000    0.00000000    0.11779000
+H      0.00000000    0.75545000   -0.47116000
+H      0.00000000   -0.75545000   -0.47116000
+`;
+const ETHANOL_XYZ = `9
+ethanol, GFN2-xTB
+C     -0.0476    -0.4144     0.0000
+C      1.4483     0.0108     0.0000
+O     -0.8018     0.7835     0.0000
+H     -0.3176    -1.0093     0.8838
+H     -0.3176    -1.0093    -0.8838
+H      1.6956     0.6020     0.8862
+H      1.6956     0.6020    -0.8862
+H      2.0598    -0.8959     0.0000
+H     -1.7400     0.5400     0.0000
+`;
+
+function geometryHeader(id: string, title: string): ExhibitHeader {
+  return {
+    exhibit_id: id,
+    session_id: GEOMETRY_SESSION,
+    kind: 'geometry',
+    title,
+    head_revision: 1,
+    head_author_kind: 'agent',
+    head_author: 'chemclaw',
+    created_by: 'chemclaw',
+    created_at: '2026-10-03T08:00:00Z',
+    updated_at: id === GEOMETRY_INLINE_ID ? '2026-10-03T08:05:00Z' : '2026-10-03T08:00:00Z',
+  };
+}
+
+const GEOMETRIES: Record<string, { header: ExhibitHeader; spec: ExhibitView['spec'] }> = {
+  [GEOMETRY_INLINE_ID]: {
+    header: geometryHeader(GEOMETRY_INLINE_ID, 'Optimised water'),
+    spec: {
+      kind: 'geometry',
+      format: 'xyz',
+      xyz: WATER_XYZ,
+      label: 'Water, GFN2-xTB',
+      energy_hartree: -5.070544440612,
+      highlight_atoms: [0],
+    },
+  },
+  [GEOMETRY_CITED_ID]: {
+    header: geometryHeader(GEOMETRY_CITED_ID, 'Ethanol conformer'),
+    spec: {
+      kind: 'geometry',
+      format: 'xyz',
+      source: { calc_key: CALC_KEY, name: CALC_NAME },
+      label: '',
+      highlight_atoms: [],
+    },
+  },
+};
+
+/** The geometry session's artefact routes, and the calc byte route. `false` when not one. */
+function geometryRoutes(
+  req: import('node:http').IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+): boolean {
+  if (url.pathname === '/calc-artifacts/content' && req.method === 'GET') {
+    // The service's contract: the whole `<calc_key>#<name>` in one `ref` parameter.
+    if (url.searchParams.get('ref') !== `${CALC_KEY}#${CALC_NAME}`) {
+      json(res, 404, { detail: 'no stored calculation artifact' });
+      return true;
+    }
+    res.writeHead(200, {
+      'content-type': 'chemical/x-xyz',
+      'content-disposition': `attachment; filename="${CALC_NAME}"`,
+    });
+    res.end(ETHANOL_XYZ);
+    return true;
+  }
+  const match =
+    /^\/sessions\/([0-9a-f]{32})\/exhibits(?:\/(xb-[0-9a-f]{16})(\/revisions|\/export\.xyz)?)?$/.exec(
+      url.pathname,
+    );
+  if (!match || match[1] !== GEOMETRY_SESSION || req.method !== 'GET') return false;
+  const [, , xid, tail] = match;
+  if (!xid) {
+    const listed: ExhibitListOut = {
+      enabled: true,
+      exhibits: [GEOMETRIES[GEOMETRY_INLINE_ID]!.header, GEOMETRIES[GEOMETRY_CITED_ID]!.header],
+    };
+    json(res, 200, listed);
+    return true;
+  }
+  const found = GEOMETRIES[xid];
+  if (!found) {
+    json(res, 404, { detail: 'unknown artefact' });
+    return true;
+  }
+  const record: ExhibitRevision = {
+    revision: 1,
+    parent_revision: 0,
+    author_kind: 'agent',
+    author: 'chemclaw',
+    change_note: '',
+    created_at: found.header.created_at,
+    byte_size: 400,
+  };
+  if (tail === '/revisions') {
+    json(res, 200, { revisions: [record] });
+  } else if (tail === '/export.xyz') {
+    res.writeHead(200, {
+      'content-type': 'chemical/x-xyz',
+      'content-disposition': 'attachment; filename="optimised-water.xyz"',
+    });
+    res.end(xid === GEOMETRY_INLINE_ID ? WATER_XYZ : ETHANOL_XYZ);
+  } else {
+    const view: ExhibitView = {
+      ...found.header,
+      revision: 1,
+      parent_revision: 0,
+      author_kind: 'agent',
+      author: 'chemclaw',
+      change_note: '',
+      revision_created_at: found.header.created_at,
+      spec: found.spec,
+      unverified_figures: [],
+    };
+    json(res, 200, view);
+  }
+  return true;
+}
 
 /** Read a JSON request body. */
 function readBody<T>(req: import('node:http').IncomingMessage): Promise<T> {
@@ -1260,11 +1564,20 @@ createServer(async (req, res) => {
       resetExhibit(session);
       return streamTurn(res, EXHIBIT_TURN);
     }
+    // A draft session's turn writes its report afresh: nothing is listed until its `exhibit` frame.
+    if (DRAFT_SESSIONS.has(session)) {
+      draftCreated.delete(session);
+      return streamTurn(res, DRAFT_TURN, (event) => {
+        if (event.type === 'exhibit') draftCreated.add(session);
+      });
+    }
     return streamTurn(res);
   }
 
   // The artefact routes. Every other session lists none, with the deployment's switch on — the
   // shape every spec's shell now reads once per conversation.
+  if (draftExhibits(req, res, url)) return;
+  if (geometryRoutes(req, res, url)) return;
   if (await exhibits(req, res, url)) return;
 
   if (path.endsWith('/events')) {

@@ -372,3 +372,55 @@ describe('the CSV a chemist opens in Excel', () => {
     expect(toCsv(['t'], [{ t: '-1+1e1*A1' }])).toBe("t\r\n'-1+1e1*A1");
   });
 });
+
+describe('calculation files (C4)', () => {
+  const ROW = {
+    artifact_ref: 'xtb_hess@6.7.1:ab:cd#hessian.npy',
+    name: 'hessian.npy',
+    media_type: 'application/x-npy',
+    byte_size: 2_400_000,
+  };
+
+  it('claims both calc-store tools by name — an empty listing included, which is a real answer', () => {
+    expect(pick('list_artifacts', [ROW]).id).toBe('calc-artifacts');
+    expect(pick('list_artifacts', []).id).toBe('calc-artifacts');
+    expect(pick('fetch_artifact', { ...ROW, text: 'x', truncated: false }).id).toBe(
+      'calc-artifacts',
+    );
+    // Any other tool's empty list is still nothing to draw.
+    expect(rendererFor('find_calculations', [])).toBeNull();
+  });
+
+  it('offers every listed file as a download, with its stored size', async () => {
+    draw(
+      'list_artifacts',
+      [ROW, { ...ROW, artifact_ref: 'k@1:a:b#xtbopt.xyz', name: 'xtbopt.xyz', byte_size: 512 }],
+      false,
+    );
+    expect(await screen.findByRole('button', { name: 'Download hessian.npy' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Download xtbopt.xyz' })).toBeTruthy();
+    expect(screen.getByText('2.3 MB')).toBeTruthy();
+    expect(screen.getByText('512 B')).toBeTruthy();
+  });
+
+  it('says an empty listing is no files kept, not a missing calculation', async () => {
+    draw('list_artifacts', [], true);
+    expect(await screen.findByText('This calculation kept no files.')).toBeTruthy();
+  });
+
+  it('marks a cut read as part of the file, and offers the whole file', async () => {
+    draw(
+      'fetch_artifact',
+      {
+        ...ROW,
+        artifact_ref: 'k@1:a:b#xtbopt.log',
+        name: 'xtbopt.log',
+        text: 'line 1\nline 2',
+        truncated: true,
+      },
+      false,
+    );
+    expect(await screen.findByText('part of the file')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Download the whole file xtbopt.log' })).toBeTruthy();
+  });
+});

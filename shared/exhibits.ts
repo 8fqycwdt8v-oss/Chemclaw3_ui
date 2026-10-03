@@ -31,7 +31,7 @@
  * `shared/events.ts` records what a hand-written mirror costs: nine members and fields deleted in
  * transit because the decoder and the declaration were different objects. These bodies are the
  * same kind of thing — another repository's shape, read by a surface that renders whatever it is
- * handed — and the spec is a six-member discriminated union whose members a renderer switches on.
+ * handed — and the spec is a seven-member discriminated union whose members a renderer switches on.
  * A schema whose `InferOutput` *is* the type makes "a field the type has and the decoder drops"
  * unrepresentable, exactly as it did there, and it lets an unreadable spec be a value the view can
  * say something honest about instead of a `TypeError` three components down.
@@ -77,10 +77,13 @@ export const EXPORT_FORMATS: Readonly<Record<ExhibitKind, readonly ExportFormat[
   chart: ['csv'],
   result: [],
   link: [],
+  // The inline block, or the bytes the `source` names, resolved by the service — so the file is the
+  // same one whether the agent pasted the coordinates or cited the calculation that produced them.
+  geometry: ['xyz'],
 };
 
 /** Every server-side export format. The BFF whitelist's `FMT` pattern is this list. */
-export const EXPORT_FORMAT_LIST = ['md', 'csv', 'smi'] as const;
+export const EXPORT_FORMAT_LIST = ['md', 'csv', 'smi', 'xyz'] as const;
 export type ExportFormat = (typeof EXPORT_FORMAT_LIST)[number];
 
 /* ── field vocabulary ────────────────────────────────────────────────────────
@@ -188,6 +191,46 @@ const linkSpec = v.object({
   id: v.string(),
 });
 
+/**
+ * A calculation by-product a geometry is read from — the calc artifact store's `ArtifactRef` key.
+ *
+ * Two fields, because those are what address a stored artifact: which calculation, and the file's
+ * role in it. Together they are the `<calc_key>#<name>` string `fetch_artifact` and a note's
+ * `artifact_refs` already spell (`calcArtifactRef`), which is what `GET /calc-artifacts/content`
+ * takes.
+ */
+const geometrySource = v.object({
+  calc_key: v.pipe(v.string(), v.minLength(1)),
+  name: v.pipe(v.string(), v.minLength(1)),
+});
+
+/**
+ * One 3D structure (wave 2): an inline XYZ block, or a stored calculation artifact it cites.
+ *
+ * **Exactly one of `xyz` and `source`**, as the service holds it — checked here too, because a spec
+ * carrying both would leave the viewer choosing which structure is "the" artefact, and one carrying
+ * neither is not a structure at all. The service omits whichever is absent rather than sending
+ * `null`, so both are plain optionals.
+ *
+ * The block itself is *not* parsed here. The service validated it on write (count line, known
+ * elements, finite coordinates, at most `exhibit_max_atoms`); this schema's job is the shape, and
+ * `src/chem/geometry.ts`'s `parseXyz` is the one reader of the text — so a `source`'s bytes, which nothing validated
+ * on the way out of the calc store, go through the same parser and the same refusals.
+ *
+ * `highlight_atoms` are **0-based** indices into the atom lines (the service's own docstring), and
+ * `energy_hartree` is a label to show, not a figure anything here computes — the same posture the
+ * chart's caption takes about agent-transcribed values.
+ */
+const geometrySpec = v.object({
+  kind: v.literal('geometry'),
+  format: v.optional(v.literal('xyz'), 'xyz'),
+  xyz: v.optional(v.string()),
+  source: v.optional(geometrySource),
+  label: v.optional(v.string(), ''),
+  energy_hartree: v.optional(v.pipe(v.number(), v.finite())),
+  highlight_atoms: v.optional(v.array(v.pipe(v.number(), v.integer(), v.minValue(0))), []),
+});
+
 const exhibitSpec = v.variant('kind', [
   documentSpec,
   tableSpec,
@@ -195,9 +238,23 @@ const exhibitSpec = v.variant('kind', [
   chartSpec,
   resultSpec,
   linkSpec,
+  geometrySpec,
 ]);
 
-export type ExhibitSpec = v.InferOutput<typeof exhibitSpec>;
+/**
+ * The spec, with the one rule a member cannot state about itself: a geometry carries exactly one of
+ * `xyz` and `source`. On the union rather than on `geometrySpec` because `v.variant` dispatches only
+ * on plain object members, and a check there would make the member something it cannot take.
+ */
+const checkedSpec = v.pipe(
+  exhibitSpec,
+  v.check(
+    (spec) => spec.kind !== 'geometry' || (spec.xyz === undefined) !== (spec.source === undefined),
+    'a geometry takes exactly one of `xyz` or `source`',
+  ),
+);
+
+export type ExhibitSpec = v.InferOutput<typeof checkedSpec>;
 export type DocumentSpec = v.InferOutput<typeof documentSpec>;
 export type TableSpec = v.InferOutput<typeof tableSpec>;
 export type TableColumn = v.InferOutput<typeof tableColumn>;
@@ -208,6 +265,17 @@ export type ChartSpec = v.InferOutput<typeof chartSpec>;
 export type ChartSeries = v.InferOutput<typeof chartSeries>;
 export type ResultSpec = v.InferOutput<typeof resultSpec>;
 export type LinkSpec = v.InferOutput<typeof linkSpec>;
+export type GeometrySpec = v.InferOutput<typeof geometrySpec>;
+export type GeometrySource = v.InferOutput<typeof geometrySource>;
+
+/**
+ * The flat `<calc_key>#<name>` form of a calc artifact reference — `ArtifactRef.as_str()` upstream.
+ *
+ * Written once because three things spell it and must agree: a geometry's `source`, the
+ * `artifact_ref` a `list_artifacts` row carries, and the query parameter the download route takes.
+ */
+export const calcArtifactRef = (source: GeometrySource): string =>
+  `${source.calc_key}#${source.name}`;
 
 /**
  * A spec, or `null` when this build cannot read it.
@@ -216,7 +284,7 @@ export type LinkSpec = v.InferOutput<typeof linkSpec>;
  * null as a sentence, and the revision log, the diff and the export — none of which need the
  * spec's shape — keep working.
  */
-const specOrNull = () => v.fallback(v.nullable(exhibitSpec), null);
+const specOrNull = () => v.fallback(v.nullable(checkedSpec), null);
 
 /* ── the bodies ──────────────────────────────────────────────────────────── */
 
@@ -383,5 +451,5 @@ export const decodeMyExhibits = decoder(exhibitIndexOut, 'an artefact list');
  * fault rather than reaching the service as a revision the chemist is told was refused.
  */
 export function isSpec(value: unknown): value is ExhibitSpec {
-  return v.safeParse(exhibitSpec, value).success;
+  return v.safeParse(checkedSpec, value).success;
 }

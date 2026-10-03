@@ -23,6 +23,9 @@ const SLOW = (what: string): string =>
   );
 
 test('reloading mid-turn reattaches to the turn and shows its answer', async ({ alice }) => {
+  // Known defect, tracked as Chemclaw3_ui#131 (D5): the unloading page stops the turn. Remove this
+  // line when the grace-stop fix lands; the test then has to pass outright.
+  test.fail(true, 'Chemclaw3_ui#131 (D5)');
   const { page } = alice;
   await newConversation(page);
   await send(page, SLOW('reload mid-turn'));

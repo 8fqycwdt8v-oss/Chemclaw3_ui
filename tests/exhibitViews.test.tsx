@@ -291,7 +291,7 @@ describe('a chart artefact', () => {
 
   it('captions an agent-authored chart as transcribed, and lists every value it draws', () => {
     const view = { ...table, kind: 'chart', author_kind: 'agent', spec } as ExhibitView;
-    render(<ChartView view={view} spec={spec} />);
+    render(<ChartView sessionId={SID} view={view} spec={spec} isHead />);
     expect(screen.getByText(TRANSCRIBED_CAPTION)).toBeTruthy();
     expect(TRANSCRIBED_CAPTION).toBe(
       'Values transcribed by the agent — not linked to tool results.',
@@ -312,7 +312,7 @@ describe('a chart artefact', () => {
 
   it('says nothing about transcription over a chemist’s own revision', () => {
     const view = { ...table, kind: 'chart', author_kind: 'human', spec } as ExhibitView;
-    render(<ChartView view={view} spec={spec} />);
+    render(<ChartView sessionId={SID} view={view} spec={spec} isHead />);
     expect(screen.queryByText(TRANSCRIBED_CAPTION)).toBeNull();
   });
 
@@ -324,7 +324,14 @@ describe('a chart artefact', () => {
       y_label: 'Yield (%)',
       series: [{ name: 'Yield', x: ['2-MeTHF', 'CPME'], y: [82, 64] }],
     };
-    render(<ChartView view={{ ...table, spec: bars } as ExhibitView} spec={bars} />);
+    render(
+      <ChartView
+        sessionId={SID}
+        view={{ ...table, spec: bars } as ExhibitView}
+        spec={bars}
+        isHead
+      />,
+    );
     expect(screen.getByRole('img').querySelectorAll('rect')).toHaveLength(2);
     expect(screen.getByRole('img').textContent).toContain('starting at zero');
   });
@@ -334,6 +341,9 @@ describe('a structures artefact', () => {
   it('draws a labelled tile per structure, each enlargeable', () => {
     render(
       <StructuresView
+        sessionId={SID}
+        view={table}
+        isHead
         spec={{
           kind: 'structures',
           items: [

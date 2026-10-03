@@ -23,6 +23,8 @@ export const EXHIBIT_KINDS = [
   'result',
   'link',
   'geometry',
+  // Wave 3: agent-written HTML, drawn only inside the sandbox origin (`HtmlView`), never inline.
+  'html',
 ] as const;
 export type ExhibitKind = (typeof EXHIBIT_KINDS)[number];
 
@@ -51,6 +53,7 @@ export const KIND_LABEL: Readonly<Record<string, string>> = {
   result: 'Tool result',
   link: 'Link',
   geometry: '3D structure',
+  html: 'HTML',
 };
 
 /**

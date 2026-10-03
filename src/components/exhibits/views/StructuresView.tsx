@@ -12,20 +12,45 @@
  *
  * Selecting a tile enlarges it in a panel with the whole SMILES, every property and "use in my
  * message". Properties are the agent's literal values, shown with the key it wrote and no unit
- * added.
+ * added — or, since wave 3, values bound to a tool result: a bound SMILES or property carries a
+ * provenance marker, and **Detach** (from the marker, on the head) is the one write this view makes.
  */
 
 import { useState } from 'react';
-import type { StructureItem, StructuresSpec } from '../../../../shared/exhibits.ts';
+import type { ExhibitView, StructureItem, StructuresSpec } from '../../../../shared/exhibits.ts';
 import { formatScientificNumber } from '../../../lib/format.ts';
 import { Molecule } from '../../Molecule.tsx';
 import { UseStructure } from '@/components/chem/UseStructure';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
+import { ProvenanceMarker, SOURCE_GONE } from '../Provenance.tsx';
+import { ReviseNotices } from '../ReviseNotices.tsx';
+import { useRevise } from '../useRevise.ts';
+import {
+  canDetach,
+  detach,
+  pathOf,
+  provenanceAt,
+  rawOf,
+  type BoundTarget,
+  type Provenance,
+} from '../bindings.ts';
 
-const shownProp = (value: string | number): string =>
-  typeof value === 'number' ? formatScientificNumber(value) : value;
+/** A property as text; `null` is a bound value whose source is gone, said rather than blanked. */
+const shownProp = (value: string | number | null): string =>
+  value === null ? SOURCE_GONE : typeof value === 'number' ? formatScientificNumber(value) : value;
 
-function Props({ props }: { props: StructureItem['props'] }): React.JSX.Element | null {
+/** What a bound position needs to draw its marker: the provenance, and the detach if offered. */
+type MarkerFor = (target: BoundTarget) => React.JSX.Element | null;
+
+function Props({
+  item,
+  props,
+  marker,
+}: {
+  item: number;
+  props: StructureItem['props'];
+  marker: MarkerFor;
+}): React.JSX.Element | null {
   const entries = Object.entries(props);
   if (entries.length === 0) return null;
   return (
@@ -33,19 +58,54 @@ function Props({ props }: { props: StructureItem['props'] }): React.JSX.Element 
       {entries.map(([key, value]) => (
         <div key={key} className="contents">
           <dt className="text-ink-subtle">{key}</dt>
-          <dd className="min-w-0 truncate font-mono tabular-nums">{shownProp(value)}</dd>
+          <dd className="flex min-w-0 items-center gap-1 font-mono tabular-nums">
+            <span className="truncate">{shownProp(value)}</span>
+            {marker({ at: 'prop', item, name: key })}
+          </dd>
         </div>
       ))}
     </dl>
   );
 }
 
-export function StructuresView({ spec }: { spec: StructuresSpec }): React.JSX.Element {
+export function StructuresView({
+  sessionId,
+  view,
+  spec,
+  isHead,
+}: {
+  sessionId: string;
+  view: ExhibitView;
+  spec: StructuresSpec;
+  isHead: boolean;
+}): React.JSX.Element {
   const [enlarged, setEnlarged] = useState<number | null>(null);
   const item = enlarged === null ? null : spec.items[enlarged];
+  const revise = useRevise(sessionId, view);
+  const raw = rawOf(view, 'structures');
+
+  const detachFor = (target: BoundTarget, provenance: Provenance): (() => void) | undefined => {
+    if (!isHead || !raw || !canDetach(target, provenance)) return undefined;
+    const base = view.revision;
+    return () => {
+      const next = detach(raw, spec, target);
+      if (next) void revise.save(next, `Detached ${pathOf(target)} from its tool result`, base);
+    };
+  };
+  const marker: MarkerFor = (target) => {
+    const bound = provenanceAt(view, target);
+    return bound ? (
+      <ProvenanceMarker
+        provenance={bound}
+        onDetach={detachFor(target, bound)}
+        detachDisabled={revise.state.status === 'saving'}
+      />
+    ) : null;
+  };
 
   return (
     <>
+      <ReviseNotices sessionId={sessionId} exhibitId={view.exhibit_id} revise={revise} />
       <ul className="grid grid-cols-[repeat(auto-fill,minmax(9.5rem,1fr))] gap-2">
         {spec.items.map((entry, index) => (
           <li
@@ -61,10 +121,13 @@ export function StructuresView({ spec }: { spec: StructuresSpec }): React.JSX.El
               <Molecule smiles={entry.smiles} maxWidth={180} />
             </button>
             {entry.label && <p className="truncate text-xs font-medium">{entry.label}</p>}
-            <p className="truncate font-mono text-2xs text-ink-muted" title={entry.smiles}>
-              {entry.smiles}
+            <p className="flex min-w-0 items-center gap-1 font-mono text-2xs text-ink-muted">
+              <span className="truncate" title={entry.smiles}>
+                {entry.smiles || SOURCE_GONE}
+              </span>
+              {marker({ at: 'smiles', item: index })}
             </p>
-            <Props props={entry.props} />
+            <Props item={index} props={entry.props} marker={marker} />
           </li>
         ))}
       </ul>
@@ -83,7 +146,7 @@ export function StructuresView({ spec }: { spec: StructuresSpec }): React.JSX.El
               {item.label && <h3 className="font-medium">{item.label}</h3>}
               <Molecule smiles={item.smiles} maxWidth={520} />
               <p className="font-mono text-xs break-all text-ink-muted">{item.smiles}</p>
-              <Props props={item.props} />
+              <Props item={enlarged ?? 0} props={item.props} marker={marker} />
               <div className="flex justify-end">
                 <UseStructure smiles={item.smiles} label onUsed={() => setEnlarged(null)} />
               </div>

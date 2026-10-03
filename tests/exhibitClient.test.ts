@@ -114,6 +114,8 @@ describe('the artefact bodies decode into the frozen shape', () => {
       result: [],
       link: [],
       geometry: ['xyz'],
+      // Wave 3: the source, which the service sends as a `text/plain` attachment.
+      html: ['html'],
     });
   });
 });
@@ -205,7 +207,11 @@ describe('the artefact requests', () => {
   it('lists a session’s artefacts, and reads a service without the route as “off”', async () => {
     const stub = stubFetch(() => json(404, { detail: 'Not Found' }));
     restore = stub.restore;
-    await expect(api.listExhibits(SID, auth)).resolves.toEqual({ enabled: false, exhibits: [] });
+    await expect(api.listExhibits(SID, auth)).resolves.toEqual({
+      enabled: false,
+      html_enabled: false,
+      exhibits: [],
+    });
     expect(stub.calls[0]?.url).toBe(`/api/sessions/${SID}/exhibits`);
   });
 

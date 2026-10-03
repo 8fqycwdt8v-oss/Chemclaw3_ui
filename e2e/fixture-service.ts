@@ -54,6 +54,7 @@ import type {
   ExhibitListOut,
   ExhibitRevision,
   ExhibitView,
+  RawExhibitSpec,
   TableSpec,
 } from '../shared/exhibits.ts';
 
@@ -485,6 +486,9 @@ function exhibitView(sessionId: string, revisions: StoredRevision[], asked: numb
     change_note: at.record.change_note,
     revision_created_at: at.record.created_at,
     spec: at.spec,
+    // Nothing in this table is bound, so the stored spec is the drawn one (wave 3).
+    raw_spec: at.spec,
+    bindings: [],
     // Phase 2's grounding check, on the agent's revision only: 111 was never returned by a tool.
     unverified_figures: at.record.author_kind === 'agent' ? ['111'] : [],
   };
@@ -700,7 +704,11 @@ function draftExhibits(
   const [, sid = '', xid, tail] = match;
   const created = draftCreated.has(sid);
   if (!xid) {
-    const listed: ExhibitListOut = { enabled: true, exhibits: created ? [draftHeader(sid)] : [] };
+    const listed: ExhibitListOut = {
+      enabled: true,
+      html_enabled: true,
+      exhibits: created ? [draftHeader(sid)] : [],
+    };
     json(res, 200, listed);
   } else if (!created || xid !== DRAFT_EXHIBIT_ID) {
     json(res, 404, { detail: 'unknown artefact' });
@@ -716,6 +724,8 @@ function draftExhibits(
       change_note: '',
       revision_created_at: DRAFT_RECORD.created_at,
       spec: { kind: 'document', markdown: DRAFT_MARKDOWN },
+      raw_spec: { kind: 'document', markdown: DRAFT_MARKDOWN },
+      bindings: [],
       unverified_figures: [],
     };
     json(res, 200, view);
@@ -824,6 +834,7 @@ function geometryRoutes(
   if (!xid) {
     const listed: ExhibitListOut = {
       enabled: true,
+      html_enabled: true,
       exhibits: [GEOMETRIES[GEOMETRY_INLINE_ID]!.header, GEOMETRIES[GEOMETRY_CITED_ID]!.header],
     };
     json(res, 200, listed);
@@ -861,10 +872,236 @@ function geometryRoutes(
       change_note: '',
       revision_created_at: found.header.created_at,
       spec: found.spec,
+      raw_spec: found.spec as RawExhibitSpec,
+      bindings: [],
       unverified_figures: [],
     };
     json(res, 200, view);
   }
+  return true;
+}
+
+/* ── Bindings and the HTML sandbox (artefacts wave 3) ───────────────────────
+ *
+ * One read-only conversation holding the three wave-3 shapes: a table with one bound cell and one
+ * whose source is gone, a chart with one series bound and one transcribed, and an `html` artefact
+ * whose script *probes its own sandbox* — it tries to fetch, read cookies and storage, reach the
+ * parent's document, navigate the top window and open a popup, and writes what happened into its
+ * own page, where `e2e/sandbox.spec.ts` reads it through the frame. The probes are the agent's
+ * worst case written down: the page is what an injected instruction would make the agent write.
+ */
+const WAVE3_SESSION = '1'.repeat(32);
+const BOUND_TABLE_ID = 'xb-3b0000000000b001';
+const BOUND_CHART_ID = 'xb-3b0000000000b002';
+const HTML_ID = 'xb-3b0000000000b003';
+/** The tool result the bound values come from, and one retention has since swept. */
+const BOUND_REF = '3b'.repeat(32);
+const GONE_REF = '4c'.repeat(32);
+
+const bind = (result: string, pointer: string) => ({ $bind: { result, pointer } });
+
+const SANDBOX_PROBE_HTML = `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Sandbox probe</title>
+<style>body{font-family:sans-serif;margin:8px;color:#111;background:#fff}#tall{height:520px}</style>
+</head><body>
+<h1>Sandbox probe</h1>
+<ul>
+<li>fetch: <output id="fetch">pending</output></li>
+<li>csp: <output id="csp">pending</output></li>
+<li>cookie: <output id="cookie">pending</output></li>
+<li>storage: <output id="storage">pending</output></li>
+<li>parent: <output id="parent">pending</output></li>
+<li>top: <output id="top">pending</output></li>
+<li>popup: <output id="popup">pending</output></li>
+</ul>
+<div id="tall"></div>
+<script>
+function put(id, text) { document.getElementById(id).textContent = text; }
+// A \`data:\` URL, so neither CORS nor the shell's CORP can be what refuses it: without the shell's
+// \`connect-src 'none'\` this fetch succeeds, and the violation names the directive that stopped it.
+document.addEventListener('securitypolicyviolation', function (e) { put('csp', e.effectiveDirective); });
+fetch('data:text/plain,probe').then(function () { put('fetch', 'allowed'); }, function (e) { put('fetch', 'blocked: ' + e.name); });
+try { put('cookie', 'read: ' + JSON.stringify(document.cookie)); } catch (e) { put('cookie', 'blocked: ' + e.name); }
+try { localStorage.getItem('chemclaw3.theme'); put('storage', 'read'); } catch (e) { put('storage', 'blocked: ' + e.name); }
+try { put('parent', 'read: ' + JSON.stringify(parent.document.cookie)); } catch (e) { put('parent', 'blocked: ' + e.name); }
+try { top.location.href = 'about:blank#escaped'; put('top', 'attempted'); } catch (e) { put('top', 'blocked: ' + e.name); }
+try { var w = window.open('about:blank', '_blank'); put('popup', w ? 'opened' : 'blocked: null'); } catch (e) { put('popup', 'blocked: ' + e.name); }
+// Messages the app must not act on: the wrong type, and a height that is not a number.
+parent.postMessage({ type: 'navigate', href: 'about:blank' }, '*');
+parent.postMessage({ type: 'height', px: 'tall' }, '*');
+</script>
+</body></html>`;
+
+interface Wave3Artefact {
+  header: ExhibitHeader;
+  spec: ExhibitView['spec'];
+  raw: RawExhibitSpec;
+  bindings: ExhibitView['bindings'];
+}
+
+function wave3Header(id: string, kind: string, title: string): ExhibitHeader {
+  return {
+    exhibit_id: id,
+    session_id: WAVE3_SESSION,
+    kind,
+    title,
+    head_revision: 1,
+    head_author_kind: 'agent',
+    head_author: 'chemclaw',
+    created_by: 'chemclaw',
+    created_at: '2026-10-03T09:00:00Z',
+    updated_at: `2026-10-03T09:0${id.slice(-1)}:00Z`,
+  };
+}
+
+const WAVE3: Record<string, Wave3Artefact> = {
+  [HTML_ID]: {
+    header: wave3Header(HTML_ID, 'html', 'Sandbox probe'),
+    spec: { kind: 'html', html: SANDBOX_PROBE_HTML, height: 320 },
+    raw: { kind: 'html', html: SANDBOX_PROBE_HTML, height: 320 },
+    bindings: [],
+  },
+  [BOUND_TABLE_ID]: {
+    header: wave3Header(BOUND_TABLE_ID, 'table', 'Predicted yields'),
+    spec: {
+      kind: 'table',
+      columns: [
+        { key: 'solvent', label: 'Solvent', unit: '' },
+        { key: 'yield', label: 'Yield', unit: '%' },
+      ],
+      rows: [
+        { solvent: '2-MeTHF', yield: 82 },
+        { solvent: 'CPME', yield: null },
+        { solvent: 'Toluene', yield: 51 },
+      ],
+    },
+    raw: {
+      kind: 'table',
+      columns: [
+        { key: 'solvent', label: 'Solvent', unit: '' },
+        { key: 'yield', label: 'Yield', unit: '%' },
+      ],
+      rows: [
+        { solvent: '2-MeTHF', yield: bind(BOUND_REF, '/0/yield') },
+        { solvent: 'CPME', yield: bind(GONE_REF, '/1/yield') },
+        { solvent: 'Toluene', yield: 51 },
+      ],
+    },
+    bindings: [
+      {
+        path: 'rows[0].yield',
+        result_ref: BOUND_REF,
+        tool: 'predict_yield',
+        pointer: '/0/yield',
+        ok: true,
+        error: '',
+      },
+      {
+        path: 'rows[1].yield',
+        result_ref: GONE_REF,
+        tool: 'predict_yield',
+        pointer: '/1/yield',
+        ok: false,
+        error: 'the tool result was removed by retention',
+      },
+    ],
+  },
+  [BOUND_CHART_ID]: {
+    header: wave3Header(BOUND_CHART_ID, 'chart', 'Conversion against time'),
+    spec: {
+      kind: 'chart',
+      chart: 'line',
+      x_label: 'Time (h)',
+      y_label: 'Conversion (%)',
+      series: [
+        { name: 'Measured', x: [0, 2, 4], y: [0, 41, 77] },
+        { name: 'Literature', x: [0, 2, 4], y: [0, 35, 70] },
+      ],
+    },
+    raw: {
+      kind: 'chart',
+      chart: 'line',
+      x_label: 'Time (h)',
+      y_label: 'Conversion (%)',
+      series: [
+        { name: 'Measured', x: bind(BOUND_REF, '/t'), y: bind(BOUND_REF, '/conversion') },
+        { name: 'Literature', x: [0, 2, 4], y: [0, 35, 70] },
+      ],
+    },
+    bindings: [
+      {
+        path: 'series[0].x',
+        result_ref: BOUND_REF,
+        tool: 'read_hplc_series',
+        pointer: '/t',
+        ok: true,
+        error: '',
+      },
+      {
+        path: 'series[0].y',
+        result_ref: BOUND_REF,
+        tool: 'read_hplc_series',
+        pointer: '/conversion',
+        ok: true,
+        error: '',
+      },
+    ],
+  },
+};
+
+/** The wave-3 conversation's artefact routes. Read-only. `false` when the request is not one. */
+function wave3Routes(
+  req: import('node:http').IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+): boolean {
+  const match = /^\/sessions\/([0-9a-f]{32})\/exhibits(?:\/(xb-[0-9a-f]{16})(\/revisions)?)?$/.exec(
+    url.pathname,
+  );
+  if (!match || match[1] !== WAVE3_SESSION || req.method !== 'GET') return false;
+  const [, , xid, tail] = match;
+  if (!xid) {
+    const listed: ExhibitListOut = {
+      enabled: true,
+      html_enabled: true,
+      // Newest first, as the service orders them: the HTML probe is in front.
+      exhibits: [HTML_ID, BOUND_CHART_ID, BOUND_TABLE_ID].map((id) => WAVE3[id]!.header),
+    };
+    json(res, 200, listed);
+    return true;
+  }
+  const found = WAVE3[xid];
+  if (!found) {
+    json(res, 404, { detail: 'unknown artefact' });
+    return true;
+  }
+  const record: ExhibitRevision = {
+    revision: 1,
+    parent_revision: 0,
+    author_kind: 'agent',
+    author: 'chemclaw',
+    change_note: '',
+    created_at: found.header.created_at,
+    byte_size: JSON.stringify(found.raw).length,
+  };
+  if (tail === '/revisions') {
+    json(res, 200, { revisions: [record] });
+    return true;
+  }
+  const view: ExhibitView = {
+    ...found.header,
+    revision: 1,
+    parent_revision: 0,
+    author_kind: 'agent',
+    author: 'chemclaw',
+    change_note: '',
+    revision_created_at: found.header.created_at,
+    spec: found.spec,
+    raw_spec: found.raw,
+    bindings: found.bindings,
+    unverified_figures: [],
+  };
+  json(res, 200, view);
   return true;
 }
 
@@ -901,6 +1138,7 @@ async function exhibits(
     if (req.method === 'GET') {
       const listed: ExhibitListOut = {
         enabled: true,
+        html_enabled: true,
         exhibits: revisions ? [exhibitHeader(sid, revisions)] : [],
       };
       json(res, 200, listed);
@@ -1578,6 +1816,7 @@ createServer(async (req, res) => {
   // shape every spec's shell now reads once per conversation.
   if (draftExhibits(req, res, url)) return;
   if (geometryRoutes(req, res, url)) return;
+  if (wave3Routes(req, res, url)) return;
   if (await exhibits(req, res, url)) return;
 
   if (path.endsWith('/events')) {

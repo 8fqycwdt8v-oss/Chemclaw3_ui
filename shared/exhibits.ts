@@ -21,10 +21,16 @@
  * surface that drew an agent's figure and a person's figure the same would erase it. A write names
  * the revision it was based on, and the service answers 409 with the head when that is stale.
  *
- * **The spec holds literal values that the agent transcribed.** Phase 0 measured the binding
- * design out (tables are 2.7% of what answers spend), so a table cell or a chart point is a number
- * the model *wrote*, not one bound to a tool result. That is why `unverified_figures` exists and
- * why `ChartView` captions an agent-authored chart: the UI is the place that has to say it.
+ * **A value is either transcribed or bound (wave 3).** Phase 0 measured the binding design out, and
+ * the owner reversed that on 2026-10-03: a table cell, a structure's SMILES or property, and a chart
+ * series may now be `{"$bind": {result, pointer}}` — a value taken verbatim from a tool result the
+ * session holds. So an `ExhibitView` carries two specs. `spec` is **resolved** (every binding
+ * replaced by its value), and every renderer draws it unchanged; `raw_spec` is what is **stored**,
+ * bindings and all, and it is the only spec a write starts from — a human edit that rebuilt its
+ * body from `spec` would silently turn every binding it did not touch into a literal. `bindings[]`
+ * says, per bound path, which tool it came from and whether its source is still there. A literal
+ * is still a number the model *wrote*, which is why `unverified_figures` exists and why
+ * `ChartView` captions the series nothing links to a tool result.
  *
  * ## Why valibot here, when `shared/protocols.ts` is hand-written interfaces
  *
@@ -80,10 +86,13 @@ export const EXPORT_FORMATS: Readonly<Record<ExhibitKind, readonly ExportFormat[
   // The inline block, or the bytes the `source` names, resolved by the service — so the file is the
   // same one whether the agent pasted the coordinates or cited the calculation that produced them.
   geometry: ['xyz'],
+  // The source, as an attachment the service types `text/plain` — never `text/html` on any origin
+  // that holds a token. Opening it in a browser is the reader's own decision, outside this app.
+  html: ['html'],
 };
 
 /** Every server-side export format. The BFF whitelist's `FMT` pattern is this list. */
-export const EXPORT_FORMAT_LIST = ['md', 'csv', 'smi', 'xyz'] as const;
+export const EXPORT_FORMAT_LIST = ['md', 'csv', 'smi', 'xyz', 'html'] as const;
 export type ExportFormat = (typeof EXPORT_FORMAT_LIST)[number];
 
 /* ── field vocabulary ────────────────────────────────────────────────────────
@@ -118,15 +127,78 @@ const textList = () =>
     [] as string[],
   );
 
+/* ── bindings (wave 3) ──────────────────────────────────────────────────────
+ *
+ * A bound value in a *stored* spec. The outer object is strict — it is a binding exactly when its
+ * one key is `$bind`, so a cell can never be misread as one — and the inner one is loose, because a
+ * write keeps an untouched binding **verbatim**: a field the service adds inside `$bind` later must
+ * survive a chemist's edit of a different cell rather than being stripped on the way back.
+ *
+ * `result` is the full 64-hex `result_ref` once stored (the agent writes the `r:<12 hex>` handle,
+ * and the service substitutes it); `pointer` is an RFC 6901 JSON Pointer into that result.
+ */
+export const BIND_KEY = '$bind';
+
+const bindValue = v.strictObject({
+  $bind: v.looseObject({ result: v.string(), pointer: v.string() }),
+});
+export type BindValue = v.InferOutput<typeof bindValue>;
+
+/** Whether a stored value is a binding rather than a literal. */
+export const isBind = (value: unknown): value is BindValue => v.is(bindValue, value);
+
+/**
+ * A whole table bound to one array in a tool result: each element is a row, each column a pointer
+ * relative to the element. Mutually exclusive with `rows`. Loose for the reason `bindValue` is.
+ */
+const rowsFrom = v.looseObject({
+  result: v.string(),
+  pointer: v.string(),
+  columns: v.record(v.string(), v.string()),
+});
+export type RowsFrom = v.InferOutput<typeof rowsFrom>;
+
+/**
+ * One bound path of a revision, as the service resolved it.
+ *
+ * `path` is the spec path (`rows[3].yield`, `items[0].props.mw`, `series[1].y`, `rows_from`).
+ * `ok: false` is a binding whose result blob is gone (retention): the resolved `spec` then holds
+ * `null` there, and `error` is the service's reason. A row without a boolean `ok` is dropped rather
+ * than guessed at — the provenance marker still draws from `raw_spec`, without a status it would
+ * have had to invent.
+ */
+const binding = v.object({
+  path: v.string(),
+  result_ref: text(),
+  tool: text(),
+  pointer: text(),
+  ok: v.boolean(),
+  error: text(),
+});
+export type Binding = v.InferOutput<typeof binding>;
+
 /* ── the spec, one schema per kind ──────────────────────────────────────────
  *
- * Literal values only (no bindings — superseded in phase 0). Each is strict about the field that
- * *is* the content and defaults what the service defaults, so a spec the service accepted parses
- * here, and one it could not have accepted does not.
+ * Each is strict about the field that *is* the content and defaults what the service defaults, so
+ * a spec the service accepted parses here, and one it could not have accepted does not.
+ *
+ * **Two readings of the three kinds that can bind.** The *resolved* schema is what the views draw:
+ * literals only, except that a binding whose source is gone resolved to `null` — so a bindable
+ * position also admits `null` there (a series' `x`/`y` reads as no points, a SMILES as empty) rather
+ * than costing the whole spec over one expired result. The *raw* schema is what is stored and what a
+ * write sends: a bindable position admits a `$bind` value instead, and never `null` where the
+ * service would refuse one.
  */
 
 /** A table cell: the service's `str | number | null`, nothing else. */
 const cell = v.union([v.string(), v.pipe(v.number(), v.finite()), v.null()]);
+const finite = () => v.pipe(v.number(), v.finite());
+/** A resolved array a gone binding left `null`: no values, which the provenance marker explains. */
+const resolvedArray = <T extends v.GenericSchema>(item: T) =>
+  v.pipe(
+    v.nullable(v.array(item)),
+    v.transform((items) => items ?? []),
+  );
 
 const documentSpec = v.object({
   kind: v.literal('document'),
@@ -142,19 +214,37 @@ const tableColumn = v.object({
   unit: v.optional(v.string(), ''),
 });
 
+/**
+ * A resolved table. A `rows_from` binding has become `rows` — the service resolves it — and an
+ * expired one leaves `rows` null, read as no rows.
+ */
 const tableSpec = v.object({
   kind: v.literal('table'),
   columns: v.pipe(v.array(tableColumn), v.minLength(1)),
-  rows: v.optional(v.array(v.record(v.string(), cell)), []),
+  rows: v.optional(resolvedArray(v.record(v.string(), cell)), []),
+});
+
+/** A stored table: cells may be bound, or the whole body may be one `rows_from` binding. */
+const rawTableSpec = v.object({
+  kind: v.literal('table'),
+  columns: v.pipe(v.array(tableColumn), v.minLength(1)),
+  rows: v.optional(v.array(v.record(v.string(), v.union([cell, bindValue])))),
+  rows_from: v.optional(rowsFrom),
 });
 
 const structureItem = v.object({
-  smiles: v.string(),
-  label: v.optional(v.string(), ''),
-  props: v.optional(
-    v.record(v.string(), v.union([v.string(), v.pipe(v.number(), v.finite())])),
-    {},
+  smiles: v.pipe(
+    v.nullable(v.string()),
+    v.transform((smiles) => smiles ?? ''),
   ),
+  label: v.optional(v.string(), ''),
+  props: v.optional(v.record(v.string(), v.union([v.string(), finite(), v.null()])), {}),
+});
+
+const rawStructureItem = v.object({
+  smiles: v.union([v.string(), bindValue]),
+  label: v.optional(v.string(), ''),
+  props: v.optional(v.record(v.string(), v.union([v.string(), finite(), bindValue])), {}),
 });
 
 const structuresSpec = v.object({
@@ -162,21 +252,37 @@ const structuresSpec = v.object({
   items: v.pipe(v.array(structureItem), v.minLength(1)),
 });
 
-const chartSeries = v.object({
-  name: v.string(),
-  /** Numbers, or category names for a `bar` chart — the only kind the service lets them be. */
-  x: v.array(v.union([v.pipe(v.number(), v.finite()), v.string()])),
-  y: v.array(v.pipe(v.number(), v.finite())),
+const rawStructuresSpec = v.object({
+  kind: v.literal('structures'),
+  items: v.pipe(v.array(rawStructureItem), v.minLength(1)),
 });
 
-const chartSpec = v.object({
+/** Numbers, or category names for a `bar` chart — the only kind the service lets them be. */
+const chartX = v.union([finite(), v.string()]);
+
+const chartSeries = v.object({
+  name: v.string(),
+  x: resolvedArray(chartX),
+  y: resolvedArray(finite()),
+});
+
+/** A stored series: `x` and `y` are each a literal array or one binding to an array. */
+const rawChartSeries = v.object({
+  name: v.string(),
+  x: v.union([v.array(chartX), bindValue]),
+  y: v.union([v.array(finite()), bindValue]),
+});
+
+const chartEntries = {
   kind: v.literal('chart'),
   chart: v.picklist(['line', 'scatter', 'bar']),
   /** The axis label *with its unit*, as the agent wrote it. Nothing here invents one. */
   x_label: v.string(),
   y_label: v.string(),
-  series: v.array(chartSeries),
-});
+};
+
+const chartSpec = v.object({ ...chartEntries, series: v.array(chartSeries) });
+const rawChartSpec = v.object({ ...chartEntries, series: v.array(rawChartSeries) });
 
 const resultSpec = v.object({
   kind: v.literal('result'),
@@ -231,6 +337,17 @@ const geometrySpec = v.object({
   highlight_atoms: v.optional(v.array(v.pipe(v.number(), v.integer(), v.minValue(0))), []),
 });
 
+/**
+ * Agent-written HTML (wave 3). **Never rendered on this origin**: `HtmlView` hands it to the sandbox
+ * origin's frame, or shows it as escaped source when there is none. `height` is the frame's starting
+ * height in CSS pixels, before the frame reports its own.
+ */
+const htmlSpec = v.object({
+  kind: v.literal('html'),
+  html: v.string(),
+  height: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0)), 480),
+});
+
 const exhibitSpec = v.variant('kind', [
   documentSpec,
   tableSpec,
@@ -239,7 +356,26 @@ const exhibitSpec = v.variant('kind', [
   resultSpec,
   linkSpec,
   geometrySpec,
+  htmlSpec,
 ]);
+
+const rawExhibitSpec = v.variant('kind', [
+  documentSpec,
+  rawTableSpec,
+  rawStructuresSpec,
+  rawChartSpec,
+  resultSpec,
+  linkSpec,
+  geometrySpec,
+  htmlSpec,
+]);
+
+/** A geometry carries exactly one of `xyz` and `source`. */
+const oneGeometrySource = (spec: { kind: string }): boolean => {
+  if (spec.kind !== 'geometry') return true;
+  const { xyz, source } = spec as { xyz?: unknown; source?: unknown };
+  return (xyz === undefined) !== (source === undefined);
+};
 
 /**
  * The spec, with the one rule a member cannot state about itself: a geometry carries exactly one of
@@ -248,25 +384,38 @@ const exhibitSpec = v.variant('kind', [
  */
 const checkedSpec = v.pipe(
   exhibitSpec,
+  v.check((spec) => oneGeometrySource(spec), 'a geometry takes exactly one of `xyz` or `source`'),
+);
+
+/** The stored spec, with the geometry rule and the table's: `rows` or `rows_from`, never both. */
+const checkedRawSpec = v.pipe(
+  rawExhibitSpec,
+  v.check((spec) => oneGeometrySource(spec), 'a geometry takes exactly one of `xyz` or `source`'),
   v.check(
-    (spec) => spec.kind !== 'geometry' || (spec.xyz === undefined) !== (spec.source === undefined),
-    'a geometry takes exactly one of `xyz` or `source`',
+    (spec) => spec.kind !== 'table' || spec.rows === undefined || spec.rows_from === undefined,
+    'a table takes `rows` or `rows_from`, not both',
   ),
 );
 
 export type ExhibitSpec = v.InferOutput<typeof checkedSpec>;
+/** The stored spec, bindings and all — what `raw_spec` holds and what every write sends. */
+export type RawExhibitSpec = v.InferOutput<typeof checkedRawSpec>;
 export type DocumentSpec = v.InferOutput<typeof documentSpec>;
 export type TableSpec = v.InferOutput<typeof tableSpec>;
+export type RawTableSpec = v.InferOutput<typeof rawTableSpec>;
 export type TableColumn = v.InferOutput<typeof tableColumn>;
 export type TableCell = v.InferOutput<typeof cell>;
 export type StructuresSpec = v.InferOutput<typeof structuresSpec>;
+export type RawStructuresSpec = v.InferOutput<typeof rawStructuresSpec>;
 export type StructureItem = v.InferOutput<typeof structureItem>;
 export type ChartSpec = v.InferOutput<typeof chartSpec>;
+export type RawChartSpec = v.InferOutput<typeof rawChartSpec>;
 export type ChartSeries = v.InferOutput<typeof chartSeries>;
 export type ResultSpec = v.InferOutput<typeof resultSpec>;
 export type LinkSpec = v.InferOutput<typeof linkSpec>;
 export type GeometrySpec = v.InferOutput<typeof geometrySpec>;
 export type GeometrySource = v.InferOutput<typeof geometrySource>;
+export type HtmlSpec = v.InferOutput<typeof htmlSpec>;
 
 /**
  * The flat `<calc_key>#<name>` form of a calc artifact reference — `ArtifactRef.as_str()` upstream.
@@ -285,8 +434,29 @@ export const calcArtifactRef = (source: GeometrySource): string =>
  * spec's shape — keep working.
  */
 const specOrNull = () => v.fallback(v.nullable(checkedSpec), null);
+const rawSpecOrNull = () => v.fallback(v.nullable(checkedRawSpec), null);
 
 /* ── the bodies ──────────────────────────────────────────────────────────── */
+
+/**
+ * Drop the rows of a list that are not one of its members, keeping the rest.
+ *
+ * A list body is the one place a per-row failure must not cost the list: twenty artefacts with one
+ * malformed header is nineteen artefacts and a log line, not an empty pane.
+ */
+const rowsOf = <T extends v.GenericSchema>(row: T) =>
+  v.fallback(
+    v.pipe(
+      v.array(v.unknown()),
+      v.transform((entries) =>
+        entries.flatMap((entry) => {
+          const parsed = v.safeParse(row, entry);
+          return parsed.success ? [parsed.output as v.InferOutput<T>] : [];
+        }),
+      ),
+    ),
+    [] as v.InferOutput<T>[],
+  );
 
 const headerEntries = {
   exhibit_id: text(),
@@ -316,7 +486,16 @@ const exhibitView = v.object({
   author: text(),
   change_note: text(),
   revision_created_at: text(),
+  /** The **resolved** spec: every binding replaced by its value. What every view draws. */
   spec: specOrNull(),
+  /**
+   * The **stored** spec, with its bindings (wave 3) — the base of every write, so an edit keeps the
+   * bindings it did not touch. A service that predates the field sends none, and the decoder reads
+   * `spec` in its place, which is exact there: nothing could be bound.
+   */
+  raw_spec: rawSpecOrNull(),
+  /** Every bound path of this revision, with its tool and whether its source is still there. */
+  bindings: rowsOf(binding),
   /**
    * Numerals in an agent-authored revision that no tool in this session returned (phase 2).
    *
@@ -358,11 +537,23 @@ const shownValue = () =>
           ? ''
           : typeof value === 'string'
             ? value
-            : JSON.stringify(value),
+            : isBind(value)
+              ? boundLabel(value)
+              : JSON.stringify(value),
       ),
     ),
     '',
   );
+
+/**
+ * A binding as a diff shows it: what it points at, not its JSON. The service diffs the *stored*
+ * spec, so "detached" reads as `linked to r:… /0/yield` → `82`, which is the fact a reviewer needs.
+ */
+export function boundLabel(value: BindValue): string {
+  const { result, pointer } = value.$bind;
+  const short = result.startsWith('r:') ? result : `r:${result.slice(0, 12)}`;
+  return `linked to ${short} ${pointer || '/'}`;
+}
 
 const exhibitChange = v.object({
   path: text('spec'),
@@ -379,26 +570,6 @@ const exhibitDiff = v.object({
 export type ExhibitDiff = v.InferOutput<typeof exhibitDiff>;
 
 /**
- * Drop the rows of a list that are not one of its members, keeping the rest.
- *
- * A list body is the one place a per-row failure must not cost the list: twenty artefacts with one
- * malformed header is nineteen artefacts and a log line, not an empty pane.
- */
-const rowsOf = <T extends v.GenericSchema>(row: T) =>
-  v.fallback(
-    v.pipe(
-      v.array(v.unknown()),
-      v.transform((entries) =>
-        entries.flatMap((entry) => {
-          const parsed = v.safeParse(row, entry);
-          return parsed.success ? [parsed.output as v.InferOutput<T>] : [];
-        }),
-      ),
-    ),
-    [] as v.InferOutput<T>[],
-  );
-
-/**
  * `GET /sessions/{id}/exhibits` — every artefact of one session, newest activity first.
  *
  * `enabled` is the deployment's `agent_exhibits_enabled`, and it is the whole of what decides
@@ -408,6 +579,12 @@ const rowsOf = <T extends v.GenericSchema>(row: T) =>
  */
 const exhibitListOut = v.object({
   enabled: v.fallback(v.boolean(), false),
+  /**
+   * Whether the agent may create `html` artefacts here (`agent_html_artefacts_enabled`, wave 3).
+   * Read only as a fact about the deployment: a person has no way to create one anyway, and an
+   * existing one still views when this is off. Absent reads as off.
+   */
+  html_enabled: v.fallback(v.boolean(), false),
   exhibits: rowsOf(exhibitHeader),
 });
 export type ExhibitListOut = v.InferOutput<typeof exhibitListOut>;
@@ -437,7 +614,19 @@ function decoder<T extends v.GenericSchema>(schema: T, what: string) {
 }
 
 export const decodeExhibitList = decoder(exhibitListOut, 'an artefact list');
-export const decodeExhibitView = decoder(exhibitView, 'an artefact');
+const decodeView = decoder(exhibitView, 'an artefact');
+
+/**
+ * An artefact body. A service that predates `raw_spec` sends `spec` alone, and that spec *is* the
+ * stored one — nothing in it can be bound — so it is read as both rather than leaving every write
+ * without a base.
+ */
+export const decodeExhibitView = (raw: unknown): ExhibitView =>
+  decodeView(
+    raw !== null && typeof raw === 'object' && !('raw_spec' in raw)
+      ? { ...raw, raw_spec: (raw as { spec?: unknown }).spec }
+      : raw,
+  );
 export const decodeExhibitRevisions = decoder(exhibitRevisionsOut, 'an artefact history');
 export const decodeExhibitDiff = decoder(exhibitDiff, 'an artefact comparison');
 export const decodeMyExhibits = decoder(exhibitIndexOut, 'an artefact list');
@@ -450,6 +639,7 @@ export const decodeMyExhibits = decoder(exhibitIndexOut, 'an artefact list');
  * became `NaN`, a column whose key went missing — fails here with a sentence about *this* app's
  * fault rather than reaching the service as a revision the chemist is told was refused.
  */
-export function isSpec(value: unknown): value is ExhibitSpec {
-  return v.safeParse(checkedSpec, value).success;
+export function isSpec(value: unknown): value is RawExhibitSpec {
+  // The *stored* schema: what is sent is a raw spec, which may carry the bindings it kept.
+  return v.safeParse(checkedRawSpec, value).success;
 }

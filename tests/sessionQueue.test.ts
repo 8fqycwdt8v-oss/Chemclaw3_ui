@@ -222,7 +222,7 @@ describe('a message waiting in a shared conversation’s line', () => {
       if (url.includes('/queue/') && init?.method === 'DELETE') {
         return jsonError(404, 'no such message is waiting in this session');
       }
-      if (url.endsWith('/turn/stop')) return json({ stopped: true });
+      if (url.endsWith('/turn/stop?reason=unload')) return json({ stopped: true });
       return stream.response;
     });
     restore = stub.restore;
@@ -232,11 +232,12 @@ describe('a message waiting in a shared conversation’s line', () => {
     await until(() => Boolean(latest(cid).queuePlace), 'the place in line');
     useChatStore.getState().streaming?.abandon();
     await until(
-      () => stub.calls.some((c) => c.url.endsWith('/turn/stop')),
+      () => stub.calls.some((c) => c.url.endsWith('/turn/stop?reason=unload')),
       'the stop that follows a withdrawal the service no longer had a place for',
     );
 
-    const stop = stub.calls.find((c) => c.url.endsWith('/turn/stop'));
+    // An unload stop like any other (Chemclaw3_ui#131): deferred, so a reload can keep the turn.
+    const stop = stub.calls.find((c) => c.url.endsWith('/turn/stop?reason=unload'));
     expect(stop?.init?.keepalive).toBe(true);
 
     stream.send([answerEvent({ text: 'done' })]);

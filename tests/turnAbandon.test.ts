@@ -38,7 +38,7 @@ const msalAuth: AuthProvider = {
 };
 
 /** Every stop request the page made, with the parts that decide whether it survives unload. */
-let stops: { authorization?: string; keepalive?: boolean }[] = [];
+let stops: { authorization?: string; keepalive?: boolean; reason: string | null }[] = [];
 let restore: (() => void) | null = null;
 
 /**
@@ -55,9 +55,14 @@ function startAnUnfinishedTurn(): void {
         headers: { 'content-type': 'application/json' },
       });
     }
-    if (url.endsWith('/turn/stop')) {
+    const [path = '', query = ''] = url.split('?');
+    if (path.endsWith('/turn/stop')) {
       const headers = (init?.headers ?? {}) as Record<string, string>;
-      stops.push({ authorization: headers.authorization, keepalive: init?.keepalive });
+      stops.push({
+        authorization: headers.authorization,
+        keepalive: init?.keepalive,
+        reason: new URLSearchParams(query).get('reason'),
+      });
       return new Response(JSON.stringify({ stopped: true }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -145,6 +150,21 @@ describe('a tab that goes away mid-turn', () => {
 
     // The same trick, and the same reason, as the log sink's final batch (`src/lib/logger.ts`).
     expect(stops[0]?.keepalive).toBe(true);
+  }, 20_000);
+
+  it('says it is an unload, so a reload can keep the turn (Chemclaw3_ui#131)', async () => {
+    startAnUnfinishedTurn();
+    const cid = useChatStore.getState().createConversation();
+    void sendMessage({ conversationId: cid, text: 'pKa?', auth: msalAuth });
+    await turnIsRunning();
+
+    pagehide(false);
+    await vi.waitFor(() => expect(stops.length).toBe(1));
+
+    // A reload is a `pagehide` too, and the browser cannot say which this is. Sent plain, the stop
+    // killed the turn the reloaded page then waited 630 s for; with the reason the service holds it
+    // for a grace window that the reloaded page's reattach cancels.
+    expect(stops[0]?.reason).toBe('unload');
   }, 20_000);
 
   it('leaves the turn alone when the page is only going into the back/forward cache', async () => {

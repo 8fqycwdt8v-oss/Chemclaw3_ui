@@ -272,7 +272,13 @@ describe('a live turn cut off by a restart', () => {
       return new Response(
         sseFrames([
           { type: 'token', text: 'thinking' },
-          { type: 'error', message: 'behind', code: 'stream_lagged', retryable: true },
+          {
+            type: 'error',
+            message: 'behind',
+            code: 'stream_lagged',
+            retryable: true,
+            correlation_id: '',
+          },
         ]),
         { status: 200, headers: { 'content-type': 'text/event-stream' } },
       );

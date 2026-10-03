@@ -134,6 +134,16 @@ export type ApiErrorKind =
    *  a full buffer behind and the service cut it off. The turn itself runs on, so the remedy is to
    *  reattach (`GET /sessions/{id}/turn/stream`) or read the answer back from the transcript. */
   | 'stream_lagged'
+  /**
+   * The turn this browser was following died with the service process running it — a restart, a
+   * killed pod — and will never answer. Reached two ways for one fact: the reattach
+   * (`GET /sessions/{id}/turn/stream`) answering 410 `{"code": "turn_interrupted"}`, and the
+   * transcript marking the turn's question `interrupted` (Chemclaw3
+   * `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`). Nothing ran twice, the
+   * question is in the conversation, and the remedy is to send it again — so it is offered as
+   * Retry rather than polled for, which is what a dropped stream used to get for ten minutes.
+   */
+  | 'turn_interrupted'
   /** An `error` event arrived in-stream. Includes the turn timeout, which the backend reports as
    *  a final SSE event rather than an HTTP status. */
   | 'agent'
@@ -150,6 +160,15 @@ export type ApiErrorKind =
    * session transcript on exactly that chance — for this kind there is none to poll for, and
    * `sendMessage` must not read "no bearer token" as "the turn may still be running server-side". */
   | 'token_unavailable';
+
+/**
+ * What a chemist reads about a turn that died with the service process running it.
+ *
+ * This client's own sentence rather than the service's 410 detail, because the same fact also
+ * arrives from the transcript, which carries no sentence at all — and one fact should read one
+ * way wherever it was learned. The Retry beside it is `MessageList`'s, and sends the question again.
+ */
+export const TURN_INTERRUPTED_TEXT = 'This answer was interrupted (the service restarted).';
 
 export class ApiError extends Error {
   readonly kind: ApiErrorKind;
@@ -305,6 +324,11 @@ export function errorFromStatus(
   code?: string,
 ): ApiError {
   const options = correlationId ? { correlationId } : undefined;
+  // Only the reattach route answers 410, and only with this code. A 410 without it is not a
+  // refusal this client knows, so it falls to the same default as any other unknown status.
+  if (status === 410 && code === 'turn_interrupted') {
+    return new ApiError(code, TURN_INTERRUPTED_TEXT, 410, options);
+  }
   switch (status) {
     case 401:
       return new ApiError(

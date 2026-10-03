@@ -367,7 +367,25 @@ export interface TranscriptMessage {
    * absent for a row that records neither half, and from a service older than the field.
    */
   author?: Authorship | null;
+  /**
+   * How the turn this *question* opened has ended so far (Chemclaw3
+   * `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`).
+   *
+   * The service writes the chemist's message ahead of the turn now, so a question can be in the
+   * transcript before its answer — `running` — and after a turn that ended without one: `failed`,
+   * `stopped`, or `interrupted` when the process running it died (a restart, a killed pod). That
+   * last one is the case it exists for: the question is in the model's record of the conversation
+   * either way, and the transcript now says so instead of losing it. `done` once answered.
+   *
+   * `null` on every message that is not a question, and absent altogether from a service older
+   * than the field — which this client reads exactly as before: a question with its answer after
+   * it, or none.
+   */
+  turn_status?: TranscriptTurnStatus | null;
 }
+
+/** The ways a written-ahead turn can stand (`TranscriptMessage.turn_status`). */
+export type TranscriptTurnStatus = 'running' | 'done' | 'failed' | 'stopped' | 'interrupted';
 
 /** The person a thing was written for, and the agent that wrote it (`null`: a human did). */
 export interface Authorship {

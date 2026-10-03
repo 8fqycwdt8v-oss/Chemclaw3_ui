@@ -57,11 +57,18 @@ function ProtocolLink({ designId }: { designId: string }): React.JSX.Element {
   );
 }
 
-function JobLink({ jobId }: { jobId: string }): React.JSX.Element {
+/**
+ * A linked run. The conversation's session goes with the read (`GET /jobs/{id}?session_id=`, the
+ * wave-2 amendment): the service keeps a report run's `exhibit_id` only for a reader of the session
+ * the run came from, and strips it otherwise — so without it a linked report could never show
+ * **Open report**, and with it the card offers exactly what the job card in the transcript does.
+ */
+function JobLink({ jobId, sessionId }: { jobId: string; sessionId: string }): React.JSX.Element {
   const { auth, ready } = useAuth();
   const { data, error, isPending } = useApiQuery({
-    queryKey: keys.job(jobId),
-    queryFn: () => api.getJob(jobId, auth),
+    // Keyed on the session too: the same run reads differently from another session.
+    queryKey: keys.job(jobId, sessionId),
+    queryFn: () => api.getJob(jobId, auth, sessionId),
     enabled: ready,
   });
   return (
@@ -73,7 +80,11 @@ function JobLink({ jobId }: { jobId: string }): React.JSX.Element {
           <JobFailureCard jobId={jobId} reason={data.summary ?? ''} />
         ) : (
           <>
-            <JobResultCard jobId={jobId} summary={data.result as JobSummary} />
+            <JobResultCard
+              jobId={jobId}
+              summary={data.result as JobSummary}
+              sessionId={sessionId}
+            />
             <p className="text-xs">
               <Badge tone={data.status === 'completed' ? 'ok' : 'neutral'}>{data.status}</Badge>{' '}
               {data.summary}
@@ -90,12 +101,19 @@ function JobLink({ jobId }: { jobId: string }): React.JSX.Element {
   );
 }
 
-export function LinkView({ spec }: { spec: LinkSpec }): React.JSX.Element {
+export function LinkView({
+  sessionId,
+  spec,
+}: {
+  /** The conversation's session — what a linked report's **Open report** opens the artefact in. */
+  sessionId: string;
+  spec: LinkSpec;
+}): React.JSX.Element {
   // Following a neighbour re-targets this view, as it re-targets the citation panel.
   const [noteId, setNoteId] = useState(spec.id);
   if (!spec.id) return <EmptyState title="This link names nothing" className="py-6" />;
   if (spec.target === 'protocol') return <ProtocolLink designId={spec.id} />;
-  if (spec.target === 'job') return <JobLink jobId={spec.id} />;
+  if (spec.target === 'job') return <JobLink jobId={spec.id} sessionId={sessionId} />;
   return (
     <div className="flex flex-col gap-4">
       <NoteBody

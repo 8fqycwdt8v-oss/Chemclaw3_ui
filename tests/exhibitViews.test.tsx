@@ -15,7 +15,14 @@ import { TableView, headerOf, parseCell } from '../src/components/exhibits/views
 import { DocumentView } from '../src/components/exhibits/views/DocumentView.tsx';
 import { ChartView, TRANSCRIBED_CAPTION } from '../src/components/exhibits/views/ChartView.tsx';
 import { StructuresView } from '../src/components/exhibits/views/StructuresView.tsx';
-import { UnverifiedStrip, revisionLabel } from '../src/components/exhibits/ExhibitPane.tsx';
+import { LinkView } from '../src/components/exhibits/views/LinkView.tsx';
+import { MemoryRouter } from 'react-router';
+import {
+  FORMAT_LABEL,
+  UnverifiedStrip,
+  revisionLabel,
+  savedName,
+} from '../src/components/exhibits/ExhibitPane.tsx';
 import { sdfOf } from '../src/components/exhibits/exports.ts';
 import { useExhibitPane } from '../src/state/exhibitPane.ts';
 import {
@@ -439,5 +446,48 @@ describe('the qualifiers around a view', () => {
     expect(revisionLabel({ ...base, author_kind: 'human', author: 'ann' }, 'me')).toBe(
       'r3 · ann · 14:02',
     );
+  });
+});
+
+describe('a link artefact to a run', () => {
+  it('reads the run with the conversation’s session, so a linked report offers Open report', async () => {
+    const JOB = 'job-report-1';
+    const REPORT = 'xb-0123456789abcdef';
+    const stub = stubFetch((url) =>
+      url.startsWith(`/api/jobs/${JOB}`)
+        ? json(200, {
+            job_id: JOB,
+            status: 'completed',
+            summary: 'Report written',
+            // Kept only because this reader named the run's origin session (wave-2 amendment).
+            result: url.includes(`session_id=${SID}`) ? { exhibit_id: REPORT } : {},
+            calc_refs: [],
+            rationale: '',
+          })
+        : json(404, { detail: 'not found' }),
+    );
+    restore = stub.restore;
+    render(
+      <MemoryRouter>
+        <LinkView sessionId={SID} spec={{ kind: 'link', target: 'job', id: JOB }} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Open report' }));
+    expect(stub.calls[0]!.url).toBe(`/api/jobs/${JOB}?session_id=${SID}`);
+    expect(useExhibitPane.getState().focus[SID]?.exhibitId).toBe(REPORT);
+  });
+});
+
+describe('the html export', () => {
+  it('is saved as .html.txt whatever the service named it, and the menu says why', () => {
+    // A double-click on the saved file opens text, not a page whose scripts run unsandboxed.
+    expect(savedName('html', 'Dose response.html', 'stem')).toBe('Dose response.html.txt');
+    expect(savedName('html', 'x.HTM', 'stem')).toBe('x.html.txt');
+    expect(savedName('html', 'x.html.txt', 'stem')).toBe('x.html.txt');
+    expect(savedName('html', '', 'stem')).toBe('stem.html.txt');
+    // Every other format keeps the service's name.
+    expect(savedName('csv', 'Solvents.csv', 'stem')).toBe('Solvents.csv');
+    expect(FORMAT_LABEL.html).toMatch(/\.html\.txt/);
+    expect(FORMAT_LABEL.html).toMatch(/runs its scripts if opened/);
   });
 });

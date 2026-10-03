@@ -97,15 +97,36 @@ export interface PaneProps {
   conversationId: string;
   sessionId: string;
   exhibits: ExhibitHeader[];
+  /**
+   * Artefacts are off in this deployment but this conversation already holds some (the contract's
+   * hardening item 6): they are shown, compared, exported and printed, and nothing here makes,
+   * edits or hands one on — no edit, no Detach, no "Ask about this", no promotion — because each of
+   * those is a write the service would refuse or a request to an agent that has no artefact tools.
+   */
+  readOnly?: boolean;
 }
 
-const FORMAT_LABEL: Record<ExportFormat, string> = {
+export const FORMAT_LABEL: Record<ExportFormat, string> = {
   md: 'Markdown (.md)',
   csv: 'CSV (.csv)',
   smi: 'SMILES (.smi)',
   xyz: 'XYZ coordinates (.xyz)',
-  html: 'HTML source (.html)',
+  // Says what the file is outside the sandbox: an ordinary page, whose scripts run with nothing
+  // around them if it is opened as one. Saved as `.html.txt` (`savedName`) so a double-click opens
+  // it as text; renaming it is then a decision somebody made.
+  html: 'HTML source (.html.txt) — runs its scripts if opened as a web page',
 };
+
+/**
+ * The name a service export is saved under: the service's own, except an `html` export, which is
+ * saved as `<stem>.html.txt` (the contract lets the client choose the saved name). The service
+ * already sends it as `text/plain`; the extension is what the reader's file manager goes by.
+ */
+export function savedName(format: ExportFormat, served: string, stem: string): string {
+  if (format !== 'html') return served;
+  const base = served.replace(/\.html?(\.txt)?$/i, '') || stem;
+  return `${base}.html.txt`;
+}
 
 /**
  * `14:02`, in the reader's own time zone and on a 24-hour clock — or nothing for a timestamp this
@@ -169,12 +190,14 @@ export function UnverifiedStrip({
 function Body({
   sessionId,
   view,
-  isHead,
+  editable,
   chartRef,
 }: {
   sessionId: string;
   view: ExhibitView;
-  isHead: boolean;
+  /** The head of a deployment that writes artefacts: the one place editing is offered. Handed to
+   *  the views as their `isHead`, which is the only thing they gate an edit on. */
+  editable: boolean;
   chartRef: React.Ref<HTMLDivElement>;
 }): React.JSX.Element {
   const spec = view.spec;
@@ -190,19 +213,19 @@ function Body({
   }
   switch (spec.kind) {
     case 'document':
-      return <DocumentView sessionId={sessionId} view={view} spec={spec} isHead={isHead} />;
+      return <DocumentView sessionId={sessionId} view={view} spec={spec} isHead={editable} />;
     case 'table':
-      return <TableView sessionId={sessionId} view={view} spec={spec} isHead={isHead} />;
+      return <TableView sessionId={sessionId} view={view} spec={spec} isHead={editable} />;
     case 'structures':
-      return <StructuresView sessionId={sessionId} view={view} spec={spec} isHead={isHead} />;
+      return <StructuresView sessionId={sessionId} view={view} spec={spec} isHead={editable} />;
     case 'chart':
       return (
-        <ChartView ref={chartRef} sessionId={sessionId} view={view} spec={spec} isHead={isHead} />
+        <ChartView ref={chartRef} sessionId={sessionId} view={view} spec={spec} isHead={editable} />
       );
     case 'result':
       return <ResultView sessionId={sessionId} spec={spec} />;
     case 'link':
-      return <LinkView spec={spec} />;
+      return <LinkView sessionId={sessionId} spec={spec} />;
     case 'geometry':
       return <GeometryView view={view} spec={spec} />;
     case 'html':
@@ -238,7 +261,7 @@ function ExportMenu({
     onProblem(null);
     try {
       const file = await api.exportExhibit(sessionId, view.exhibit_id, format, auth, view.revision);
-      saveBlob(file.blob, file.filename);
+      saveBlob(file.blob, savedName(format, file.filename, stem));
     } catch (err) {
       onProblem(err instanceof Error ? err.message : 'The download failed.');
     }
@@ -362,11 +385,13 @@ function ExhibitDetail({
   conversationId,
   sessionId,
   header,
+  readOnly = false,
   onAsked,
 }: {
   conversationId: string;
   sessionId: string;
   header: ExhibitHeader;
+  readOnly?: boolean;
   /** The reader handed this artefact to the composer — the sheet closes so they can type. */
   onAsked?: () => void;
 }): React.JSX.Element {
@@ -511,43 +536,54 @@ function ExhibitDetail({
             <Printer aria-hidden className="size-3.5" />
             Print
           </Button>
-          <Button variant="outline" size="xs" onClick={ask}>
-            <AtSign aria-hidden className="size-3.5" />
-            Ask about this
-          </Button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-xs" aria-label="More for this artefact">
-                <MoreHorizontal />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem
-                onSelect={() =>
-                  promote(
-                    `Save the attached artefact “${view.title}” (revision ${view.revision}) as a knowledge note, citing what it rests on.`,
-                  )
-                }
-              >
-                Save as note
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={() =>
-                  promote(
-                    `Draft an experiment protocol from the attached artefact “${view.title}” (revision ${view.revision}).`,
-                  )
-                }
-              >
-                Make a protocol
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+          {!readOnly && (
+            <Button variant="outline" size="xs" onClick={ask}>
+              <AtSign aria-hidden className="size-3.5" />
+              Ask about this
+            </Button>
+          )}
+          {!readOnly && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon-xs" aria-label="More for this artefact">
+                  <MoreHorizontal />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onSelect={() =>
+                    promote(
+                      `Save the attached artefact “${view.title}” (revision ${view.revision}) as a knowledge note, citing what it rests on.`,
+                    )
+                  }
+                >
+                  Save as note
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    promote(
+                      `Draft an experiment protocol from the attached artefact “${view.title}” (revision ${view.revision}).`,
+                    )
+                  }
+                >
+                  Make a protocol
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
-        {!isHead && (
+        {readOnly ? (
           <p role="status" className="text-2xs text-ink-muted">
-            An earlier revision — the latest is revision {view.head_revision}. Editing is offered on
-            the latest only.
+            Artefacts are turned off in this deployment, so this one is shown read-only: it can be
+            read, compared, exported and printed, but not edited or handed to the agent.
           </p>
+        ) : (
+          !isHead && (
+            <p role="status" className="text-2xs text-ink-muted">
+              An earlier revision — the latest is revision {view.head_revision}. Editing is offered
+              on the latest only.
+            </p>
+          )
         )}
         {problem && (
           <p role="alert" className="text-xs text-danger-ink">
@@ -568,7 +604,12 @@ function ExhibitDetail({
       {revising && isHead ? (
         <DraftView draft={revising} revising />
       ) : (
-        <Body sessionId={sessionId} view={view} isHead={isHead} chartRef={chartRef} />
+        <Body
+          sessionId={sessionId}
+          view={view}
+          editable={isHead && !readOnly}
+          chartRef={chartRef}
+        />
       )}
     </article>
   );
@@ -579,6 +620,7 @@ function ArtefactsTab({
   conversationId,
   sessionId,
   exhibits,
+  readOnly,
   onAsked,
 }: PaneProps & { onAsked?: () => void }): React.JSX.Element {
   const focus = useExhibitPane((s) => focusOf(s, sessionId));
@@ -643,6 +685,7 @@ function ArtefactsTab({
         conversationId={conversationId}
         sessionId={sessionId}
         header={focused}
+        readOnly={readOnly}
         onAsked={onAsked}
       />
     </div>
@@ -654,6 +697,7 @@ export function PaneBody({
   conversationId,
   sessionId,
   exhibits,
+  readOnly,
   onClose,
   onAsked,
 }: PaneProps & { onClose?: () => void; onAsked?: () => void }): React.JSX.Element {
@@ -699,6 +743,7 @@ export function PaneBody({
           conversationId={conversationId}
           sessionId={sessionId}
           exhibits={exhibits}
+          readOnly={readOnly}
           onAsked={onAsked}
         />
       </Tabs.Content>

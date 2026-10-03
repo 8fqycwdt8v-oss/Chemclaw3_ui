@@ -248,7 +248,7 @@ describe('acquiring a token', () => {
     // means "navigation is in flight, abandon this request" — the same absence, and the reason
     // the caller must be inside a try/catch or a gate either way.
     expect(await auth.getAccessToken()).toBeNull();
-    expect(calls.loginRedirect).toEqual([{ scopes: [SCOPE] }]);
+    expect(calls.loginRedirect).toEqual([expect.objectContaining({ scopes: [SCOPE] })]);
   });
 
   it('escalates to an interactive redirect exactly when MSAL says interaction is required', async () => {
@@ -271,6 +271,54 @@ describe('acquiring a token', () => {
     // login page to fix an unplugged VPN, and hide the real error behind a navigation.
     await expect(auth.getAccessToken()).rejects.toThrow('network is down');
     expect(calls.acquireTokenRedirect).toHaveLength(0);
+  });
+});
+
+describe('where a first sign-in comes back to', () => {
+  // A signed-out visitor to `/` is on `/c/<id>` by the time the sign-in starts — `Bootstrap` mints
+  // a conversation on first paint, in the *anonymous* history slot. Returning there after sign-in
+  // read the account's own slot, which never holds it: measured on the kind cluster, most first
+  // sign-ins landed on "That conversation isn't on this device".
+  const at = (path: string) => window.history.replaceState(null, '', path);
+
+  it('returns to the app root, not to the conversation minted before anybody was known', async () => {
+    at('/c/4f1c2a9e-0000-4000-8000-000000000001');
+    const { createMsalAuth } = await import('../src/auth/msalAuth.ts');
+    const auth = await createMsalAuth();
+
+    await auth.getAccessToken();
+    await auth.login();
+    await auth.handleUnauthorized();
+
+    expect(calls.loginRedirect).toEqual(
+      Array(3).fill({ scopes: [SCOPE], redirectStartPage: `${window.location.origin}/` }),
+    );
+  });
+
+  it('keeps every other deep link, which means the same thing to whoever signs in', async () => {
+    const { signInStartPage } = await import('../src/auth/msalAuth.ts');
+    const origin = 'https://chemclaw.example';
+    const page = (path: string) => signInStartPage(new URL(path, origin) as unknown as Location);
+
+    expect(page('/c/abc')).toBe(`${origin}/`);
+    expect(page('/c/abc/')).toBe(`${origin}/`);
+    expect(page(`/open/${'a'.repeat(32)}`)).toBe(`${origin}/open/${'a'.repeat(32)}`);
+    expect(page('/jobs/calc-123?x=1')).toBe(`${origin}/jobs/calc-123?x=1`);
+    expect(page('/review')).toBe(`${origin}/review`);
+    expect(page('/')).toBe(`${origin}/`);
+  });
+
+  it('leaves a re-authentication of somebody signed in on the conversation they were reading', async () => {
+    at('/c/4f1c2a9e-0000-4000-8000-000000000002');
+    behaviour.redirectResult = { account: account() };
+    behaviour.silent = 'interaction-required';
+    const { createMsalAuth } = await import('../src/auth/msalAuth.ts');
+    const auth = await createMsalAuth();
+
+    await auth.getAccessToken();
+
+    // Their `/c/<id>` is in their own slot; MSAL's default (the current page) is right for them.
+    expect(calls.acquireTokenRedirect).toEqual([{ account: behaviour.active, scopes: [SCOPE] }]);
   });
 });
 
@@ -333,7 +381,7 @@ describe('signing in and out', () => {
 
     // Popups are blocked by default in several enterprise browser configurations, and Conditional
     // Access / MFA / device-compliance flows render badly inside one.
-    expect(calls.loginRedirect).toEqual([{ scopes: [SCOPE] }]);
+    expect(calls.loginRedirect).toEqual([expect.objectContaining({ scopes: [SCOPE] })]);
     expect(calls.logoutRedirect).toBe(1);
   });
 

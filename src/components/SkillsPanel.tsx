@@ -157,7 +157,12 @@ function MySkills(): React.JSX.Element {
           When a turn works out a procedure worth keeping, it can propose one — you decide on the
           review screen, and what you accept appears here.
         </EmptyState>
-        <WriteMine onSaved={() => invalidateTier('mine')} />
+        {/* Keyed, and keyed the same in the branch below: keeping the *first* skill moves this
+            tier from this branch to that one, and an unkeyed `WriteMine` sat at a different
+            position in each — so React mounted a new one and the "Kept …" sentence, which lives
+            in its state, vanished the instant it was written. Measured on the kind cluster: the
+            skill was kept and listed, and the only confirmation of it was gone. */}
+        <WriteMine key="write-mine" onSaved={() => invalidateTier('mine')} />
       </>
     );
   }
@@ -199,7 +204,7 @@ function MySkills(): React.JSX.Element {
           </li>
         ))}
       </ul>
-      <WriteMine onSaved={() => invalidateTier('mine')} />
+      <WriteMine key="write-mine" onSaved={() => invalidateTier('mine')} />
     </>
   );
 }

@@ -12,7 +12,7 @@ import { api } from '../api/client.ts';
 import type { TranscriptMessage } from '../api/client.ts';
 import { config } from '../env.ts';
 import { prefetchMarkdown } from '../components/LazyMarkdown.tsx';
-import { ApiError } from '../api/errors.ts';
+import { ApiError, TURN_INTERRUPTED_TEXT } from '../api/errors.ts';
 import { streamTurn, TURN_STALL_MS } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import type { Banner, ChatMessage, ComposerLock } from './types.ts';
@@ -22,6 +22,8 @@ import { announceStatus, describeAnswer } from './announce.ts';
 import { logger } from '../lib/logger.ts';
 import { backoff } from '../lib/backoff.ts';
 import { linePlace } from './turnActivity.ts';
+import { endingOfTurn, TURN_FAILED_TEXT } from './transcript.ts';
+import type { UnansweredEnding } from './transcript.ts';
 
 /**
  * What the reader is told when Stop was pressed and the server never confirmed it.
@@ -512,6 +514,38 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   };
 
   /**
+   * Settle this turn as one the service ended without an answer, and say so.
+   *
+   * `interrupted` is the one the rest of this exists for: the service process running the turn
+   * died (a restart, a killed pod), and the reattach or the transcript said so (Chemclaw3
+   * `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`). The bubble carries
+   * the sentence and a Retry that sends the question again (`MessageList`), and the composer is
+   * free — before this, the same turn polled the transcript for ten minutes and then reported a
+   * dropped connection. The question is not put back in the draft: Retry is the offer, and a
+   * second copy in the box would be a second, silent one.
+   */
+  const settleUnanswered = (ending: UnansweredEnding): void => {
+    batcher?.flush();
+    if (ending === 'stopped') {
+      useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
+      releaseTurn();
+      announceStatus('The turn was stopped before it answered.');
+      return;
+    }
+    const message = ending === 'interrupted' ? TURN_INTERRUPTED_TEXT : TURN_FAILED_TEXT;
+    useChatStore.getState().failTurn(conversationId, messageId, {
+      kind: ending === 'interrupted' ? 'turn_interrupted' : 'agent',
+      message,
+    });
+    releaseComposer(false);
+    showBanner({
+      kind: 'warn',
+      text: correlationId ? `${message} (reference ${correlationId})` : message,
+    });
+    logger.warn('turn.unanswered', { ending });
+  };
+
+  /**
    * Whether the next attempt follows the running turn rather than sending the message: set after
    * the service cut this browser's view off (`stream_lagged`), and the turn it was a view of runs on.
    */
@@ -742,6 +776,14 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       return;
     }
 
+    // The turn this browser was following died with the service process running it — the
+    // reattach answered 410 `turn_interrupted`. Nothing will answer it, so there is nothing to
+    // poll for; say so and offer the question again.
+    if (apiError.kind === 'turn_interrupted') {
+      settleUnanswered('interrupted');
+      return;
+    }
+
     // Withdrawn from a shared conversation's line by somebody else — the owner, the service on
     // the sender's removal, the session's deletion (Chemclaw3 #499). Nothing ran and nothing was
     // spent, so this is not painted as a failed turn: the bubble says why, the question goes back
@@ -792,6 +834,10 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           abort.signal,
           auth,
         );
+        if (recovered !== null && typeof recovered !== 'string') {
+          settleUnanswered(recovered.ended);
+          return;
+        }
         if (recovered !== null) {
           useChatStore.getState().applyEvent(conversationId, messageId, {
             type: 'answer',
@@ -960,7 +1006,16 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
 }
 
 /**
- * Read a detached turn's answer back from the transcript, or `null` when it never appears.
+ * A turn detach recovery found *ended* rather than answered — its stored question says it failed,
+ * was stopped, or was interrupted by the service restarting under it.
+ */
+export interface TurnEnded {
+  ended: UnansweredEnding;
+}
+
+/**
+ * Read a detached turn's answer back from the transcript, or `null` when it never appears — or,
+ * from a service that marks how a turn ended, `{ ended }` once its question says it never will.
  *
  * The detached turn writes its exchange to `session_messages` at its true end, so the recovery
  * signal is the transcript's newest question-and-answer pair turning into this turn's. Bounded — the server's turn deadline is 600 s, and polling much past it would wait
@@ -1020,7 +1075,7 @@ export async function recoverDetachedAnswer(
   correlationId: string,
   signal: AbortSignal,
   auth: AuthProvider,
-): Promise<string | null> {
+): Promise<string | TurnEnded | null> {
   const deadline = Date.now() + 630_000;
   let attempt = 0;
   /**
@@ -1059,6 +1114,12 @@ export async function recoverDetachedAnswer(
     }
     const own = correlationId ? answerOfTurn(transcript, correlationId) : null;
     if (own !== null) return own;
+    // **An ending is an answer to the question this loop asks**, and the one a dead process gives.
+    // A turn whose service process died writes no answer, ever; its question is marked
+    // `interrupted` once its lease lapses, and this read is one of the things that notices. Asked
+    // only by identity: a question's text says nothing about which turn's ending it carries.
+    const ended = correlationId ? endingOfTurn(transcript, correlationId) : null;
+    if (ended !== null) return { ended };
     const newest = newestExchange(transcript);
     if (held === null) {
       // The anchor this client could not supply, taken from the same population the search runs on.
@@ -1195,6 +1256,21 @@ export function resumeInterruptedTurn(
       auth,
     );
     if (abort.signal.aborted) return;
+    if (recovered !== null && typeof recovered !== 'string') {
+      const store = useChatStore.getState();
+      const current = store.conversations[conversationId]?.messages.find((m) => m.id === messageId);
+      if (!current || current.role !== 'assistant' || !current.interruptedByReload) return;
+      // Settled as the live path settles it, without the banner: nobody was waiting on this page.
+      if (recovered.ended === 'stopped') {
+        store.finishTurn(conversationId, messageId, 'aborted');
+        return;
+      }
+      store.failTurn(conversationId, messageId, {
+        kind: recovered.ended === 'interrupted' ? 'turn_interrupted' : 'agent',
+        message: recovered.ended === 'interrupted' ? TURN_INTERRUPTED_TEXT : TURN_FAILED_TEXT,
+      });
+      return;
+    }
     if (recovered === null) {
       // **Recovery ran its whole budget and found nothing, so stop asking.** `finishTurn` clears
       // the flag on every turn that settles, but this exit settles nothing — and leaving the flag

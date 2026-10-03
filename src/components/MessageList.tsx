@@ -33,7 +33,7 @@ import { ActivityLine } from './ActivityLine.tsx';
 import { ResultBlock } from './ResultBlock.tsx';
 import { LazyExhibitCard as ExhibitCard } from './exhibits/lazy.tsx';
 import { ApprovalPrompt, QuestionPrompt } from './Prompts.tsx';
-import { prefill } from '../state/composerEvents.ts';
+import { prefill, prefillAndSend } from '../state/composerEvents.ts';
 import { ErrorBoundary } from './ErrorBoundary.tsx';
 import { useChatStore } from '../state/chatStore.ts';
 import { entitiesOf, messagesFor, useEntityStore } from '../chem/entities.ts';
@@ -233,10 +233,13 @@ function CopyAnswer({ text }: { text: string }): React.JSX.Element {
 const AssistantBubble = memo(function AssistantBubble({
   message,
   sessionId,
+  retryQuestion,
 }: {
   message: AssistantMessage;
   /** Threaded down for the plan gate, which is answered per session rather than per message. */
   sessionId: string | null;
+  /** The question to send again, on an answer the service lost (`retryQuestionOf`). */
+  retryQuestion?: string;
 }): React.JSX.Element {
   // finalText wins outright. answer.text is the full concatenation of every token, so anything
   // that combined the two would render the entire answer twice.
@@ -344,6 +347,21 @@ const AssistantBubble = memo(function AssistantBubble({
           // and that one already announces — two alerts with identical text read it out twice.
           <div className="mt-2 rounded-lg border border-danger/40 bg-danger-soft px-3 py-2">
             <p className="text-sm text-danger-ink">{message.error.message}</p>
+            {/* **The one place this app re-sends a question for the chemist, and why it may.** An
+                interrupted turn died with the service process running it: nothing will answer it,
+                nothing ran twice, and the question is already in the conversation — so sending it
+                again is the whole remedy, offered as a press rather than a poll. It goes through the
+                composer like any other send, so a turn already running still locks it out. */}
+            {message.error.kind === 'turn_interrupted' && retryQuestion && (
+              <Button
+                variant="outline"
+                size="xs"
+                className="mt-2"
+                onClick={() => prefillAndSend(retryQuestion)}
+              >
+                Retry
+              </Button>
+            )}
           </div>
         )}
 
@@ -385,11 +403,14 @@ const Bubble = memo(function Bubble({
   message,
   sessionId,
   sender,
+  retryQuestion,
 }: {
   message: ChatMessage;
   sessionId: string | null;
   /** Who sent a user message, in a conversation with more than one person — see `senderOf`. */
   sender?: string;
+  /** See `retryQuestionOf`. */
+  retryQuestion?: string;
 }): React.JSX.Element {
   const streaming = message.role === 'assistant' && message.status === 'streaming';
   return (
@@ -409,10 +430,33 @@ const Bubble = memo(function Bubble({
         streaming ? undefined : { contentVisibility: 'auto', containIntrinsicSize: 'auto 220px' }
       }
     >
-      <BubbleBody message={message} sessionId={sessionId} sender={sender} />
+      <BubbleBody
+        message={message}
+        sessionId={sessionId}
+        sender={sender}
+        retryQuestion={retryQuestion}
+      />
     </div>
   );
 });
+
+/**
+ * The question an interrupted answer would send again, or `undefined` for every other message.
+ *
+ * Read off the message before it rather than stored on the answer: the question is right there in
+ * the transcript, on a live turn and on a reloaded one alike, and a copy on the answer would be a
+ * second record of what was asked. Only for an answer the service lost (`turn_interrupted`) —
+ * every other failure keeps its own remedy. Exported for its own test.
+ */
+export function retryQuestionOf(
+  messages: readonly ChatMessage[],
+  index: number,
+): string | undefined {
+  const message = messages[index];
+  if (message?.role !== 'assistant' || message.error?.kind !== 'turn_interrupted') return undefined;
+  const asked = messages[index - 1];
+  return asked?.role === 'user' && asked.text.trim() ? asked.text : undefined;
+}
 
 /**
  * Who a user bubble should say sent it, or `undefined` for no label at all.
@@ -439,10 +483,12 @@ function BubbleBody({
   message,
   sessionId,
   sender,
+  retryQuestion,
 }: {
   message: ChatMessage;
   sessionId: string | null;
   sender?: string;
+  retryQuestion?: string;
 }): React.JSX.Element {
   if (message.role === 'user') {
     return (
@@ -497,7 +543,7 @@ function BubbleBody({
         'focus-ring',
       )}
     >
-      <AssistantBubble message={message} sessionId={sessionId} />
+      <AssistantBubble message={message} sessionId={sessionId} retryQuestion={retryQuestion} />
     </article>
   );
 }
@@ -680,12 +726,13 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
             </EmptyState>
           ))}
 
-        {shown.map((message) => (
+        {shown.map((message, i) => (
           <Bubble
             key={message.id}
             message={message}
             sessionId={sessionId}
             sender={senderOf(message, shared, me)}
+            retryQuestion={retryQuestionOf(shown, i)}
           />
         ))}
         <div ref={endRef} className="h-px" />

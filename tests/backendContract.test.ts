@@ -171,6 +171,42 @@ const RETAINED_FOR_ROLLOUT = new Map<string, Argued>([
   ],
 ]);
 
+/**
+ * Response fields this client reads *before* the service sends them — `AHEAD_OF_BACKEND`, one field
+ * at a time, keyed `Model.field`.
+ *
+ * The response axis below fails a property this client declares and no model sends, and that is
+ * right for a rename; it is wrong for the reader of a two-repository change landing first, which
+ * is the order this repository ships them in (the UI PR before the core PR, so neither main ever
+ * reads a shape the other cannot). So an argued entry exempts that one failure while the service
+ * does not send the field, under the same discipline the event maps keep — a reason, an
+ * `ISSUES.md` row, a review date.
+ *
+ * **Once the service sends it, the entry is a notice, not a failure** — the opposite of the event
+ * map's rule, and on purpose: this file runs against core *main*, and a reader that went red the
+ * moment the core half merged would break this repository's main for doing exactly what it was
+ * merged to do. The review date is what still forces the deletion.
+ */
+const FIELDS_AHEAD_OF_BACKEND = new Map<string, Argued>([
+  [
+    'TranscriptMessage.turn_status',
+    {
+      reason:
+        'Chemclaw3 D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so: the ' +
+        'service marks a written-ahead question running/done/failed/stopped/interrupted, and ' +
+        'this client renders an interrupted turn with a Retry. It lands here before the core PR ' +
+        'that sends it, and reads an absent field exactly as before.',
+      issue: "an interrupted turn's status is read ahead of the service",
+      review: '2026-10-31',
+    },
+  ],
+]);
+
+/** Whether a response-axis failure line names a field that is argued ahead of the service. */
+function aheadOfBackend(line: string): boolean {
+  return FIELDS_AHEAD_OF_BACKEND.has(line.split(' ')[0] ?? '');
+}
+
 /** Both maps as one lookup: the filter below cannot tell "not yet" from "no longer", and the
  *  distinction is about who unblocks the removal, not about what this client accepts. */
 const ARGUED = new Map<string, Argued>([...AHEAD_OF_BACKEND, ...RETAINED_FOR_ROLLOUT]);
@@ -278,10 +314,33 @@ describe('a name this client admits and the service does not is argued, not mere
   const admitted = new Set(clientEventTypes());
 
   it('holds every entry to a reason, a row that can retire it, and a date', () => {
+    // A field entry is "admitted" when this client declares the field on the interface it names —
+    // an entry for a field nobody reads would exempt nothing.
+    const declaredFields = new Set(
+      [...FIELDS_AHEAD_OF_BACKEND.keys()].filter((key) => {
+        const [model, field] = key.split('.');
+        return Boolean(model && field && (clientInterfaceFields(model) ?? []).includes(field));
+      }),
+    );
     expect([
       ...problems('AHEAD_OF_BACKEND', AHEAD_OF_BACKEND, issues, today, admitted),
       ...problems('RETAINED_FOR_ROLLOUT', RETAINED_FOR_ROLLOUT, issues, today, admitted),
+      ...problems(
+        'FIELDS_AHEAD_OF_BACKEND',
+        FIELDS_AHEAD_OF_BACKEND,
+        issues,
+        today,
+        declaredFields,
+      ),
     ]).toEqual([]);
+  });
+
+  it('exempts only the field an entry names, and only from the not-sent failure', () => {
+    expect(aheadOfBackend('TranscriptMessage.turn_status (src/api/client.ts:1)')).toBe(
+      FIELDS_AHEAD_OF_BACKEND.has('TranscriptMessage.turn_status'),
+    );
+    expect(aheadOfBackend('TranscriptMessage.text (src/api/client.ts:1)')).toBe(false);
+    expect(aheadOfBackend('Other.turn_status (src/api/client.ts:1)')).toBe(false);
   });
 
   it('refuses an empty reason, a dangling row, a passed date and a name nobody admits', () => {
@@ -1050,10 +1109,21 @@ if (root === null) {
         unread.push(...drift.unread);
       }
       expect(
-        wrong,
+        wrong.filter((line) => !aheadOfBackend(line)),
         'this client declares these properties on a response and no model upstream sends them — ' +
           'every one arrives `undefined`, which is the confident blank this axis exists to catch',
       ).toEqual([]);
+      // An argued field the service now sends is spent: say so where a reader of the log looks,
+      // without failing a main that merged its core half (see `FIELDS_AHEAD_OF_BACKEND`).
+      const spent = [...FIELDS_AHEAD_OF_BACKEND.keys()].filter(
+        (key) => !wrong.some((line) => line.startsWith(`${key} `)),
+      );
+      if (spent.length > 0) {
+        console.log(
+          `\n  the service now sends ${spent.join(', ')}: delete the FIELDS_AHEAD_OF_BACKEND ` +
+            'entry and its ISSUES.md row',
+        );
+      }
       // **The other direction is asserted too now, against an argued list rather than printed.**
       // A client is entitled not to read a field, which is why this was a `console.log` — and what
       // that spent was the only notice anybody got: `Digest.disputed` and `Digest.headlines` were

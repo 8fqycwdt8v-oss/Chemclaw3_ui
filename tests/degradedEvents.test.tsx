@@ -69,6 +69,8 @@ describe('normalizeEvent', () => {
       // `null` is an ordinary failure. The only other value is `'plan_gate'`, which says the
       // pre-execution approval refused the call — a control working, not a fault.
       reason: null,
+      // Empty is a service older than the field; the failed call's id drops exactly its draft.
+      call_id: '',
     });
   });
 

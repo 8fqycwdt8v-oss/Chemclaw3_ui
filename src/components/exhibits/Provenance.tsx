@@ -24,7 +24,7 @@ import { Link2, TriangleAlert, Unlink } from 'lucide-react';
 import type { Binding } from '../../../shared/exhibits.ts';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { shortRef, type Provenance } from './bindings.ts';
+import { isStructureCitation, shortRef, type Provenance } from './bindings.ts';
 
 /** The sentence a gone source is announced with — the contract's wording. */
 export const SOURCE_GONE = 'source no longer available';
@@ -135,17 +135,30 @@ export function ProvenanceMarker({
  */
 export function GoneSourcesStrip({ gone }: { gone: readonly Binding[] }): React.JSX.Element | null {
   if (gone.length === 0) return null;
+  const structures = gone.filter(isStructureCitation);
+  const results = gone.filter((b) => !isStructureCitation(b));
   return (
     <p
       role="note"
       className="flex items-start gap-2 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
     >
       <TriangleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />
-      <span>
-        {gone.length === 1 ? 'One linked value: ' : `${gone.length} linked values: `}
-        {SOURCE_GONE} — the tool result it was taken from has been removed. Where it stood, the
-        artefact says “{SOURCE_GONE}” (a chart series draws no points):{' '}
-        <span className="font-mono">{gone.map((b) => b.path).join(', ')}</span>
+      <span className="flex flex-col gap-1">
+        {results.length > 0 && (
+          <span>
+            {results.length === 1 ? 'One linked value: ' : `${results.length} linked values: `}
+            {SOURCE_GONE} — the tool result it was taken from has been removed. Where it stood, the
+            artefact says “{SOURCE_GONE}” (a chart series draws no points):{' '}
+            <span className="font-mono">{results.map((b) => b.path).join(', ')}</span>
+          </span>
+        )}
+        {structures.map((b) => (
+          <span key={b.pointer}>
+            The stored structure <span className="font-mono break-all">{b.pointer}</span> this
+            geometry cites: {SOURCE_GONE}
+            {b.error ? ` — ${b.error}` : ''}.
+          </span>
+        ))}
       </span>
     </p>
   );

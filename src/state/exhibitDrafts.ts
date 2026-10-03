@@ -17,7 +17,7 @@
  *     order, for documents only. A settled draft stays on screen until the session's list has
  *     been refetched, so the swap from draft to artefact has nothing in between to flash.
  *  3. **Is dropped** — once settled and refetched; at once when its tool call raises
- *     (`failDraft`); or, unsettled, when the turn ends: the turn failed, and the text the reader
+ *     (`failDraft`, by the failed call's `call_id` when the service sends one); or, unsettled, when the turn ends: the turn failed, and the text the reader
  *     watched being written is not a document anybody has.
  */
 
@@ -148,12 +148,16 @@ export function settleDraft(
  * anybody will have, so it leaves now rather than at the turn's end — where it would sit in front
  * of the pane while the agent retries, and could be mistaken for the retry's text.
  *
- * `tool_failed` carries no call id on this wire, so the draft is the **oldest unsettled one of that
- * op**: calls fail in the order they were made, and the drafts are held in arrival order.
+ * **By identity first**, `settleDraft`'s rule: `tool_failed` carries the `call_id` of the call that
+ * raised (the contract's hardening item 2), and when it does, only that call's draft is dropped —
+ * or none, if that call streamed nothing. Only an empty id — a service older than the field — falls
+ * back to the old rule, the **oldest unsettled draft of that op**: calls fail in the order they were
+ * made, and the drafts are held in arrival order. That fallback was wrong exactly when two drafts of
+ * one op were in flight and the later one failed, which is the case the id exists for.
  */
-export function failDraft(sessionId: string, op: 'create' | 'revise'): void {
+export function failDraft(sessionId: string, op: 'create' | 'revise', callId = ''): void {
   const failed = draftsOf(useExhibitDrafts.getState(), sessionId).find(
-    (d) => d.settledAs === null && d.op === op,
+    (d) => d.settledAs === null && (callId ? d.callId === callId : d.op === op),
   );
   if (failed) update(sessionId, (drafts) => drafts.filter((d) => d !== failed));
 }

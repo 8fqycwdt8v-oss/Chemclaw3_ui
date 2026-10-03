@@ -1,5 +1,7 @@
 /**
- * A geometry artefact (wave 2): one 3D structure, inline or read from the calculation that made it.
+ * A geometry artefact (wave 2): one 3D structure, inline, read from the calculation that made it, or
+ * read from the structure store (`structure_id`, hardening item 1 — which the service resolves to
+ * `xyz` before the view ever sees it, so it is drawn exactly as an inline block is).
  *
  * Two sources, one drawing. An inline `xyz` block is drawn as it is; a `source` names a stored calc
  * by-product (`<calc_key>#<name>`) and its bytes are fetched through `GET /calc-artifacts/content`
@@ -12,8 +14,10 @@
  *
  * **What a failure says.** A source that is gone is the calc store doing what it was designed to do
  * (by-products are eviction-managed), and the sentence says so and points at the calculation; a
- * block that does not parse says which line. Neither falls back to drawing *something*: a partial
- * structure shown as the artefact would be a molecule nobody computed.
+ * stored structure that has vanished resolves to no `xyz` at all, and the sentence names the id
+ * (the pane's strip above says the same from the `bindings[]` row); a block that does not parse says
+ * which line. None falls back to drawing *something*: a partial structure shown as the artefact
+ * would be a molecule nobody computed.
  */
 
 import { lazy, Suspense, useMemo } from 'react';
@@ -110,8 +114,22 @@ export function GeometryView({
   spec: GeometrySpec;
 }): React.JSX.Element {
   const reference = spec.source ? calcArtifactRef(spec.source) : null;
+  const structure = spec.structure_id;
+  if (structure && spec.xyz === undefined) {
+    return (
+      <EmptyState title="The stored structure is no longer available" className="py-6">
+        This geometry cites the structure <span className="font-mono break-all">{structure}</span>,
+        which the structure store no longer holds, so there is nothing to draw.
+      </EmptyState>
+    );
+  }
   return (
     <div className="flex flex-col gap-2">
+      {structure && (
+        <p className="text-2xs text-ink-muted">
+          From the stored structure <span className="font-mono break-all">{structure}</span>
+        </p>
+      )}
       {reference ? (
         <>
           <p className="flex flex-wrap items-center gap-2 text-2xs text-ink-muted">

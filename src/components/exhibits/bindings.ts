@@ -131,6 +131,14 @@ export function provenanceAt(view: ExhibitView, target: BoundTarget): Provenance
 export const shortRef = (ref: string): string =>
   ref.startsWith('r:') ? ref : `r:${ref.slice(0, 12)}`;
 
+/**
+ * A `bindings[]` row that is not a tool result at all but a geometry's stored structure (hardening
+ * item 1): `{path: "xyz", result_ref: "", tool: "structure", pointer: <structure_id>}`. The strip
+ * says it in its own words — "the tool result has been removed" would be false of it.
+ */
+export const isStructureCitation = (b: Binding): boolean =>
+  b.tool === 'structure' && b.result_ref === '';
+
 /** Every binding of this revision whose source is gone, for the pane's strip. */
 export const goneBindings = (view: ExhibitView): Binding[] => view.bindings.filter((b) => !b.ok);
 

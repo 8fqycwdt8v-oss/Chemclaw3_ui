@@ -265,6 +265,30 @@ describe('replacement and discard', () => {
     expect(reviseDraftOf(useExhibitDrafts.getState(), SID, XID)).toBeNull();
   });
 
+  it('drops exactly the failed call’s draft when tool_failed names its call', () => {
+    // Two creates in flight; the *later* one is refused. By order the older draft would go — the
+    // one whose call is still running — and the refused text would stay in front.
+    draftArrived(SID, draft({ call_id: 'running' }));
+    draftArrived(SID, draft({ call_id: 'refused', markdown: '# Refused' }));
+    const failed = (call_id: string) =>
+      draftToolFailed(SID, {
+        type: 'tool_failed',
+        tool: 'create_exhibit',
+        message: 'spec too large',
+        reason: null,
+        agent: '',
+        call_id,
+      });
+    failed('refused');
+    expect(draftsOf(useExhibitDrafts.getState(), SID).map((d) => d.callId)).toEqual(['running']);
+    // A call id naming a call that streamed nothing drops nothing.
+    failed('never-streamed');
+    expect(draftsOf(useExhibitDrafts.getState(), SID).map((d) => d.callId)).toEqual(['running']);
+    // An empty one is an older service: the old rule, oldest of that op.
+    failed('');
+    expect(draftsOf(useExhibitDrafts.getState(), SID)).toEqual([]);
+  });
+
   it('is discarded when the turn ends without its artefact, and a settled one is left to land', () => {
     // The first create's `exhibit` frame settles the first draft in call order; the second call
     // was refused, so no frame ever names it.

@@ -564,6 +564,149 @@ const EXHIBIT_TURN: readonly Frame[] = [
   ],
 ];
 
+/* ── Geometry artefacts and the calc file route (artefacts wave 2) ───────────
+ *
+ * A conversation that already holds two 3D structures — one inline, one citing the calculation file
+ * it came from — so the viewer, its accessible table, the `.xyz` export and the calc byte route are
+ * all reached through the real BFF. Read-only, so one session serves every project and both themes
+ * at once without any of them seeing another's write.
+ */
+const GEOMETRY_SESSION = '2'.repeat(32);
+const GEOMETRY_INLINE_ID = 'xb-9e0000000000a001';
+const GEOMETRY_CITED_ID = 'xb-9e0000000000a002';
+/** The calc artifact the cited geometry names, as `ArtifactRef.as_str()` spells it. */
+const CALC_KEY = 'xtb_opt@6.7.1:0123abcd:89efcdab';
+const CALC_NAME = 'xtbopt.xyz';
+const WATER_XYZ = `3
+ energy: -5.070544440612 gnorm: 0.000123 xtb: 6.7.1
+O      0.00000000    0.00000000    0.11779000
+H      0.00000000    0.75545000   -0.47116000
+H      0.00000000   -0.75545000   -0.47116000
+`;
+const ETHANOL_XYZ = `9
+ethanol, GFN2-xTB
+C     -0.0476    -0.4144     0.0000
+C      1.4483     0.0108     0.0000
+O     -0.8018     0.7835     0.0000
+H     -0.3176    -1.0093     0.8838
+H     -0.3176    -1.0093    -0.8838
+H      1.6956     0.6020     0.8862
+H      1.6956     0.6020    -0.8862
+H      2.0598    -0.8959     0.0000
+H     -1.7400     0.5400     0.0000
+`;
+
+function geometryHeader(id: string, title: string): ExhibitHeader {
+  return {
+    exhibit_id: id,
+    session_id: GEOMETRY_SESSION,
+    kind: 'geometry',
+    title,
+    head_revision: 1,
+    head_author_kind: 'agent',
+    head_author: 'chemclaw',
+    created_by: 'chemclaw',
+    created_at: '2026-10-03T08:00:00Z',
+    updated_at: id === GEOMETRY_INLINE_ID ? '2026-10-03T08:05:00Z' : '2026-10-03T08:00:00Z',
+  };
+}
+
+const GEOMETRIES: Record<string, { header: ExhibitHeader; spec: ExhibitView['spec'] }> = {
+  [GEOMETRY_INLINE_ID]: {
+    header: geometryHeader(GEOMETRY_INLINE_ID, 'Optimised water'),
+    spec: {
+      kind: 'geometry',
+      format: 'xyz',
+      xyz: WATER_XYZ,
+      label: 'Water, GFN2-xTB',
+      energy_hartree: -5.070544440612,
+      highlight_atoms: [0],
+    },
+  },
+  [GEOMETRY_CITED_ID]: {
+    header: geometryHeader(GEOMETRY_CITED_ID, 'Ethanol conformer'),
+    spec: {
+      kind: 'geometry',
+      format: 'xyz',
+      source: { calc_key: CALC_KEY, name: CALC_NAME },
+      label: '',
+      highlight_atoms: [],
+    },
+  },
+};
+
+/** The geometry session's artefact routes, and the calc byte route. `false` when not one. */
+function geometryRoutes(
+  req: import('node:http').IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+): boolean {
+  if (url.pathname === '/calc-artifacts/content' && req.method === 'GET') {
+    // The service's contract: the whole `<calc_key>#<name>` in one `ref` parameter.
+    if (url.searchParams.get('ref') !== `${CALC_KEY}#${CALC_NAME}`) {
+      json(res, 404, { detail: 'no stored calculation artifact' });
+      return true;
+    }
+    res.writeHead(200, {
+      'content-type': 'chemical/x-xyz',
+      'content-disposition': `attachment; filename="${CALC_NAME}"`,
+    });
+    res.end(ETHANOL_XYZ);
+    return true;
+  }
+  const match =
+    /^\/sessions\/([0-9a-f]{32})\/exhibits(?:\/(xb-[0-9a-f]{16})(\/revisions|\/export\.xyz)?)?$/.exec(
+      url.pathname,
+    );
+  if (!match || match[1] !== GEOMETRY_SESSION || req.method !== 'GET') return false;
+  const [, , xid, tail] = match;
+  if (!xid) {
+    const listed: ExhibitListOut = {
+      enabled: true,
+      exhibits: [GEOMETRIES[GEOMETRY_INLINE_ID]!.header, GEOMETRIES[GEOMETRY_CITED_ID]!.header],
+    };
+    json(res, 200, listed);
+    return true;
+  }
+  const found = GEOMETRIES[xid];
+  if (!found) {
+    json(res, 404, { detail: 'unknown artefact' });
+    return true;
+  }
+  const record: ExhibitRevision = {
+    revision: 1,
+    parent_revision: 0,
+    author_kind: 'agent',
+    author: 'chemclaw',
+    change_note: '',
+    created_at: found.header.created_at,
+    byte_size: 400,
+  };
+  if (tail === '/revisions') {
+    json(res, 200, { revisions: [record] });
+  } else if (tail === '/export.xyz') {
+    res.writeHead(200, {
+      'content-type': 'chemical/x-xyz',
+      'content-disposition': 'attachment; filename="optimised-water.xyz"',
+    });
+    res.end(xid === GEOMETRY_INLINE_ID ? WATER_XYZ : ETHANOL_XYZ);
+  } else {
+    const view: ExhibitView = {
+      ...found.header,
+      revision: 1,
+      parent_revision: 0,
+      author_kind: 'agent',
+      author: 'chemclaw',
+      change_note: '',
+      revision_created_at: found.header.created_at,
+      spec: found.spec,
+      unverified_figures: [],
+    };
+    json(res, 200, view);
+  }
+  return true;
+}
+
 /** Read a JSON request body. */
 function readBody<T>(req: import('node:http').IncomingMessage): Promise<T> {
   return new Promise((resolve) => {
@@ -1265,6 +1408,7 @@ createServer(async (req, res) => {
 
   // The artefact routes. Every other session lists none, with the deployment's switch on — the
   // shape every spec's shell now reads once per conversation.
+  if (geometryRoutes(req, res, url)) return;
   if (await exhibits(req, res, url)) return;
 
   if (path.endsWith('/events')) {

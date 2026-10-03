@@ -22,6 +22,7 @@ export const EXHIBIT_KINDS = [
   'chart',
   'result',
   'link',
+  'geometry',
 ] as const;
 export type ExhibitKind = (typeof EXHIBIT_KINDS)[number];
 
@@ -49,4 +50,5 @@ export const KIND_LABEL: Readonly<Record<string, string>> = {
   chart: 'Chart',
   result: 'Tool result',
   link: 'Link',
+  geometry: '3D structure',
 };

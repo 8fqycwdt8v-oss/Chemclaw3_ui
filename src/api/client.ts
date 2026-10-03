@@ -2043,6 +2043,64 @@ export const api = {
       filename: filenameFrom(res.headers.get('content-disposition'), `${exhibitId}.${format}`),
     };
   },
+
+  /**
+   * One calculation by-product's bytes — `GET /calc-artifacts/content?ref=<calc_key>#<name>`.
+   *
+   * The route the C4 story waited on (artefacts wave 2): `fetch_artifact` hands the *model* bounded
+   * text and refuses binaries, which is right for a context window and useless for "take this
+   * geometry into another package". This is the file itself, with the stored media type and the
+   * name the calculation gave it. A geometry artefact that cites a calculation reads its XYZ here
+   * too, so the viewer and the download are one fetch of one thing.
+   *
+   * **Not session-scoped, and that is the service's decision, not a gap here**: the calc cache is
+   * shared across sessions (D-011's "a persisted result is never recomputed"), so any authenticated
+   * caller may read a stored by-product, as with notes and jobs.
+   *
+   * The ref is a **query parameter, encoded whole** — its `#` would otherwise end the URL at the
+   * fragment and its `:`/`@` are the calc key's own punctuation. The BFF whitelists the path and
+   * holds the parameter to `CALC_ARTIFACT_REF` before anything is forwarded.
+   *
+   * Fetched rather than linked, for `exportExhibit`'s reason: the bearer token rides a header, so a
+   * plain `<a href>` would reach the service unauthenticated. Two refusals get their own sentence
+   * because the service's status alone reads as something else here — a 404 is the calc store's
+   * eviction (by-products are reclaimed by design), not an unknown session; a 413 is the deployment's
+   * `calc_artifact_max_download_bytes`, not a fault.
+   */
+  async getCalcArtifact(
+    ref: string,
+    getToken: TokenGetter,
+  ): Promise<{ blob: Blob; filename: string; mediaType: string }> {
+    // Written out whole at the one `send`, for the contract check (see `postExhibitRevision`).
+    const fetchFile = (): Promise<Response> =>
+      send(`/calc-artifacts/content?ref=${encodeURIComponent(ref)}`, getToken, {
+        headers: { accept: '*/*' },
+      });
+    let res = await fetchFile();
+    if (res.status === 401 && (await recoverFrom(getToken))) res = await fetchFile();
+    if (!res.ok) {
+      const failure = await readFailure(res);
+      const sentence =
+        res.status === 404
+          ? 'That calculation file is no longer stored. By-products are reclaimed over time; re-running the calculation stores it again.'
+          : res.status === 413
+            ? 'That calculation file is larger than this deployment will send to a browser.'
+            : failure.detail;
+      throw errorFromStatus(
+        res.status,
+        sentence,
+        res.headers.get('retry-after'),
+        failure.correlationId,
+        failure.code,
+      );
+    }
+    const name = ref.slice(ref.lastIndexOf('#') + 1) || 'artifact';
+    return {
+      blob: await res.blob(),
+      filename: filenameFrom(res.headers.get('content-disposition'), name),
+      mediaType: res.headers.get('content-type') ?? 'application/octet-stream',
+    };
+  },
 };
 
 /**

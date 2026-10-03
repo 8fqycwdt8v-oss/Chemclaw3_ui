@@ -155,11 +155,46 @@ const XID = '(xb-[0-9a-f]{16})';
 
 /**
  * What an artefact can be downloaded as from the service. A closed list rather than a pattern,
- * because it is one: the contract's export table names three formats and the service 404s every
- * other one, so admitting a fourth here would forward a request with no answer. SDF and SVG are
+ * because it is one: the contract's export table names four formats (`xyz` arrived with the
+ * `geometry` kind in wave 2) and the service 404s every
+ * other one, so admitting a fifth here would forward a request with no answer. SDF and SVG are
  * made in the browser and never reach this route.
  */
-const FMT = '(md|csv|smi)';
+const FMT = '(md|csv|smi|xyz)';
+
+/**
+ * A calculation by-product's reference, `<calc_key>#<name>` — `ArtifactRef.as_str()` upstream.
+ *
+ * The one id on this whitelist that travels in the **query string** (`GET /calc-artifacts/content
+ * ?ref=…`), because its `#` cannot be a path segment and its calc key is the service's own
+ * punctuation (`calc_type@version:input_hash:params_hash`). The resolver is handed only the
+ * pathname, so a route that forwards a query has to say what that query may hold — otherwise the
+ * whitelist would be a path filter with an open side door. This is that statement.
+ *
+ * As tight as the shape allows without restating another repository's numbers: the key is the
+ * alphabet its four parts are written in, the name is a producer's filename (`xtbopt.xyz`,
+ * `hessian`), and neither may be only dots. The lengths bound the URL, not the service's fields.
+ */
+export const CALC_ARTIFACT_REF = /^[A-Za-z0-9._+@:-]{1,512}#(?!\.+$)[A-Za-z0-9._+-]{1,128}$/;
+
+/**
+ * Whether a query string is exactly one `ref` that is a calc artifact reference — nothing else.
+ * A second `ref`, an extra key or a malformed escape is refused, because each is a request this
+ * app never makes and a forwarded one would be the service's to interpret.
+ */
+function onlyCalcArtifactRef(search: string): boolean {
+  let params: URLSearchParams;
+  try {
+    // `URLSearchParams` decodes leniently; a malformed escape is refused by asking first.
+    decodeURIComponent(search.replace(/\+/g, ' '));
+    params = new URLSearchParams(search);
+  } catch {
+    return false;
+  }
+  const keys = [...params.keys()];
+  const ref = params.get('ref');
+  return keys.length === 1 && keys[0] === 'ref' && ref !== null && CALC_ARTIFACT_REF.test(ref);
+}
 
 /** What a proposal proposes. Two values, because the service's `ProposalKind` has exactly two. */
 const KIND = '(skill|profile)';
@@ -181,6 +216,14 @@ export interface Route {
    * own path template is the spelling to copy.
    */
   labels?: readonly string[];
+  /**
+   * What the route's query string may hold, for the one route whose id travels there.
+   *
+   * Absent means the query is forwarded untouched and the service validates it — the arrangement
+   * every revision selector runs under. Present, the query is checked *here*, and a request whose
+   * query fails it is not whitelisted at all.
+   */
+  query?: (search: string) => boolean;
 }
 
 export const ROUTES: readonly Route[] = [
@@ -569,6 +612,17 @@ export const ROUTES: readonly Route[] = [
   // because it is what answers "which session" — the same argument `/plans/pending` makes — and
   // the service scopes it to sessions the caller owns or is a member of.
   { method: 'GET', pattern: /^\/api\/exhibits$/, target: () => '/exhibits', sse: false },
+  // A calculation by-product's bytes (artefacts wave 2; the C4 story's byte route) — a geometry
+  // artefact that cites a calculation reads its XYZ here, and a `list_artifacts` row downloads
+  // through it. Any authenticated caller, as with notes and jobs: the calc cache is shared, not
+  // session-owned. A file, like the export above, so its type and disposition pass through.
+  {
+    method: 'GET',
+    pattern: /^\/api\/calc-artifacts\/content$/,
+    target: () => '/calc-artifacts/content',
+    query: onlyCalcArtifactRef,
+    sse: false,
+  },
 ] as const;
 
 export interface ResolvedRoute {
@@ -629,8 +683,13 @@ function isTraversal(segment: string): boolean {
   return decoded.includes('/') || decoded.includes('\\') || decoded === '..' || decoded === '.';
 }
 
-/** Resolve a request to an upstream path, or `null` if it is not whitelisted. */
-export function resolveRoute(method: string, path: string): ResolvedRoute | null {
+/**
+ * Resolve a request to an upstream path, or `null` if it is not whitelisted.
+ *
+ * `search` is the raw query string (with or without its `?`), consulted only by a route that
+ * declares `query`; every other route forwards it untouched, as before.
+ */
+export function resolveRoute(method: string, path: string, search = ''): ResolvedRoute | null {
   for (const route of ROUTES) {
     if (route.method !== method) continue;
     const match = path.match(route.pattern);
@@ -638,6 +697,7 @@ export function resolveRoute(method: string, path: string): ResolvedRoute | null
       if (match.slice(1).some((group) => group !== undefined && isTraversal(group))) {
         return null;
       }
+      if (route.query && !route.query(search.replace(/^\?/, ''))) return null;
       return {
         path: route.target(match),
         sse: route.sse,

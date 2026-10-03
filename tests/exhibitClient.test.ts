@@ -113,7 +113,52 @@ describe('the artefact bodies decode into the frozen shape', () => {
       chart: ['csv'],
       result: [],
       link: [],
+      geometry: ['xyz'],
     });
+  });
+});
+
+describe('a calculation file (the C4 byte route)', () => {
+  it('asks for one encoded `ref` and hands back the bytes under the stored name and type', async () => {
+    const stub = stubFetch(
+      () =>
+        new Response('3\n\nO 0 0 0\nH 0 0 1\nH 0 1 0\n', {
+          status: 200,
+          headers: {
+            'content-type': 'chemical/x-xyz',
+            'content-disposition': 'attachment; filename="xtbopt.xyz"',
+          },
+        }),
+    );
+    restore = stub.restore;
+    const file = await api.getCalcArtifact('xtb_opt@6.7.1:ab:cd#xtbopt.xyz', auth);
+    expect(stub.calls[0]!.url).toBe(
+      '/api/calc-artifacts/content?ref=xtb_opt%406.7.1%3Aab%3Acd%23xtbopt.xyz',
+    );
+    expect(file.filename).toBe('xtbopt.xyz');
+    expect(file.mediaType).toBe('chemical/x-xyz');
+    expect(await file.blob.text()).toMatch(/^3\n/);
+  });
+
+  it('names the file after the ref when the service sent no disposition', async () => {
+    const stub = stubFetch(() => new Response('x', { status: 200 }));
+    restore = stub.restore;
+    expect((await api.getCalcArtifact('k@1:a:b#hessian', auth)).filename).toBe('hessian');
+  });
+
+  it('says an evicted file is gone and an oversized one is over the limit, in its own words', async () => {
+    for (const [status, sentence] of [
+      [404, /no longer stored/],
+      [413, /larger than this deployment will send/],
+    ] as const) {
+      const stub = stubFetch(() => json(status, { detail: 'nope' }));
+      restore = stub.restore;
+      const err = (await api.getCalcArtifact('k@1:a:b#x', auth).catch((e: unknown) => e)) as Error;
+      expect(err).toBeInstanceOf(ApiError);
+      expect(err.message).toMatch(sentence);
+      stub.restore();
+      restore = null;
+    }
   });
 });
 

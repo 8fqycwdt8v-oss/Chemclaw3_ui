@@ -526,15 +526,16 @@ describe('proxy route whitelist', () => {
       }
     });
 
-    it('exports only the three formats the service renders', () => {
+    it('exports only the four formats the service renders', () => {
       // SDF and SVG are made in the browser; a request for them here could only be a 404 upstream,
       // and a format list wider than the service's is a door to whatever `export.{x}` means later.
-      for (const format of ['md', 'csv', 'smi']) {
+      // `xyz` is the geometry kind's (wave 2).
+      for (const format of ['md', 'csv', 'smi', 'xyz']) {
         expect(
           resolveRoute('GET', `/api/sessions/${SID}/exhibits/${XID}/export.${format}`),
         ).not.toBeNull();
       }
-      for (const format of ['sdf', 'svg', 'pdf', 'csv/x', 'CSV', '']) {
+      for (const format of ['sdf', 'svg', 'pdf', 'csv/x', 'CSV', 'XYZ', 'mol2', '']) {
         expect(
           resolveRoute('GET', `/api/sessions/${SID}/exhibits/${XID}/export.${format}`),
           format,
@@ -570,6 +571,53 @@ describe('proxy route whitelist', () => {
       expect(resolveRoute('GET', `/api/sessions/${SID}/exhibits/${XID}/export.md`)?.sse).toBe(
         false,
       );
+    });
+  });
+  describe('calculation files (the C4 byte route)', () => {
+    const PATH = '/api/calc-artifacts/content';
+    const ref = (value: string): string => `?ref=${encodeURIComponent(value)}`;
+    const KEY = 'xtb_opt@6.7.1:0123abcd:89efcdab';
+
+    it('forwards one encoded `ref` naming `<calc_key>#<name>`, query and all', () => {
+      const resolved = resolveRoute('GET', PATH, ref(`${KEY}#xtbopt.xyz`));
+      expect(resolved?.path).toBe('/calc-artifacts/content');
+      expect(resolved?.template).toBe('/calc-artifacts/content');
+      expect(resolved?.sse).toBe(false);
+      // The leading `?` is optional to the resolver, as the raw URL slice may or may not carry it.
+      expect(resolveRoute('GET', PATH, ref(`${KEY}#hessian`).slice(1))).not.toBeNull();
+      // A version with a build suffix and a name with a second dot are ordinary.
+      expect(
+        resolveRoute('GET', PATH, ref('crest@3.0.2+gfn2:aa:bb#crest_conformers.xyz')),
+      ).not.toBeNull();
+    });
+
+    it('is not whitelisted at all without exactly that query', () => {
+      for (const search of [
+        '',
+        '?',
+        ref('xtbopt.xyz'), // no calc key
+        ref(`${KEY}#`), // no name
+        ref(`${KEY}#..`), // a name that is only dots
+        ref(`${KEY}#.`),
+        ref(`${KEY}#../../etc/passwd`),
+        ref(`${KEY}#a/b`),
+        ref(`${KEY} #x`), // whitespace
+        ref(`${KEY}#x#y`), // two fragments
+        `${ref(`${KEY}#x`)}&ref=${encodeURIComponent(`${KEY}#y`)}`, // two refs
+        `${ref(`${KEY}#x`)}&limit=5`, // a second key
+        '?ref=%zz', // a malformed escape
+        `?REF=${encodeURIComponent(`${KEY}#x`)}`,
+      ]) {
+        expect(resolveRoute('GET', PATH, search), search).toBeNull();
+      }
+    });
+
+    it('takes GET only, and no path below it', () => {
+      const ok = ref(`${KEY}#xtbopt.xyz`);
+      expect(resolveRoute('POST', PATH, ok)).toBeNull();
+      expect(resolveRoute('DELETE', PATH, ok)).toBeNull();
+      expect(resolveRoute('GET', `${PATH}/x`, ok)).toBeNull();
+      expect(resolveRoute('GET', '/api/calc-artifacts', ok)).toBeNull();
     });
   });
 });

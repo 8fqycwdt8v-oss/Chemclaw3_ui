@@ -118,7 +118,18 @@ const SAMPLES = [
   'house-workup', // a skill name: lowercase and hyphens, the shape both stored tiers store under
   'skill', // what a behaviour proposal proposes — the other value is `profile`
   'xb-0123456789abcdef', // an artefact (exhibit) id: `xb-` plus sixteen lowercase hex
-  'csv', // an artefact export format, the `{fmt}` of `export.{fmt}` — one of md, csv, smi
+  'csv', // an artefact export format, the `{fmt}` of `export.{fmt}` — one of md, csv, smi, xyz
+  'xtb_opt@6.7.1:0123abcd:89efcdab#xtbopt.xyz', // a calc artifact ref, `<calc_key>#<name>`
+];
+
+/**
+ * Query strings to try beside the bare path. One route holds its id in the query rather than the
+ * path (`GET /calc-artifacts/content?ref=…`), and the whitelist checks that query, so without a
+ * sample of it the route would be reported unforwarded while it is forwarded.
+ */
+const QUERY_SAMPLES = [
+  '',
+  `?ref=${encodeURIComponent('xtb_opt@6.7.1:0123abcd:89efcdab#xtbopt.xyz')}`,
 ];
 
 const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];
@@ -183,8 +194,10 @@ if (dead.length === 0) {
 // one. Reported, never fatal: the whitelist is deliberately narrower than the service.
 const unforwarded = backendRoutes.filter(
   (backend) =>
-    !concretePaths(backend.path).some(
-      (path) => resolveRoute(backend.method, `/api${path}`)?.path === path,
+    !concretePaths(backend.path).some((path) =>
+      QUERY_SAMPLES.some(
+        (query) => resolveRoute(backend.method, `/api${path}`, query)?.path === path,
+      ),
     ),
 );
 if (unforwarded.length === 0) {

@@ -73,6 +73,7 @@ import { Resizer } from './Resizer.tsx';
 import { fileStem, sdfOf, svgFileOf } from './exports.ts';
 import { ChartView } from './views/ChartView.tsx';
 import { DocumentView } from './views/DocumentView.tsx';
+import { GeometryView } from './views/GeometryView.tsx';
 import { LinkView } from './views/LinkView.tsx';
 import { ResultView } from './views/ResultView.tsx';
 import { StructuresView } from './views/StructuresView.tsx';
@@ -89,6 +90,7 @@ const FORMAT_LABEL: Record<ExportFormat, string> = {
   md: 'Markdown (.md)',
   csv: 'CSV (.csv)',
   smi: 'SMILES (.smi)',
+  xyz: 'XYZ coordinates (.xyz)',
 };
 
 /**
@@ -185,6 +187,8 @@ function Body({
       return <ResultView sessionId={sessionId} spec={spec} />;
     case 'link':
       return <LinkView spec={spec} />;
+    case 'geometry':
+      return <GeometryView view={view} spec={spec} />;
   }
 }
 

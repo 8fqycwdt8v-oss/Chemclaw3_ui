@@ -60,6 +60,37 @@ async function scan(page: Page, exclude?: string): Promise<void> {
   ).toEqual([]);
 }
 
+/** Seed one conversation bound to a fixture session, as a returning reader's browser holds it. */
+async function seedArtefactConversation(page: Page, id: string, sessionId: string): Promise<void> {
+  await page.addInitScript(
+    ([key, value]) => window.localStorage.setItem(key as string, value as string),
+    [
+      'chemclaw3.chat.v2.dev-user',
+      JSON.stringify({
+        version: 3,
+        state: {
+          conversations: {
+            [id]: {
+              id,
+              sessionId,
+              title: 'Amination',
+              createdAt: 1700000000000,
+              updatedAt: 1700000000000,
+              messages: [],
+              contextLost: false,
+              sessionOrigin: 'local',
+            },
+          },
+          order: [id],
+          activeId: id,
+          jobFeed: [],
+          notifyOnJobComplete: false,
+        },
+      }),
+    ],
+  );
+}
+
 for (const theme of ['light', 'dark'] as const) {
   test.describe(theme, () => {
     test.beforeEach(async ({ page }) => {
@@ -243,6 +274,29 @@ for (const theme of ['light', 'dark'] as const) {
 
       await pane.getByRole('tab', { name: /^Index/ }).click();
       await expect(pane.getByRole('tabpanel')).toBeVisible();
+      await scan(page);
+    });
+
+    test('a 3D structure in the artefact pane, with its atom table open', async ({
+      page,
+      isMobile,
+    }) => {
+      // The geometry viewer: an `application` frame that takes the arrow keys, an SVG drawing named
+      // by its summary, three buttons, and a disclosure holding a scrollable table — in the column,
+      // or in the sheet below `lg`. Its own read-only fixture session (`GEOMETRY_SESSION`).
+      await seedArtefactConversation(page, 'e2e-a11y-geometry', '2'.repeat(32));
+      await page.goto('/c/e2e-a11y-geometry');
+      await page
+        .getByRole('button', { name: isMobile ? 'Artefacts (2)' : 'Show artefacts (2)' })
+        .click();
+      const pane = isMobile
+        ? page.getByRole('dialog', { name: 'Artefacts' })
+        : page.getByRole('complementary', { name: 'Artefacts' });
+      await pane.getByRole('combobox', { name: 'Artefact' }).selectOption('xb-9e0000000000a001');
+      await expect(pane.getByRole('img', { name: /^Water, GFN2-xTB/ })).toBeVisible();
+      await pane.getByText('Atom table (3)').click();
+      await expect(pane.getByRole('region', { name: /atoms and coordinates/ })).toBeVisible();
+      await expectTheme(page, theme);
       await scan(page);
     });
 

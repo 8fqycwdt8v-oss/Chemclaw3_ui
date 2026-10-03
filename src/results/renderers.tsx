@@ -28,7 +28,7 @@
  * something the full view does not.
  */
 
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { Download } from 'lucide-react';
 import { formatScientificNumber, toolLabel } from '../lib/format.ts';
 import { saveBlob } from '../lib/download.ts';
@@ -1119,6 +1119,25 @@ export function Verdict({ data }: { data: Json }): React.JSX.Element | null {
   return <p className="text-sm font-medium">{line}</p>;
 }
 
+/**
+ * The calc store's files, in a chunk of their own (`CalcArtifacts.tsx`): a download control and its
+ * failure sentences are nothing the first load needs, and this registry is on it.
+ */
+const CalcArtifactsChunk = lazy(() =>
+  import('./CalcArtifacts.tsx').then((m) => ({ default: m.CalcArtifactsResult })),
+);
+
+function CalcArtifacts(props: ResultViewProps): React.JSX.Element {
+  return (
+    <Suspense fallback={<p className="text-xs text-ink-muted">Listing the files…</p>}>
+      <CalcArtifactsChunk {...props} />
+    </Suspense>
+  );
+}
+
+/** The two calc-store tools whose rows are files (`list_artifacts`, `fetch_artifact`). */
+const CALC_ARTIFACT_TOOLS = new Set(['list_artifacts', 'fetch_artifact']);
+
 /* ── The registry ─────────────────────────────────────────────────────────── */
 
 export interface ResultRenderer {
@@ -1815,6 +1834,16 @@ function SurrogateAnswerResult({ data }: ResultViewProps): React.JSX.Element {
  */
 const RENDERERS: (ResultRenderer & { matches: (tool: string, data: Json) => boolean })[] = [
   {
+    id: 'calc-artifacts',
+    generic: false,
+    title: () => 'Calculation files',
+    wide: true,
+    // Name-keyed, and first: `fetch_artifact`'s single object is a `values` strip by shape (one
+    // `byte_size`), and a file whose only rendering is its size is the dead end C4 recorded.
+    matches: (tool) => CALC_ARTIFACT_TOOLS.has(tool),
+    View: CalcArtifacts,
+  },
+  {
     id: 'campaign',
     generic: false,
     title: () => 'Campaign progress',
@@ -1999,7 +2028,13 @@ export function rendererFor(
 ): { renderer: ResultRenderer; data: Json } | null {
   if (Array.isArray(parsed)) {
     const records = rows(parsed);
-    if (records.length === 0 || records.length !== parsed.length) return null;
+    if (records.length !== parsed.length) return null;
+    // `list_artifacts` answers with a bare list, and an empty one is its real answer ("this
+    // calculation kept no files"), so it is claimed before the generic list's emptiness check.
+    if (CALC_ARTIFACT_TOOLS.has(tool)) {
+      return { renderer: RENDERERS[0]!, data: { items: records } };
+    }
+    if (records.length === 0) return null;
     return { renderer: BARE_LIST, data: { items: records } };
   }
   if (!isObject(parsed)) return null;

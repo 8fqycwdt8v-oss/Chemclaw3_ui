@@ -105,3 +105,53 @@ test('the agent writes a table, the chemist corrects a cell, and the comparison 
   await expect(compare.getByText('rows[0].yield')).toBeVisible();
   await expect(compare).toContainText('1 change from revision 1 to revision 2');
 });
+
+test('a 3D structure turns under the keyboard, reads as a table, and downloads as XYZ', async ({
+  page,
+  isMobile,
+}) => {
+  // A conversation that already holds two geometry artefacts (`GEOMETRY_SESSION` in the fixture):
+  // one inline, one citing the calculation file it came from — read through the calc byte route.
+  await seedConversation(page, '2'.repeat(32));
+  await page.goto(`/c/${CONVERSATION}`);
+  // Nothing opened it: the reader does, from the top bar.
+  if (isMobile) {
+    await page.getByRole('button', { name: 'Artefacts (2)' }).click();
+  } else {
+    await page.getByRole('button', { name: 'Show artefacts (2)' }).click();
+  }
+  const pane = isMobile
+    ? page.getByRole('dialog', { name: 'Artefacts' })
+    : page.getByRole('complementary', { name: 'Artefacts' });
+  await pane.getByRole('combobox', { name: 'Artefact' }).selectOption('xb-9e0000000000a001');
+  await expect(pane.getByRole('heading', { name: 'Optimised water' })).toBeVisible();
+
+  const drawing = pane.getByRole('img', { name: /^Water, GFN2-xTB: H2O; 3 atoms, 2 bonds/ });
+  await expect(drawing).toBeVisible();
+  const viewer = pane.getByRole('application', { name: /arrow keys turn it/ });
+  const before = await drawing.innerHTML();
+  await viewer.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect.poll(() => drawing.innerHTML()).not.toBe(before);
+
+  // The accessible reading: every atom with its coordinates, the highlighted one said in words.
+  await pane.getByText('Atom table (3)').click();
+  const table = pane.getByRole('region', { name: 'Water, GFN2-xTB — atoms and coordinates' });
+  await expect(table.getByRole('row')).toHaveCount(4);
+  await expect(table.getByRole('row').nth(1)).toContainText('O — highlighted');
+
+  // The service's `.xyz`, through the BFF's `FMT` whitelist.
+  await pane.getByRole('button', { name: 'Export' }).click();
+  const download = page.waitForEvent('download');
+  await page.getByRole('menuitem', { name: 'XYZ coordinates (.xyz)' }).click();
+  expect((await download).suggestedFilename()).toBe('optimised-water.xyz');
+
+  // The cited one: drawn from the calc store's bytes, which the reader can also take away (C4).
+  await pane.getByRole('combobox', { name: 'Artefact' }).selectOption('xb-9e0000000000a002');
+  await expect(
+    pane.getByRole('img', { name: /^Ethanol conformer: C2H6O; 9 atoms, 8 bonds/ }),
+  ).toBeVisible();
+  const file = page.waitForEvent('download');
+  await pane.getByRole('button', { name: 'Download xtbopt.xyz' }).click();
+  expect((await file).suggestedFilename()).toBe('xtbopt.xyz');
+});

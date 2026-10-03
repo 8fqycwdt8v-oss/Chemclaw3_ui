@@ -38,5 +38,18 @@ export const VIEW = {
       { solvent: 'CPME', yield: null },
     ],
   },
+  // Wave 3: nothing in this table is bound, so the stored spec is the drawn one.
+  raw_spec: {
+    kind: 'table',
+    columns: [
+      { key: 'solvent', label: 'Solvent', unit: '' },
+      { key: 'yield', label: 'Yield', unit: '%' },
+    ],
+    rows: [
+      { solvent: '2-MeTHF', yield: 82 },
+      { solvent: 'CPME', yield: null },
+    ],
+  },
+  bindings: [],
   unverified_figures: ['82'],
 };

@@ -1,10 +1,16 @@
 /**
- * A table artefact: columns with units, rows of literal values, sortable, editable cell by cell.
+ * A table artefact: columns with units, rows of values, sortable, editable cell by cell.
  *
- * **Every value here is one the agent wrote**, not one bound to a tool result — phase 0 measured
- * bindings out — which is why the pane puts the unverified-figures strip above this table when the
- * service flags any, and why a chemist's correction of one cell is worth a revision of its own:
- * it is the most informative thing the system observes, and the agent is told about it next turn.
+ * **A value here is one the agent wrote, or one bound to a tool result (wave 3).** A written value
+ * is why the pane puts the unverified-figures strip above this table when the service flags any,
+ * and why a chemist's correction of one cell is worth a revision of its own: it is the most
+ * informative thing the system observes, and the agent is told about it next turn.
+ *
+ * A bound cell — or every cell, when the table is one `rows_from` binding — carries a provenance
+ * marker and is **read-only until detached**: correcting a value that claims to be a tool's output
+ * would leave the claim standing over a number the tool never returned. Detach first makes it the
+ * chemist's own; then it edits like any other cell. Every write starts from `raw_spec`, so the
+ * bindings an edit did not touch go back verbatim.
  *
  * ## The unit is in the header, never in the cell
  *
@@ -26,11 +32,12 @@
 
 import { useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp } from 'lucide-react';
-import type {
-  ExhibitView,
-  TableCell,
-  TableColumn,
-  TableSpec,
+import {
+  isBind as isBound,
+  type ExhibitView,
+  type TableCell,
+  type TableColumn,
+  type TableSpec,
 } from '../../../../shared/exhibits.ts';
 import { formatScientificNumber } from '../../../lib/format.ts';
 import { DownloadCsv } from '../../../results/renderers.tsx';
@@ -38,6 +45,16 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { RebasePrompt } from '../RebasePrompt.tsx';
 import { useRevise } from '../useRevise.ts';
+import { ProvenanceMarker, SOURCE_GONE } from '../Provenance.tsx';
+import {
+  canDetach,
+  detach,
+  pathOf,
+  provenanceAt,
+  rawOf,
+  type BoundTarget,
+  type Provenance,
+} from '../bindings.ts';
 
 /** How many rows are drawn before the reader is asked — `FULL_ROW_LIMIT`'s argument in
  *  `results/renderers.tsx`, at the service's own cap of 2,000 rows. The CSV is always every row. */
@@ -112,6 +129,10 @@ export function TableView({
     setEditingState(next);
   };
   const revise = useRevise(sessionId, view);
+  // The stored spec every write starts from; `null` only when the service sent none it could read.
+  const raw = rawOf(view, 'table');
+  // A table bound whole: every cell is the tool's, and the one marker is above the table.
+  const rowsFrom = provenanceAt(view, { at: 'rows_from' });
 
   // Row indexes into the spec, in drawn order. Indexes rather than rows, so an edit addresses the
   // spec's row whatever order it is drawn in.
@@ -158,12 +179,27 @@ export function TableView({
     const next = parseCell(edit.text, previous);
     setEditing(null);
     if (next === (previous ?? null)) return;
-    const rows = spec.rows.map((row, i) => (i === edit.row ? { ...row, [edit.key]: next } : row));
+    // From the stored rows, so every binding in every other cell is sent back as it was stored.
+    if (!raw?.rows) return;
+    const rows = raw.rows.map((row, i) => (i === edit.row ? { ...row, [edit.key]: next } : row));
     await revise.save(
-      { kind: 'table', columns: spec.columns, rows },
+      { ...raw, rows },
       `Edited ${column ? headerOf(column) : edit.key} in row ${edit.row + 1}`,
       edit.base,
     );
+  };
+
+  /**
+   * The detach for one bound position, or nothing where it cannot be offered. Built per render, so
+   * the base is the revision drawn — `ProvenanceMarker` keeps the one its popover opened over.
+   */
+  const detachFor = (target: BoundTarget, provenance: Provenance): (() => void) | undefined => {
+    if (!isHead || !raw || !canDetach(target, provenance)) return undefined;
+    const base = view.revision;
+    return () => {
+      const next = detach(raw, spec, target);
+      if (next) void revise.save(next, `Detached ${pathOf(target)} from its tool result`, base);
+    };
   };
 
   const drawn = all ? order : order.slice(0, ROWS_SHOWN);
@@ -183,6 +219,18 @@ export function TableView({
 
   return (
     <div className="flex flex-col gap-2">
+      {rowsFrom && (
+        <p className="flex flex-wrap items-center gap-1.5 text-2xs text-ink-muted">
+          <ProvenanceMarker
+            provenance={rowsFrom}
+            onDetach={detachFor({ at: 'rows_from' }, rowsFrom)}
+            detachDisabled={revise.state.status === 'saving'}
+          />
+          Every row is taken from {rowsFrom.tool || 'a tool result'} at{' '}
+          <span className="font-mono">{rowsFrom.pointer || '/'}</span>
+          {rowsFrom.ok === false ? ` — ${SOURCE_GONE}.` : '.'} Read-only until detached.
+        </p>
+      )}
       <div
         tabIndex={0}
         role="region"
@@ -228,6 +276,8 @@ export function TableView({
                     const value = row[column.key];
                     const numeric = numericColumns.has(column.key);
                     const isEditing = editing?.row === rowIndex && editing.key === column.key;
+                    const target: BoundTarget = { at: 'cell', row: rowIndex, key: column.key };
+                    const bound = rowsFrom ? null : provenanceAt(view, target);
                     return (
                       <td
                         key={column.key}
@@ -235,7 +285,20 @@ export function TableView({
                           numeric ? 'px-2.5 py-1 text-right font-mono tabular-nums' : 'px-2.5 py-1'
                         }
                       >
-                        {isEditing ? (
+                        {bound ? (
+                          <span className="inline-flex items-center gap-1">
+                            {bound.ok === false ? (
+                              <span className="text-2xs text-warn-ink">{SOURCE_GONE}</span>
+                            ) : (
+                              shown(value)
+                            )}
+                            <ProvenanceMarker
+                              provenance={bound}
+                              onDetach={detachFor(target, bound)}
+                              detachDisabled={revise.state.status === 'saving'}
+                            />
+                          </span>
+                        ) : isEditing ? (
                           <input
                             // A cell editor takes focus because the reader just asked to type in
                             // this cell; nothing else in the pane does.
@@ -251,7 +314,7 @@ export function TableView({
                             onBlur={() => void commit()}
                             className="w-full min-w-16 rounded-sm border border-brand bg-surface-raised px-1 font-mono text-xs focus-ring"
                           />
-                        ) : isHead ? (
+                        ) : isHead && !rowsFrom && raw ? (
                           <button
                             type="button"
                             aria-label={`Edit ${headerOf(column)}, row ${rowIndex + 1}: ${shown(value)}`}
@@ -300,7 +363,14 @@ export function TableView({
           </Button>
         )}
         <DownloadCsv headers={headers} records={records} name={view.title || view.exhibit_id} />
-        {isHead && <span className="text-2xs text-ink-subtle">Select a cell to correct it.</span>}
+        {isHead && raw && !rowsFrom && (
+          <span className="text-2xs text-ink-subtle">
+            Select a cell to correct it
+            {view.bindings.length > 0 || raw.rows?.some((r) => Object.values(r).some(isBound))
+              ? '; a linked value is read-only until detached.'
+              : '.'}
+          </span>
+        )}
       </div>
     </div>
   );

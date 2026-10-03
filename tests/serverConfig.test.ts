@@ -48,6 +48,13 @@ const base: BffConfig = {
   rawMaxMessageChars: '',
   maxMessageCharsIsValid: true,
   csp: '',
+  rawSandboxOrigin: '',
+  rawAppOrigin: '',
+  sandboxOrigin: '',
+  appOrigin: '',
+  sandboxEnabled: false,
+  sandboxPort: 8081,
+  sandboxBindHost: '127.0.0.1',
   logLevel: 'error',
   clientLogLevel: 'info',
 };

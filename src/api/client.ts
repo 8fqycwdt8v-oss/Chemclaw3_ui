@@ -43,6 +43,7 @@ import type {
   ExhibitRevisionsOut,
   ExhibitSpec,
   ExhibitView,
+  RawExhibitSpec,
   ExportFormat,
   ExhibitIndexOut,
 } from '../../shared/exhibits.ts';
@@ -1880,7 +1881,7 @@ export const api = {
     } catch (err) {
       if (err instanceof ApiError && err.kind === 'session_not_found') {
         logger.warn('api.list_route_missing', { route: '/sessions/{id}/exhibits' });
-        return { enabled: false, exhibits: [] };
+        return { enabled: false, html_enabled: false, exhibits: [] };
       }
       throw err;
     }
@@ -1964,7 +1965,7 @@ export const api = {
   async postExhibitRevision(
     sessionId: string,
     exhibitId: string,
-    edit: { parentRevision: number; spec: ExhibitSpec; changeNote: string; title?: string },
+    edit: { parentRevision: number; spec: RawExhibitSpec; changeNote: string; title?: string },
     getToken: TokenGetter,
   ): Promise<ExhibitView> {
     // The URL written out whole at the call, because the contract check reads the route off the

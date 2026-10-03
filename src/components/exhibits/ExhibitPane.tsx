@@ -29,7 +29,7 @@
  * gated tools of their own, and the pane does not get a second door to the knowledge graph.
  */
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useId, useRef, useState } from 'react';
 import { Tabs } from 'radix-ui';
 import {
   AtSign,
@@ -80,6 +80,17 @@ import { LinkView } from './views/LinkView.tsx';
 import { ResultView } from './views/ResultView.tsx';
 import { StructuresView } from './views/StructuresView.tsx';
 import { TableView } from './views/TableView.tsx';
+import { GoneSourcesStrip } from './Provenance.tsx';
+import { goneBindings } from './bindings.ts';
+
+/**
+ * The HTML view, in a chunk of its own (wave 3). Most conversations never hold an `html` artefact,
+ * and the sandbox plumbing — the frame, its message handshake, the source fallback — is nothing a
+ * chemist reading a table should download.
+ */
+const HtmlView = lazy(() =>
+  import('./views/HtmlView.tsx').then((module) => ({ default: module.HtmlView })),
+);
 
 /** What every half of the pane is handed. The list is the shell's — one read, shared. */
 export interface PaneProps {
@@ -93,6 +104,7 @@ const FORMAT_LABEL: Record<ExportFormat, string> = {
   csv: 'CSV (.csv)',
   smi: 'SMILES (.smi)',
   xyz: 'XYZ coordinates (.xyz)',
+  html: 'HTML source (.html)',
 };
 
 /**
@@ -182,15 +194,23 @@ function Body({
     case 'table':
       return <TableView sessionId={sessionId} view={view} spec={spec} isHead={isHead} />;
     case 'structures':
-      return <StructuresView spec={spec} />;
+      return <StructuresView sessionId={sessionId} view={view} spec={spec} isHead={isHead} />;
     case 'chart':
-      return <ChartView ref={chartRef} view={view} spec={spec} />;
+      return (
+        <ChartView ref={chartRef} sessionId={sessionId} view={view} spec={spec} isHead={isHead} />
+      );
     case 'result':
       return <ResultView sessionId={sessionId} spec={spec} />;
     case 'link':
       return <LinkView spec={spec} />;
     case 'geometry':
       return <GeometryView view={view} spec={spec} />;
+    case 'html':
+      return (
+        <Suspense fallback={<Loading>Preparing the sandboxed preview…</Loading>}>
+          <HtmlView view={view} spec={spec} />
+        </Suspense>
+      );
   }
 }
 
@@ -537,6 +557,7 @@ function ExhibitDetail({
       </header>
 
       <UnverifiedStrip figures={view.unverified_figures} />
+      <GoneSourcesStrip gone={goneBindings(view)} />
 
       {comparing && (
         <div data-print="hide" className="rounded-lg border border-border-subtle p-2">

@@ -14,7 +14,7 @@
  */
 
 import type { TranscriptMessage, TranscriptToolCall } from '../api/client.ts';
-import type { ChatMessage, TraceEntry } from './types.ts';
+import type { AssistantMessage, ChatMessage, TraceEntry } from './types.ts';
 import { EXHIBIT_ID_RE } from '../../shared/exhibitConstants.ts';
 
 /**
@@ -130,6 +130,7 @@ export function transcriptToMessages(remote: TranscriptMessage[]): ChatMessage[]
     // the service's `index`, which counts positions in the stored array including the rows it
     // drops: it would be just as unique, and it would fix nothing.
     const key = `h${messages.length}`;
+    const correlationId = m.correlation_id?.trim() || undefined;
 
     if (m.role === 'user') {
       // A user message is its text; there is nothing else it could be showing.
@@ -137,7 +138,14 @@ export function transcriptToMessages(remote: TranscriptMessage[]): ChatMessage[]
       // Who sent it, when the service recorded a person: in a shared conversation that is whose
       // question this is — and, since every message runs as its sender, whose roles answered it.
       const author = m.author?.actor?.trim();
-      messages.push({ id: key, role: 'user', text, at, ...(author ? { author } : {}) });
+      messages.push({
+        id: key,
+        role: 'user',
+        text,
+        at,
+        ...(author ? { author } : {}),
+        ...(correlationId ? { correlationId } : {}),
+      });
       continue;
     }
 
@@ -145,6 +153,9 @@ export function transcriptToMessages(remote: TranscriptMessage[]): ChatMessage[]
       id: key,
       role: 'assistant',
       at,
+      // The turn's id, which is what `mergeTranscript` joins a re-read on — and what the trace
+      // footer quotes on a turn this browser did not send.
+      ...(correlationId ? { correlationId } : {}),
       status: 'done',
       streamedText: '',
       finalText: text,
@@ -168,4 +179,160 @@ export function transcriptToMessages(remote: TranscriptMessage[]): ChatMessage[]
   }
 
   return messages;
+}
+
+/**
+ * One exchange: a question and what answered it, or a lone answer with no question before it.
+ *
+ * `key` is the turn's id (`correlationId`) when any message in it carries one.
+ */
+interface Turn {
+  messages: ChatMessage[];
+  key: string | null;
+  question: string | null;
+  /** A watched placeholder (`AssistantMessage.watched`) — its own turn, never matched. */
+  watched: boolean;
+}
+
+function turnsOf(messages: readonly ChatMessage[]): Turn[] {
+  const turns: Turn[] = [];
+  let current: Turn | null = null;
+  for (const m of messages) {
+    const watched = m.role === 'assistant' && m.watched === true;
+    // A question opens a turn, and so does a watched answer: it is somebody else's exchange, and
+    // folding it into the question above it would hand that question an answer it never had.
+    if (m.role === 'user' || watched || !current || current.watched) {
+      current = {
+        messages: [],
+        key: null,
+        question: m.role === 'user' ? m.text.trim() : null,
+        watched,
+      };
+      turns.push(current);
+    }
+    current.messages.push(m);
+    current.key ??= m.correlationId || null;
+  }
+  return turns;
+}
+
+/**
+ * A stored exchange as one question and **one** answer.
+ *
+ * The transcript stores each model step as its own message — a tool-calling step, then the reply
+ * — and `transcriptToMessages` keeps them apart. A turn arriving in a conversation already on
+ * screen is somebody else's exchange, and the reader watched it arrive as one answer: inserting it
+ * as several would make one turn read as several, and move every count of answers on the page.
+ * So its steps are folded into the last one, their tool calls kept in order.
+ */
+function folded(turn: Turn, id: (seed: string) => string): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  let answer: AssistantMessage | null = null;
+  for (const m of turn.messages) {
+    if (m.role === 'user') {
+      out.push({ ...m, id: id(`${m.correlationId ?? m.id}:q`) });
+      continue;
+    }
+    answer = answer
+      ? {
+          ...m,
+          id: answer.id,
+          finalText: m.finalText || answer.finalText,
+          trace: [...answer.trace, ...m.trace],
+        }
+      : { ...m, id: id(`${m.correlationId ?? m.id}:a`) };
+  }
+  if (answer) out.push(answer);
+  return out;
+}
+
+/**
+ * Merge a re-read transcript into the messages this browser holds, by turn identity.
+ *
+ * What a shared conversation needs and an ordinary reload never did (Chemclaw3_ui #130): the
+ * transcript has turns somebody else sent that this browser has never seen, interleaved with turns
+ * it has. So this is an ordered alignment rather than a replacement:
+ *
+ *  - **A turn both sides hold stays as this browser has it.** A live turn carries what storage
+ *    does not — confidence, the verifier, the plan snapshots, a stream still running — and a
+ *    re-read must never trade that for the stored copy. Turns are matched by `correlationId` first
+ *    and by the question's text second (a row stored before the column, or a turn whose id never
+ *    reached this browser), in order, so a question asked twice matches twice.
+ *  - **A turn only the service holds is inserted where the service has it**, folded to one
+ *    answer (`folded`) and attributed to its sender.
+ *  - **A turn only this browser holds stays where it is** — a turn still streaming, a message
+ *    waiting in line, one that failed or was withdrawn and so was never stored.
+ *  - **A settled watched placeholder is dropped once the exchange it stood for has arrived**, which
+ *    is "the merge inserted a turn". Before that it stays: the answer it shows is the only copy on
+ *    screen until the service's write lands.
+ *
+ * Returns `null` when nothing would change, so a caller can skip the store write and the render.
+ * An inserted message never takes an id the conversation already uses.
+ */
+export function mergeTranscript(
+  local: readonly ChatMessage[],
+  remote: readonly ChatMessage[],
+): ChatMessage[] | null {
+  const mine = turnsOf(local);
+  const theirs = turnsOf(remote).filter((t) => !t.watched);
+  const taken = new Set(local.map((m) => m.id));
+  const id = (seed: string): string => {
+    let candidate = `r:${seed}`;
+    for (let n = 1; taken.has(candidate); n += 1) candidate = `r:${seed}:${n}`;
+    taken.add(candidate);
+    return candidate;
+  };
+
+  const used = new Set<number>();
+  const matchFor = (turn: Turn, from: number): number => {
+    if (turn.key) {
+      const byKey = mine.findIndex(
+        (t, i) => i >= from && !t.watched && !used.has(i) && t.key === turn.key,
+      );
+      if (byKey >= 0) return byKey;
+    }
+    if (turn.question === null) return -1;
+    return mine.findIndex(
+      (t, i) =>
+        i >= from &&
+        !t.watched &&
+        !used.has(i) &&
+        t.question === turn.question &&
+        // Two different turns that asked the same words: both ids known and different.
+        !(t.key && turn.key && t.key !== turn.key),
+    );
+  };
+
+  const placed: (Turn | ChatMessage[])[] = [];
+  let next = 0;
+  let inserted = false;
+  for (const turn of theirs) {
+    const at = matchFor(turn, next);
+    if (at < 0) {
+      placed.push(folded(turn, id));
+      inserted = true;
+      continue;
+    }
+    for (let i = next; i < at; i += 1) placed.push(mine[i]!);
+    placed.push(mine[at]!);
+    used.add(at);
+    next = at + 1;
+  }
+  for (let i = next; i < mine.length; i += 1) placed.push(mine[i]!);
+
+  let dropped = false;
+  const merged: ChatMessage[] = [];
+  for (const entry of placed) {
+    if (Array.isArray(entry)) {
+      merged.push(...entry);
+      continue;
+    }
+    const settled = entry.messages.every((m) => m.role !== 'assistant' || m.status !== 'streaming');
+    if (entry.watched && settled && inserted) {
+      dropped = true;
+      continue;
+    }
+    merged.push(...entry.messages);
+  }
+  return inserted || dropped ? merged : null;
 }

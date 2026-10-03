@@ -1215,7 +1215,7 @@ are wall-clock-sensitive rather than wrong, but a gate that reds under load teac
 rerun. Make the first assert order rather than elapsed time, and give the contract test a timeout
 derived from what it reads rather than vitest's 5 s default.
 
-## Issue 22: shared sessions queue turns; following somebody else's turn live is still open
+## Issue 22: shared sessions queue turns, and each participant follows the others' turns
 
 Core Chemclaw3 #499 (`D-2026-10-01-a-queued-message-waits-in-its-senders-request`) replaced the
 409 a second sender got with a place in the session's line, fanned a turn's events out to every
@@ -1238,15 +1238,38 @@ reader, and let the pending-plans inbox list a member's own plan in somebody els
 - The plan inbox marks a plan in a shared conversation with whose it is, and opening it adopts the
   conversation as shared — so it opens with a member's rules, not an owner's.
 
-**Still open — following another member's turn while it runs.** A member who opens a shared
-conversation mid-turn sees nothing of that turn until its exchange lands in the transcript. The
-route is there (`GET /sessions/{id}/turn/stream` admits any participant) and so is the line
-(`GET /sessions/{id}/queue`, with senders); neither is called for that purpose yet. It is a
-separate surface rather than a field: deciding when to attach (on open, on focus, on a push-back
-hint the service does not send yet), rendering a turn this browser did not start in a transcript
-that is keyed by this browser's own sends, and the watcher cap's 429 and the other-replica 404 as
-ordinary states. The reattach after `stream_lagged` uses the route only for the turn this browser
-sent. Not blocked on core; it needs a design for where a watched turn lives in `chatStore`.
+**Done since — following another member's turn, and seeing it afterwards (Chemclaw3_ui #130,
+defect D4 of the kind full-system run).** The defect was wider than "not live": participants never
+saw each other's turns at all, before or after a reload. `useRemoteTranscript` reads the transcript
+only into an _empty_ conversation the service listed, so an owner never re-read theirs and a member
+read theirs once. Now, for a shared conversation — a member's (`membership`), or an owner's whose
+roster (`GET /sessions/{id}/members`, the people panel's own query) names anybody else —
+`followSharedConversation` (`src/state/sharedSync.ts`), for the one conversation on screen:
+
+- **re-reads and merges the transcript** (`mergeTranscript`, `src/state/transcript.ts`) on open, when
+  the tab comes back into view or the window regains focus, after a turn this browser sent there
+  ends, after a watched turn ends, and when the line says a running turn has stopped. Turns are
+  joined by `correlation_id` (now carried on both messages of a read-back turn), then by the
+  question's words, in order. A turn this browser holds is never traded for its stored copy — least
+  of all one it is streaming or one waiting in line; a turn only the service holds is inserted where
+  the service has it, folded to one answer, attributed to its sender.
+- **follows somebody else's running turn live.** It reads `GET /sessions/{id}/queue` every 5 s (a new
+  BFF route, GET only) and, when a turn is running that is not this browser's, attaches one watcher
+  through `GET /sessions/{id}/turn/stream`. The answer streams into a placeholder
+  (`AssistantMessage.watched`: no Stop, no recovery, never persisted) that the re-read at the turn's
+  end replaces with the stored question and answer. `404` (the turn ended, or runs on another
+  replica) and `429` (the turn's watcher cap, or this person's stream cap) stand the watcher down for
+  15 s or the `Retry-After`, whichever is longer; `stream_lagged` reattaches twice, as the sender's
+  own stream does. No watcher while this browser's own turn runs there; the poll and the watcher stop
+  when the tab is hidden or the conversation is closed.
+
+**Still open, upstream:** a watcher never sees the _question_ while the turn runs, nor who sent it —
+the service stores the exchange whole, at the turn's end, the watch stream carries only the answer's
+events, and the line's `running` names no sender. So the placeholder says "another person's turn"
+until the re-read; the question and its author appear when the answer lands. A `turn_started` frame
+carrying the sender and the question (or `running_sender` on `GET /queue`) would let the bubble say
+whose it is from the first token. The line is also polled rather than pushed: a push-back hint on
+`GET /sessions/{id}/events` when a turn starts would remove the 5 s delay and the timer.
 
 **Done since, with Chemclaw3 #503 item 6 (this PR lands before the core one, and reads both
 shapes):**

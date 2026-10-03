@@ -111,8 +111,6 @@ test.describe('a shared session', () => {
     await expect(bob.page.getByRole('banner').getByRole('alert')).toHaveCount(0);
 
     // And alice, the owner, sees bob's question in her conversation, attributed to him.
-    // Known to fail until Chemclaw3_ui#130 (D4): the owner's transcript is never re-read.
-    test.info().annotations.push({ type: 'issue', description: 'Chemclaw3_ui#130 (D4)' });
     await alice.page.reload();
     await expect(alice.page.locator('#transcript').getByText(`${tag} bob queued`)).toBeVisible();
   });
@@ -147,9 +145,6 @@ test.describe('a shared session', () => {
   });
 
   test('bob follows alice’s running turn live, without reloading', async ({ alice, bob }) => {
-    // Known defect, tracked as Chemclaw3_ui#130 (D4): nobody follows another participant's
-    // running turn. Remove this line when the fix lands; the test then has to pass outright.
-    test.fail(true, 'Chemclaw3_ui#130 (D4)');
     const tag = runTag();
     await aliceShares(alice, tag);
     await bobOpens(bob, tag);

@@ -26,6 +26,7 @@ import type {
   TraceEntry,
   UserMessage,
 } from './types.ts';
+import { mergeTranscript } from './transcript.ts';
 
 /**
  * One finished job, plus what the wire event does not carry.
@@ -800,6 +801,19 @@ export interface ChatState {
   clearAll: () => void;
   setSessionId: (conversationId: string, sessionId: string, contextLost?: boolean) => void;
   hydrateTranscript: (conversationId: string, messages: ChatMessage[]) => void;
+  /**
+   * Fold a re-read transcript into a conversation that already has messages — the shared-
+   * conversation sync (Chemclaw3_ui #130). Merged against the messages as they are *now*, inside
+   * the write, so a token that landed while the read was in flight is not lost. See
+   * `mergeTranscript` for the rules. Returns whether anything changed.
+   */
+  mergeRemoteTranscript: (conversationId: string, remote: ChatMessage[]) => boolean;
+  /** Open a placeholder for somebody else's running turn, followed live. See
+   *  `AssistantMessage.watched`. Returns its id. */
+  startWatchedTurn: (conversationId: string) => string;
+  /** Remove every watched placeholder from a conversation — the view was closed before the
+   *  re-read could replace it. Returns whether there was one. */
+  dropWatchedTurns: (conversationId: string) => boolean;
   attachPlan: (
     conversationId: string,
     todos: string[],
@@ -1718,6 +1732,60 @@ export const useChatStore = create<ChatState>()(
         });
       },
 
+      mergeRemoteTranscript(conversationId, remote) {
+        let changed = false;
+        set((s) => {
+          const conversation = s.conversations[conversationId];
+          if (!conversation || remote.length === 0) return {};
+          const merged = mergeTranscript(conversation.messages, remote);
+          if (!merged) return {};
+          changed = true;
+          return {
+            conversations: {
+              ...s.conversations,
+              [conversationId]: { ...conversation, updatedAt: Date.now(), messages: merged },
+            },
+          };
+        });
+        return changed;
+      },
+
+      startWatchedTurn(conversationId) {
+        const message: AssistantMessage = { ...newAssistantMessage(), watched: true };
+        set((s) => {
+          const conversation = s.conversations[conversationId];
+          if (!conversation) return {};
+          return {
+            conversations: {
+              ...s.conversations,
+              [conversationId]: {
+                ...conversation,
+                messages: [...conversation.messages, message],
+              },
+            },
+          };
+        });
+        return message.id;
+      },
+
+      dropWatchedTurns(conversationId) {
+        let dropped = false;
+        set((s) => {
+          const conversation = s.conversations[conversationId];
+          if (!conversation) return {};
+          const kept = conversation.messages.filter((m) => !(m.role === 'assistant' && m.watched));
+          if (kept.length === conversation.messages.length) return {};
+          dropped = true;
+          return {
+            conversations: {
+              ...s.conversations,
+              [conversationId]: { ...conversation, messages: kept },
+            },
+          };
+        });
+        return dropped;
+      },
+
       setMembership(conversationId, membership) {
         set((s) => {
           const conversation = s.conversations[conversationId];
@@ -2421,6 +2489,10 @@ export const useChatStore = create<ChatState>()(
           conversations[id] = {
             ...conversation,
             messages: conversation.messages
+              // Somebody else's turn, followed live, is never written down: it is a view of an
+              // exchange the transcript holds, and persisted it would come back as an interrupted
+              // turn of this browser's own — and send `resumeInterruptedTurn` after it.
+              .filter((m) => !(m.role === 'assistant' && m.watched))
               .slice(-MAX_PERSISTED_MESSAGES)
               .map((m) =>
                 m.role === 'assistant' && m.status === 'streaming'

@@ -247,6 +247,15 @@ export const ROUTES: readonly Route[] = [
     sse: false,
     labels: ['{id}', '{ticket}'],
   },
+  // The session's line, and whether a turn is running ahead of it. Read by an open shared
+  // conversation to learn that somebody else's turn has started (and ended), which is what decides
+  // when to follow it live and when to re-read the transcript (Chemclaw3_ui #130).
+  {
+    method: 'GET',
+    pattern: new RegExp(`^/api/sessions/${SID}/queue$`),
+    target: (m) => `/sessions/${m[1]}/queue`,
+    sse: false,
+  },
   // A further view of the running turn. The app opens it after the service cut this browser's own
   // view off for falling behind (`stream_lagged`): the turn ran on, and this is how to follow it
   // again. An event stream, so it gets the turn stream's SSE handling.

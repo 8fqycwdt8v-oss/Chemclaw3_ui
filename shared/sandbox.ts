@@ -36,6 +36,37 @@ export const SANDBOX_FRAME_PATH = '/sandbox/frame';
 export const SANDBOX_MIN_HEIGHT = 80;
 export const SANDBOX_MAX_HEIGHT = 4_000;
 
+/**
+ * How long the app waits for the shell's first `ready` before it stops showing a frame and shows
+ * the source instead, with a notice that the sandbox did not answer.
+ *
+ * A frame that never says `ready` is a blank box with no explanation: the sandbox host unrouted,
+ * blocked by a proxy that rewrote its CSP, an oauth-proxy login inside it, a certificate the
+ * browser refused. Five seconds is several round trips to a page that is one static response and
+ * one inline script; a sandbox slower than that is one a chemist would read as broken anyway.
+ */
+export const SANDBOX_READY_TIMEOUT_MS = 5_000;
+
+/**
+ * Where the README is read from when a deployment names nowhere else (`DOCS_BASE_URL`). The html
+ * view's "How the sandbox works" link resolves `README.md#html-sandbox-artefacts` against it — so
+ * an air-gapped deployment points this at an internal mirror (or a path this origin serves) instead
+ * of a host its browsers cannot reach.
+ */
+export const DEFAULT_DOCS_BASE_URL = 'https://github.com/8fqycwdt8v-oss/Chemclaw3_ui/blob/main/';
+
+/** The README's sandbox section, resolved against a docs base (absolute, or a path on this origin). */
+export function sandboxDocsUrl(base: string, pageUrl: string): string {
+  try {
+    return new URL(
+      'README.md#html-sandbox-artefacts',
+      new URL(base || DEFAULT_DOCS_BASE_URL, pageUrl),
+    ).href;
+  } catch {
+    return new URL('README.md#html-sandbox-artefacts', DEFAULT_DOCS_BASE_URL).href;
+  }
+}
+
 /** A height clamped to the bounds, or `null` for something that is not a height at all. */
 export function clampHeight(px: unknown): number | null {
   if (typeof px !== 'number' || !Number.isFinite(px)) return null;

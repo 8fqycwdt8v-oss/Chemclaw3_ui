@@ -62,6 +62,7 @@ const base: BffConfig = {
   htmlScriptsDefault: true,
   logLevel: 'error',
   clientLogLevel: 'info',
+  docsBaseUrl: 'https://github.com/8fqycwdt8v-oss/Chemclaw3_ui/blob/main/',
 };
 
 const config = (over: Partial<BffConfig> = {}): BffConfig => ({ ...base, ...over });

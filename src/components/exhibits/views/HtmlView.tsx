@@ -41,20 +41,24 @@
  * ## The handshake
  *
  * The shell posts `{type: "ready"}` once its listener is armed, and the HTML is posted in answer to
- * the first one, never before — a post on `load` relied on the shell's inline script having run by
- * then, and a message sent a moment early was lost with nothing to say so. Target `'*'`, because an
- * opaque origin has no name to target. `ready` and heights are accepted only from this frame's
- * window with the opaque origin; `heightMessage` reads nothing else and clamps.
+ * **every** `ready` that passes the checks, never before one — a post on `load` relied on the shell's
+ * inline script having run by then, and answering only the first `ready` left a shell that reloaded
+ * blank for good. Target `'*'`, because an opaque origin has no name to target. `ready` and heights
+ * are accepted only from this frame's window with the opaque origin; `heightMessage` reads nothing
+ * else and clamps. No `ready` within `SANDBOX_READY_TIMEOUT_MS` and the frame is replaced by the
+ * source, with a notice that the sandbox did not answer, rather than left as an unexplained blank.
  */
 
-import { useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useId, useLayoutEffect, useRef, useState } from 'react';
 import { Play, ShieldCheck, Square, TriangleAlert } from 'lucide-react';
 import type { ExhibitView, HtmlSpec } from '../../../../shared/exhibits.ts';
 import {
   SANDBOX_FRAME_PATH,
+  SANDBOX_READY_TIMEOUT_MS,
   clampHeight,
   heightMessage,
   readyMessage,
+  sandboxDocsUrl,
   usableSandboxOrigin,
 } from '../../../../shared/sandbox.ts';
 import { config } from '../../../env.ts';
@@ -63,15 +67,21 @@ import { Button } from '@/components/ui/button';
 /** The notice shown in place of a preview — the contract's sentence, then what to do about it. */
 export const NO_SANDBOX_NOTICE = 'HTML preview needs a separate sandbox origin';
 
-/** What a running script can still do from inside the sandbox — the contract's residual risks. */
+/**
+ * What a running script can still do from inside the sandbox — the contract's residual risks.
+ *
+ * Not "navigate its frame": the content is a nested `srcdoc` frame under the shell's
+ * `default-src 'none'`, which lists no frame source, and it cannot reach its parent's location.
+ * What it *can* do that a reader must be told before typing is send what is typed into it out over
+ * WebRTC — a password form drawn in the pane looks exactly like one.
+ */
 export const SCRIPT_RISKS =
-  'They can still send data over the network through WebRTC, which no content policy blocks, ' +
-  'write to your clipboard after a click, and navigate their own frame within this app’s frame ' +
-  'policy.';
+  'They can still send data over the network through WebRTC, which no content policy blocks — ' +
+  'including anything you type into this page, so never enter a password or other secret into a ' +
+  'form drawn here — and write to your clipboard after a click.';
 
-/** Where the sandbox, its residual risks and the deployment's controls over them are written down. */
-export const SANDBOX_DOCS_URL =
-  'https://github.com/8fqycwdt8v-oss/Chemclaw3_ui/blob/main/README.md#html-sandbox-artefacts';
+/** Said in place of a frame whose shell never answered within `SANDBOX_READY_TIMEOUT_MS`. */
+export const SANDBOX_SILENT_NOTICE = 'The sandbox did not answer';
 
 /** The frame, and the three messages it is allowed to exchange with this page. */
 function SandboxFrame({
@@ -80,6 +90,7 @@ function SandboxFrame({
   scripts,
   initialHeight,
   title,
+  onSilent,
 }: {
   origin: string;
   html: string;
@@ -87,21 +98,31 @@ function SandboxFrame({
   scripts: boolean;
   initialHeight: number;
   title: string;
+  /** No `ready` within `SANDBOX_READY_TIMEOUT_MS`: the caller shows the source instead. */
+  onSilent: () => void;
 }): React.JSX.Element {
   const frame = useRef<HTMLIFrameElement | null>(null);
-  const posted = useRef(false);
   const [height, setHeight] = useState(initialHeight);
 
-  useEffect(() => {
+  // A layout effect, so the listener is attached before the browser can paint — and so before the
+  // frame can load and say `ready` — rather than after, where a fast shell's `ready` was missed.
+  useLayoutEffect(() => {
+    let answered = false;
+    const silent = window.setTimeout(() => {
+      if (!answered) onSilent();
+    }, SANDBOX_READY_TIMEOUT_MS);
     const onMessage = (event: MessageEvent): void => {
       // This frame's window, posting from the opaque origin a sandboxed document has. Anything else
       // (another frame, this page, an extension, a forged origin) is ignored.
       const target = frame.current?.contentWindow;
       if (!target || event.source !== target || event.origin !== 'null') return;
       if (readyMessage(event.data)) {
-        // Once: a second `ready` is the frame having navigated itself, and is not handed the HTML.
-        if (posted.current) return;
-        posted.current = true;
+        // On *every* ready that passes the checks: a shell that reloaded (a navigation the app's
+        // frame-src kept on the sandbox origin, a browser restoring the frame) is a fresh document
+        // waiting for its content, and answering only the first left it blank for good. The shell
+        // takes one document per load, so a repeat cannot stack anything.
+        answered = true;
+        window.clearTimeout(silent);
         target.postMessage(
           { type: 'html', html, scripts, height: initialHeight, title: `${title} — content` },
           '*',
@@ -112,8 +133,11 @@ function SandboxFrame({
       if (px !== null) setHeight(px);
     };
     window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
-  }, [html, scripts, initialHeight, title]);
+    return () => {
+      window.clearTimeout(silent);
+      window.removeEventListener('message', onMessage);
+    };
+  }, [html, scripts, initialHeight, title, onSilent]);
 
   return (
     <iframe
@@ -169,13 +193,21 @@ export function HtmlView({ view, spec }: { view: ExhibitView; spec: HtmlSpec }):
   const shown = `${view.exhibit_id}:${view.revision}`;
   const [flippedFor, setFlippedFor] = useState<string | null>(null);
   const scripts = config.htmlScriptsDefault !== (flippedFor === shown);
+  // The frame that did not answer, by revision and mode — so a new revision, or flipping scripts,
+  // gets a fresh frame and a fresh wait rather than inheriting a verdict about another one.
+  const mode = `${shown}:${scripts ? 'scripts' : 'static'}`;
+  const [silentFor, setSilentFor] = useState<string | null>(null);
   const noticeId = useId();
+  const docs = sandboxDocsUrl(config.docsBaseUrl, window.location.href);
+  // Stable per mode, so the frame's effect is not torn down (and its wait restarted) by a render.
+  const onSilent = useCallback(() => setSilentFor(mode), [mode]);
 
   if (!origin) {
     return (
       <SourceInstead name={name} html={spec.html}>
-        {NO_SANDBOX_NOTICE}, and this deployment has none (<code>SANDBOX_ORIGIN</code> is unset, or
-        is this app&rsquo;s own origin) — so the page is shown as its source rather than run here.
+        {NO_SANDBOX_NOTICE}, and this deployment does not provide one here — so the page is shown as
+        its source rather than run. The server&rsquo;s <code>html sandbox off:</code> startup line
+        says why.
       </SourceInstead>
     );
   }
@@ -189,17 +221,28 @@ export function HtmlView({ view, spec }: { view: ExhibitView; spec: HtmlSpec }):
     );
   }
 
+  if (silentFor === mode) {
+    return (
+      <SourceInstead name={name} html={spec.html}>
+        {SANDBOX_SILENT_NOTICE} at <code>{origin}</code> within {SANDBOX_READY_TIMEOUT_MS / 1000}{' '}
+        seconds, so the page is shown as its source. The sandbox host may be unreachable from this
+        network, or something in front of it changed its response.
+      </SourceInstead>
+    );
+  }
+
   const author = view.author_kind === 'agent' ? 'the agent' : view.author || 'a person';
   return (
     <div className="flex flex-col gap-2">
       <SandboxFrame
         // A new revision, or a change of mode, is a new frame: the shell takes one document per load.
-        key={`${shown}:${scripts ? 'scripts' : 'static'}`}
+        key={mode}
         origin={origin}
         html={spec.html}
         scripts={scripts}
         initialHeight={clampHeight(spec.height) ?? 480}
         title={`${name} — sandboxed HTML preview`}
+        onSilent={onSilent}
       />
       <p id={noticeId} role="note" className="flex items-start gap-1.5 text-2xs text-ink-muted">
         <ShieldCheck aria-hidden className="mt-px size-3.5 shrink-0" />
@@ -210,7 +253,7 @@ export function HtmlView({ view, spec }: { view: ExhibitView; spec: HtmlSpec }):
             : 'Its scripts are off. Run, they run in an isolated frame with no access to this app or your sign-in.'}{' '}
           {SCRIPT_RISKS}{' '}
           <a
-            href={SANDBOX_DOCS_URL}
+            href={docs}
             target="_blank"
             rel="noreferrer noopener"
             className="text-brand-ink underline underline-offset-2 focus-ring"

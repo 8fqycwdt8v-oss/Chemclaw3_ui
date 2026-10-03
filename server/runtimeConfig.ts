@@ -56,6 +56,11 @@ export interface RuntimeConfig {
    * the owner's decision of 2026-10-03). Off puts back the per-view "Run scripts".
    */
   htmlScriptsDefault: boolean;
+  /**
+   * Where the browser reads the README (`DOCS_BASE_URL`): the html view's "How the sandbox works"
+   * link. Configurable because the default is github.com, which an air-gapped browser cannot reach.
+   */
+  docsBaseUrl: string;
 }
 
 const LOG_LEVELS = ['silent', 'error', 'warn', 'info', 'debug'] as const;
@@ -81,6 +86,7 @@ export function runtimeConfig(): RuntimeConfig {
     sandboxOrigin: cfg.sandboxEnabled ? cfg.sandboxOrigin : '',
     appOrigin: cfg.appOrigin,
     htmlScriptsDefault: cfg.htmlScriptsDefault,
+    docsBaseUrl: cfg.docsBaseUrl,
   };
 }
 

@@ -21,6 +21,7 @@
 
 import type { LogLevel } from './lib/logger.ts';
 import { MAX_MESSAGE_CHARS, isUsableMessageCap } from '../shared/events.ts';
+import { DEFAULT_DOCS_BASE_URL } from '../shared/sandbox.ts';
 
 export type AuthMode = 'dev' | 'msal';
 
@@ -107,6 +108,11 @@ export interface RuntimeConfig {
    * a security default nobody stated is the closed one.
    */
   htmlScriptsDefault: boolean;
+  /**
+   * Where the README is read from (`DOCS_BASE_URL`; `DEFAULT_DOCS_BASE_URL` when absent): an
+   * internal mirror in an air-gapped deployment, where github.com is a dead link.
+   */
+  docsBaseUrl: string;
 }
 
 declare global {
@@ -166,6 +172,7 @@ function resolve(): RuntimeConfig {
     sandboxOrigin: pick(w.sandboxOrigin),
     appOrigin: pick(w.appOrigin),
     htmlScriptsDefault: w.htmlScriptsDefault === true,
+    docsBaseUrl: pick(w.docsBaseUrl, DEFAULT_DOCS_BASE_URL),
   };
 }
 

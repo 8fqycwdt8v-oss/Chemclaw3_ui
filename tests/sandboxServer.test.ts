@@ -271,6 +271,26 @@ describe('turning the sandbox on', () => {
     expect(validateConfig(c).join('\n')).toMatch(problem);
   });
 
+  it.each(['0', 'abc', '70000'])(
+    'refuses SANDBOX_PORT=%s even with no sandbox configured',
+    async (port) => {
+      const c = await configFrom({ BIND_HOST: '127.0.0.1', SANDBOX_PORT: port });
+      expect(c.sandboxEnabled).toBe(false);
+      expect(validateConfig(c).join('\n')).toMatch(/SANDBOX_PORT .* is not a port/);
+    },
+  );
+
+  it.each([
+    ['https://intranet.example/chemclaw-ui/', true],
+    ['/docs/', true],
+    ['javascript:alert(1)//', false],
+    ['//evil.example/', false],
+    ['data:text/html,x', false],
+  ])('DOCS_BASE_URL=%s is accepted: %s', async (base, ok) => {
+    const c = await configFrom({ BIND_HOST: '127.0.0.1', DOCS_BASE_URL: base });
+    expect(validateConfig(c).some((p) => p.startsWith('DOCS_BASE_URL'))).toBe(!ok);
+  });
+
   it.each(['1', '8081', '65535'])('takes SANDBOX_PORT=%s', async (port) => {
     const c = await configFrom({
       BIND_HOST: '127.0.0.1',

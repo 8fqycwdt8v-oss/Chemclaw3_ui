@@ -7,6 +7,7 @@
  */
 
 import { MAX_MESSAGE_CHARS, isUsableMessageCap } from '../shared/events.ts';
+import { DEFAULT_DOCS_BASE_URL } from '../shared/sandbox.ts';
 
 export type AuthMode = 'dev' | 'msal';
 
@@ -418,6 +419,9 @@ export interface BffConfig {
    *  is this process's own verbosity: turning the pod's logs up is not the same decision as
    *  turning every chemist's browser up. */
   clientLogLevel: string;
+  /** `DOCS_BASE_URL`: where the browser reads this repository's README (an internal mirror when
+   *  air-gapped), as an absolute http(s) URL or a path on this origin. */
+  docsBaseUrl: string;
 }
 
 export const cfg: BffConfig = {
@@ -598,6 +602,7 @@ export const cfg: BffConfig = {
   // Defaults to `info` rather than to this process's own level: the two are independent knobs and
   // an operator debugging the BFF has not asked every open tab to start reporting.
   clientLogLevel: str('CLIENT_LOG_LEVEL', 'info'),
+  docsBaseUrl: str('DOCS_BASE_URL', DEFAULT_DOCS_BASE_URL),
 };
 
 /**
@@ -724,7 +729,27 @@ export function validateConfig(c: BffConfig = cfg): string[] {
 
   problems.push(...sandboxProblems(c));
 
+  // The docs link is rendered as an `href`, so the value must be something a link may be: an
+  // http(s) URL or a path on this origin — never `javascript:` or `data:`, which a link would run.
+  if (!docsBaseIsUsable(c.docsBaseUrl)) {
+    problems.push(
+      `DOCS_BASE_URL ${JSON.stringify(c.docsBaseUrl)} is not an http(s) URL or a path starting ` +
+        'with "/". It is where the app links to its README (an internal mirror when air-gapped).',
+    );
+  }
+
   return problems;
+}
+
+/** An http(s) URL, or a path on this origin (`/docs/`, never the scheme-relative `//host`). */
+function docsBaseIsUsable(base: string): boolean {
+  if (base.startsWith('/')) return !base.startsWith('//');
+  try {
+    const url = new URL(base);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -758,6 +783,21 @@ function sandboxProblems(c: BffConfig): string[] {
         `${JSON.stringify(c.rawAppOrigin)}. It is written into the sandbox shell's CSP and script.`,
     );
   }
+  // Unconditionally, sandbox configured or not — a bad value is a typo whoever reads it, and the
+  // README states the rule without a condition. Whole digits as typed *and* in range: `num()` falls back to 8081 on a non-number, so only the
+  // raw value can show that `SANDBOX_PORT=abc` was asked for; and a `0` would make Node bind a
+  // random port no Route points at, while 70000 throws at listen.
+  if (
+    (c.rawSandboxPort && !/^\d+$/.test(c.rawSandboxPort)) ||
+    !Number.isInteger(c.sandboxPort) ||
+    c.sandboxPort < 1 ||
+    c.sandboxPort > 65_535
+  ) {
+    problems.push(
+      `SANDBOX_PORT ${JSON.stringify(c.rawSandboxPort || String(c.sandboxPort))} is not a port ` +
+        '(expected a whole number from 1 to 65535).',
+    );
+  }
   if (!c.sandboxOrigin) return problems;
   if (!c.rawAppOrigin) {
     problems.push(
@@ -775,20 +815,6 @@ function sandboxProblems(c: BffConfig): string[] {
     problems.push(
       `SANDBOX_ORIGIN ${JSON.stringify(c.sandboxOrigin)} is http under an https app: the browser ` +
         'blocks the frame as mixed content. Serve the sandbox over https too.',
-    );
-  }
-  // Whole digits as typed *and* in range: `num()` falls back to 8081 on a non-number, so only the
-  // raw value can show that `SANDBOX_PORT=abc` was asked for; and a `0` would make Node bind a
-  // random port no Route points at, while 70000 throws at listen.
-  if (
-    (c.rawSandboxPort && !/^\d+$/.test(c.rawSandboxPort)) ||
-    !Number.isInteger(c.sandboxPort) ||
-    c.sandboxPort < 1 ||
-    c.sandboxPort > 65_535
-  ) {
-    problems.push(
-      `SANDBOX_PORT ${JSON.stringify(c.rawSandboxPort || String(c.sandboxPort))} is not a port ` +
-        '(expected a whole number from 1 to 65535).',
     );
   }
   if (c.sandboxEnabled && c.sandboxPort === c.port) {

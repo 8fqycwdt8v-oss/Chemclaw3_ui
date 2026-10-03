@@ -12,18 +12,19 @@
  * and is `e2e/sandbox.spec.ts`'s to prove.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import {
   HtmlView,
   NO_SANDBOX_NOTICE,
-  SANDBOX_DOCS_URL,
+  SANDBOX_SILENT_NOTICE,
   SCRIPT_RISKS,
 } from '../src/components/exhibits/views/HtmlView.tsx';
 import { config } from '../src/env.ts';
 import {
   SANDBOX_MAX_HEIGHT,
   SANDBOX_MIN_HEIGHT,
+  SANDBOX_READY_TIMEOUT_MS,
   heightMessage,
   readyMessage,
   usableSandboxOrigin,
@@ -49,6 +50,8 @@ afterEach(() => {
   config.sandboxOrigin = '';
   config.appOrigin = '';
   config.htmlScriptsDefault = false;
+  config.docsBaseUrl = '';
+  vi.useRealTimers();
 });
 
 describe('without a sandbox origin', () => {
@@ -66,6 +69,10 @@ describe('without a sandbox origin', () => {
       HTML,
     );
     expect(container.querySelector('h1, script')).toBeNull();
+    // Generic: the sandbox may be off for a reason this page cannot see (ALLOW_FRAMING among them),
+    // so the notice points at the startup line rather than guessing one.
+    expect(screen.getByRole('note').textContent).not.toMatch(/is unset/);
+    expect(screen.getByRole('note').textContent).toContain('html sandbox off:');
   });
 });
 
@@ -142,7 +149,7 @@ describe('with a sandbox origin', () => {
     expect(frame.style.height).toBe('300px');
   });
 
-  it('hands the frame its HTML only in answer to its own ready, and only once', () => {
+  it('hands the frame its HTML only in answer to its own ready, and again on every ready', () => {
     const { frame, frameWindow, sent } = framed();
     // A load is not a ready: nothing is sent until the shell says its listener is armed.
     fireEvent.load(frame);
@@ -154,9 +161,41 @@ describe('with a sandbox origin', () => {
     expect(sent).toEqual([]);
     ready(frameWindow);
     expect(sent).toEqual([[message(false), '*']]);
-    // A second ready is the frame having navigated itself: it is not handed the HTML again.
+    // A second ready is the shell having reloaded — a fresh document waiting for its content.
+    // Answered, or the frame stays blank for good.
     ready(frameWindow);
+    expect(sent).toEqual([
+      [message(false), '*'],
+      [message(false), '*'],
+    ]);
+  });
+
+  it('shows the source, saying the sandbox did not answer, when no ready comes in time', () => {
+    vi.useFakeTimers();
+    framed();
+    act(() => {
+      vi.advanceTimersByTime(SANDBOX_READY_TIMEOUT_MS - 1);
+    });
+    expect(screen.getByTitle('Dose–response — sandboxed HTML preview')).toBeTruthy();
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(screen.queryByTitle('Dose–response — sandboxed HTML preview')).toBeNull();
+    expect(screen.getByRole('note').textContent).toContain(SANDBOX_SILENT_NOTICE);
+    expect(screen.getByRole('region', { name: 'Dose–response — HTML source' }).textContent).toBe(
+      HTML,
+    );
+  });
+
+  it('does not give up on a frame that answered', () => {
+    vi.useFakeTimers();
+    const { frameWindow, sent } = framed();
+    ready(frameWindow);
+    act(() => {
+      vi.advanceTimersByTime(SANDBOX_READY_TIMEOUT_MS * 2);
+    });
     expect(sent).toHaveLength(1);
+    expect(screen.getByTitle('Dose–response — sandboxed HTML preview')).toBeTruthy();
   });
 
   it('with scripts on by default, runs them at once and offers Disable scripts per revision', () => {
@@ -215,12 +254,32 @@ describe('with a sandbox origin', () => {
       expect(notice?.textContent).toContain(SCRIPT_RISKS);
       expect(SCRIPT_RISKS).toMatch(/WebRTC/);
       expect(SCRIPT_RISKS).toMatch(/clipboard/);
-      expect(SCRIPT_RISKS).toMatch(/navigate/);
+      // What is typed into the page can leave too — a password form drawn here looks like one.
+      expect(SCRIPT_RISKS).toMatch(/anything you type/);
+      // Not a risk it has: the content frame cannot navigate (the shell's CSP lists no frame
+      // source, and it cannot reach its parent's location).
+      expect(SCRIPT_RISKS).not.toMatch(/navigate/);
       const link = screen.getByRole('link', { name: 'How the sandbox works' });
-      expect(link.getAttribute('href')).toBe(SANDBOX_DOCS_URL);
+      expect(link.getAttribute('href')).toBe(
+        'https://github.com/8fqycwdt8v-oss/Chemclaw3_ui/blob/main/README.md#html-sandbox-artefacts',
+      );
       expect(link.getAttribute('rel')).toContain('noopener');
     },
   );
+
+  it('links the README at the deployment’s docs base, absolute or a path on this origin', () => {
+    config.docsBaseUrl = 'https://intranet.example/chemclaw-ui/';
+    const first = framed();
+    expect(screen.getByRole('link', { name: 'How the sandbox works' }).getAttribute('href')).toBe(
+      'https://intranet.example/chemclaw-ui/README.md#html-sandbox-artefacts',
+    );
+    first.rendered.unmount();
+    config.docsBaseUrl = '/docs/';
+    framed();
+    expect(screen.getByRole('link', { name: 'How the sandbox works' }).getAttribute('href')).toBe(
+      `${window.location.origin}/docs/README.md#html-sandbox-artefacts`,
+    );
+  });
 
   it('says it is no network sandbox nowhere', () => {
     config.htmlScriptsDefault = true;

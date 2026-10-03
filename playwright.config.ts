@@ -25,6 +25,17 @@ const FIXTURE_PORT = 4322;
 const SANDBOX_PORT = 4323;
 
 /**
+ * A second BFF with `HTML_SCRIPTS_DEFAULT=off` — the kill switch — over the same fixture service.
+ *
+ * The default (`on`) is what every other spec runs under, so the switch would otherwise be proved
+ * only by a unit test of the view, and "no script runs and no UDP leaves" is a property of a real
+ * browser. Its own app and sandbox ports, because both origins are part of what is configured:
+ * `e2e/sandbox.spec.ts` opens it at exactly `SCRIPTS_OFF_PORT`.
+ */
+const SCRIPTS_OFF_PORT = 4324;
+const SCRIPTS_OFF_SANDBOX_PORT = 4325;
+
+/**
  * Which client build the BFF serves here.
  *
  * `dist/client-dev-auth` by default, not `dist/client`: this suite runs unauthenticated, so it
@@ -75,14 +86,25 @@ export default defineConfig({
     { name: 'mobile', use: { ...devices['Pixel 7'] } },
   ],
 
-  webServer: {
-    // BIND_HOST is explicit rather than left to default: the BFF refuses to serve AUTH_MODE=dev on
-    // a non-loopback bind, and this suite runs unauthenticated. Binding loopback is the honest way
-    // to satisfy that — the server really is only reachable from this machine — rather than
-    // setting ALLOW_INSECURE_AUTH and teaching the test harness to wave the check through.
-    command: `node --experimental-strip-types e2e/fixture-service.ts ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 APP_ORIGIN=http://127.0.0.1:${PORT} SANDBOX_ORIGIN=http://127.0.0.1:${SANDBOX_PORT} SANDBOX_PORT=${SANDBOX_PORT} CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
-    url: `http://127.0.0.1:${PORT}/api/healthz`,
-    reuseExistingServer: !process.env.CI,
-    timeout: 60_000,
-  },
+  webServer: [
+    {
+      // BIND_HOST is explicit rather than left to default: the BFF refuses to serve AUTH_MODE=dev on
+      // a non-loopback bind, and this suite runs unauthenticated. Binding loopback is the honest way
+      // to satisfy that — the server really is only reachable from this machine — rather than
+      // setting ALLOW_INSECURE_AUTH and teaching the test harness to wave the check through.
+      command: `node --experimental-strip-types e2e/fixture-service.ts ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 APP_ORIGIN=http://127.0.0.1:${PORT} SANDBOX_ORIGIN=http://127.0.0.1:${SANDBOX_PORT} SANDBOX_PORT=${SANDBOX_PORT} CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
+      url: `http://127.0.0.1:${PORT}/api/healthz`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 60_000,
+    },
+    {
+      // The kill switch, beside the default. Its own `/healthz` (not `/api/healthz`) as the
+      // readiness URL: that one is the BFF's own, so this server does not wait on the fixture the
+      // first command starts.
+      command: `CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${SCRIPTS_OFF_PORT} BIND_HOST=127.0.0.1 APP_ORIGIN=http://127.0.0.1:${SCRIPTS_OFF_PORT} SANDBOX_ORIGIN=http://127.0.0.1:${SCRIPTS_OFF_SANDBOX_PORT} SANDBOX_PORT=${SCRIPTS_OFF_SANDBOX_PORT} HTML_SCRIPTS_DEFAULT=off CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
+      url: `http://127.0.0.1:${SCRIPTS_OFF_PORT}/healthz`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 60_000,
+    },
+  ],
 });

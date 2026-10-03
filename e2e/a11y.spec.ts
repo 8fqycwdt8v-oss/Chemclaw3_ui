@@ -334,10 +334,12 @@ for (const theme of ['light', 'dark'] as const) {
       await picker.selectOption('xb-3b0000000000b003');
       const frame = pane.locator('iframe[title="Sandbox probe — sandboxed HTML preview"]');
       await expect(frame).toBeVisible();
-      // Scanned with scripts running: with them off (the default) the content frame is
-      // `sandbox=""`, where no script runs — axe's included, so it could not look inside. The
-      // markup is the same in both modes, and so are the two frames' titles.
-      await pane.getByRole('button', { name: 'Run scripts' }).click();
+      // Scanned with scripts running, which is the default now: with them off the content frame
+      // is `sandbox=""`, where no script runs — axe's included, so it could not look inside. The
+      // markup is the same in both modes, and so are the two frames' titles; the always-visible
+      // notice and its docs link are part of what is scanned.
+      await expect(pane.getByRole('button', { name: 'Disable scripts' })).toBeVisible();
+      await expect(pane.getByRole('link', { name: 'How the sandbox works' })).toBeVisible();
       await expect(
         page
           .frameLocator('iframe[title="Sandbox probe — sandboxed HTML preview"]')

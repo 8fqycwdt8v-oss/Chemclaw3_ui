@@ -5,15 +5,19 @@
  * holds the bearer token: it runs in a frame served by the BFF's **second listener**
  * (`SANDBOX_ORIGIN`, a different origin, ideally a different hostname), embedded with
  * `sandbox="allow-scripts"` and nothing else — so its document is opaque-origin as well as
- * cross-origin, cannot reach the network (`connect-src 'none'` on the shell), and cannot touch the
- * app's storage, cookies, top window or a popup.
+ * cross-origin, cannot reach the network through anything CSP governs (`connect-src 'none'` on the
+ * shell — WebRTC is not among those, see `HtmlView`), and cannot touch the app's storage, cookies,
+ * top window or a popup.
  *
- * The two halves talk in exactly two messages, and both checks are on the receiving side:
+ * The two halves talk in exactly three messages, and every check is on the receiving side:
  *
- *  - **app → frame: `{type: "html", html}`**, posted once, when the frame has loaded. The shell
- *    accepts it only from its parent window and only when `event.origin` is the app origin the
- *    server injected — so another tab, another frame or a page that framed the shell cannot hand it
- *    content. Posted with target `'*'` because the frame's origin is opaque and no origin string
+ *  - **frame → app: `{type: "ready"}`** (the contract's hardening handshake), posted by the shell to
+ *    the app origin once its listener is armed. The app sends nothing before it, and takes it only
+ *    from its own frame's window with the opaque origin (`readyMessage`, `HtmlView`).
+ *  - **app → frame: `{type: "html", html, scripts, height, title}`**, posted once, in answer to that
+ *    `ready`. The shell accepts it only from its parent window and only when `event.origin` is the
+ *    app origin the server injected — so another tab, another frame or a page that framed the shell
+ *    cannot hand it content. Posted with target `'*'` because the frame's origin is opaque and no origin string
  *    names it; what that does not protect is argued in `HtmlView`.
  *  - **frame → app: `{type: "height", px}`**, debounced and clamped by the shell, and clamped again
  *    by the app, which accepts it only from that frame's window (`event.source`) with the opaque
@@ -36,6 +40,11 @@ export const SANDBOX_MAX_HEIGHT = 4_000;
 export function clampHeight(px: unknown): number | null {
   if (typeof px !== 'number' || !Number.isFinite(px)) return null;
   return Math.min(SANDBOX_MAX_HEIGHT, Math.max(SANDBOX_MIN_HEIGHT, Math.round(px)));
+}
+
+/** Whether a frame message is the shell's `{type: "ready"}` — and nothing else is read from it. */
+export function readyMessage(data: unknown): boolean {
+  return data !== null && typeof data === 'object' && (data as { type?: unknown }).type === 'ready';
 }
 
 /** The height a frame message carries, or `null` when the message is anything but `{type:"height", px}`. */

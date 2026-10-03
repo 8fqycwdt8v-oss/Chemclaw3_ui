@@ -17,13 +17,15 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import {
   HtmlView,
   NO_SANDBOX_NOTICE,
-  RUN_SCRIPTS_WARNING,
+  SANDBOX_DOCS_URL,
+  SCRIPT_RISKS,
 } from '../src/components/exhibits/views/HtmlView.tsx';
 import { config } from '../src/env.ts';
 import {
   SANDBOX_MAX_HEIGHT,
   SANDBOX_MIN_HEIGHT,
   heightMessage,
+  readyMessage,
   usableSandboxOrigin,
 } from '../shared/sandbox.ts';
 import { decodeExhibitView, type ExhibitView, type HtmlSpec } from '../shared/exhibits.ts';
@@ -45,6 +47,8 @@ const SANDBOX = 'http://127.0.0.1:4323';
 afterEach(() => {
   cleanup();
   config.sandboxOrigin = '';
+  config.appOrigin = '';
+  config.htmlScriptsDefault = false;
 });
 
 describe('without a sandbox origin', () => {
@@ -65,8 +69,29 @@ describe('without a sandbox origin', () => {
   });
 });
 
+describe('opened at an address other than APP_ORIGIN', () => {
+  it('shows the source with both origins named, rather than a frame that would stay blank', () => {
+    config.sandboxOrigin = SANDBOX;
+    config.appOrigin = 'http://127.0.0.1:9999';
+    const { container } = render(<HtmlView view={view} spec={spec} />);
+    expect(container.querySelector('iframe')).toBeNull();
+    const notice = screen.getByRole('note').textContent ?? '';
+    expect(notice).toContain(window.location.origin);
+    expect(notice).toContain('http://127.0.0.1:9999');
+    expect(screen.getByRole('region', { name: 'Dose–response — HTML source' }).textContent).toBe(
+      HTML,
+    );
+  });
+
+  it('frames as usual when the page is at APP_ORIGIN', () => {
+    config.sandboxOrigin = SANDBOX;
+    config.appOrigin = window.location.origin;
+    render(<HtmlView view={view} spec={spec} />);
+    expect(screen.getByTitle('Dose–response — sandboxed HTML preview')).toBeTruthy();
+  });
+});
+
 describe('with a sandbox origin', () => {
-  /** Render, and hand back the frame with its window's `postMessage` recorded. */
   /** The frame on screen now, with its window's `postMessage` recorded into `sent`. */
   function grab(sent: [unknown, string][]) {
     const frame = screen.getByTitle('Dose–response — sandboxed HTML preview') as HTMLIFrameElement;
@@ -83,6 +108,14 @@ describe('with a sandbox origin', () => {
     const sent: [unknown, string][] = [];
     return { ...grab(sent), sent, rendered };
   }
+
+  const post = (data: unknown, origin: string, source: unknown) =>
+    act(() => {
+      window.dispatchEvent(new MessageEvent('message', { data, origin, source: source as Window }));
+    });
+
+  /** The shell saying it is armed, as a sandboxed document posts it: from `"null"`. */
+  const ready = (frameWindow: Window) => post({ type: 'ready' }, 'null', frameWindow);
 
   const message = (scripts: boolean) => ({
     type: 'html',
@@ -109,66 +142,94 @@ describe('with a sandbox origin', () => {
     expect(frame.style.height).toBe('300px');
   });
 
-  it('hands the frame its HTML once, on the first load only', () => {
-    const { frame, sent } = framed();
+  it('hands the frame its HTML only in answer to its own ready, and only once', () => {
+    const { frame, frameWindow, sent } = framed();
+    // A load is not a ready: nothing is sent until the shell says its listener is armed.
     fireEvent.load(frame);
-    // Scripts off: the shell will put it in a `sandbox=""` frame (wave-3 amendment).
+    expect(sent).toEqual([]);
+    // A ready from anywhere else — this page, another window, the frame under a named origin.
+    post({ type: 'ready' }, 'null', window);
+    post({ type: 'ready' }, 'null', null);
+    post({ type: 'ready' }, SANDBOX, frameWindow);
+    expect(sent).toEqual([]);
+    ready(frameWindow);
     expect(sent).toEqual([[message(false), '*']]);
-    // A second load is the frame navigating itself: it is not handed the HTML again.
-    fireEvent.load(frame);
+    // A second ready is the frame having navigated itself: it is not handed the HTML again.
+    ready(frameWindow);
     expect(sent).toHaveLength(1);
   });
 
-  it('runs scripts only when asked, says what that risks, and forgets it on a new revision', () => {
-    const { frame, sent, rendered } = framed();
-    fireEvent.load(frame);
-    const run = screen.getByRole('button', { name: 'Run scripts' });
-    // The warning is the button's description, and it names all three residual risks.
-    const warning = document.getElementById(run.getAttribute('aria-describedby') ?? '');
-    expect(warning?.textContent).toBe(RUN_SCRIPTS_WARNING);
-    expect(RUN_SCRIPTS_WARNING).toMatch(/WebRTC/);
-    expect(RUN_SCRIPTS_WARNING).toMatch(/clipboard/);
-    expect(RUN_SCRIPTS_WARNING).toMatch(/navigate/);
+  it('with scripts on by default, runs them at once and offers Disable scripts per revision', () => {
+    config.htmlScriptsDefault = true;
+    const { frameWindow, sent, rendered } = framed();
+    ready(frameWindow);
+    expect(sent).toEqual([[message(true), '*']]);
 
-    fireEvent.click(run);
-    // A new frame (the shell takes one document per load), handed the HTML with scripts on.
-    const scripted: [unknown, string][] = [];
-    const again = grab(scripted);
-    expect(again.frame).not.toBe(frame);
-    fireEvent.load(again.frame);
-    expect(scripted).toEqual([[message(true), '*']]);
-    expect(sent).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Disable scripts' }));
+    // A new frame (the shell takes one document per load), handed the HTML with scripts off.
+    const off: [unknown, string][] = [];
+    ready(grab(off).frameWindow);
+    expect(off).toEqual([[message(false), '*']]);
+    expect(screen.getByRole('button', { name: 'Run scripts' })).toBeTruthy();
 
-    // A new revision of the same artefact is back to scripts off — the choice is not carried.
+    // A new revision of the same artefact is back to the default — the choice is not carried.
     rendered.rerender(<HtmlView view={{ ...view, revision: 3, head_revision: 3 }} spec={spec} />);
     const next: [unknown, string][] = [];
-    fireEvent.load(grab(next).frame);
-    expect(next).toEqual([[message(false), '*']]);
-    expect(screen.getByRole('button', { name: 'Run scripts' })).toBeTruthy();
+    ready(grab(next).frameWindow);
+    expect(next).toEqual([[message(true), '*']]);
+    expect(screen.getByRole('button', { name: 'Disable scripts' })).toBeTruthy();
   });
 
-  it('never stores the choice: a remount is scripts off', () => {
+  it('never stores the choice: a remount is back to the default', () => {
+    config.htmlScriptsDefault = true;
     const first = framed();
-    fireEvent.click(screen.getByRole('button', { name: 'Run scripts' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Disable scripts' }));
     first.rendered.unmount();
-    const { frame, sent } = framed();
-    fireEvent.load(frame);
-    expect(sent).toEqual([[message(false), '*']]);
+    const { frameWindow, sent } = framed();
+    ready(frameWindow);
+    expect(sent).toEqual([[message(true), '*']]);
   });
+
+  it('with HTML_SCRIPTS_DEFAULT=off, runs nothing until Run scripts, which the risks describe', () => {
+    config.htmlScriptsDefault = false;
+    const { frameWindow, sent } = framed();
+    ready(frameWindow);
+    expect(sent).toEqual([[message(false), '*']]);
+    const run = screen.getByRole('button', { name: 'Run scripts' });
+    const notice = document.getElementById(run.getAttribute('aria-describedby') ?? '');
+    expect(notice?.textContent).toContain(SCRIPT_RISKS);
+    fireEvent.click(run);
+    const scripted: [unknown, string][] = [];
+    ready(grab(scripted).frameWindow);
+    expect(scripted).toEqual([[message(true), '*']]);
+  });
+
+  it.each([true, false])(
+    'always says scripts run isolated, what they can still do, and where to read more (default %s)',
+    (on) => {
+      config.htmlScriptsDefault = on;
+      framed();
+      const notice = screen
+        .getAllByRole('note')
+        .find((n) => n.textContent?.includes('isolated frame'));
+      expect(notice?.textContent).toContain(SCRIPT_RISKS);
+      expect(SCRIPT_RISKS).toMatch(/WebRTC/);
+      expect(SCRIPT_RISKS).toMatch(/clipboard/);
+      expect(SCRIPT_RISKS).toMatch(/navigate/);
+      const link = screen.getByRole('link', { name: 'How the sandbox works' });
+      expect(link.getAttribute('href')).toBe(SANDBOX_DOCS_URL);
+      expect(link.getAttribute('rel')).toContain('noopener');
+    },
+  );
 
   it('says it is no network sandbox nowhere', () => {
+    config.htmlScriptsDefault = true;
     framed();
     expect(document.body.textContent).not.toMatch(/no network/i);
   });
 
   it('takes a height only from its own frame, from the opaque origin, and clamps it', () => {
     const { frame, frameWindow } = framed();
-    const post = (data: unknown, origin: string, source: unknown) =>
-      act(() => {
-        window.dispatchEvent(
-          new MessageEvent('message', { data, origin, source: source as Window }),
-        );
-      });
     post({ type: 'height', px: 640 }, 'null', frameWindow);
     expect(frame.style.height).toBe('640px');
     // Another window — this page, or a second sandboxed frame posting from "null" too.
@@ -186,6 +247,13 @@ describe('with a sandbox origin', () => {
 });
 
 describe('the protocol helpers', () => {
+  it('reads a ready as a ready and nothing else', () => {
+    expect(readyMessage({ type: 'ready' })).toBe(true);
+    expect(readyMessage({ type: 'height', px: 1 })).toBe(false);
+    expect(readyMessage('ready')).toBe(false);
+    expect(readyMessage(null)).toBe(false);
+  });
+
   it('reads only {type: "height", px} and clamps it', () => {
     expect(heightMessage({ type: 'height', px: 10 })).toBe(SANDBOX_MIN_HEIGHT);
     expect(heightMessage({ type: 'height', px: 512.4 })).toBe(512);

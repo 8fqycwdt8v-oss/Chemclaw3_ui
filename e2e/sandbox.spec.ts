@@ -11,14 +11,18 @@ import { expect, test, type Frame, type Page } from '@playwright/test';
  * *browser* decided; nothing here is asserted about a header string that a unit test does not
  * already pin (`tests/sandboxServer.test.ts`).
  *
- * **By default none of that script runs** (the wave-3 amendment): the shell puts the artefact in a
- * nested `srcdoc` frame with `sandbox=""`. The probes run only after **Run scripts**, and then with
- * the prelude that removes the WebRTC constructors from the content's realm.
+ * **By default that script runs** (the owner's decision of 2026-10-03, contract hardening item 4):
+ * the shell puts the artefact in a nested `srcdoc` frame with `sandbox="allow-scripts"`, behind the
+ * prelude that removes the WebRTC constructors from the content's realm, and the view offers
+ * **Disable scripts**. Under `HTML_SCRIPTS_DEFAULT=off` — the kill switch, served by the second BFF
+ * `playwright.config.ts` starts — the nested frame is `sandbox=""` and nothing runs until
+ * **Run scripts**; the first test below proves that against a real browser and a UDP listener.
  *
  * **Known residual, deliberately not asserted as safe:** the prelude reaches one realm. A scripted
  * page that creates its own nested `srcdoc` frame gets a fresh realm with `RTCPeerConnection`
- * intact (and `allow-scripts` inherited), and can send UDP from there. That is why scripts are
- * opt-in per view, and why the README recommends `WebRtcIPHandling=disable_non_proxied_udp`.
+ * intact (and `allow-scripts` inherited), and can send UDP from there. Running scripts by default
+ * accepts that (docs/production-readiness.md); the README names the browser policies that narrow it
+ * and `HTML_SCRIPTS_DEFAULT=off`, which removes it.
  *
  * Then the other direction: the app takes a height from that frame and from nothing else — not
  * from its own window, and not from a second sandboxed frame, which posts from the very same
@@ -31,6 +35,9 @@ const WAVE3_SESSION = '1'.repeat(32);
 const HTML_ID = 'xb-3b0000000000b003';
 /** `SANDBOX_PORT` in `playwright.config.ts`, where the BFF's second listener is started. */
 const SANDBOX = 'http://127.0.0.1:4323';
+/** The kill-switch BFF (`HTML_SCRIPTS_DEFAULT=off`) and its sandbox, from `playwright.config.ts`. */
+const SCRIPTS_OFF_APP = 'http://127.0.0.1:4324';
+const SCRIPTS_OFF_SANDBOX = 'http://127.0.0.1:4325';
 const FRAME_TITLE = 'Sandbox probe — sandboxed HTML preview';
 
 async function seed(page: Page): Promise<void> {
@@ -69,9 +76,9 @@ async function seed(page: Page): Promise<void> {
 const RTC_PROBE_PORT = 47140;
 
 /** Open the conversation's artefact pane on the HTML probe; hand back the frame element. */
-async function openProbe(page: Page, isMobile: boolean) {
+async function openProbe(page: Page, isMobile: boolean, app = '') {
   await seed(page);
-  await page.goto(`/c/${CONVERSATION}`);
+  await page.goto(`${app}/c/${CONVERSATION}`);
   await page
     .getByRole('button', { name: isMobile ? 'Artefacts (3)' : 'Show artefacts (3)' })
     .click();
@@ -88,8 +95,8 @@ async function openProbe(page: Page, isMobile: boolean) {
 }
 
 /** The shell's frame and the content frame inside it, as Playwright frames. */
-function frames(page: Page): { shell: Frame; content: Frame } {
-  const shell = page.frames().find((f) => f.url().startsWith(SANDBOX));
+function frames(page: Page, sandbox = SANDBOX): { shell: Frame; content: Frame } {
+  const shell = page.frames().find((f) => f.url().startsWith(sandbox));
   const content = shell?.childFrames()[0];
   if (!shell || !content) throw new Error('the sandbox frames are not on the page');
   return { shell, content };
@@ -127,7 +134,7 @@ async function udpListener(): Promise<{
 test.describe('WebRTC', () => {
   test.describe.configure({ mode: 'serial' });
 
-  test('by default the page’s script never runs, and nothing leaves over WebRTC', async ({
+  test('with HTML_SCRIPTS_DEFAULT=off the page’s script never runs, and nothing leaves over WebRTC', async ({
     page,
     isMobile,
   }) => {
@@ -135,10 +142,10 @@ test.describe('WebRTC', () => {
     test.skip(isMobile, 'the UDP listener is a single port');
     const udp = await udpListener();
     try {
-      const { frame, content, pane } = await openProbe(page, isMobile);
+      const { frame, content, pane } = await openProbe(page, isMobile, SCRIPTS_OFF_APP);
       await expect(frame).toHaveAttribute('sandbox', 'allow-scripts');
       await expect(frame).toHaveAttribute('referrerpolicy', 'no-referrer');
-      await expect(frame).toHaveAttribute('src', `${SANDBOX}/sandbox/frame`);
+      await expect(frame).toHaveAttribute('src', `${SCRIPTS_OFF_SANDBOX}/sandbox/frame`);
       // The shell's nested frame runs no script at all.
       await expect(
         page.frameLocator(`iframe[title="${FRAME_TITLE}"]`).locator('iframe'),
@@ -150,7 +157,7 @@ test.describe('WebRTC', () => {
         await expect(content.locator(`#${id}`)).toHaveText('pending');
       }
       expect(udp.packets()).toBe(0);
-      // Off is said, with the risks of turning it on.
+      // Off is said, with what turning it on risks.
       await expect(pane.getByRole('button', { name: 'Run scripts' })).toBeVisible();
       await expect(pane.getByText(/through WebRTC/)).toBeVisible();
     } finally {
@@ -158,7 +165,7 @@ test.describe('WebRTC', () => {
     }
   });
 
-  test('after Run scripts the page runs sealed, and without the WebRTC constructors', async ({
+  test('by default the page runs at once, sealed, and without the WebRTC constructors', async ({
     page,
     context,
     isMobile,
@@ -167,61 +174,65 @@ test.describe('WebRTC', () => {
     context.on('page', (opened) => popups.push(opened.url()));
     // One UDP port, so the desktop run listens and the mobile run does not.
     const udp = isMobile ? null : await udpListener();
-    const { pane } = await openProbe(page, isMobile);
-    const startedAt = page.url();
-    await pane.getByRole('button', { name: 'Run scripts' }).click();
-    const content = page.frameLocator(`iframe[title="${FRAME_TITLE}"]`).frameLocator('iframe');
-    await expect(
-      page.frameLocator(`iframe[title="${FRAME_TITLE}"]`).locator('iframe'),
-    ).toHaveAttribute('sandbox', 'allow-scripts');
-    const probe = (id: string) => content.locator(`#${id}`);
-    await expect(probe('ran')).toHaveText('script ran');
+    const startedAt = { url: '' };
+    try {
+      const { pane, content } = await openProbe(page, isMobile);
+      startedAt.url = page.url();
+      // Nobody pressed anything: the default is scripts on.
+      await expect(
+        page.frameLocator(`iframe[title="${FRAME_TITLE}"]`).locator('iframe'),
+      ).toHaveAttribute('sandbox', 'allow-scripts');
+      const probe = (id: string) => content.locator(`#${id}`);
+      await expect(probe('ran')).toHaveText('script ran');
 
-    // `connect-src 'none'` on the shell, inherited by the content: even a fetch of a `data:` URL —
-    // no network, no CORS, no CORP — is refused, and the browser names the directive.
-    await expect(probe('fetch')).toHaveText(/^blocked: TypeError/);
-    await expect(probe('csp')).toHaveText('connect-src');
-    // Opaque origin (no `allow-same-origin`): no cookie jar, no storage, no reach into the app.
-    await expect(probe('cookie')).toHaveText(/^blocked: SecurityError/);
-    await expect(probe('storage')).toHaveText(/^blocked: SecurityError/);
-    await expect(probe('parent')).toHaveText(/^blocked: SecurityError/);
-    // No `allow-top-navigation`, no `allow-popups`.
-    await expect(probe('top')).toHaveText(/^blocked: SecurityError/);
-    await expect(probe('popup')).toHaveText('blocked: null');
-    // The prelude: the constructors are gone from the content's realm, so the probe's attempt threw.
-    // Defence in depth only — see the residual in this file's header.
-    await expect(probe('rtc')).toHaveText(/^blocked: TypeError/);
-    expect(
-      await frames(page).content.evaluate(() => [
-        typeof (window as unknown as Record<string, unknown>).RTCPeerConnection,
-        typeof (window as unknown as Record<string, unknown>).webkitRTCPeerConnection,
-        typeof (window as unknown as Record<string, unknown>).RTCDataChannel,
-      ]),
-    ).toEqual(['undefined', 'undefined', 'undefined']);
-    if (udp) {
-      // And the probe's own attempt sent nothing. (Without the prelude it sends its secret here.)
-      await page.waitForTimeout(2_000);
-      udp.close();
-      expect(udp.packets()).toBe(0);
+      // `connect-src 'none'` on the shell, inherited by the content: even a fetch of a `data:` URL
+      // — no network, no CORS, no CORP — is refused, and the browser names the directive.
+      await expect(probe('fetch')).toHaveText(/^blocked: TypeError/);
+      await expect(probe('csp')).toHaveText('connect-src');
+      // Opaque origin (no `allow-same-origin`): no cookie jar, no storage, no reach into the app.
+      await expect(probe('cookie')).toHaveText(/^blocked: SecurityError/);
+      await expect(probe('storage')).toHaveText(/^blocked: SecurityError/);
+      await expect(probe('parent')).toHaveText(/^blocked: SecurityError/);
+      // No `allow-top-navigation`, no `allow-popups`.
+      await expect(probe('top')).toHaveText(/^blocked: SecurityError/);
+      await expect(probe('popup')).toHaveText('blocked: null');
+      // The prelude: the constructors are gone from the content's realm, so the probe's attempt
+      // threw. Defence in depth only — see the residual in this file's header.
+      await expect(probe('rtc')).toHaveText(/^blocked: TypeError/);
+      expect(
+        await frames(page).content.evaluate(() => [
+          typeof (window as unknown as Record<string, unknown>).RTCPeerConnection,
+          typeof (window as unknown as Record<string, unknown>).webkitRTCPeerConnection,
+          typeof (window as unknown as Record<string, unknown>).RTCDataChannel,
+        ]),
+      ).toEqual(['undefined', 'undefined', 'undefined']);
+      if (udp) {
+        // And the probe's own attempt sent nothing. (Without the prelude it sends its secret here.)
+        await page.waitForTimeout(2_000);
+        expect(udp.packets()).toBe(0);
+      }
+
+      // From the outside: the app is where it was, no window opened, its cookie never the frame's.
+      expect(page.url()).toBe(startedAt.url);
+      expect(popups).toEqual([]);
+      expect(await page.evaluate(() => document.cookie)).toContain('e2e_app_secret=hunter2');
+      // Said, always: isolated, and what it can still do.
+      await expect(pane.getByText(/through WebRTC/)).toBeVisible();
+
+      // Never persisted: Disable, then loading the page again, is back to the default.
+      await pane.getByRole('button', { name: 'Disable scripts' }).click();
+      await expect(content.locator('#ran')).toHaveText('no script ran');
+      const again = await openProbe(page, isMobile);
+      await expect(again.content.locator('#ran')).toHaveText('script ran');
+      await expect(again.pane.getByRole('button', { name: 'Disable scripts' })).toBeVisible();
+    } finally {
+      udp?.close();
     }
-
-    // From the outside: the app is where it was, no window opened, its cookie never the frame's.
-    expect(page.url()).toBe(startedAt);
-    expect(popups).toEqual([]);
-    expect(await page.evaluate(() => document.cookie)).toContain('e2e_app_secret=hunter2');
-
-    // Never persisted: Stop, or loading the page again, is back to no script.
-    await pane.getByRole('button', { name: 'Stop scripts' }).click();
-    await expect(content.locator('#ran')).toHaveText('no script ran');
-    const again = await openProbe(page, isMobile);
-    await expect(again.content.locator('#ran')).toHaveText('no script ran');
-    await expect(again.pane.getByRole('button', { name: 'Run scripts' })).toBeVisible();
   });
 });
 
 test('the frame cannot navigate itself off the sandbox origin', async ({ page, isMobile }) => {
-  const { pane } = await openProbe(page, isMobile);
-  await pane.getByRole('button', { name: 'Run scripts' }).click();
+  await openProbe(page, isMobile);
   await expect(
     page.frameLocator(`iframe[title="${FRAME_TITLE}"]`).frameLocator('iframe').locator('#ran'),
   ).toHaveText('script ran');

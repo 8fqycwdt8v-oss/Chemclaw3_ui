@@ -90,6 +90,9 @@ export default defineConfig({
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'playwright-report-kind' }]],
   outputDir: 'test-results-kind',
   metadata: lane as unknown as Record<string, unknown>,
+  // Gates the run on both `/readyz` answering 200 steadily — a suite started mid-rollout failed on
+  // flapping probes, which read as product defects. See `e2e/kind/global-setup.ts`.
+  globalSetup: './e2e/kind/global-setup.ts',
   timeout: 300_000,
   expect: { timeout: 30_000 },
 

@@ -262,6 +262,14 @@ export async function sessionIdOf(page: Page): Promise<string> {
 export const NOTE_CHIP =
   /^(?:compound|rxn|playbook|campaign|opt|interaction|report|failure|proposal|bo-candidate|job-result)-/;
 
+/**
+ * Any citation chip's accessible name: an ELN/ORD record (`reaction-…`) or a knowledge note.
+ * Built from `NOTE_CHIP` rather than spelled out again, so the two cannot drift — a hand-written
+ * copy missed six note prefixes, and a failure then claimed "no clickable citation" beside a
+ * `proposal-…` chip it simply had not been told about.
+ */
+export const CITATION_CHIP = new RegExp(`^(?:reaction-|${NOTE_CHIP.source.replace(/^\^/, '')})`);
+
 /** A tag that makes this run's conversations findable in a sidebar the cluster keeps. */
 export const runTag = (): string => `k4-${Date.now().toString(36)}`;
 

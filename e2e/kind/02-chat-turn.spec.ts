@@ -6,6 +6,7 @@
 import {
   ask,
   bearerOf,
+  CITATION_CHIP,
   expect,
   lastAnswer,
   NOTE_CHIP,
@@ -84,9 +85,7 @@ test('a citation in the answer opens the record it names', async ({ alice }) => 
         'use by its id exactly as the search returned it.',
     ),
   );
-  const chip = lastAnswer(page)
-    .getByRole('button', { name: /^(?:reaction|playbook|failure|rxn|compound|campaign)-/ })
-    .first();
+  const chip = lastAnswer(page).getByRole('button', { name: CITATION_CHIP }).first();
   await expect(chip, 'the answer carries no clickable citation').toBeVisible();
   if (!realModel()) {
     // The script cites one ELN/ORD record and one knowledge note; both must be chips.

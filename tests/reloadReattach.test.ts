@@ -326,3 +326,52 @@ describe('a reload mid-turn', () => {
     expect(message(cid, mid).finalText).toBe('4.76 in water at 25 °C.');
   });
 });
+
+describe('a reload into a turn the service lost (Chemclaw3 D-2026-10-03 write-ahead)', () => {
+  it('says the answer was interrupted when the reattach answers 410, and reads nothing else', async () => {
+    const { cid, mid } = interrupted();
+    const stub = stubFetch((url) =>
+      url.endsWith('/turn/stream')
+        ? new Response(JSON.stringify({ detail: { code: 'turn_interrupted', message: 'gone' } }), {
+            status: 410,
+            headers: { 'content-type': 'application/json' },
+          })
+        : jsonError(500, 'nothing else should be asked'),
+    );
+    restore = stub.restore;
+
+    resumeInterruptedTurn(cid, auth);
+    await vi.waitFor(() => expect(message(cid, mid).status).toBe('error'));
+
+    expect(message(cid, mid).error?.kind).toBe('turn_interrupted');
+    expect(message(cid, mid).interruptedByReload).toBe(false);
+    expect(stub.calls.some((call) => call.url.endsWith('/messages'))).toBe(false);
+    expect(useChatStore.getState().composerLock).toBe(false);
+  });
+
+  it('stops polling the moment the transcript marks the turn interrupted', async () => {
+    vi.useFakeTimers();
+    const { cid, mid } = interrupted();
+    const stub = stubFetch((url) =>
+      url.endsWith('/turn/stream')
+        ? jsonError(404, 'no turn is running for this session')
+        : json([
+            {
+              index: 0,
+              role: 'user',
+              text: QUESTION,
+              tool_calls: [],
+              correlation_id: OURS,
+              turn_status: 'interrupted',
+            },
+          ]),
+    );
+    restore = stub.restore;
+
+    resumeInterruptedTurn(cid, auth);
+    await untilFake(() => message(cid, mid).status === 'error');
+
+    expect(message(cid, mid).error?.kind).toBe('turn_interrupted');
+    expect(message(cid, mid).interruptedByReload).toBe(false);
+  });
+});

@@ -46,7 +46,11 @@ export function prefill(text: string): void {
   window.dispatchEvent(new CustomEvent<PrefillDetail>(PREFILL_EVENT, { detail: text }));
 }
 
-/** Fill the composer AND submit — one-tap approve/decline, and nothing else. */
+/**
+ * Fill the composer AND submit — one-tap approve/decline, and the Retry on an answer the service
+ * lost (`MessageList`'s `turn_interrupted`), and nothing else. Each is a press on a sentence the
+ * chemist has just read; none fires on its own.
+ */
 export function prefillAndSend(text: string): void {
   window.dispatchEvent(
     new CustomEvent<PrefillDetail>(PREFILL_EVENT, { detail: { text, autoSend: true } }),

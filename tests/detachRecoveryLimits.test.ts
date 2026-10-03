@@ -21,6 +21,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, type TranscriptMessage } from '../src/api/client.ts';
 import { recoverDetachedAnswer } from '../src/state/sendMessage.ts';
+import type { TurnEnded } from '../src/state/sendMessage.ts';
 import type { AuthProvider } from '../src/auth/types.ts';
 
 const SID = 'r'.repeat(32);
@@ -45,7 +46,10 @@ const stamped = (...pairs: [string, string, string | null][]): TranscriptMessage
 
 const THIS_TURN = 'c'.repeat(32);
 
-async function recover(held: string | null, correlationId = ''): Promise<string | null> {
+async function recover(
+  held: string | null,
+  correlationId = '',
+): Promise<string | TurnEnded | null> {
   const pending = recoverDetachedAnswer(
     SID,
     'pKa of phenol?',

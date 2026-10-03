@@ -15,15 +15,16 @@
  * finish regardless, so the wording never claims the job stopped.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { Search, Server } from 'lucide-react';
 import { useAuth, useIsReviewer } from '../auth/AuthContext.tsx';
 import { api, type DurableJobStatus } from '../api/client.ts';
 import { useNewestRead } from '../hooks/useNewestRead.ts';
-import { useApiInfiniteQuery } from '../api/queryClient.ts';
+import { queryClient, useApiInfiniteQuery } from '../api/queryClient.ts';
 import { jobsQuery } from '../api/queries.ts';
 import { relativeTime } from '../lib/format.ts';
+import { isTerminalJobStatus } from '../state/jobReconcile.ts';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent } from '@/components/ui/sheet';
@@ -68,6 +69,28 @@ const CAMPAIGN_DESCRIPTION =
   'many rounds as its spec asked for, so expect hours rather than the minutes a single calculation ' +
   'takes.';
 
+/**
+ * How long to wait before each re-read of a run the sheet has just asked to cancel — about 30 s in
+ * all, then it stops.
+ *
+ * One immediate re-read was the rule, and it lost the race every time it mattered: Temporal had
+ * the cancellation within a second, but the read went out first, came back `running`, and nothing
+ * asked again — so the sheet said `running` for as long as it stayed open while `GET /jobs/{id}`
+ * had long since said `cancelled`. Backing off rather than polling at a fixed rate because the
+ * first second is when the answer usually changes, and bounded because a run past its last
+ * cancellation point may legitimately keep going for hours; past this the sheet's own "Try again"
+ * is the way to ask.
+ *
+ * Exported so the test can advance through it.
+ */
+export const CANCEL_REREAD_DELAYS_MS: readonly number[] = [500, 1000, 2000, 4000, 8000, 8000, 8000];
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The registry list under every search text — a cancelled run's row changes in all of them. */
+const invalidateJobList = (): Promise<void> =>
+  queryClient.invalidateQueries({ queryKey: ['jobs'] });
+
 function JobSheet({
   jobId,
   jobName,
@@ -98,7 +121,7 @@ function JobSheet({
       // not only the displayed state that would be another job's: Cancel is offered on
       // `status.status === 'running'` and posts to `jobId`, so a stale status decides whether a
       // state-changing control appears for a job it does not describe. The same-id case is real
-      // here too — `cancel` re-reads the job it just asked to stop. See `useNewestRead`.
+      // here too — `cancel` follows the job it just asked to stop. See `useNewestRead`.
       const isNewest = claim();
       setStatus(null);
       setFailed(false);
@@ -114,6 +137,52 @@ function JobSheet({
     [auth, claim],
   );
 
+  // A follow-up still sleeping when the panel unmounts stops there rather than reading on for half
+  // a minute. A flag set in the effect body, not a `claim()` in the cleanup: StrictMode's
+  // mount-unmount-mount would make that cleanup retire the first read issued during render, and
+  // the sheet would spin for ever in development.
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  /**
+   * Re-read a run just asked to cancel until the registry says it ended, or the backoff runs out.
+   *
+   * Unlike `load`, the status already shown stays on screen between reads — blanking it to a
+   * spinner every few seconds would read as the sheet losing the job. Each read is behind the same
+   * newest-read guard, so opening another job, pressing "Try again" or closing the sheet stops it.
+   * A failed read in between is not reported: the request was accepted, the status on screen is
+   * still the last true one, and the next read may well answer.
+   */
+  const follow = async (id: string): Promise<void> => {
+    const isNewest = claim();
+    try {
+      for (const delay of CANCEL_REREAD_DELAYS_MS) {
+        await sleep(delay);
+        if (!isNewest() || !mounted.current) return;
+        let next: DurableJobStatus;
+        try {
+          next = await api.getJob(id, auth);
+        } catch {
+          continue;
+        }
+        if (!isNewest()) return;
+        setStatus(next);
+        setFailed(false);
+        if (isTerminalJobStatus(next.status)) return;
+      }
+    } finally {
+      // On every way out, including a superseded or unmounted follow-up: the list's row carries
+      // the state too, and the cache is the app's rather than this sheet's, so it would otherwise
+      // keep saying the run was open until something else happened to refetch it.
+      void invalidateJobList();
+    }
+  };
+
   if (open && loadedFor !== jobId) {
     setLoadedFor(jobId);
     setNotice(null);
@@ -128,7 +197,7 @@ function JobSheet({
       setNotice(
         'Cancellation requested. A run already past its last checkpoint will still finish.',
       );
-      load(jobId);
+      void follow(jobId);
     } catch (err) {
       setNotice(err instanceof Error ? err.message : 'The cancellation was not accepted.');
     }

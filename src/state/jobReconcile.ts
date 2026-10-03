@@ -121,6 +121,15 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Whether `GET /jobs/{id}` has said the run is over. Shared with `JobsPanel`, which follows a run
+ * it has just asked to cancel until the registry says so — the same word list, so the panel and
+ * the reconciler cannot disagree about which states are endings.
+ */
+export function isTerminalJobStatus(status: string): boolean {
+  return TERMINAL_STATUSES.has(status);
+}
+
+/**
  * The ending the stream would have delivered, from what the registry says — or `null` while the
  * run is still open (`running`, `queued`, or a word this client does not know as an ending).
  *

@@ -22,7 +22,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router';
-import { JobsPanel } from '../src/components/JobsPanel.tsx';
+import { CANCEL_REREAD_DELAYS_MS, JobsPanel } from '../src/components/JobsPanel.tsx';
 import { stubFetch } from './helpers.ts';
 import type { DurableJobStatus, JobRecordSummary } from '../src/api/client.ts';
 
@@ -86,6 +86,11 @@ let cursors: Record<string, string> = {};
 /** How many times the job read has been asked for, and whether it is currently failing. */
 let jobReads = 0;
 let jobReadFails = false;
+/**
+ * What the job read answers once a cancellation has been accepted, one per read; the last one
+ * repeats. Empty means the status `serve` was given, as before.
+ */
+let afterCancel: DurableJobStatus[] = [];
 
 function serve(records = [RECORD], status: DurableJobStatus = STATUS): void {
   const stub = stubFetch((url, init) => {
@@ -105,7 +110,13 @@ function serve(records = [RECORD], status: DurableJobStatus = STATUS): void {
           headers: { 'content-type': 'application/json' },
         });
       }
-      return new Response(JSON.stringify(status), {
+      const answer =
+        deletes.length && afterCancel.length
+          ? afterCancel.length > 1
+            ? afterCancel.shift()!
+            : afterCancel[0]!
+          : status;
+      return new Response(JSON.stringify(answer), {
         status: 200,
         headers: { 'content-type': 'application/json' },
       });
@@ -132,10 +143,12 @@ beforeEach(() => {
   cursors = {};
   jobReads = 0;
   jobReadFails = false;
+  afterCancel = [];
   mode.current = 'dev';
   mode.roles = [];
 });
 afterEach(() => {
+  vi.useRealTimers();
   cleanup();
   restore?.();
   restore = null;
@@ -281,6 +294,66 @@ describe('JobsPanel', () => {
     expect(deletes[0]).toContain('/jobs/calc-9f2c');
     // The wording the service's 202 actually supports.
     expect(await screen.findByText(/will still finish/)).toBeTruthy();
+  });
+
+  it('follows a cancelled run until the registry says it ended, then stops asking', async () => {
+    // The one immediate re-read lost the race every time: Temporal had the cancellation within a
+    // second, but that read went out first, said `running`, and nothing asked again — so the sheet
+    // said `running` for minutes while `GET /jobs/{id}` already said `cancelled`.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    afterCancel = [STATUS, { ...STATUS, status: 'cancelled' }];
+    serve();
+    mountJobs();
+    fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
+    await screen.findByText('running');
+    expect(jobReads).toBe(1);
+    const listReads = pagesAsked.length;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Request cancellation' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Request cancellation' }));
+    await waitFor(() => expect(deletes).toHaveLength(1));
+
+    // The first follow-up still says running — the race the old single read always lost.
+    await vi.advanceTimersByTimeAsync(CANCEL_REREAD_DELAYS_MS[0]!);
+    await waitFor(() => expect(jobReads).toBe(2));
+    expect(screen.getByText('running')).toBeTruthy();
+
+    // The next one has the ending, and the sheet shows it.
+    await vi.advanceTimersByTimeAsync(CANCEL_REREAD_DELAYS_MS[1]!);
+    expect(await screen.findByText('cancelled')).toBeTruthy();
+    expect(screen.queryByText('running')).toBeNull();
+    expect(jobReads).toBe(3);
+    // And the list is asked again, so its row stops saying the run is open.
+    await waitFor(() => expect(pagesAsked.length).toBeGreaterThan(listReads));
+
+    // An ending is an ending: nothing further is read.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(jobReads).toBe(3);
+  });
+
+  it('gives up following a run that will not stop, after the bounded backoff', async () => {
+    // A run past its last cancellation point may keep going for hours; the sheet does not poll it
+    // for that long. "Try again" is still there to ask by hand.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    serve();
+    mountJobs();
+    fireEvent.click(await screen.findByRole('button', { name: /compare_solvents/ }));
+    await screen.findByText('running');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Request cancellation' }));
+    const dialog = await screen.findByRole('alertdialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Request cancellation' }));
+    await waitFor(() => expect(deletes).toHaveLength(1));
+
+    const total = CANCEL_REREAD_DELAYS_MS.reduce((a, b) => a + b, 0);
+    expect(total).toBeLessThanOrEqual(35_000);
+    await vi.advanceTimersByTimeAsync(total + 1_000);
+    await waitFor(() => expect(jobReads).toBe(1 + CANCEL_REREAD_DELAYS_MS.length));
+
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(jobReads).toBe(1 + CANCEL_REREAD_DELAYS_MS.length);
+    expect(screen.getByText('running')).toBeTruthy();
   });
 
   it('shows a run that has not started as waiting, with the reason, and still cancellable', async () => {

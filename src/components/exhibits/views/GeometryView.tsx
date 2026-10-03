@@ -106,6 +106,19 @@ function FromSource({
   return <Drawing text={data} spec={spec} view={view} />;
 }
 
+/**
+ * The `structure_id` a geometry cites, or `undefined`.
+ *
+ * From the **stored** spec first: the service resolves a cited structure to `xyz` in `spec` and
+ * drops the id there (`exhibits/sources.py::resolved_geometry`), so only `raw_spec` still names it.
+ * `spec` is the fallback for a structure that did not resolve (the service then serves the stored
+ * spec as it is) and for a service older than `raw_spec`.
+ */
+function citedStructure(view: ExhibitView, spec: GeometrySpec): string | undefined {
+  const raw = view.raw_spec;
+  return (raw?.kind === 'geometry' ? raw.structure_id : undefined) ?? spec.structure_id;
+}
+
 export function GeometryView({
   view,
   spec,
@@ -114,12 +127,17 @@ export function GeometryView({
   spec: GeometrySpec;
 }): React.JSX.Element {
   const reference = spec.source ? calcArtifactRef(spec.source) : null;
-  const structure = spec.structure_id;
+  const structure = citedStructure(view, spec);
   if (structure && spec.xyz === undefined) {
+    // Why there is no `xyz` is the binding row's to say: "gone" and "the store could not be read"
+    // are different facts, and only the first means the structure no longer exists.
+    const reason = view.bindings.find(
+      (b) => b.tool === 'structure' && !b.ok && b.pointer === structure,
+    )?.error;
     return (
-      <EmptyState title="The stored structure is no longer available" className="py-6">
+      <EmptyState title="The stored structure cannot be drawn" className="py-6">
         This geometry cites the structure <span className="font-mono break-all">{structure}</span>,
-        which the structure store no longer holds, so there is nothing to draw.
+        and it could not be read: {reason || 'the service gave no reason'}.
       </EmptyState>
     );
   }

@@ -237,6 +237,18 @@ describe('the geometry spec', () => {
   });
 });
 
+/** A geometry whose cited structure did not resolve, as the service serves it, with its reason. */
+const vanished = (error: string): ExhibitView & { spec: GeometrySpec } =>
+  decodeExhibitView({
+    ...VIEW,
+    kind: 'geometry',
+    spec: { kind: 'geometry', structure_id: 'st-gone' },
+    raw_spec: { kind: 'geometry', structure_id: 'st-gone' },
+    bindings: [
+      { path: 'xyz', result_ref: '', tool: 'structure', pointer: 'st-gone', ok: false, error },
+    ],
+  }) as ExhibitView & { spec: GeometrySpec };
+
 describe('a geometry artefact in the pane', () => {
   it('draws an inline block', async () => {
     const view = geometryView({ xyz: WATER, label: 'Water, GFN2', energy_hartree: -5.07 });
@@ -289,43 +301,46 @@ describe('a geometry artefact in the pane', () => {
   });
 
   it('draws a stored structure from the xyz the service resolved, naming the structure', async () => {
-    const view = geometryView({ structure_id: 'st-water', xyz: WATER });
+    // The service's real shape (`exhibits/sources.py::resolved_geometry`): the resolved `spec`
+    // carries only `xyz`, and the id survives in `raw_spec` alone.
+    const view = decodeExhibitView({
+      ...VIEW,
+      kind: 'geometry',
+      title: 'Optimised water',
+      spec: { kind: 'geometry', xyz: WATER },
+      raw_spec: { kind: 'geometry', structure_id: 'st-water' },
+    }) as ExhibitView & { spec: GeometrySpec };
     render(<GeometryView view={view} spec={view.spec} />);
     expect(await screen.findByRole('img')).toBeTruthy();
     expect(screen.getByText('st-water')).toBeTruthy();
   });
 
   it('says a vanished stored structure is gone, and the strip says it in its own words', () => {
-    const view = decodeExhibitView({
-      ...VIEW,
-      kind: 'geometry',
-      spec: { kind: 'geometry', structure_id: 'st-gone' },
-      raw_spec: { kind: 'geometry', structure_id: 'st-gone' },
-      bindings: [
-        {
-          path: 'xyz',
-          result_ref: '',
-          tool: 'structure',
-          pointer: 'st-gone',
-          ok: false,
-          error: 'structure not found',
-        },
-      ],
-    }) as ExhibitView & { spec: GeometrySpec };
+    const view = vanished('no structure is stored under this id any more');
     render(
       <>
         <GoneSourcesStrip gone={goneBindings(view)} />
         <GeometryView view={view} spec={view.spec} />
       </>,
     );
-    expect(screen.getByText('The stored structure is no longer available')).toBeTruthy();
+    expect(screen.getByText('The stored structure cannot be drawn')).toBeTruthy();
+    expect(document.body.textContent).toContain('no structure is stored under this id any more');
     expect(screen.queryByRole('img')).toBeNull();
     const strip = screen.getByRole('note').textContent ?? '';
     expect(strip).toContain('st-gone');
     expect(strip).toContain('source no longer available');
-    expect(strip).toContain('structure not found');
+    expect(strip).toContain('no structure is stored under this id any more');
     // Not a tool result, so not the tool-result sentence.
     expect(strip).not.toContain('tool result');
+  });
+
+  it('does not call an unreadable store a vanished structure', () => {
+    // The service's wording when the store is unreachable: a transient fault, not a deletion.
+    const view = vanished('the structure store could not be read');
+    render(<GeometryView view={view} spec={view.spec} />);
+    const text = document.body.textContent ?? '';
+    expect(text).toContain('the structure store could not be read');
+    expect(text).not.toMatch(/no longer holds|no longer available/);
   });
 
   it('names the line of a block that does not parse', async () => {

@@ -1321,23 +1321,6 @@ bearer, and what a Chemclaw3-equivalent validator behind the BFF accepted.
   warnings per sign-in in every real deployment's browser log. One sign-in in flight, shared by
   every caller, would remove it.
 
-## Issue 24: an interrupted turn's status is read ahead of the service
-
-A front-door pod killed mid-turn used to lose the turn silently (Chemclaw3 K5 §1): the stream was
-cut with no terminal event, the reattach answered a bare 404, and the chemist's question vanished
-from the transcript while staying in the model's record. Core's
-`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so` writes the question ahead of
-the turn and marks it `interrupted` once the dead turn's lease lapses, with a 410
-`turn_interrupted` on the reattach. This client reads both — the bubble says "This answer was
-interrupted (the service restarted)" with a Retry that sends the question again, detach recovery
-stops polling the moment the transcript says so, and a reloaded transcript renders `interrupted`,
-`failed` and `stopped` questions with the ending they had.
-
-**Open until the core PR merges:** `TranscriptMessage.turn_status` is held in
-`FIELDS_AHEAD_OF_BACKEND` (`tests/backendContract.test.ts`), because the core main this repository
-checks against does not send it yet. Once core main declares it, the contract test prints that the
-entry is spent: delete it and this row together.
-
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.

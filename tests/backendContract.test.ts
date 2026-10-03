@@ -186,25 +186,18 @@ const RETAINED_FOR_ROLLOUT = new Map<string, Argued>([
  * map's rule, and on purpose: this file runs against core *main*, and a reader that went red the
  * moment the core half merged would break this repository's main for doing exactly what it was
  * merged to do. The review date is what still forces the deletion.
+ *
+ * Empty is the normal state, and it is empty: `TranscriptMessage.turn_status` sat here until
+ * Chemclaw3 #549 shipped it.
  */
-const FIELDS_AHEAD_OF_BACKEND = new Map<string, Argued>([
-  [
-    'TranscriptMessage.turn_status',
-    {
-      reason:
-        'Chemclaw3 D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so: the ' +
-        'service marks a written-ahead question running/done/failed/stopped/interrupted, and ' +
-        'this client renders an interrupted turn with a Retry. It lands here before the core PR ' +
-        'that sends it, and reads an absent field exactly as before.',
-      issue: "an interrupted turn's status is read ahead of the service",
-      review: '2026-10-31',
-    },
-  ],
-]);
+const FIELDS_AHEAD_OF_BACKEND = new Map<string, Argued>([]);
 
 /** Whether a response-axis failure line names a field that is argued ahead of the service. */
-function aheadOfBackend(line: string): boolean {
-  return FIELDS_AHEAD_OF_BACKEND.has(line.split(' ')[0] ?? '');
+function aheadOfBackend(
+  line: string,
+  argued: ReadonlyMap<string, Argued> = FIELDS_AHEAD_OF_BACKEND,
+): boolean {
+  return argued.has(line.split(' ')[0] ?? '');
 }
 
 /** Both maps as one lookup: the filter below cannot tell "not yet" from "no longer", and the
@@ -336,11 +329,14 @@ describe('a name this client admits and the service does not is argued, not mere
   });
 
   it('exempts only the field an entry names, and only from the not-sent failure', () => {
-    expect(aheadOfBackend('TranscriptMessage.turn_status (src/api/client.ts:1)')).toBe(
-      FIELDS_AHEAD_OF_BACKEND.has('TranscriptMessage.turn_status'),
-    );
-    expect(aheadOfBackend('TranscriptMessage.text (src/api/client.ts:1)')).toBe(false);
-    expect(aheadOfBackend('Other.turn_status (src/api/client.ts:1)')).toBe(false);
+    // Against a map built for the probe: the real one is normally empty, and a predicate over an
+    // empty map answers `false` whatever it does.
+    const argued = new Map<string, Argued>([
+      ['Model.field', { reason: 'x'.repeat(MIN_REASON), issue: 'Issue 0', review: '2099-01-01' }],
+    ]);
+    expect(aheadOfBackend('Model.field (src/api/client.ts:1)', argued)).toBe(true);
+    expect(aheadOfBackend('Model.other (src/api/client.ts:1)', argued)).toBe(false);
+    expect(aheadOfBackend('Other.field (src/api/client.ts:1)', argued)).toBe(false);
   });
 
   it('refuses an empty reason, a dangling row, a passed date and a name nobody admits', () => {

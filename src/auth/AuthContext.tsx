@@ -5,10 +5,20 @@
  * resolves. Blocking the whole app on authentication was costing a full MSAL round-trip before
  * first paint, for a transcript that lives in localStorage and needs no token at all.
  *
- * What still must not happen is React navigating over MSAL's redirect fragment before
- * `handleRedirectPromise()` has read it. That is handled structurally rather than by blocking:
- * `/auth/callback` is a route whose element writes no URL, and the URL-sync effects live inside
- * the `/c/:id` element (see `src/routes.tsx`).
+ * What still must not happen is React navigating before `handleRedirectPromise()` has finished.
+ * That is handled per route rather than by blocking the app: `/auth/callback` is a route whose
+ * element writes no URL, the URL-sync effects live inside the `/c/:id` element, and every route
+ * element that writes the URL *on mount* — `/`, `/open/:id`, the catch-all — waits for `settled`
+ * first (see `src/routes.tsx`).
+ *
+ * The fragment is not the only thing at stake, and that is what PR #126 ran into. With
+ * `navigateToLoginRequestUrl` on, MSAL returns from `/auth/callback` to the page the sign-in started
+ * on, carrying the response in sessionStorage, and only redeems the code there **if the address
+ * bar still names that page** when `handleRedirectPromise()` gets to compare. Any other URL and it
+ * navigates back to the start page and tries again. So a route that rewrites the URL on mount
+ * before auth has settled — `Bootstrap` pushing `/c/<new id>` over `/` — loops forever: measured on
+ * kind against the mock tenant, 212 navigations in 4 s, a conversation minted every cycle and the
+ * code never redeemed. `e2e/oidc-mock.spec.ts` drives that sign-in in a real browser.
  *
  * `ready` is what consumers gate on. Anything that needs a token — sending, uploading, the session
  * list, the transcript read, the job streams — must wait for it. Anything that does not — theme,
@@ -27,6 +37,13 @@ interface AuthContextValue {
   auth: AuthProvider;
   /** False until the real provider has replaced the placeholder. */
   ready: boolean;
+  /**
+   * True once authentication has finished, either way: the provider resolved (`ready`) or it
+   * failed (and said so in the banner). Until then MSAL may still be comparing the address bar
+   * against the page a sign-in started on, so nothing may write the URL. Gating on `ready` alone
+   * would leave a failed sign-in on a spinner forever with its banner never rendered.
+   */
+  settled: boolean;
   /** Bumped on sign-in/out so consumers re-read `auth.account`, which is a getter. */
   revision: number;
   refresh: () => void;
@@ -37,6 +54,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthGate({ children }: { children: ReactNode }): React.JSX.Element {
   const [auth, setAuth] = useState<AuthProvider>(pendingAuth);
   const [ready, setReady] = useState(false);
+  const [settled, setSettled] = useState(false);
   const [revision, setRevision] = useState(0);
 
   useEffect(() => {
@@ -53,6 +71,7 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
         hydrateExhibitPaneForAccount(provider.account?.id);
         setAuth(provider);
         setReady(true);
+        setSettled(true);
         // `account` is a getter on the MSAL provider, so consumers are told to re-read it rather
         // than relying on a value comparison.
         setRevision((r) => r + 1);
@@ -66,6 +85,7 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
           text: err instanceof Error ? err.message : 'Authentication failed.',
           action: 'reauth',
         });
+        setSettled(true);
       });
     return () => {
       cancelled = true;
@@ -74,7 +94,7 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
 
   return (
     <AuthContext.Provider
-      value={{ auth, ready, revision, refresh: () => setRevision((r) => r + 1) }}
+      value={{ auth, ready, settled, revision, refresh: () => setRevision((r) => r + 1) }}
     >
       {children}
     </AuthContext.Provider>

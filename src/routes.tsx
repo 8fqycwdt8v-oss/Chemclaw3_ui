@@ -37,6 +37,15 @@
  * (`server/index.ts`). Its element writes no URL — and the URL-sync effects live INSIDE the
  * `/c/:id` element rather than being guarded by a pathname check, so they structurally cannot run
  * while a redirect fragment is still on the address bar.
+ *
+ * **No route element writes the URL on mount until auth has settled** (`useAuth().settled`). That
+ * is the callback's rule applied to every page a sign-in can *return* to, because MSAL comes back
+ * from `/auth/callback` to the start page and redeems the code there only if the address bar still
+ * names it — otherwise it navigates back and tries again (`src/auth/AuthContext.tsx` has the
+ * mechanism). `Bootstrap` at `/` broke it once #126 made `/` a start page: it pushed `/c/<new id>`
+ * before `handleRedirectPromise()` settled, and sign-in looped forever. `Bootstrap`,
+ * `SessionResolver` and the catch-all are the three elements that navigate on mount; each waits.
+ * `e2e/oidc-mock.spec.ts` counts the navigations of a real sign-in, from `/` and from deep links.
  */
 
 import { lazy, Suspense, useEffect, useRef } from 'react';
@@ -141,14 +150,32 @@ function Panel({ what, children }: { what: string; children: React.ReactNode }):
   );
 }
 
+/**
+ * Hold a URL-writing route element until auth has settled. See the module docstring: MSAL may
+ * still be comparing the address bar with the page a sign-in started on.
+ */
+function AfterAuth({ children }: { children: React.ReactNode }): React.JSX.Element {
+  const { settled } = useAuth();
+  if (!settled) return <Loading className="justify-center p-8">Signing in…</Loading>;
+  return <>{children}</>;
+}
+
 /** Pick a conversation to land on, creating one if the store is empty. */
 function Bootstrap(): React.JSX.Element {
   const navigate = useNavigate();
+  const { settled } = useAuth();
 
   // The only place a conversation is created for want of one. It used to live in `App`, where
   // under a router it would fire behind the not-found panel and rewrite the URL out from under
   // the reader before they could read it.
+  //
+  // Not before auth has settled, for two reasons. The URL: `/` is where a first sign-in returns to
+  // (`signInStartPage`), and navigating away from it before MSAL has redeemed the code sends MSAL
+  // back to `/` to try again — for ever. And the store: until the account is known it holds the
+  // anonymous slot (`hydrateChatForAccount`), so the conversation picked or minted here would be
+  // one the signed-in person does not have, which is the "isn't on this device" #126 removed.
   useEffect(() => {
+    if (!settled) return;
     const state = useChatStore.getState();
     const [first] = state.order;
     const target = first && state.conversations[first] ? first : state.createConversation();
@@ -156,7 +183,7 @@ function Bootstrap(): React.JSX.Element {
     // does, and nothing here waits for it. Marked rather than left floating so the lint rule
     // that now exists can tell this from a promise somebody forgot.
     void navigate(`/c/${target}`, { replace: true });
-  }, [navigate]);
+  }, [settled, navigate]);
 
   return <Loading className="justify-center p-8">Opening…</Loading>;
 }
@@ -171,12 +198,32 @@ function Bootstrap(): React.JSX.Element {
 function SessionResolver(): React.JSX.Element {
   const { sessionId = '' } = useParams();
   const navigate = useNavigate();
+  const { auth, ready, settled } = useAuth();
   // The backend's session ids are 32 lowercase hex characters (`shared/events.ts`), so anything
   // else is a mistyped or truncated link rather than a session we have not seen.
   const valid = /^[0-9a-f]{32}$/.test(sessionId);
+  // Somebody signed out under Entra, on a link that only means something once they are signed in
+  // (#132). Adopting it now would put it in the anonymous slot and send them off to `/c/<id>`,
+  // and the sign-in that the first `/api` call then starts returns them to `/` — an unrelated
+  // conversation, with the link silently dropped. So sign in *from here*: `signInStartPage` keeps
+  // an `/open/` path, MSAL returns to it, and the adoption below runs in their own slot.
+  const mustSignIn = valid && ready && auth.mode === 'msal' && !auth.account;
+  const signingIn = useRef(false);
 
   useEffect(() => {
-    if (!valid) return;
+    if (!mustSignIn || signingIn.current) return;
+    // Once per mount: StrictMode runs effects twice, and a second `loginRedirect` while the first
+    // is navigating fails with `interaction_in_progress`.
+    signingIn.current = true;
+    void auth.login().catch(() => {
+      signingIn.current = false;
+    });
+  }, [mustSignIn, auth]);
+
+  useEffect(() => {
+    // Not before auth has settled: this page can be where a sign-in returns to, and MSAL redeems
+    // the code only while the address bar still names it (see the module docstring).
+    if (!valid || !settled || mustSignIn) return;
     const state = useChatStore.getState();
     const existing = Object.values(state.conversations).find((c) => c.sessionId === sessionId);
     if (existing) {
@@ -205,7 +252,7 @@ function SessionResolver(): React.JSX.Element {
       order: [conversation.id, ...s.order],
     }));
     void navigate(`/c/${conversation.id}`, { replace: true });
-  }, [sessionId, valid, navigate]);
+  }, [sessionId, valid, settled, mustSignIn, navigate]);
 
   if (!valid) {
     return (
@@ -217,7 +264,11 @@ function SessionResolver(): React.JSX.Element {
       </AppShell>
     );
   }
-  return <Loading className="justify-center p-8">Opening the conversation…</Loading>;
+  return (
+    <Loading className="justify-center p-8">
+      {mustSignIn ? 'Signing in to open the conversation…' : 'Opening the conversation…'}
+    </Loading>
+  );
 }
 
 /**
@@ -225,11 +276,12 @@ function SessionResolver(): React.JSX.Element {
  *
  * `handleRedirectPromise()` consumes the fragment during `createAuthProvider()`, which is already
  * in flight from module scope. This waits for that to settle and then leaves. It must not touch
- * the URL before then.
+ * the URL before then. Settled either way: a sign-in that failed leaves for `/`, where the shell
+ * shows the banner saying so, rather than spinning here with the banner nowhere on screen.
  */
 function AuthCallback(): React.JSX.Element {
-  const { ready } = useAuth();
-  if (!ready) return <Loading className="justify-center p-8">Completing sign-in…</Loading>;
+  const { settled } = useAuth();
+  if (!settled) return <Loading className="justify-center p-8">Completing sign-in…</Loading>;
   return <Navigate to="/" replace />;
 }
 
@@ -458,7 +510,14 @@ export function AppRoutes(): React.JSX.Element {
           </AppShell>
         }
       />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route
+        path="*"
+        element={
+          <AfterAuth>
+            <Navigate to="/" replace />
+          </AfterAuth>
+        }
+      />
     </Routes>
   );
 }

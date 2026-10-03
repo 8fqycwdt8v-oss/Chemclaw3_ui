@@ -75,9 +75,15 @@ export const apiScopes = (): string[] => [config.apiScope];
  * `/` ended on that panel.
  *
  * So a conversation path is dropped in favour of `/`, where `Bootstrap` picks the signed-in
- * person's most recent conversation or makes one in their own slot. Every other path is kept —
+ * person's most recent conversation or makes one in their own slot — **once auth has settled, and
+ * not a moment before.** MSAL redeems the code on the start page only while the address bar still
+ * names it; as first merged, `Bootstrap` pushed `/c/<new id>` while `handleRedirectPromise()` was
+ * still running, MSAL went back to `/`, and sign-in looped for ever (`src/routes.tsx`, and
+ * `e2e/oidc-mock.spec.ts`, which counts the navigations). Every other path is kept —
  * `/open/<session>`, `/jobs/<id>`, `/review` are addresses that mean the same thing to whoever
- * signs in, and a deep link that survived the sign-in is the point of returning at all. A
+ * signs in, and a deep link that survived the sign-in is the point of returning at all. (`/open/`
+ * starts the sign-in itself, before it adopts anything, so that it is still the address bar when
+ * the sign-in starts — #132.) A
  * re-authentication of somebody already signed in (`acquireTokenRedirect`) is not routed through
  * this: their `/c/<id>` *is* in their slot, and returning to it is right.
  */

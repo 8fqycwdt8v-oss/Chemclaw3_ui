@@ -341,6 +341,10 @@ const TOOLING = new Set([
   // that cannot be a git ref, which is input hygiene for `$GITHUB_OUTPUT`, not a claim about the
   // product. `tests/delivery.test.ts` holds its precedence and that the checkout reads its output.
   'chemclaw3-ref.mjs',
+  // Provisioning, not assertion: it gives a Chemclaw3_mock checkout the `.venv` the OIDC lane
+  // (`playwright.oidc-mock.config.ts`) starts the tenant from, as the mock's README installs it.
+  // A file because a workflow step may only run `npm`/`npx` or `node scripts/<file>.mjs`.
+  'provision-mock-tenant.mjs',
 ]);
 
 /** Every `scripts/*.mjs` an npm script's command line names. */

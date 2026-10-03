@@ -123,7 +123,7 @@ export type UnansweredEnding = Extract<TranscriptTurnStatus, 'failed' | 'stopped
 export function unansweredEnding(
   status: TranscriptMessage['turn_status'],
 ): UnansweredEnding | null {
-  return status === 'failed' || status === 'stopped' || status === 'interrupted' ? status : null;
+  return status && status !== 'running' && status !== 'done' ? status : null;
 }
 
 /**
@@ -155,6 +155,18 @@ export function endingOfTurn(
  * and `stopped` an aborted turn. Built rather than omitted, because a question with nothing after
  * it reads as a turn still running — or as this app having lost the answer.
  */
+/**
+ * The error a turn that ended without an answer carries — `null` for a stopped one, which is not
+ * a failure. One definition, read by the transcript and by both live paths in `sendMessage`.
+ */
+export function endedError(ending: UnansweredEnding): AssistantMessage['error'] {
+  return ending === 'stopped'
+    ? null
+    : ending === 'interrupted'
+      ? { kind: 'turn_interrupted', message: TURN_INTERRUPTED_TEXT }
+      : { kind: 'agent', message: TURN_FAILED_TEXT };
+}
+
 function unanswered(
   id: string,
   at: number,
@@ -162,30 +174,46 @@ function unanswered(
   correlationId: string | undefined,
 ): AssistantMessage {
   return {
+    ...answerOf(id, at, correlationId, '', []),
+    status: ending === 'stopped' ? 'aborted' : 'error',
+    error: endedError(ending),
+  };
+}
+
+/** A settled answer read back from the service — see the module docstring for each "unknown". */
+function answerOf(
+  id: string,
+  at: number,
+  correlationId: string | undefined,
+  finalText: string,
+  trace: TraceEntry[],
+): AssistantMessage {
+  return {
     id,
     role: 'assistant',
     at,
+    // The turn's id, which is what `mergeTranscript` joins a re-read on — and what the trace
+    // footer quotes on a turn this browser did not send.
     ...(correlationId ? { correlationId } : {}),
-    status: ending === 'stopped' ? 'aborted' : 'error',
+    status: 'done',
     streamedText: '',
-    finalText: '',
+    finalText,
+    // Never persisted — see the module docstring. Null and empty are the honest readings.
     confidence: null,
     unsupportedClaims: [],
     reviewRequired: false,
+    // The transcript records the answer, not which verifier scored it.
     verifiedBy: null,
+    // The backend stores the messages, not which connectors happened to be down at the time.
     degradedConnectors: [],
     partialReason: null,
+    // A rehydrated message is finished, so it is not waiting on anything.
     queued: false,
-    trace: [],
+    trace,
     latestPlan: null,
     latestPlanHash: null,
     latestPlanScope: null,
-    error:
-      ending === 'interrupted'
-        ? { kind: 'turn_interrupted', message: TURN_INTERRUPTED_TEXT }
-        : ending === 'failed'
-          ? { kind: 'agent', message: TURN_FAILED_TEXT }
-          : null,
+    error: null,
   };
 }
 
@@ -235,33 +263,12 @@ export function transcriptToMessages(remote: TranscriptMessage[]): ChatMessage[]
       continue;
     }
 
-    messages.push({
-      id: key,
-      role: 'assistant',
-      at,
-      // The turn's id, which is what `mergeTranscript` joins a re-read on — and what the trace
-      // footer quotes on a turn this browser did not send.
-      ...(correlationId ? { correlationId } : {}),
-      status: 'done',
-      streamedText: '',
-      finalText: text,
-      // Never persisted — see the module docstring. Null and empty are the honest readings.
-      confidence: null,
-      unsupportedClaims: [],
-      reviewRequired: false,
-      // The transcript records the answer, not which verifier scored it.
-      verifiedBy: null,
-      // The backend stores the messages, not which connectors happened to be down at the time.
-      degradedConnectors: [],
-      partialReason: null,
-      // A rehydrated message is finished, so it is not waiting on anything.
-      queued: false,
-      trace: [...traceFrom(calls, key, at), ...exhibitsFrom(calls, key, at)],
-      latestPlan: null,
-      latestPlanHash: null,
-      latestPlanScope: null,
-      error: null,
-    });
+    messages.push(
+      answerOf(key, at, correlationId, text, [
+        ...traceFrom(calls, key, at),
+        ...exhibitsFrom(calls, key, at),
+      ]),
+    );
   }
 
   return messages;
@@ -406,8 +413,8 @@ export function mergeTranscript(
     // stays as this browser has it, would then keep that lone question for ever and never let the
     // answer in. A turn this browser *sent* always has an answer bubble of its own, streaming or
     // settled, so only a question read from the service is ever answerless here.
-    const answerless = !mine[at]!.messages.some((m) => m.role === 'assistant');
-    if (answerless && turn.messages.some((m) => m.role === 'assistant')) {
+    const answered = (t: Turn): boolean => t.messages.some((m) => m.role === 'assistant');
+    if (!answered(mine[at]!) && answered(turn)) {
       placed.push(folded(turn, id));
       inserted = true;
     } else {

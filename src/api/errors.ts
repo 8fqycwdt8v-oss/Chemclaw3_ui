@@ -324,6 +324,11 @@ export function errorFromStatus(
   code?: string,
 ): ApiError {
   const options = correlationId ? { correlationId } : undefined;
+  // Only the reattach route answers 410, and only with this code. A 410 without it is not a
+  // refusal this client knows, so it falls to the same default as any other unknown status.
+  if (status === 410 && code === 'turn_interrupted') {
+    return new ApiError(code, TURN_INTERRUPTED_TEXT, 410, options);
+  }
   switch (status) {
     case 401:
       return new ApiError(
@@ -381,18 +386,6 @@ export function errorFromStatus(
         'turn_in_flight',
         detail || 'A turn is already running for this conversation.',
         409,
-        options,
-      );
-    case 410:
-      // Only the reattach route answers 410, and only with this code. A 410 without it is not a
-      // refusal this client knows, so it falls to the same default as any other unknown status.
-      if (code === 'turn_interrupted') {
-        return new ApiError(code, TURN_INTERRUPTED_TEXT, 410, options);
-      }
-      return new ApiError(
-        'network',
-        detail || `The service returned an unexpected status (${status}).`,
-        status,
         options,
       );
     case 422:

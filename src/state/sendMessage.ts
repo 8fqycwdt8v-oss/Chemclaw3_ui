@@ -12,7 +12,7 @@ import { api } from '../api/client.ts';
 import type { TranscriptMessage } from '../api/client.ts';
 import { config } from '../env.ts';
 import { prefetchMarkdown } from '../components/LazyMarkdown.tsx';
-import { ApiError, TURN_INTERRUPTED_TEXT } from '../api/errors.ts';
+import { ApiError } from '../api/errors.ts';
 import { streamTurn, TURN_STALL_MS } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
 import type { Banner, ChatMessage, ComposerLock } from './types.ts';
@@ -22,7 +22,7 @@ import { announceStatus, describeAnswer } from './announce.ts';
 import { logger } from '../lib/logger.ts';
 import { backoff } from '../lib/backoff.ts';
 import { linePlace } from './turnActivity.ts';
-import { endingOfTurn, TURN_FAILED_TEXT } from './transcript.ts';
+import { endedError, endingOfTurn } from './transcript.ts';
 import type { UnansweredEnding } from './transcript.ts';
 
 /**
@@ -555,23 +555,16 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
    */
   const settleUnanswered = (ending: UnansweredEnding): void => {
     batcher?.flush();
-    if (ending === 'stopped') {
+    const error = endedError(ending);
+    if (!error) {
       useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
       releaseTurn();
-      announceStatus('The turn was stopped before it answered.');
       return;
     }
-    const message = ending === 'interrupted' ? TURN_INTERRUPTED_TEXT : TURN_FAILED_TEXT;
-    useChatStore.getState().failTurn(conversationId, messageId, {
-      kind: ending === 'interrupted' ? 'turn_interrupted' : 'agent',
-      message,
-    });
+    useChatStore.getState().failTurn(conversationId, messageId, error);
     releaseComposer(false);
-    showBanner({
-      kind: 'warn',
-      text: correlationId ? `${message} (reference ${correlationId})` : message,
-    });
-    logger.warn('turn.unanswered', { ending });
+    // No reference in the banner: the turn's id is on the bubble's trace footer already.
+    showBanner({ kind: 'warn', text: error.message });
   };
 
   /**
@@ -1319,14 +1312,9 @@ export function resumeInterruptedTurn(
       const current = store.conversations[conversationId]?.messages.find((m) => m.id === messageId);
       if (!current || current.role !== 'assistant' || !current.interruptedByReload) return;
       // Settled as the live path settles it, without the banner: nobody was waiting on this page.
-      if (recovered.ended === 'stopped') {
-        store.finishTurn(conversationId, messageId, 'aborted');
-        return;
-      }
-      store.failTurn(conversationId, messageId, {
-        kind: recovered.ended === 'interrupted' ? 'turn_interrupted' : 'agent',
-        message: recovered.ended === 'interrupted' ? TURN_INTERRUPTED_TEXT : TURN_FAILED_TEXT,
-      });
+      const error = endedError(recovered.ended);
+      if (error) store.failTurn(conversationId, messageId, error);
+      else store.finishTurn(conversationId, messageId, 'aborted');
       return;
     }
     if (recovered === null) {

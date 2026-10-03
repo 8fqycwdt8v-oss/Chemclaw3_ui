@@ -455,7 +455,7 @@ export function retryQuestionOf(
   const message = messages[index];
   if (message?.role !== 'assistant' || message.error?.kind !== 'turn_interrupted') return undefined;
   const asked = messages[index - 1];
-  return asked?.role === 'user' && asked.text.trim() ? asked.text : undefined;
+  return asked?.role === 'user' ? asked.text : undefined;
 }
 
 /**

@@ -47,6 +47,7 @@ import { exhibitDiffQuery, exhibitQuery, exhibitRevisionsQuery } from '../../api
 import { useChatStore } from '../../state/chatStore.ts';
 import { prefill } from '../../state/composerEvents.ts';
 import { focusOf, revisionShown, useExhibitPane } from '../../state/exhibitPane.ts';
+import { createDraftOf, reviseDraftOf, useExhibitDrafts } from '../../state/exhibitDrafts.ts';
 import { rdkitAvailable } from '../../chem/rdkit.ts';
 import { saveBlob } from '../../lib/download.ts';
 import {
@@ -73,6 +74,7 @@ import { Resizer } from './Resizer.tsx';
 import { fileStem, sdfOf, svgFileOf } from './exports.ts';
 import { ChartView } from './views/ChartView.tsx';
 import { DocumentView } from './views/DocumentView.tsx';
+import { DraftView } from './views/DraftView.tsx';
 import { GeometryView } from './views/GeometryView.tsx';
 import { LinkView } from './views/LinkView.tsx';
 import { ResultView } from './views/ResultView.tsx';
@@ -355,6 +357,9 @@ function ExhibitDetail({
   const revision = useExhibitPane((s) => revisionShown(s, sessionId, header.exhibit_id));
   const setRevision = (picked: number): void =>
     useExhibitPane.getState().setRevision(sessionId, header.exhibit_id, picked);
+  // The agent rewriting this artefact right now (wave 2): its new text is drawn over the body, under
+  // a banner, until the `exhibit` frame lands the revision — the header and the history stay.
+  const revising = useExhibitDrafts((s) => reviseDraftOf(s, sessionId, header.exhibit_id));
   const [comparing, setComparing] = useState(false);
   const [printing, setPrinting] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -539,7 +544,11 @@ function ExhibitDetail({
         </div>
       )}
 
-      <Body sessionId={sessionId} view={view} isHead={isHead} chartRef={chartRef} />
+      {revising && isHead ? (
+        <DraftView draft={revising} revising />
+      ) : (
+        <Body sessionId={sessionId} view={view} isHead={isHead} chartRef={chartRef} />
+      )}
     </article>
   );
 }
@@ -552,15 +561,29 @@ function ArtefactsTab({
   onAsked,
 }: PaneProps & { onAsked?: () => void }): React.JSX.Element {
   const focus = useExhibitPane((s) => focusOf(s, sessionId));
+  // A new document being written (wave 2) is what the pane shows while it is written: it is the
+  // artefact this turn is making, and it has no id to focus until the tool has run.
+  const drafting = useExhibitDrafts((s) => createDraftOf(s, sessionId));
   const pickerId = useId();
   const chosen = focus ? exhibits.find((x) => x.exhibit_id === focus.exhibitId) : undefined;
   const fallback = exhibits[0];
   // Nothing chosen here yet (or the choice is gone): the fallback is shown, and pinned as the
   // choice, so a list that reorders under it — the newest-first order moves on every edit — keeps
-  // the same document in front instead of swapping one under an unsaved draft.
+  // the same document in front instead of swapping one under an unsaved draft. Not while a draft
+  // is in front: the focus the new artefact's frame sets must not be overwritten by a fallback
+  // chosen from a list that has not caught up with it yet.
   useEffect(() => {
-    if (!chosen && fallback) useExhibitPane.getState().pin(sessionId, fallback.exhibit_id);
-  }, [chosen, fallback, sessionId]);
+    if (!drafting && !chosen && fallback) {
+      useExhibitPane.getState().pin(sessionId, fallback.exhibit_id);
+    }
+  }, [drafting, chosen, fallback, sessionId]);
+  if (drafting) {
+    return (
+      <div className="flex flex-col gap-3 p-3">
+        <DraftView draft={drafting} />
+      </div>
+    );
+  }
   if (exhibits.length === 0) {
     return (
       <p className="p-3 text-sm text-ink-muted">

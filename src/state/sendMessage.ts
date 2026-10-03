@@ -6,7 +6,7 @@
  */
 
 import type { ExhibitRef } from '../../shared/exhibitConstants.ts';
-import { exhibitArrived } from './exhibitEvents.ts';
+import { draftArrived, draftsEnded, exhibitArrived } from './exhibitEvents.ts';
 import { useExhibitPane } from './exhibitPane.ts';
 import { api } from '../api/client.ts';
 import type { TranscriptMessage } from '../api/client.ts';
@@ -517,6 +517,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
    */
   let watching = false;
   let reattached = 0;
+  /** The session a draft arrived on, so the turn's end can discard the ones that never landed. */
+  let draftSession: string | null = null;
 
   const runOnce = async (sessionId: string): Promise<void> => {
     // Per attempt: a replay after a 401 or a `session_not_found` starts a new turn, and what the
@@ -557,6 +559,14 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         if (drop.type) dropped.types.add(drop.type);
       },
       onEvent(event) {
+        // A document being drafted (wave 2). Not a trace row and not part of the message: it is a
+        // few seconds of stream that the `exhibit` frame after it replaces, so it goes to the draft
+        // store and nowhere else — and it is not a reason to flush the token batcher either.
+        if (event.type === 'exhibit_draft') {
+          draftSession = sessionId;
+          draftArrived(sessionId, event);
+          return;
+        }
         if (event.type === 'token') {
           // The first sign the chain is moving, and the client half of a measurement the service
           // cannot take: it knows when it started generating, not when the bytes reached a browser.
@@ -931,6 +941,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   } finally {
     const streaming = useChatStore.getState().streaming;
     if (streaming?.messageId === messageId) useChatStore.getState().setStreaming(null);
+    // However the turn ended — answered, stopped, failed, recovered — a draft whose `exhibit` frame
+    // never came is not a document anybody has, and it leaves the pane now.
+    if (draftSession) draftsEnded(draftSession);
 
     // The client half of the turn's timing. It composes with the service's own turn span, which
     // cannot see any of these three: when the chemist pressed Send, when the first byte reached

@@ -106,6 +106,42 @@ test('the agent writes a table, the chemist corrects a cell, and the comparison 
   await expect(compare).toContainText('1 change from revision 1 to revision 2');
 });
 
+test('a report is watched being written, then becomes the artefact', async ({ page, isMobile }) => {
+  // The column exists at `lg` only, and a draft opens nothing on a phone — the same rule as a new
+  // artefact, which the test above already holds for the mobile project. What this one is about is
+  // the text growing in the column and then being replaced, so it runs where the column is.
+  test.skip(isMobile, 'the draft opens the column, which a phone does not have');
+  await seedConversation(page, '4'.repeat(32));
+  await page.goto(`/c/${CONVERSATION}`);
+
+  await page.getByPlaceholder(/Ask about a reaction/).fill('Write up the amination as a report.');
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+
+  const pane = page.getByRole('complementary', { name: 'Artefacts' });
+  // The pane opened on the draft before the tool had run…
+  await expect(
+    pane.getByRole('heading', { name: 'Drafting “Amination process report”…' }),
+  ).toBeVisible();
+  await expect(pane.getByRole('status')).toContainText('being written now');
+  // …and the text grows in it: the summary first, the next section later.
+  await expect(pane).toContainText('The Buchwald–Hartwig amination ran in 2-MeTHF');
+  await expect(pane).toContainText('Isolated yield was 82 %');
+  // Not a document yet: nothing to revise, export or compare.
+  await expect(pane.getByRole('combobox', { name: 'Revision' })).toHaveCount(0);
+
+  // Then the `exhibit` frame lands it: the real artefact, with its revision and its whole text.
+  await expect(pane.getByRole('heading', { name: /^Drafting/ })).toHaveCount(0);
+  // The artefact's own title (the document's `# …` renders a level lower, inside it).
+  await expect(
+    pane.getByRole('heading', { level: 2, name: 'Amination process report', exact: true }),
+  ).toBeVisible();
+  await expect(pane.getByRole('combobox', { name: 'Revision' })).toContainText('r1 · agent');
+  await expect(pane).toContainText('Repeat with CPME to compare the work-up.');
+  await expect(
+    page.getByRole('button', { name: 'Open artefact Amination process report' }),
+  ).toBeVisible();
+});
+
 test('a 3D structure turns under the keyboard, reads as a table, and downloads as XYZ', async ({
   page,
   isMobile,

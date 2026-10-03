@@ -36,6 +36,7 @@ describe('the event contract admits every member of its own union', () => {
     evidence_source: { source: 'graph', chunks: 4 },
     handoff: { from_agent: 'default', to_agent: 'safety', reason: 'hazard check' },
     exhibit: { exhibit_id: 'xb-0123456789abcdef', revision: 1, kind: 'table', op: 'created' },
+    exhibit_draft: { call_id: 'toolu_1', op: 'create', kind: 'document', markdown: '# Draft' },
     question: { question: 'which?', options: [] },
     note_proposed: { note_id: 'n1', reference: 'ref' },
     approval_request: { prompt: 'ok?', approval_id: 'a1' },
@@ -194,6 +195,21 @@ const full: Array<[string, Record<string, unknown>]> = [
       op: 'created',
       author_kind: 'human',
       author: 'chemist@example.com',
+    },
+  ],
+  // Every field away from its fallback: `create` is the op an unknown value does NOT read as, and
+  // `done: true` the flag that falls back to false — a mirror that dropped either would pass on the
+  // default otherwise.
+  [
+    'exhibit_draft',
+    {
+      call_id: 'toolu_01',
+      op: 'create',
+      exhibit_id: 'xb-0123456789abcdef',
+      kind: 'document',
+      title: 'Process report',
+      markdown: '# Process report\n\nThe amination ran in',
+      done: true,
     },
   ],
   ['question', { question: 'which?', options: ['a'] }],

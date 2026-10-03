@@ -300,6 +300,21 @@ for (const theme of ['light', 'dark'] as const) {
       await scan(page);
     });
 
+    test('a report being drafted in the artefact pane', async ({ page, isMobile }) => {
+      // The draft: a heading, one polite status, and a busy body of rendered Markdown. At `lg`
+      // only, where the draft opens the column by itself (`e2e/exhibits.spec.ts` says why).
+      test.skip(isMobile, 'the draft opens the column, which a phone does not have');
+      await seedArtefactConversation(page, 'e2e-a11y-draft', '3'.repeat(32));
+      await page.goto('/c/e2e-a11y-draft');
+      await page.getByPlaceholder(/Ask about a reaction/).fill('Write up the amination.');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      const pane = page.getByRole('complementary', { name: 'Artefacts' });
+      await expect(pane.getByRole('heading', { name: /^Drafting/ })).toBeVisible();
+      await expect(pane).toContainText('The Buchwald–Hartwig amination');
+      await expectTheme(page, theme);
+      await scan(page);
+    });
+
     test('the conversation that is not on this device', async ({ page }) => {
       // A new page, a new focus target, and the one state reached by a link rather than a click.
       await page.goto('/c/does-not-exist');

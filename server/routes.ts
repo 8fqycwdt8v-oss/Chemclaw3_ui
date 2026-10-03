@@ -185,6 +185,30 @@ function onlyCalcArtifactRef(search: string): boolean {
   return keys.length === 1 && keys[0] === 'ref' && ref !== null && CALC_ARTIFACT_REF.test(ref);
 }
 
+/**
+ * Whether a query string is empty or exactly one `session_id` that is a session id — the one query
+ * `GET /jobs/{id}` takes from this app. Same refusals as `onlyCalcArtifactRef`: a repeat, a second
+ * key or a malformed escape is a request this app never makes.
+ */
+function onlySessionId(search: string): boolean {
+  if (search === '') return true;
+  let params: URLSearchParams;
+  try {
+    decodeURIComponent(search.replace(/\+/g, ' '));
+    params = new URLSearchParams(search);
+  } catch {
+    return false;
+  }
+  const keys = [...params.keys()];
+  const sid = params.get('session_id');
+  return (
+    keys.length === 1 &&
+    keys[0] === 'session_id' &&
+    sid !== null &&
+    new RegExp(`^${SID}$`).test(sid)
+  );
+}
+
 /** What a proposal proposes. Two values, because the service's `ProposalKind` has exactly two. */
 const KIND = '(skill|profile)';
 
@@ -432,10 +456,14 @@ export const ROUTES: readonly Route[] = [
   // whitelisted here anyway, because hiding a control the caller is entitled to use is the
   // frontend's job and refusing to proxy it would break the caller who *is* entitled.
   { method: 'GET', pattern: /^\/api\/jobs$/, target: () => '/jobs', sse: false },
+  // `?session_id=` and nothing else (the artefacts contract's wave-2 amendment): naming the run's
+  // origin session is what keeps a report's `exhibit_id` in the answer, and a 32-hex value is the
+  // whole set of session ids, so the query is held to it here rather than forwarded open.
   {
     method: 'GET',
     pattern: new RegExp(`^/api/jobs/${JOB}$`),
     target: (m) => `/jobs/${m[1]}`,
+    query: onlySessionId,
     sse: false,
   },
   {

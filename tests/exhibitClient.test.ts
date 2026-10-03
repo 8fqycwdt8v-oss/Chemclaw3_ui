@@ -345,3 +345,27 @@ describe('the filename an export is saved under', () => {
     expect(filenameFrom('attachment', 'fallback.csv')).toBe('fallback.csv');
   });
 });
+
+describe('a job, read for its card', () => {
+  it('names the conversation’s session, encoded, and sends nothing that is not a session id', async () => {
+    const stub = stubFetch(() =>
+      json(200, {
+        job_id: 'j',
+        status: 'running',
+        summary: null,
+        result: {},
+        calc_refs: [],
+        rationale: '',
+      }),
+    );
+    restore = stub.restore;
+    await api.getJob('report-1', auth, SID);
+    await api.getJob('report-1', auth);
+    await api.getJob('report-1', auth, '../../x');
+    expect(stub.calls.map((c) => c.url)).toEqual([
+      `/api/jobs/report-1?session_id=${SID}`,
+      '/api/jobs/report-1',
+      '/api/jobs/report-1',
+    ]);
+  });
+});

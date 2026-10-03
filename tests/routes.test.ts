@@ -640,4 +640,31 @@ describe('proxy route whitelist', () => {
       expect(resolveRoute('GET', '/api/calc-artifacts', ok)).toBeNull();
     });
   });
+  describe('a job, read with the session that launched it', () => {
+    const JOB_PATH = '/api/jobs/calc-compare_solvents-0123456789abcdef';
+
+    it('forwards no query, or exactly one 32-hex `session_id`', () => {
+      expect(resolveRoute('GET', JOB_PATH, '')?.path).toBe(
+        '/jobs/calc-compare_solvents-0123456789abcdef',
+      );
+      expect(resolveRoute('GET', JOB_PATH, `?session_id=${SID}`)).not.toBeNull();
+    });
+
+    it('refuses anything else in the query, so the read cannot be widened', () => {
+      for (const search of [
+        '?session_id=',
+        `?session_id=${SID.toUpperCase()}`,
+        `?session_id=${SID}0`,
+        `?session_id=${SID}&session_id=${SID}`,
+        `?session_id=${SID}&limit=1`,
+        '?session_id=..%2F..',
+        '?session_id=%zz',
+        '?limit=1',
+      ]) {
+        expect(resolveRoute('GET', JOB_PATH, search), search).toBeNull();
+      }
+      // The cancel takes no query and is not affected.
+      expect(resolveRoute('DELETE', JOB_PATH)).not.toBeNull();
+    });
+  });
 });

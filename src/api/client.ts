@@ -48,6 +48,7 @@ import type {
 } from '../../shared/exhibits.ts';
 import { keys, queryClient } from './queryClient.ts';
 import { CALC_ARTIFACT_REF } from '../../shared/exhibitConstants.ts';
+import { SESSION_ID_RE } from '../../shared/events.ts';
 
 /**
  * The artefact decoders, fetched with the first artefact body rather than with the app.
@@ -1586,8 +1587,22 @@ export const api = {
     }
   },
 
-  getJob(jobId: string, getToken: TokenGetter): Promise<DurableJobStatus> {
-    return request<DurableJobStatus>(`/jobs/${encodeURIComponent(jobId)}`, getToken);
+  /**
+   * One run's status, from the run registry.
+   *
+   * `sessionId` is the conversation the card asking belongs to (the frozen contract's wave-2
+   * amendment): the service keeps a result's `exhibit_id` — the report artefact G1's **Open
+   * report** focuses — only for a caller who names the run's origin session and can read it, and
+   * strips it otherwise, because an artefact id is a pointer into a session the registry's other
+   * readers may not be in. A card reconciled without it would lose its Open report on reload.
+   * Anything that is not a session id is not sent; the BFF refuses any other query on this route.
+   */
+  getJob(jobId: string, getToken: TokenGetter, sessionId?: string): Promise<DurableJobStatus> {
+    const suffix =
+      sessionId && SESSION_ID_RE.test(sessionId)
+        ? `?session_id=${encodeURIComponent(sessionId)}`
+        : '';
+    return request<DurableJobStatus>(`/jobs/${encodeURIComponent(jobId)}${suffix}`, getToken);
   },
 
   /**

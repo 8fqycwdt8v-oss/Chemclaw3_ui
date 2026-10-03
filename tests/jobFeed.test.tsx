@@ -214,4 +214,95 @@ describe('JobFeed', () => {
     renderFeed();
     expect(screen.queryByRole('button', { name: 'Open report' })).toBeNull();
   });
+
+  it('keeps Open report across a reload: the reconciled card asks the registry with its session', async () => {
+    // A reload loses the stream's frame; the new page's leader asks `GET /jobs/{id}`. The service
+    // keeps `exhibit_id` only when the request names the run's origin session (the contract's
+    // wave-2 amendment), so the reconciled card has its Open report only if this client asks so.
+    const { reconcileAfterTakeover } = await import('../src/state/jobReconcile.ts');
+    const { stubFetch } = await import('./helpers.ts');
+    const { useExhibitPane } = await import('../src/state/exhibitPane.ts');
+    useExhibitPane.setState({ open: false, sheetOpen: false, focus: {} });
+    const conversation = {
+      id: 'c-report',
+      sessionId: SID,
+      title: 'Process report',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      contextLost: false,
+      sessionOrigin: 'local',
+      messages: [
+        { id: 'u', role: 'user', text: 'write the report', at: Date.now() },
+        {
+          id: 'a',
+          role: 'assistant',
+          text: '',
+          status: 'done',
+          at: Date.now(),
+          trace: [
+            { id: 't', at: Date.now() - 1000, kind: 'job_started', job: { jobId: 'report-9' } },
+          ],
+        },
+      ],
+    };
+    useChatStore.setState({
+      conversations: { 'c-report': conversation as never },
+      order: ['c-report'],
+      activeId: 'c-report',
+    });
+    const stub = stubFetch((url) =>
+      url.includes('session_id=')
+        ? new Response(
+            JSON.stringify({
+              job_id: 'report-9',
+              status: 'completed',
+              summary: null,
+              result: { note_id: 'report-amination', exhibit_id: 'xb-00aa11bb22cc33dd' },
+              calc_refs: [],
+              rationale: '',
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          )
+        : // Without the session the service strips the pointer — the card the bug produced.
+          new Response(
+            JSON.stringify({
+              job_id: 'report-9',
+              status: 'completed',
+              summary: null,
+              result: { note_id: 'report-amination' },
+              calc_refs: [],
+              rationale: '',
+            }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+          ),
+    );
+    try {
+      const published = await reconcileAfterTakeover(
+        {
+          id: 'tab-reloaded',
+          isLeader: () => true,
+          declare: () => undefined,
+          watched: () => [],
+          subscribe: () => () => undefined,
+          publish: (note) => {
+            if (note.kind === 'job')
+              useChatStore.getState().pushJobFinished(note.event, note.sessionId);
+          },
+          close: () => undefined,
+        },
+        useChatStore.getState(),
+        async () => null,
+      );
+      expect(published).toBe(1);
+      expect(stub.calls[0]!.url).toBe(`/api/jobs/report-9?session_id=${SID}`);
+    } finally {
+      stub.restore();
+    }
+    renderFeed();
+    fireEvent.click(screen.getByRole('button', { name: 'Open report' }));
+    expect(useExhibitPane.getState().focus[SID]).toEqual({
+      exhibitId: 'xb-00aa11bb22cc33dd',
+      revision: 0,
+    });
+  });
 });

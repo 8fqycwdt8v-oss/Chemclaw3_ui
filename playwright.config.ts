@@ -41,7 +41,10 @@ export default defineConfig({
   //
   // `oidc-mock.spec.ts` likewise belongs to its own config (`playwright.oidc-mock.config.ts`): it
   // signs in through a real authority and needs a sibling Chemclaw3_mock checkout to be one.
-  testIgnore: /(full-stack|oidc-mock)\.spec\.ts/,
+  //
+  // `e2e/kind/` is the whole-system workflow suite (`playwright.kind.config.ts`) and needs a
+  // running kind cluster; nothing in it can pass against the fixture service.
+  testIgnore: [/(full-stack|oidc-mock)\.spec\.ts/, /[\\/]kind[\\/]/],
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

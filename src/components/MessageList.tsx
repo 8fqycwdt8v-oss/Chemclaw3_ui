@@ -447,15 +447,27 @@ const Bubble = memo(function Bubble({
  * the transcript, on a live turn and on a reloaded one alike, and a copy on the answer would be a
  * second record of what was asked. Only for an answer the service lost (`turn_interrupted`) —
  * every other failure keeps its own remedy. Exported for its own test.
+ *
+ * **Only for the question's own sender.** In a shared conversation the service runs a message as
+ * whoever sends it, so a member pressing Retry on somebody else's question would re-ask it under
+ * their own name, roles and memories — another person's words, sent as theirs. Everyone else sees
+ * the interrupted marker and no Retry. Whose a question is follows `senderOf`: a question this
+ * browser sent live carries no author and is the reader's by construction; one read back from the
+ * service is the reader's when its author is the reader. Outside a shared conversation every
+ * question is the reader's.
  */
 export function retryQuestionOf(
   messages: readonly ChatMessage[],
   index: number,
+  shared = false,
+  me: string | null = null,
 ): string | undefined {
   const message = messages[index];
   if (message?.role !== 'assistant' || message.error?.kind !== 'turn_interrupted') return undefined;
   const asked = messages[index - 1];
-  return asked?.role === 'user' ? asked.text : undefined;
+  if (asked?.role !== 'user') return undefined;
+  const mine = !shared || asked.author === undefined || asked.author === me;
+  return mine ? asked.text : undefined;
 }
 
 /**
@@ -732,7 +744,7 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
             message={message}
             sessionId={sessionId}
             sender={senderOf(message, shared, me)}
-            retryQuestion={retryQuestionOf(shown, i)}
+            retryQuestion={retryQuestionOf(shown, i, shared, me)}
           />
         ))}
         <div ref={endRef} className="h-px" />

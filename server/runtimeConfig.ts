@@ -39,6 +39,11 @@ export interface RuntimeConfig {
   logLevel: 'silent' | 'error' | 'warn' | 'info' | 'debug';
   /** The service's message-length cap, so the composer refuses where the service refuses. */
   maxMessageChars: number;
+  /**
+   * The HTML sandbox's origin (wave 3), or `''` when the second listener is not running — so the
+   * SPA never frames an origin this process is not serving. See `sandboxOrigin` in src/env.ts.
+   */
+  sandboxOrigin: string;
 }
 
 const LOG_LEVELS = ['silent', 'error', 'warn', 'info', 'debug'] as const;
@@ -61,6 +66,7 @@ export function runtimeConfig(): RuntimeConfig {
     reviewerRoles: cfg.reviewerRoles,
     logLevel: clientLogLevel(),
     maxMessageChars: cfg.maxMessageChars,
+    sandboxOrigin: cfg.sandboxEnabled ? cfg.sandboxOrigin : '',
   };
 }
 

@@ -25,6 +25,14 @@ export UPSTREAM_CONNECT_TIMEOUT_MS="${UPSTREAM_CONNECT_TIMEOUT_MS:-10000}"
 # PORT is assigned by Replit or falls back to 8100
 export PORT="${PORT:-8099}"
 
+# The HTML sandbox (artefacts wave 3) is NOT defaulted here. This script is what a hosted preview
+# (Replit) runs, where `localhost` is the viewer's own machine: a default would frame whatever the
+# viewer runs on that port and post the artefact's HTML to it. Unset, HTML artefacts are shown as
+# source. To run it, name both origins as the browser reaches them, and route a distinct hostname to
+# SANDBOX_PORT (README, "HTML sandbox"):
+#
+#   SANDBOX_ORIGIN=https://sandbox.example APP_ORIGIN=https://ui.example SANDBOX_PORT=8100 ./start.sh
+
 # Tell the BFF where its built client assets are
 export CLIENT_DIR="$SCRIPT_DIR/dist/client"
 
@@ -43,6 +51,7 @@ fi
 echo "Starting Chemclaw3 UI (BFF) on http://${BIND_HOST}:${PORT}"
 echo "  Proxying /api -> ${CHEMCLAW_API_URL}"
 echo "  Auth mode    : ${AUTH_MODE}"
+echo "  HTML sandbox : ${SANDBOX_ORIGIN:-off (HTML artefacts shown as source)}"
 
 # Node 22+ strips TypeScript types natively — no build step needed for the server
 exec node --experimental-strip-types server/index.ts

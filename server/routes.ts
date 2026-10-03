@@ -157,12 +157,17 @@ const XID = '(xb-[0-9a-f]{16})';
 
 /**
  * What an artefact can be downloaded as from the service. A closed list rather than a pattern,
- * because it is one: the contract's export table names four formats (`xyz` arrived with the
- * `geometry` kind in wave 2) and the service 404s every
- * other one, so admitting a fifth here would forward a request with no answer. SDF and SVG are
+ * because it is one: the contract's export table names five formats (`xyz` arrived with the
+ * `geometry` kind in wave 2, `html` with the `html` kind in wave 3) and the service 404s every
+ * other one, so admitting a sixth here would forward a request with no answer. SDF and SVG are
  * made in the browser and never reach this route.
+ *
+ * `html` is safe to proxy on the app origin only because of how the service sends it —
+ * `text/plain` and `Content-Disposition: attachment` (the frozen contract) — and because this
+ * process replaces any upstream CSP and adds `nosniff` on every response (`proxy.ts`), so even a
+ * mis-typed body could not render as a page here.
  */
-const FMT = '(md|csv|smi|xyz)';
+const FMT = '(md|csv|smi|xyz|html)';
 
 /**
  * Whether a query string is exactly one `ref` that is a calc artifact reference — nothing else.

@@ -173,3 +173,73 @@ jobs:
           # ships), looks in an empty store and tries to pull `chemclaw3-ui:ci` from a registry.
           CONTAINER_RUNTIME: docker
         run: npm run ci:container
+
+  oidc-mock:
+    # The real browser sign-in, against Chemclaw3_mock's stand-in Entra tenant
+    # (`e2e/oidc-mock.spec.ts`; `playwright.oidc-mock.config.ts` has the four processes). Every
+    # other browser test runs `AUTH_MODE=dev`, so before this job nothing on a pull request drove
+    # MSAL at all — and #126 merged green while every first sign-in looped for ever between `/`
+    # and `/c/<id>` with the code never redeemed: 534 navigations and no token request in the
+    # spec's own count. This lane failed on that commit; it is here so the next one cannot merge.
+    #
+    # Its own job rather than a step of `check`: it needs Python and a second repository, it builds
+    # the production bundle the gate does not, and in parallel it costs the pull request no wall
+    # time the gate was not already spending.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # The tenant, **pinned to a commit**, so this lane's verdict is a function of this
+      # repository's inputs: the mock serves the login page and mints the tokens this job trusts,
+      # and a moving `main` would let a change there red (or green) a pull request here with
+      # nothing changed in it. To bump: point `ref:` at a newer Chemclaw3_mock commit SHA
+      # (`gh api repos/8fqycwdt8v-oss/Chemclaw3_mock/commits/main --jq .sha`) in a pull request of
+      # its own, whose run of this job is the proof the new tenant still signs in. No credential:
+      # the repository is public.
+      - name: The Chemclaw3_mock checkout the tenant runs from
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: 8fqycwdt8v-oss/Chemclaw3_mock
+          ref: 74d495f6e544238fa6f32d554d1e071d0c74dd08 # main at #14, 2026-10
+          path: .chemclaw3-mock
+          fetch-depth: 1
+          persist-credentials: false
+
+      - run: npm ci
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      # `pip install -e .` into the checkout's `.venv`, per the mock's README — the path its own
+      # `start.sh` and this lane's config both run it from.
+      - name: The mock tenant's Python environment
+        env:
+          MOCK_DIR: ${{ github.workspace }}/.chemclaw3-mock
+        run: npm run provision:mock-tenant
+
+      # The production bundle (`dist/client`), which is what the lane signs in through.
+      - run: npm run build
+
+      - name: Sign in through a real authority, in a real browser
+        env:
+          MOCK_DIR: ${{ github.workspace }}/.chemclaw3-mock
+        run: npm run test:e2e:oidc-mock
+
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: oidc-mock-traces
+          path: test-results/
+          retention-days: 7

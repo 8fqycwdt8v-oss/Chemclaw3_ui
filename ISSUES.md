@@ -1287,7 +1287,7 @@ a 404 and falls back to stop. An explicit "queued turn started" event from the s
 the guess (Chemclaw3 #503 item 9). Not done here: a new event name has to be admitted by this
 client before the service sends it, and that is a two-step rollout of its own.
 
-## Issue 23: the production sign-in had no browser test; now it has one, outside the gate
+## Issue 23: the production sign-in had no browser test; now it has one, in its own CI job
 
 **Done.** The MSAL authority was hardcoded to `https://login.microsoftonline.com/<tenant>`, so the
 only authority the production auth path could talk to was a real Entra tenant, and no browser test
@@ -1300,10 +1300,13 @@ bearer, and what a Chemclaw3-equivalent validator behind the BFF accepted.
 
 **Still open:**
 
-- **Not in the gate.** It needs a sibling Chemclaw3_mock checkout with its venv and Python on the
-  runner; `.github/workflows/ci.yml` has neither. Wiring it in means a second checkout and a
-  `pip install` there, the way the contract check checks out Chemclaw3 — worth it once the lane is
-  trusted, not before.
+- ~~**Not in the gate.**~~ **Closed, and the cost of waiting is on record.** "Worth it once the
+  lane is trusted, not before" let #126 merge green while every first sign-in looped between `/`
+  and `/c/<id>` for ever (534 navigations, no code redeemed, in this lane's own count) — and this
+  lane, run on that commit, failed every test. It is now the `oidc-mock` job of
+  `.github/workflows/ci.yml`, on every pull request: Chemclaw3_mock checked out at a pinned SHA into
+  `.chemclaw3-mock`, its venv made by `scripts/provision-mock-tenant.mjs`, the production bundle
+  built, the spec run. Still not in `npm run ci`, which stays offline and single-repository.
 - **The validator is a stand-in.** `e2e/oidc-upstream.ts` applies core's four checks; it is not
   core. Core's own `validate_token` and `create_app()` front door were run by hand against tokens
   from the same flow (200 for alice and bob, 401 with no token), not by this lane. Running core
@@ -1320,6 +1323,23 @@ bearer, and what a Chemclaw3-equivalent validator behind the BFF accepted.
   and `check_ins.claim_failed`. Harmless — the page is navigating away — but it is a burst of
   warnings per sign-in in every real deployment's browser log. One sign-in in flight, shared by
   every caller, would remove it.
+
+## Issue 24: an interrupted turn's status is read ahead of the service
+
+A front-door pod killed mid-turn used to lose the turn silently (Chemclaw3 K5 §1): the stream was
+cut with no terminal event, the reattach answered a bare 404, and the chemist's question vanished
+from the transcript while staying in the model's record. Core's
+`D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so` writes the question ahead of
+the turn and marks it `interrupted` once the dead turn's lease lapses, with a 410
+`turn_interrupted` on the reattach. This client reads both — the bubble says "This answer was
+interrupted (the service restarted)" with a Retry that sends the question again, detach recovery
+stops polling the moment the transcript says so, and a reloaded transcript renders `interrupted`,
+`failed` and `stopped` questions with the ending they had.
+
+**Open until the core PR merges:** `TranscriptMessage.turn_status` is held in
+`FIELDS_AHEAD_OF_BACKEND` (`tests/backendContract.test.ts`), because the core main this repository
+checks against does not send it yet. Once core main declares it, the contract test prints that the
+entry is spent: delete it and this row together.
 
 ## Known gaps in the UI rebuild
 

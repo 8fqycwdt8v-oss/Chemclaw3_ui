@@ -19,6 +19,7 @@ const API_URL = process.env.CHEMCLAW_API_URL ?? 'http://127.0.0.1:8080';
 console.log(`\n  Chemclaw3 UI — development`);
 console.log(`  BFF        http://127.0.0.1:${BFF_PORT}`);
 console.log(`  UI         http://127.0.0.1:5173`);
+console.log(`  sandbox    http://127.0.0.1:${process.env.SANDBOX_PORT ?? '8788'}`);
 console.log(`  backend    ${API_URL}\n`);
 
 const children = [];
@@ -47,9 +48,16 @@ process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
 // Node 22 strips TypeScript types natively, so the BFF runs from source with no build step.
+// The HTML sandbox (artefacts wave 3): the BFF's second listener. The app origin is Vite's, because
+// that is the page the browser frames it from; reach the app at exactly that address.
+const SANDBOX_PORT = process.env.SANDBOX_PORT ?? '8788';
+
 start('bff', process.execPath, ['--watch', 'server/index.ts'], {
   PORT: BFF_PORT,
   BIND_HOST: '127.0.0.1',
+  SANDBOX_PORT,
+  APP_ORIGIN: process.env.APP_ORIGIN ?? 'http://127.0.0.1:5173',
+  SANDBOX_ORIGIN: process.env.SANDBOX_ORIGIN ?? `http://127.0.0.1:${SANDBOX_PORT}`,
   CHEMCLAW_API_URL: API_URL,
   // The dev server serves the client; the BFF only proxies and serves /config.js.
   CLIENT_DIR: 'dist/client',

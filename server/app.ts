@@ -33,6 +33,8 @@ import { readiness } from './ready.ts';
 import { renderMetrics, requestFinished, requestStarted } from './metrics.ts';
 import { CORRELATION_HEADER, mintCorrelationId } from './correlation.ts';
 import type { RequestTrace } from './proxy.ts';
+import { createSandboxHandler } from './sandbox.ts';
+import { SANDBOX_FRAME_PATH } from '../shared/sandbox.ts';
 
 /**
  * The headers that make this origin safe to be, applied to **every** response.
@@ -382,6 +384,16 @@ export function createRequestListener(): http.RequestListener {
       return;
     }
 
+    if (path === SANDBOX_FRAME_PATH) {
+      // Never on the app's origin (`server/sandbox.ts`). Answered here, explicitly, because the
+      // asset handler below falls back to `index.html` for any extensionless path — so without
+      // this line the app would serve *something* at the sandbox's path on the token's origin.
+      trace.route = SANDBOX_FRAME_PATH;
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('Not Found');
+      return;
+    }
+
     assets(req, res, () => {
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('Not Found');
@@ -397,6 +409,46 @@ export function createRequestListener(): http.RequestListener {
  * are operator-settable, so the clamp is here rather than in the operator's head.
  */
 const headersTimeout = Math.min(cfg.headersTimeoutMs, cfg.requestTimeoutMs);
+
+/** The socket-level options both listeners share — see `createBffServer` for each one's reason. */
+function serverOptions(): http.ServerOptions {
+  return {
+    connectionsCheckingInterval: Math.max(1_000, Math.min(30_000, Math.floor(headersTimeout / 4))),
+    requestTimeout: cfg.requestTimeoutMs,
+    keepAliveTimeout: 120_000,
+    headersTimeout,
+  };
+}
+
+/**
+ * The HTML sandbox's listener (wave 3), configured but not listening — `index.ts` starts it only
+ * when `cfg.sandboxEnabled`.
+ *
+ * A server of its own rather than a second route table on this one, because what makes it a
+ * sandbox is that it is a *different origin*, and a port is the smallest unit of one this process
+ * can offer; a deployment puts a distinct hostname in front of it. It serves `server/sandbox.ts`'s
+ * one page and nothing else — no assets, no `/config.js`, no proxy, no `/healthz` (the app
+ * listener's probes cover the process; a probe on this port would be one more path to keep honest)
+ * — and it never carries the app's own security headers, because they say `frame-ancestors 'none'`
+ * and this page exists to be framed by the app.
+ *
+ * Every response is observed like every other this process writes: one access line and the same
+ * counters, labelled by route pattern.
+ */
+export function createSandboxServer(appOrigin: string = cfg.appOrigin): http.Server {
+  const handle = createSandboxHandler(appOrigin);
+  const server = http.createServer(serverOptions(), (req, res) => {
+    const trace: RequestTrace = {
+      route: 'sandbox:other',
+      upstreamMs: null,
+      correlationId: mintCorrelationId(),
+    };
+    observe(req, res, trace);
+    trace.route = handle(req, res);
+  });
+  server.maxConnections = cfg.maxConnections;
+  return server;
+}
 
 /** The server, configured but not listening. */
 export function createBffServer(): http.Server {

@@ -190,6 +190,56 @@ document's. The document never gets it. A proxy or CDN in front of the BFF must 
 through per path, not overwrite every response with one policy — or no structure is drawn
 (`ISSUES.md` Issue 10).
 
+### HTML sandbox (artefacts)
+
+An `html` artefact is markup and script the agent wrote. It never runs on the app's origin, which
+holds the bearer token: it is shown in a frame served by the BFF's **second listener**, on a
+different origin, embedded with `sandbox="allow-scripts"` and nothing else (no `allow-same-origin`,
+`allow-popups`, `allow-top-navigation`, `allow-forms` or `allow-modals`). That listener serves
+`GET /sandbox/frame` and nothing else, under `default-src 'none'; connect-src 'none'` and
+`frame-ancestors <APP_ORIGIN>`; the app listener answers that path with a 404.
+
+**Scripts are off by default.** The script `allow-scripts` permits is the shell's own: it puts the
+artefact in a nested `srcdoc` frame with `sandbox=""`, so the artefact's own script does not run. A
+per-view **Run scripts** button (never persisted; a new revision or a reload turns it off again)
+re-renders it with `allow-scripts`, after a warning naming what that still allows:
+
+- **Network egress over WebRTC.** CSP does not govern WebRTC — measured under this shell, a scripted
+  page sent UDP carrying data it read to an arbitrary host through a STUN candidate, and Chromium
+  ignores `webrtc 'block'`. A scripted render gets a prelude that removes `RTCPeerConnection`,
+  `webkitRTCPeerConnection` and `RTCDataChannel` from the page's realm; that is defence in depth and
+  **bypassable** (a nested `srcdoc` realm is untouched). So this is not a "no network" sandbox. A
+  deployment that can should set the browser policy **`WebRtcIPHandling=disable_non_proxied_udp`**
+  (Chrome/Edge enterprise policy), which stops non-proxied UDP from WebRTC.
+- **Clipboard writes** after one click in the frame.
+- **Self-navigation, bounded by `frame-src`.** The outer frame can only be navigated to an origin the
+  app's CSP lists in `frame-src`: the sandbox origin — and, in MSAL mode, the Entra authority, which
+  the hidden-iframe token refresh needs. Measured: self-navigation, meta refresh, anchor clicks and
+  `data:`/`blob:` navigations to anywhere else are refused. The nested content frame is bounded by
+  the shell's `default-src 'none'`, which lists no frame source at all.
+
+| Variable            | Value                                                                                                 |
+| ------------------- | ----------------------------------------------------------------------------------------------------- |
+| `SANDBOX_ORIGIN`    | the origin the browser reaches the sandbox at, e.g. `https://sandbox.ui.example`                      |
+| `APP_ORIGIN`        | the origin the browser reaches the app at, e.g. `https://ui.example` — required with `SANDBOX_ORIGIN` |
+| `SANDBOX_PORT`      | the second listener's port (default `8081`)                                                           |
+| `SANDBOX_BIND_HOST` | its bind address (default: `BIND_HOST`)                                                               |
+
+**A deployment must give the sandbox a distinct hostname** — its own Route/Ingress host pointing at
+the pod's `SANDBOX_PORT`, with TLS like the app's (an https app cannot frame an http sandbox). A
+different port on the same host is a different origin, which is all the frame strictly needs, and
+is what local dev and compose use; but it is the same _site_, so the BFF logs a warning when the two
+share a non-loopback hostname. Both origins must be exact: the shell takes content only from
+`APP_ORIGIN`, so a chemist reaching the app at an address other than `APP_ORIGIN` sees a blank frame.
+The BFF refuses to start when `SANDBOX_ORIGIN` is set without `APP_ORIGIN`, equals it, or carries a
+path. Unset, the second listener does not start, `/config.js` serves `sandboxOrigin: ""`, and HTML
+artefacts are shown as escaped source with the notice "HTML preview needs a separate sandbox origin".
+The CSP gains `frame-src <SANDBOX_ORIGIN>` only when the sandbox is on.
+
+Locally, `npm run dev` and `docker compose` set both origins for you; `start.sh` does not (it is
+also what a hosted preview runs, where `localhost` would be the _viewer's_ machine), so set
+`SANDBOX_ORIGIN`/`APP_ORIGIN` there yourself or HTML artefacts are shown as source.
+
 ## Layout
 
 ```
@@ -318,7 +368,7 @@ npm run check:standalone# dist/server.js runs with no node_modules, as the image
 npm run check:no-dev-auth
 npm run check:serving   # the four promises a running UI makes, against any base URL
 npm run test:e2e        # Playwright — layout, focus, keyboard, theme, mobile drawer
-npm run test:e2e:oidc-mock  # real MSAL sign-in against Chemclaw3_mock's tenant (not in the gate)
+npm run test:e2e:oidc-mock  # real MSAL sign-in against Chemclaw3_mock's tenant (CI's oidc-mock job)
 ```
 
 `npm run smoke` and `npm run check:openapi` are deliberately **not** in the gate: both need a live
@@ -373,9 +423,14 @@ signs alice in in one browser context and bob in another through the tenant's lo
 checks that each page shows its own person, that each sends a bearer naming its own person, and
 that `e2e/oidc-upstream.ts` — which validates every forwarded bearer with Chemclaw3's four checks
 before handing the request to the fixture — saw both of them and refused nothing. A second test
-signs out through the tenant's end-session endpoint and checks the next sign-in asks again. It
-needs a sibling Chemclaw3_mock checkout with its venv (`MOCK_DIR`, default `../Chemclaw3_mock`)
-and `npm run build` first, so it is not in the gate (`ISSUES.md` Issue 23).
+signs out through the tenant's end-session endpoint and checks the next sign-in asks again. Three
+more sign in from `/`, from a deep link and from a signed-out `/open/<id>`, and count: one code
+back on `/auth/callback`, one redeemed, and a URL that stops moving on the person's own
+conversation — the sign-in loop #126 shipped made 534 navigations and redeemed nothing. It needs a
+Chemclaw3_mock checkout with its venv (`MOCK_DIR`, default `../Chemclaw3_mock`;
+`npm run provision:mock-tenant` makes the venv) and `npm run build` first, so it is not
+in `npm run ci` (`ISSUES.md` Issue 23) — it is the workflow's own `oidc-mock` job instead, on every
+pull request.
 
 `test:e2e` runs the real BFF against `e2e/fixture-service.ts`, which emits SSE frames with real
 gaps between them. Stubbing the network inside the page would hand the whole body over at once and
@@ -417,7 +472,9 @@ an operator rather than by either pipeline; see Testing above for why they are o
 what `check:live` is and is not.
 
 This repository ships no chart, so a rollout is `oc set image` against a Deployment an operator
-created. The four-repository release, its ordering (the UI last — it is useless before the API it
+created. That Deployment owes the HTML sandbox a second container port (`SANDBOX_PORT`, default
+8081), a Service port for it, and a Route on a **distinct hostname** — see "HTML sandbox" under
+Configuration. The four-repository release, its ordering (the UI last — it is useless before the API it
 proxies answers) and the reasoning are in Chemclaw3: `deploy/jenkins/README.md` and
 `D-2026-08-26-a-release-is-a-descriptor-and-a-target`.
 

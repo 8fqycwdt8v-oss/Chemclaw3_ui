@@ -9,9 +9,10 @@
  * behind the real BFF, against the mock tenant's authorize/token/logout endpoints.
  *
  * **Not part of `npm run ci` and not in the default suite** (`playwright.config.ts` ignores the
- * spec): it needs a sibling Chemclaw3_mock checkout with its venv, and Python on the runner. Run it
- * by hand:
+ * spec): it needs a Chemclaw3_mock checkout with its venv, and Python on the runner. It runs on
+ * every pull request as the `oidc-mock` job of `.github/workflows/ci.yml`; by hand:
  *
+ *   MOCK_DIR=../Chemclaw3_mock npm run provision:mock-tenant   # once: the mock's .venv
  *   npm run build
  *   MOCK_DIR=../Chemclaw3_mock npm run test:e2e:oidc-mock
  *

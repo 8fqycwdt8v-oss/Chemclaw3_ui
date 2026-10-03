@@ -51,7 +51,10 @@ export default tseslint.config(
   // because `RUN_GATE` ships `false`, and that parameter is a supported flip rather than a
   // decision: ticking the box reds the lane that ships the image, on another repository's file.
   //
-  // Neither name is free to change here alone: `tests/delivery.test.ts` derives every in-workspace
+  // `.chemclaw3-mock/**` is the workflow's `oidc-mock` job's checkout of Chemclaw3_mock (Python,
+  // but a `.js` under it would be linted all the same).
+  //
+  // None of these names is free to change here alone: `tests/delivery.test.ts` derives every in-workspace
   // sibling checkout from *both* pipelines and asserts all four surfaces cover each one — this
   // list, `.prettierignore`, `.gitignore` and `.dockerignore` — because two declarations of one
   // directory with nothing reconciling them is how the next lane grows a blind spot.
@@ -63,6 +66,7 @@ export default tseslint.config(
       'test-results/**',
       '.claude/worktrees/**',
       '.chemclaw3/**',
+      '.chemclaw3-mock/**',
       '.jenkins-lib/**',
     ],
   },

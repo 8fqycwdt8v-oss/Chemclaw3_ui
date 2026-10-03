@@ -410,6 +410,15 @@ export interface JobSummary {
   molecule_smiles?: string;
   total_energy_hartree?: number;
   converged?: boolean;
+  /** A development report's `report` note (`request_development_report`). */
+  note_id?: string;
+  /**
+   * The `document` artefact a development report also wrote into the session that asked for it
+   * (artefacts wave 2, G1) — `xb-` plus sixteen hex, deterministic per workflow so a retried
+   * activity names the same one. What the job card's **Open report** focuses. Unverified like every
+   * key here: `reportExhibitOf` holds it to `EXHIBIT_ID_RE` before anything opens on it.
+   */
+  exhibit_id?: string;
   [key: string]: unknown;
 }
 

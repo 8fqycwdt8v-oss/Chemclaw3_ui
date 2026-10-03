@@ -178,4 +178,40 @@ describe('JobFeed', () => {
     fireEvent.click(screen.getByLabelText('Dismiss job qm-abc123'));
     expect(screen.queryByText('qm-abc123')).toBeNull();
   });
+
+  it('offers Open report on a report job and focuses that artefact in the pane (G1)', async () => {
+    const { useExhibitPane } = await import('../src/state/exhibitPane.ts');
+    useExhibitPane.setState({ open: false, sheetOpen: false, focus: {} });
+    useChatStore.setState({
+      conversations: {
+        'c-report': {
+          ...useChatStore.getState().conversations['c-report'],
+          id: 'c-report',
+          sessionId: SID,
+          title: 'Process report',
+        } as never,
+      },
+      activeId: 'c-report',
+    });
+    useChatStore.getState().pushJobFinished(
+      {
+        type: 'job_completed',
+        job_id: 'report-1',
+        summary: { note_id: 'report-amination', exhibit_id: 'xb-00aa11bb22cc33dd' },
+      },
+      SID,
+    );
+    renderFeed();
+    fireEvent.click(screen.getByRole('button', { name: 'Open report' }));
+    const pane = useExhibitPane.getState();
+    expect(pane.open).toBe(true);
+    expect(pane.focus[SID]).toEqual({ exhibitId: 'xb-00aa11bb22cc33dd', revision: 0 });
+  });
+
+  it('offers no Open report when the summary names no artefact, or one this service never minted', () => {
+    push(completion('qm-1'));
+    push(completion('qm-2', { exhibit_id: 'not-an-artefact' }));
+    renderFeed();
+    expect(screen.queryByRole('button', { name: 'Open report' })).toBeNull();
+  });
 });

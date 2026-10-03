@@ -300,6 +300,49 @@ for (const theme of ['light', 'dark'] as const) {
       await scan(page);
     });
 
+    test('linked values and a sandboxed HTML artefact in the artefact pane', async ({
+      page,
+      isMobile,
+    }) => {
+      // Wave 3: provenance markers (buttons named by their tool and pointer, one of them for a
+      // source that is gone, with the strip above), then the HTML view — whose frame must carry a
+      // title, and whose content axe scans *inside* the cross-origin frame.
+      await seedArtefactConversation(page, 'e2e-a11y-wave3', '1'.repeat(32));
+      await page.goto('/c/e2e-a11y-wave3');
+      await page
+        .getByRole('button', { name: isMobile ? 'Artefacts (3)' : 'Show artefacts (3)' })
+        .click();
+      const pane = isMobile
+        ? page.getByRole('dialog', { name: 'Artefacts' })
+        : page.getByRole('complementary', { name: 'Artefacts' });
+      const picker = pane.getByRole('combobox', { name: 'Artefact' });
+
+      await picker.selectOption('xb-3b0000000000b001');
+      await expect(
+        pane.getByRole('button', { name: 'From predict_yield, /0/yield' }),
+      ).toBeVisible();
+      await expect(
+        pane.getByRole('note').filter({ hasText: 'source no longer available' }),
+      ).toBeVisible();
+      await scan(page);
+
+      await pane.getByRole('button', { name: 'From predict_yield, /0/yield' }).click();
+      await expect(page.getByRole('dialog', { name: 'Where this value came from' })).toBeVisible();
+      await scan(page);
+      await page.keyboard.press('Escape');
+
+      await picker.selectOption('xb-3b0000000000b003');
+      const frame = pane.locator('iframe[title="Sandbox probe — sandboxed HTML preview"]');
+      await expect(frame).toBeVisible();
+      await expect(
+        page
+          .frameLocator('iframe[title="Sandbox probe — sandboxed HTML preview"]')
+          .locator('#popup'),
+      ).not.toHaveText('pending');
+      await expectTheme(page, theme);
+      await scan(page);
+    });
+
     test('a report being drafted in the artefact pane', async ({ page, isMobile }) => {
       // The draft: a heading, one polite status, and a busy body of rendered Markdown. At `lg`
       // only, where the draft opens the column by itself (`e2e/exhibits.spec.ts` says why).

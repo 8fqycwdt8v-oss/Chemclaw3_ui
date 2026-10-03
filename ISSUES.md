@@ -1304,7 +1304,7 @@ bearer, and what a Chemclaw3-equivalent validator behind the BFF accepted.
   lane is trusted, not before" let #126 merge green while every first sign-in looped between `/`
   and `/c/<id>` for ever (534 navigations, no code redeemed, in this lane's own count) — and this
   lane, run on that commit, failed every test. It is now the `oidc-mock` job of
-  `.github/workflows/ci.yml`, on every pull request: Chemclaw3_mock checked out at `main` into
+  `.github/workflows/ci.yml`, on every pull request: Chemclaw3_mock checked out at a pinned SHA into
   `.chemclaw3-mock`, its venv made by `scripts/provision-mock-tenant.mjs`, the production bundle
   built, the spec run. Still not in `npm run ci`, which stays offline and single-repository.
 - **The validator is a stand-in.** `e2e/oidc-upstream.ts` applies core's four checks; it is not

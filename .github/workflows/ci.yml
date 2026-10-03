@@ -201,14 +201,18 @@ jobs:
         with:
           python-version: '3.12'
 
-      # The tenant. `main`, like the Chemclaw3 checkout's default: the mock is a test double whose
-      # whole value is tracking what MSAL and the service expect today, so a change there that
-      # breaks sign-in should red here. No credential: the repository is public.
+      # The tenant, **pinned to a commit**, so this lane's verdict is a function of this
+      # repository's inputs: the mock serves the login page and mints the tokens this job trusts,
+      # and a moving `main` would let a change there red (or green) a pull request here with
+      # nothing changed in it. To bump: point `ref:` at a newer Chemclaw3_mock commit SHA
+      # (`gh api repos/8fqycwdt8v-oss/Chemclaw3_mock/commits/main --jq .sha`) in a pull request of
+      # its own, whose run of this job is the proof the new tenant still signs in. No credential:
+      # the repository is public.
       - name: The Chemclaw3_mock checkout the tenant runs from
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: 8fqycwdt8v-oss/Chemclaw3_mock
-          ref: main
+          ref: 74d495f6e544238fa6f32d554d1e071d0c74dd08 # main at #14, 2026-10
           path: .chemclaw3-mock
           fetch-depth: 1
           persist-credentials: false

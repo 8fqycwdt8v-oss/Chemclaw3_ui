@@ -179,4 +179,33 @@ describe('a signed-out visitor on an /open/ link (#132)', () => {
     expect(useChatStore.getState().order).toEqual([]);
     expect(screen.getByText('Signing in to open the conversation…')).toBeTruthy();
   });
+
+  it('says so, and offers to try again, when the sign-in cannot start', async () => {
+    const sessionId = 'a'.repeat(32);
+    const login = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(
+        new Error('interaction_in_progress: Interaction is currently in progress.'),
+      )
+      .mockResolvedValueOnce(undefined);
+    renderAt(`/open/${sessionId}`);
+    auth.resolve(msal(null, login));
+    await flush();
+
+    // Not a spinner for ever: the failure, in its own words, and a way out.
+    expect(login).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('alert').textContent).toMatch(/interaction_in_progress/);
+    expect(screen.queryByText('Signing in to open the conversation…')).toBeNull();
+    expect(visited).toEqual([`/open/${sessionId}`]);
+    expect(useChatStore.getState().order).toEqual([]);
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'Try again' }).click();
+    });
+    await flush();
+
+    expect(login).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByText('Signing in to open the conversation…')).toBeTruthy();
+  });
 });

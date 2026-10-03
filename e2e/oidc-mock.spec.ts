@@ -281,3 +281,16 @@ test('a signed-out visitor on an /open/ link signs in and lands on that conversa
   const id = new URL(at).pathname.split('/')[2] ?? '';
   expect((await persistedFor(trace.page, ALICE))[id]?.sessionId).toBe(sessionId);
 });
+
+test('a sign-in started on a conversation link lands on the person’s own conversation (#126)', async ({
+  browser,
+}) => {
+  // A `/c/<id>` minted in the anonymous slot is not in the person's own, so `signInStartPage`
+  // returns them to `/` instead — the other half of the round trip the loop broke.
+  const trace = await signInFrom(browser, BOB, '/c/00000000-0000-4000-8000-000000000000');
+  const at = await expectSettledAt(trace, /^http:\/\/127\.0\.0\.1:4341\/c\/[^/]+$/);
+  expectOneRoundTrip(trace);
+  await expect(trace.page.getByText('That conversation isn’t on this device')).toHaveCount(0);
+  const id = new URL(at).pathname.split('/')[2] ?? '';
+  expect(Object.keys(await persistedFor(trace.page, BOB))).toContain(id);
+});

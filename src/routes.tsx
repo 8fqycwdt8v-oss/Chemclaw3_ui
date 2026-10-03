@@ -48,7 +48,7 @@
  * `e2e/oidc-mock.spec.ts` counts the navigations of a real sign-in, from `/` and from deep links.
  */
 
-import { lazy, Suspense, useEffect, useRef } from 'react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { Navigate, Route, Routes, useNavigate, useParams } from 'react-router';
 import { useChatStore, newConversation } from './state/chatStore.ts';
 import { keys, queryClient } from './api/queryClient.ts';
@@ -209,16 +209,22 @@ function SessionResolver(): React.JSX.Element {
   // an `/open/` path, MSAL returns to it, and the adoption below runs in their own slot.
   const mustSignIn = valid && ready && auth.mode === 'msal' && !auth.account;
   const signingIn = useRef(false);
+  // A sign-in that could not *start* — the authority unreachable, a stale `interaction_in_progress`
+  // left by an abandoned attempt — rejects here rather than navigating. Swallowing it left the
+  // reader on "Signing in…" for ever with nothing to act on, so it is shown with a way to try again.
+  const [failure, setFailure] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     if (!mustSignIn || signingIn.current) return;
-    // Once per mount: StrictMode runs effects twice, and a second `loginRedirect` while the first
+    // Once per attempt: StrictMode runs effects twice, and a second `loginRedirect` while the first
     // is navigating fails with `interaction_in_progress`.
     signingIn.current = true;
-    void auth.login().catch(() => {
+    auth.login().catch((err: unknown) => {
       signingIn.current = false;
+      setFailure(err instanceof Error && err.message ? err.message : 'Sign-in could not start.');
     });
-  }, [mustSignIn, auth]);
+  }, [mustSignIn, auth, attempt]);
 
   useEffect(() => {
     // Not before auth has settled: this page can be where a sign-in returns to, and MSAL redeems
@@ -262,6 +268,34 @@ function SessionResolver(): React.JSX.Element {
           detail="A conversation link ends in a 32-character session id. Check it was copied whole."
         />
       </AppShell>
+    );
+  }
+  if (mustSignIn && failure !== null) {
+    // Not inside `AppShell`: the shell's panels fetch on mount, and every fetch while signed out
+    // starts a sign-in of its own — the very thing that just failed.
+    return (
+      <div className="flex flex-1 items-center justify-center p-8">
+        <div
+          role="alert"
+          className="max-w-md rounded-xl border border-border-subtle bg-surface-raised p-5 shadow-sm"
+        >
+          <h2 className="font-semibold">Couldn’t start signing in</h2>
+          <p className="mt-1.5 text-sm text-ink-muted">
+            This link opens a conversation once you are signed in. {failure}
+          </p>
+          <div className="mt-4">
+            <Button
+              size="sm"
+              onClick={() => {
+                setFailure(null);
+                setAttempt((n) => n + 1);
+              }}
+            >
+              Try again
+            </Button>
+          </div>
+        </div>
+      </div>
     );
   }
   return (

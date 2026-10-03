@@ -27,8 +27,11 @@
  *    so it comes from the environment by the rule core's `deploy/kind/up.sh` applies:
  *    `CHEMCLAW_KIND_LLM=live` (or `CHEMCLAW_E2E_MODEL=real`) is a real model, anything else is the
  *    scripted mock. Against the mock a scenario drives the mock's behaviour markers (`[[a-cheap]]`,
- *    `[[f-slow]]`, …) and asserts wiring; a claim that only a model *deciding* something can make
- *    (it proposed a plan, it cited a record, it respected a preference) skips with the reason.
+ *    `[[f-slow]]`, and the `[[e2e:…]]` workflows — plan, remember/conditions, cite, long-job,
+ *    slow; core `deploy/kind/README.md`) and asserts the wiring. The newest marked message in a
+ *    conversation decides, and an unmarked follow-up inherits it. What only a model *deciding*
+ *    something can show (that it would choose to plan, cite, or honour a preference) is the live
+ *    lane's question; `requireRealModel` skips a claim that has no mock stand-in at all.
  *
  * Environment: `CHEMCLAW_UI_URL` (default http://127.0.0.1:15173), `CHEMCLAW_API_URL` (the front
  * door, default http://127.0.0.1:18000), `CHEMCLAW_KIND_AUTHORITY` (default the mock tenant on
@@ -87,6 +90,9 @@ export default defineConfig({
   reporter: [['list'], ['html', { open: 'never', outputFolder: 'playwright-report-kind' }]],
   outputDir: 'test-results-kind',
   metadata: lane as unknown as Record<string, unknown>,
+  // Gates the run on both `/readyz` answering 200 steadily — a suite started mid-rollout failed on
+  // flapping probes, which read as product defects. See `e2e/kind/global-setup.ts`.
+  globalSetup: './e2e/kind/global-setup.ts',
   timeout: 300_000,
   expect: { timeout: 30_000 },
 

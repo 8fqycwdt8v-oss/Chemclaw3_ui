@@ -64,9 +64,11 @@ export const say = (mock: string, real: string): string => (realModel() ? real :
 /**
  * Skip the rest of a scenario whose claim is a *model decision* when there is no model.
  *
- * The scripted mock does not read the question (`chemclaw.cli.mock_llm`): it answers by marker. A
- * claim like "it proposed a plan" or "it cited the record" measures the script against it, so it is
- * skipped with the reason on the line rather than asserted into a meaningless green.
+ * The scripted mock answers by marker (`chemclaw.cli.mock_llm`), and core's `[[e2e:…]]` catalogue
+ * scripts the workflows a browser needs — a plan, a stored and honoured preference, a citation, a
+ * long job, a slow turn — so those scenarios drive it and assert the plumbing. A claim with no
+ * scripted stand-in would measure the script against itself, so it is skipped with the reason on
+ * the line rather than asserted into a meaningless green. (No scenario needs it today.)
  */
 export function requireRealModel(what: string): void {
   base.skip(
@@ -252,6 +254,21 @@ export async function sessionIdOf(page: Page): Promise<string> {
   expect(ids.length, 'the active conversation has no service session yet').toBeGreaterThan(0);
   return ids[0]!;
 }
+
+/**
+ * A knowledge-note citation chip's accessible name: the note prefixes `src/lib/citations.ts` turns
+ * into chips (every id `knowledge/` files a note under). An ELN/ORD record is `reaction-…` instead.
+ */
+export const NOTE_CHIP =
+  /^(?:compound|rxn|playbook|campaign|opt|interaction|report|failure|proposal|bo-candidate|job-result)-/;
+
+/**
+ * Any citation chip's accessible name: an ELN/ORD record (`reaction-…`) or a knowledge note.
+ * Built from `NOTE_CHIP` rather than spelled out again, so the two cannot drift — a hand-written
+ * copy missed six note prefixes, and a failure then claimed "no clickable citation" beside a
+ * `proposal-…` chip it simply had not been told about.
+ */
+export const CITATION_CHIP = new RegExp(`^(?:reaction-|${NOTE_CHIP.source.replace(/^\^/, '')})`);
 
 /** A tag that makes this run's conversations findable in a sidebar the cluster keeps. */
 export const runTag = (): string => `k4-${Date.now().toString(36)}`;

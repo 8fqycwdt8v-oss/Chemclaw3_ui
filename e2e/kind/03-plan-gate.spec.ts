@@ -14,7 +14,8 @@ import {
   newConversation,
   openTrace,
   realModel,
-  requireRealModel,
+  runTag,
+  say,
   test,
   toolsCalled,
 } from './lane.ts';
@@ -30,9 +31,18 @@ async function choosePlanProfile(page: Page): Promise<void> {
   await picker.selectOption(PLAN_PROFILE);
 }
 
-const PLAN_ASK =
-  'Compute the GFN2-xTB reaction energy of N2 + 3 H2 -> 2 NH3 at 298 K with ' +
-  'compute_reaction_energy. Propose the plan first and wait for my approval before running it.';
+/**
+ * The ask that should end in a plan card. On the mock, `[[e2e:plan]]` writes a one-step plan
+ * declaring `compute_reaction_energy` on its marked turn, and calls it on any later turn — the
+ * follow-up is unmarked and inherits the behaviour, so the gate (not the script) decides whether
+ * that call runs. The run tag keeps each scenario's conversation its own.
+ */
+const PLAN_ASK = (tag: string): string =>
+  say(
+    `[[e2e:plan]] ${tag} compute the ammonia reaction energy`,
+    `${tag}: Compute the GFN2-xTB reaction energy of N2 + 3 H2 -> 2 NH3 at 298 K with ` +
+      'compute_reaction_energy. Propose the plan first and wait for my approval before running it.',
+  );
 
 /** The plan card's two decisions, scoped to the last answer so an older card cannot answer. */
 const planCard = (page: Page) => ({
@@ -64,11 +74,10 @@ test('an unapproved state-changing call is refused, and the refusal says why', a
 });
 
 test('a proposed plan is shown, approved, and then executed', async ({ alice }) => {
-  requireRealModel('proposing a plan');
   const { page } = alice;
   await newConversation(page);
   await choosePlanProfile(page);
-  await ask(page, PLAN_ASK);
+  await ask(page, PLAN_ASK(runTag()));
 
   const { approve } = planCard(page);
   await expect(approve, 'no plan card with an Approve control').toBeEnabled();
@@ -87,14 +96,16 @@ test('a proposed plan is shown, approved, and then executed', async ({ alice }) 
   await expect(
     trace.getByRole('region', { name: 'Result preview from compute_reaction_energy' }).first(),
   ).not.toBeEmpty();
+  if (!realModel()) {
+    await expect(lastAnswer(page)).toContainText('I ran the approved step');
+  }
 });
 
 test('a declined plan runs nothing', async ({ alice }) => {
-  requireRealModel('proposing a plan');
   const { page } = alice;
   await newConversation(page);
   await choosePlanProfile(page);
-  await ask(page, PLAN_ASK);
+  await ask(page, PLAN_ASK(runTag()));
 
   const { decline } = planCard(page);
   await expect(decline, 'no plan card with a Decline control').toBeEnabled();
@@ -104,9 +115,15 @@ test('a declined plan runs nothing', async ({ alice }) => {
     lastAnswer(page).getByText('You declined this plan. Nothing will run.'),
   ).toBeVisible();
 
-  // Asking it to go ahead anyway is refused by the gate, not obeyed.
+  // Asking it to go ahead anyway is refused by the gate, not obeyed. On the mock the follow-up
+  // inherits `[[e2e:plan]]`, which *does* try the call — so there the gate's refusal is asserted
+  // outright; a real model may also decline on its own, which is just as correct.
   await ask(page, 'Go ahead and run it now.');
   const names = await toolsCalled(page).catch(() => [] as string[]);
+  if (!realModel()) {
+    expect(names, `tools: ${names.join(', ')}`).toContain('compute_reaction_energy');
+    await expect(lastAnswer(page)).toContainText('The plan gate refused compute_reaction_energy');
+  }
   if (names.includes('compute_reaction_energy')) {
     const trace = await openTrace(page);
     await expect(trace.getByText(/approv|plan/i).first()).toBeVisible();

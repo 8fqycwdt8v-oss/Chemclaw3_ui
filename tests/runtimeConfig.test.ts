@@ -64,6 +64,10 @@ const ENV: Record<string, string> = {
   // Wave 3: both set and different, so the sandbox is on and its origin crosses the seam.
   SANDBOX_ORIGIN: 'https://sandbox-from-the-server.example',
   APP_ORIGIN: 'https://app-from-the-server.example',
+  // Hardening: `on` crosses as `true`, which is not what the SPA falls back to (`false`).
+  HTML_SCRIPTS_DEFAULT: 'on',
+  // Not the github.com default the SPA falls back to.
+  DOCS_BASE_URL: 'https://docs-from-the-server.example/ui/',
 };
 
 /** Boot the server half against `ENV` and hand back its config plus the script it would serve. */
@@ -146,6 +150,11 @@ describe('what /config.js actually delivers', () => {
     // Wave 3: an origin that failed to cross reads as `''`, which shows every HTML artefact as
     // source — a working-looking downgrade nobody would trace to this seam.
     expect(client.sandboxOrigin).toBe('https://sandbox-from-the-server.example');
+    // Hardening: the app origin, which the html view compares with the page's own, and the scripts
+    // default — `true` here, against the SPA's closed `false` fallback.
+    expect(client.appOrigin).toBe('https://app-from-the-server.example');
+    expect(client.htmlScriptsDefault).toBe(true);
+    expect(client.docsBaseUrl).toBe('https://docs-from-the-server.example/ui/');
     // `false` and not the `true` default: a boolean that failed to cross reads as its fallback,
     // which for this one is the *on* state and therefore invisible.
     expect(client.warmSessions).toBe(false);
@@ -180,6 +189,9 @@ describe('what /config.js actually delivers', () => {
       maxMessageChars: 100_000,
       sharedPollMs: 5_000,
       sandboxOrigin: '',
+      appOrigin: '',
+      htmlScriptsDefault: false,
+      docsBaseUrl: '',
     });
 
     expect(script).not.toContain('</script>');

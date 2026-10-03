@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { DRAWN_ATOM_LIMIT, GeometryViewer } from '../src/components/chem/GeometryViewer.tsx';
 import { GeometryView } from '../src/components/exhibits/views/GeometryView.tsx';
+import { GoneSourcesStrip } from '../src/components/exhibits/Provenance.tsx';
+import { goneBindings } from '../src/components/exhibits/bindings.ts';
 import { parseXyz } from '../src/chem/geometry.ts';
 import { queryClient } from '../src/api/queryClient.ts';
 import { decodeExhibitView, type ExhibitView, type GeometrySpec } from '../shared/exhibits.ts';
@@ -203,7 +205,49 @@ describe('the geometry spec', () => {
     expect(geometryView({}).spec).toBeNull();
     expect(geometryView({ xyz: WATER, highlight_atoms: [-1] }).spec).toBeNull();
   });
+
+  it('stores exactly one of xyz, source and structure_id (hardening item 1)', () => {
+    const raw = (spec: Record<string, unknown>) =>
+      decodeExhibitView({
+        ...VIEW,
+        kind: 'geometry',
+        spec: { kind: 'geometry', xyz: WATER },
+        raw_spec: { kind: 'geometry', ...spec },
+      }).raw_spec;
+    expect(raw({ structure_id: 'st-water' })).toMatchObject({ structure_id: 'st-water' });
+    expect(raw({ structure_id: 'st-water', xyz: WATER })).toBeNull();
+    expect(
+      raw({ structure_id: 'st-water', source: { calc_key: 'k@1:a:b', name: 'x.xyz' } }),
+    ).toBeNull();
+    expect(raw({ structure_id: '' })).toBeNull();
+  });
+
+  it('reads a resolved structure_id as the xyz it resolved to, or as nothing when it vanished', () => {
+    expect(geometryView({ structure_id: 'st-water', xyz: WATER }).spec).toMatchObject({
+      structure_id: 'st-water',
+      xyz: WATER,
+    });
+    // Vanished: no xyz. Readable, so the view can say so rather than "cannot show".
+    expect(geometryView({ structure_id: 'st-gone' }).spec).toMatchObject({
+      structure_id: 'st-gone',
+    });
+    expect(
+      geometryView({ structure_id: 'st-x', source: { calc_key: 'k@1:a:b', name: 'x.xyz' } }).spec,
+    ).toBeNull();
+  });
 });
+
+/** A geometry whose cited structure did not resolve, as the service serves it, with its reason. */
+const vanished = (error: string): ExhibitView & { spec: GeometrySpec } =>
+  decodeExhibitView({
+    ...VIEW,
+    kind: 'geometry',
+    spec: { kind: 'geometry', structure_id: 'st-gone' },
+    raw_spec: { kind: 'geometry', structure_id: 'st-gone' },
+    bindings: [
+      { path: 'xyz', result_ref: '', tool: 'structure', pointer: 'st-gone', ok: false, error },
+    ],
+  }) as ExhibitView & { spec: GeometrySpec };
 
 describe('a geometry artefact in the pane', () => {
   it('draws an inline block', async () => {
@@ -254,6 +298,49 @@ describe('a geometry artefact in the pane', () => {
     expect(await screen.findByText('The cited calculation file could not be read')).toBeTruthy();
     expect(screen.getByText(/no longer stored/)).toBeTruthy();
     expect(screen.queryByRole('img')).toBeNull();
+  });
+
+  it('draws a stored structure from the xyz the service resolved, naming the structure', async () => {
+    // The service's real shape (`exhibits/sources.py::resolved_geometry`): the resolved `spec`
+    // carries only `xyz`, and the id survives in `raw_spec` alone.
+    const view = decodeExhibitView({
+      ...VIEW,
+      kind: 'geometry',
+      title: 'Optimised water',
+      spec: { kind: 'geometry', xyz: WATER },
+      raw_spec: { kind: 'geometry', structure_id: 'st-water' },
+    }) as ExhibitView & { spec: GeometrySpec };
+    render(<GeometryView view={view} spec={view.spec} />);
+    expect(await screen.findByRole('img')).toBeTruthy();
+    expect(screen.getByText('st-water')).toBeTruthy();
+  });
+
+  it('says a vanished stored structure is gone, and the strip says it in its own words', () => {
+    const view = vanished('no structure is stored under this id any more');
+    render(
+      <>
+        <GoneSourcesStrip gone={goneBindings(view)} />
+        <GeometryView view={view} spec={view.spec} />
+      </>,
+    );
+    expect(screen.getByText('The stored structure cannot be drawn')).toBeTruthy();
+    expect(document.body.textContent).toContain('no structure is stored under this id any more');
+    expect(screen.queryByRole('img')).toBeNull();
+    const strip = screen.getByRole('note').textContent ?? '';
+    expect(strip).toContain('st-gone');
+    expect(strip).toContain('source no longer available');
+    expect(strip).toContain('no structure is stored under this id any more');
+    // Not a tool result, so not the tool-result sentence.
+    expect(strip).not.toContain('tool result');
+  });
+
+  it('does not call an unreadable store a vanished structure', () => {
+    // The service's wording when the store is unreachable: a transient fault, not a deletion.
+    const view = vanished('the structure store could not be read');
+    render(<GeometryView view={view} spec={view.spec} />);
+    const text = document.body.textContent ?? '';
+    expect(text).toContain('the structure store could not be read');
+    expect(text).not.toMatch(/no longer holds|no longer available/);
   });
 
   it('names the line of a block that does not parse', async () => {

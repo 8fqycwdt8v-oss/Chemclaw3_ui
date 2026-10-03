@@ -25,13 +25,24 @@ export UPSTREAM_CONNECT_TIMEOUT_MS="${UPSTREAM_CONNECT_TIMEOUT_MS:-10000}"
 # PORT is assigned by Replit or falls back to 8100
 export PORT="${PORT:-8099}"
 
-# The HTML sandbox (artefacts wave 3) is NOT defaulted here. This script is what a hosted preview
-# (Replit) runs, where `localhost` is the viewer's own machine: a default would frame whatever the
-# viewer runs on that port and post the artefact's HTML to it. Unset, HTML artefacts are shown as
-# source. To run it, name both origins as the browser reaches them, and route a distinct hostname to
-# SANDBOX_PORT (README, "HTML sandbox"):
+# The HTML sandbox is ON by default in every other launcher (compose, `npm run dev`, the browser
+# suite, kind) and deliberately OFF here, because this script is what a hosted preview (Replit)
+# runs and nothing here can say reliably where the browser would reach a SECOND listener:
+#
+#   - the platform publishes a public hostname (REPLIT_DEV_DOMAIN, REPLIT_DOMAINS), but the sandbox
+#     needs a second externally reachable port, and that mapping lives in a `.replit` `[[ports]]`
+#     table this repository does not ship (and a published Replit deployment exposes one port);
+#   - a guessed origin is worse than none: `localhost` is the VIEWER's own machine, so a default
+#     would frame whatever the viewer runs on that port and post the artefact's HTML to it.
+#
+# So HTML artefacts are shown as escaped source here, and the BFF says so in one startup line. To
+# run it, name both origins exactly as the browser reaches them and route a distinct hostname (or
+# at least a published port) to SANDBOX_PORT (README, "HTML sandbox"):
 #
 #   SANDBOX_ORIGIN=https://sandbox.example APP_ORIGIN=https://ui.example SANDBOX_PORT=8100 ./start.sh
+#
+# ALLOW_FRAMING=true (the preview iframe) turns the sandbox off again whatever is set: a framed app
+# cannot frame the sandbox, whose frame-ancestors names APP_ORIGIN alone.
 
 # Tell the BFF where its built client assets are
 export CLIENT_DIR="$SCRIPT_DIR/dist/client"
@@ -51,7 +62,7 @@ fi
 echo "Starting Chemclaw3 UI (BFF) on http://${BIND_HOST}:${PORT}"
 echo "  Proxying /api -> ${CHEMCLAW_API_URL}"
 echo "  Auth mode    : ${AUTH_MODE}"
-echo "  HTML sandbox : ${SANDBOX_ORIGIN:-off (HTML artefacts shown as source)}"
+echo "  HTML sandbox : ${SANDBOX_ORIGIN:-off on a hosted preview (HTML artefacts shown as source; README, \"HTML sandbox\")}"
 
 # Node 22+ strips TypeScript types natively — no build step needed for the server
 exec node --experimental-strip-types server/index.ts

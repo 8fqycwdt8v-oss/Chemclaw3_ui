@@ -36,6 +36,9 @@ const BFF_PORT = 4341;
 const FIXTURE_PORT = 4342;
 const UPSTREAM_PORT = 4343;
 const TENANT_PORT = 4344;
+/** The HTML sandbox's listener: on here as in every shipped way to run the UI, so this lane signs
+ *  in through a CSP whose `frame-src` holds the authority *and* the sandbox, as production's does. */
+const SANDBOX_PORT = 4345;
 
 const MOCK_DIR = resolve(process.env.MOCK_DIR ?? '../Chemclaw3_mock');
 const CERT_DIR = join(tmpdir(), 'chemclaw-oidc-mock');
@@ -113,6 +116,7 @@ export default defineConfig({
         `AUTH_MODE=msal ENTRA_TENANT_ID=${TENANT} ENTRA_CLIENT_ID=${CLIENT_ID} ` +
         `API_SCOPE=${AUDIENCE}/Chat.Access ENTRA_AUTHORITY=${AUTHORITY} ` +
         `CHEMCLAW_API_URL=${UPSTREAM} PORT=${BFF_PORT} BIND_HOST=127.0.0.1 LOG_LEVEL=error ` +
+        `APP_ORIGIN=${BFF} SANDBOX_ORIGIN=http://127.0.0.1:${SANDBOX_PORT} SANDBOX_PORT=${SANDBOX_PORT} ` +
         `CLIENT_DIR=${process.env.CLIENT_DIR ?? 'dist/client'} node dist/server.js`,
       url: `${BFF}/api/healthz`,
       reuseExistingServer: false,

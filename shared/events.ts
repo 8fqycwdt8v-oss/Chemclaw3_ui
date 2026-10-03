@@ -768,8 +768,19 @@ const toolFailedEvent = v.object({
    *  every fixture, the mock — name a field that means "no specialist". Absent and `''` both read
    *  as the main agent, so a falsy check is the whole handling. */
   agent: text(),
+  /**
+   * The provider tool-call id of the call that raised (the contract's hardening item 2) — the same
+   * id that call's `exhibit_draft` frames carried, so a failed `create_exhibit`/`revise_exhibit`
+   * drops *its own* draft rather than the oldest one of its op (`failDraft`). **Empty** from a
+   * service older than the field, which is when the old rule still applies. Optional in the type
+   * and always populated by `normalizeEvent`, for `agent`'s reason.
+   */
+  call_id: text(),
 });
-export type ToolFailedEvent = Loosen<v.InferOutput<typeof toolFailedEvent>, 'reason' | 'agent'>;
+export type ToolFailedEvent = Loosen<
+  v.InferOutput<typeof toolFailedEvent>,
+  'reason' | 'agent' | 'call_id'
+>;
 
 /**
  * One number a structured tool result returned, under the name the tool gave it.

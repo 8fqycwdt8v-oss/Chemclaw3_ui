@@ -311,12 +311,20 @@ const geometrySource = v.object({
 });
 
 /**
- * One 3D structure (wave 2): an inline XYZ block, or a stored calculation artifact it cites.
+ * One 3D structure (wave 2): an inline XYZ block, a stored calculation artifact it cites, or — the
+ * contract's hardening item 1, and what the agent actually holds — a `structure_id` in the service's
+ * structure store.
  *
- * **Exactly one of `xyz` and `source`**, as the service holds it — checked here too, because a spec
- * carrying both would leave the viewer choosing which structure is "the" artefact, and one carrying
- * neither is not a structure at all. The service omits whichever is absent rather than sending
- * `null`, so both are plain optionals.
+ * **Stored, exactly one of `xyz`, `source` and `structure_id`** — checked here too, because a spec
+ * carrying two would leave the viewer choosing which structure is "the" artefact, and one carrying
+ * none is not a structure at all. The service omits whichever is absent rather than sending `null`,
+ * so all three are plain optionals.
+ *
+ * **Resolved, a `structure_id` arrives as `xyz`.** The service reads the structure at read time and
+ * puts its XYZ text in the view's `spec` (the stored `raw_spec` keeps the id), so the views draw the
+ * same field whichever way the geometry was written. A structure that has since vanished resolves to
+ * *no* `xyz`, with a `bindings[]` row (`tool: "structure"`, `ok: false`) the pane's strip reads —
+ * so the resolved reading also admits a `structure_id` with or without `xyz` (`resolvedGeometry`).
  *
  * The block itself is *not* parsed here. The service validated it on write (count line, known
  * elements, finite coordinates, at most `exhibit_max_atoms`); this schema's job is the shape, and
@@ -332,6 +340,8 @@ const geometrySpec = v.object({
   format: v.optional(v.literal('xyz'), 'xyz'),
   xyz: v.optional(v.string()),
   source: v.optional(geometrySource),
+  /** A structure in the service's structure store (hardening item 1); see above. */
+  structure_id: v.optional(v.pipe(v.string(), v.minLength(1))),
   label: v.optional(v.string(), ''),
   energy_hartree: v.optional(v.pipe(v.number(), v.finite())),
   highlight_atoms: v.optional(v.array(v.pipe(v.number(), v.integer(), v.minValue(0))), []),
@@ -345,7 +355,8 @@ const geometrySpec = v.object({
 const htmlSpec = v.object({
   kind: v.literal('html'),
   html: v.string(),
-  height: v.optional(v.pipe(v.number(), v.integer(), v.minValue(0)), 480),
+  // At least 1, as the service's model says (`ge=1`): a zero-height frame is a page nobody sees.
+  height: v.optional(v.pipe(v.number(), v.integer(), v.minValue(1)), 480),
 });
 
 const exhibitSpec = v.variant('kind', [
@@ -370,27 +381,40 @@ const rawExhibitSpec = v.variant('kind', [
   htmlSpec,
 ]);
 
-/** A geometry carries exactly one of `xyz` and `source`. */
+/** A stored geometry carries exactly one of `xyz`, `source` and `structure_id`. */
 const oneGeometrySource = (spec: { kind: string }): boolean => {
   if (spec.kind !== 'geometry') return true;
-  const { xyz, source } = spec as { xyz?: unknown; source?: unknown };
-  return (xyz === undefined) !== (source === undefined);
+  const { xyz, source, structure_id } = spec as Record<string, unknown>;
+  return [xyz, source, structure_id].filter((field) => field !== undefined).length === 1;
 };
 
 /**
- * The spec, with the one rule a member cannot state about itself: a geometry carries exactly one of
- * `xyz` and `source`. On the union rather than on `geometrySpec` because `v.variant` dispatches only
- * on plain object members, and a check there would make the member something it cannot take.
+ * A *resolved* geometry: the stored rule, or a `structure_id` beside the `xyz` it resolved to — or
+ * beside nothing, when the structure has vanished, which the view says rather than refusing the
+ * whole spec over (the binding row carries the reason).
+ */
+const resolvedGeometry = (spec: { kind: string }): boolean => {
+  if (oneGeometrySource(spec)) return true;
+  const { source, structure_id } = spec as Record<string, unknown>;
+  return structure_id !== undefined && source === undefined;
+};
+
+const GEOMETRY_RULE = 'a geometry takes exactly one of `xyz`, `source` or `structure_id`';
+
+/**
+ * The spec, with the one rule a member cannot state about itself: a geometry's one structure. On the
+ * union rather than on `geometrySpec` because `v.variant` dispatches only on plain object members,
+ * and a check there would make the member something it cannot take.
  */
 const checkedSpec = v.pipe(
   exhibitSpec,
-  v.check((spec) => oneGeometrySource(spec), 'a geometry takes exactly one of `xyz` or `source`'),
+  v.check((spec) => resolvedGeometry(spec), GEOMETRY_RULE),
 );
 
 /** The stored spec, with the geometry rule and the table's: `rows` or `rows_from`, never both. */
 const checkedRawSpec = v.pipe(
   rawExhibitSpec,
-  v.check((spec) => oneGeometrySource(spec), 'a geometry takes exactly one of `xyz` or `source`'),
+  v.check((spec) => oneGeometrySource(spec), GEOMETRY_RULE),
   // The service sends a whole-table binding as `{"rows": [], "rows_from": {...}}` — `rows` is a
   // defaulted field of its model — so an *empty* `rows` beside `rows_from` is the wire shape, and
   // refusing it read every such table's raw_spec as null: no marker, no Detach, no edit.

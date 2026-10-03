@@ -185,7 +185,7 @@ export const keys = {
   members: (sessionId: string) => ['members', sessionId] as const,
   jobs: (text: string) => ['jobs', text] as const,
   /** One durable run's status — what an artefact linking to a job reads. */
-  job: (jobId: string) => ['job', jobId] as const,
+  job: (jobId: string, sessionId: string) => ['job', jobId, sessionId] as const,
   protocols: (status: string, project: string) => ['protocols', status, project] as const,
   protocol: (designId: string, at: number | undefined) =>
     ['protocol', designId, at ?? 'head'] as const,

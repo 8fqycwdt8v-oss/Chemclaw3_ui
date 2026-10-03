@@ -26,6 +26,16 @@ export interface SessionExhibits {
   sessionId: string | null;
   /** The deployment's switch. `false` until the list has answered, so nothing flashes on. */
   enabled: boolean;
+  /**
+   * Whether there is a pane to show: artefacts on, **or** off with some already written (the
+   * contract's hardening item 6). Off is a switch on *making* artefacts — the agent's tools are
+   * unbound and a pin is refused — not a reason to hide what a conversation already holds, and
+   * "My artefacts" lists those and opens the pane on them, so a pane that refused to exist would
+   * make every such row a click that lands nowhere.
+   */
+  visible: boolean;
+  /** Off with artefacts in hand: the pane shows them, with no way to make, edit or hand one on. */
+  readOnly: boolean;
   exhibits: ExhibitHeader[];
 }
 
@@ -38,10 +48,14 @@ export function useSessionExhibits(conversationId: string | undefined): SessionE
     ...exhibitsQuery(sessionId ?? '', auth),
     enabled: ready && Boolean(sessionId),
   });
+  const enabled = data?.enabled === true;
+  const exhibits = data?.exhibits ?? NONE;
   return {
     sessionId,
-    enabled: data?.enabled === true,
-    exhibits: data?.exhibits ?? NONE,
+    enabled,
+    visible: enabled || exhibits.length > 0,
+    readOnly: !enabled,
+    exhibits,
   };
 }
 

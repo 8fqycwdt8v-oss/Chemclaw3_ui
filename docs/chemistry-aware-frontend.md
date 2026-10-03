@@ -439,11 +439,14 @@ substrate every later concept renders into.
 
 > **The place to hang them now exists, and it is not this rail.** The artefact pane took the rail's
 > column and holds the rail unchanged as its _Index_ tab, beside the documents the agent writes
-> (`src/components/exhibits/`, the service's `exhibit` routes). It does not close US-12 itself:
-> that story is a _calculation's_ artifacts — a geometry, a vibrational spectrum — which live in the
-> service's calc artifact store behind no byte route (`USER-STORIES.md` C4), and the artefact
-> contract defers a `geometry` kind until that route and a reviewed 3D viewer exist. The word is the
-> same and the objects are not, which is why the service named its new one `exhibit`.
+> (`src/components/exhibits/`, the service's `exhibit` routes). US-12 proper — a _calculation's_
+> artifacts — has shipped beside it since artefacts wave 2: the service's calc artifact store has a
+> byte route (`GET /calc-artifacts/content`, `USER-STORIES.md` C4), every calc artifact ref shown
+> here has a Download, and a `geometry` artefact draws a 3D structure in a dependency-free viewer —
+> from an inline XYZ block, a cited calc file, or (since the hardening pass) a `structure_id` in the
+> service's structure store, which is what the agent actually holds. A vibrational spectrum is still
+> only downloadable, not drawn. The word is the same and the objects are not, which is why the
+> service named its new one `exhibit`.
 
 **Cost:** medium. The store and its extraction rules are the work; the cards are cheap.
 

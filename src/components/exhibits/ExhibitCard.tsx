@@ -75,10 +75,11 @@ export function ExhibitCard({
           {edited && <Badge tone="brand">{edited}</Badge>}
         </p>
       </div>
-      {/* Only where the pane exists to open into. A deployment with artefacts turned off (or one
-          not yet answered) has no pane, and an Open that does nothing is worse than none —
-          `PinResult` holds the same rule. The card itself stays: the answer did write it. */}
-      {data?.enabled === true && (
+      {/* Only where the pane exists to open into: artefacts on, or off with this one listed — the
+          read-only pane (hardening item 6). A list not yet answered, or an artefact it does not
+          hold, has no pane to open, and an Open that does nothing is worse than none. The card
+          itself stays: the answer did write it. */}
+      {(data?.enabled === true || header !== null) && (
         <Button
           variant="outline"
           size="xs"

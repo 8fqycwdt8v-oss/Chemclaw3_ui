@@ -156,7 +156,16 @@ const full: Array<[string, Record<string, unknown>]> = [
     },
   ],
   ['capability_degraded', { connectors: ['eln'] }],
-  ['tool_failed', { tool: 'submit_qm_job', message: 'refused', reason: 'plan_gate', agent: 'x' }],
+  [
+    'tool_failed',
+    {
+      tool: 'submit_qm_job',
+      message: 'refused',
+      reason: 'plan_gate',
+      agent: 'x',
+      call_id: 'toolu_1',
+    },
+  ],
   [
     'tool_result',
     {

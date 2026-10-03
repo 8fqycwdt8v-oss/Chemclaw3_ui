@@ -86,7 +86,7 @@ const DRAFTING_TOOLS: Readonly<Record<string, 'create' | 'revise'>> = {
 /** A tool call raised on the turn stream: if it was one that drafts, its draft is discarded now. */
 export function draftToolFailed(sessionId: string, event: ToolFailedEvent): void {
   const op = DRAFTING_TOOLS[event.tool];
-  if (op) failDraft(sessionId, op);
+  if (op) failDraft(sessionId, op, event.call_id ?? '');
 }
 
 /** The turn is over: a draft that never became an artefact is discarded. */

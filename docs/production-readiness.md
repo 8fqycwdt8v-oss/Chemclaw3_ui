@@ -232,6 +232,36 @@ indistinguishable from one that does not work — and this repository has produc
   own and costs one upstream call however many probes arrive at once
   (`tests/bffObservability.test.ts`). A SIGTERM fails `/readyz` first and closes the listener after
   a readiness period rather than dropping in-flight requests (`tests/bffLifecycle.test.ts`).
+- **Enforced — the HTML sandbox's configuration is refused rather than served half-working.** The
+  BFF will not start with `SANDBOX_ORIGIN` set and `APP_ORIGIN` missing, equal to it, or not a plain
+  origin; with an http sandbox under an https app (mixed content); with `SANDBOX_PORT` not a whole
+  number from 1 to 65535 or equal to `PORT`; or with `HTML_SCRIPTS_DEFAULT` anything but `on`/`off`.
+  `ALLOW_FRAMING=true` turns the sandbox **off** with the reason in the startup line rather than
+  refusing, because a framed app cannot frame the sandbox (its `frame-ancestors` names `APP_ORIGIN`
+  alone and every ancestor is checked) and every launcher now sets the origins
+  (`tests/sandboxServer.test.ts`).
+- **Enforced — the app origin never serves `/sandbox/frame`.** The app listener answers it 404
+  whatever the SPA fallback would have served, and the sandbox listener serves that one page and
+  404s every other path; every response there, refusals included, carries a closed CSP and
+  `nosniff` (`tests/sandboxServer.test.ts`). `SANDBOX_PORT` is checked whether or not a sandbox is
+  configured, and `DOCS_BASE_URL` must be a link a page may follow (http(s) or a path). In a real browser the sandboxed page cannot fetch, read
+  the app's cookie or storage, navigate the top window or itself off the sandbox origin, or open a
+  popup; the app takes `ready` and heights from that frame only, and the shell takes content from
+  the app origin only (`e2e/sandbox.spec.ts`). The example OpenShift manifests are held to the same
+  configuration (`tests/openshiftManifests.test.ts`).
+- **Accepted — HTML artefact scripts run by default, and can still reach the network over
+  WebRTC.** An owner decision of 2026-10-03. Inside the sandbox a script can send data out through
+  a STUN/UDP candidate (CSP does not govern WebRTC; the prelude that removes the constructors is
+  bypassable from a nested frame's fresh realm) — including anything a reader types into a form the
+  page draws, such as a fake password prompt — and write the clipboard after a click. It cannot
+  navigate: the content frame is bounded by the shell's CSP and cannot reach its parent's location.
+  Browser policy narrows the first
+  (`WebRtcIPHandling=disable_non_proxied_udp` on Chrome/Edge — it reduces, it does not eliminate:
+  TURN over TCP through a proxy remains — or `media.peerconnection.enabled=false` on Firefox), and
+  `HTML_SCRIPTS_DEFAULT=off` removes both; the view tells the reader never to type a secret there. **Who decides:** the product owner, who took it;
+  a deployment's operator, who holds the kill switch. **What would change it:** a browser control
+  for WebRTC that CSP or a sandbox token can express. Recorded in `ISSUES.md` Issue 25; the
+  residual is driven, not asserted safe, in `e2e/sandbox.spec.ts`.
 
 ## 5. Identity
 
@@ -417,3 +447,4 @@ Every one of these is argued above and recorded in `ISSUES.md` with an anchor:
 | `check:live` is operator-run: `smoke` and `check:openapi` are on no schedule                          | `ISSUES.md`, "Known gaps" |
 | `%00` / `%0A` in a wide-class id is forwarded encoded; a non-constant URL base is outside the scan    | `ISSUES.md` Issue 15      |
 | No screenshot baselines; no real MSAL redirect exercised; the sketcher canvas has no accessible path  | `ISSUES.md`, "Known gaps" |
+| HTML artefact scripts run by default; inside the sandbox they can still send data over WebRTC         | `ISSUES.md` Issue 25      |

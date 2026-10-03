@@ -7,9 +7,9 @@
  * pane is not part of it.
  *
  * **The rail is the default and stays exactly what it was.** The pane replaces it only when all of
- * these hold: the deployment has artefacts (`enabled`, from the list itself — off means the tabs
- * never appear), this conversation has at least one, the screen is wide enough for a column, and
- * the reader has the pane open. Closing the pane puts the rail back; the top bar's toggle brings the
+ * these hold: there is a pane to show (`visible` — artefacts on, or off with some already written,
+ * which shows them **read-only**: the contract's hardening item 6), this conversation has at least
+ * one, the screen is wide enough for a column, and the reader has the pane open. Closing the pane puts the rail back; the top bar's toggle brings the
  * pane back. Below `lg` the column does not exist at all and the pane is a sheet, opened from the
  * top bar — the same arrangement the rail has had since it stopped being a phone-sized absence.
  *
@@ -47,17 +47,22 @@ export function RightColumn({
 }: {
   conversationId: string;
 }): React.JSX.Element | null {
-  const { sessionId, enabled, exhibits } = useSessionExhibits(conversationId);
+  const { sessionId, visible, readOnly, exhibits } = useSessionExhibits(conversationId);
   const open = useExhibitPane((s) => s.open);
   const wide = useWideScreen();
   const drafting = useDrafting(sessionId);
 
-  if (!wide || !enabled || !sessionId || (exhibits.length === 0 && !drafting) || !open) {
+  if (!wide || !visible || !sessionId || (exhibits.length === 0 && !drafting) || !open) {
     return <EntityRail conversationId={conversationId} />;
   }
   return (
     <Suspense fallback={<EntityRail conversationId={conversationId} />}>
-      <PaneColumn conversationId={conversationId} sessionId={sessionId} exhibits={exhibits} />
+      <PaneColumn
+        conversationId={conversationId}
+        sessionId={sessionId}
+        exhibits={exhibits}
+        readOnly={readOnly}
+      />
     </Suspense>
   );
 }
@@ -65,21 +70,21 @@ export function RightColumn({
 /**
  * The top bar's way to the pane: a toggle beside the transcript at `lg`, a sheet below it.
  *
- * Absent whenever the pane could not hold anything — artefacts off, or none yet — so nobody is
- * offered a control that opens an empty drawer, which is `EntityRailTrigger`'s rule.
+ * Absent whenever the pane could not hold anything — artefacts off with none written, or none yet —
+ * so nobody is offered a control that opens an empty drawer, which is `EntityRailTrigger`'s rule.
  */
 export function ExhibitPaneTrigger({
   conversationId,
 }: {
   conversationId: string;
 }): React.JSX.Element | null {
-  const { sessionId, enabled, exhibits } = useSessionExhibits(conversationId);
+  const { sessionId, visible, readOnly, exhibits } = useSessionExhibits(conversationId);
   const open = useExhibitPane((s) => s.open);
   const sheetOpen = useExhibitPane((s) => s.sheetOpen);
   const wide = useWideScreen();
   const drafting = useDrafting(sessionId);
 
-  if (!enabled || !sessionId || (exhibits.length === 0 && !drafting)) return null;
+  if (!visible || !sessionId || (exhibits.length === 0 && !drafting)) return null;
   const label = `Artefacts (${exhibits.length})`;
   // Open where it was, or — with nothing listed yet, only a draft — open on the draft.
   const reveal = (): void => {
@@ -127,6 +132,7 @@ export function ExhibitPaneTrigger({
               conversationId={conversationId}
               sessionId={sessionId}
               exhibits={exhibits}
+              readOnly={readOnly}
               // Handing an artefact to the composer closes the sheet: the message being written is
               // behind it, which is `NoteSheet`'s rule for a structure.
               onAsked={() => useExhibitPane.setState({ sheetOpen: false })}

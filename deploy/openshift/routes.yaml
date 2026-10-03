@@ -1,0 +1,50 @@
+# Two Routes, two hosts: the app, and the HTML sandbox on a host of its own.
+#
+# Both edge-terminated with http redirected to https — an https app cannot frame an http sandbox
+# (the BFF refuses that pair at boot as mixed content). The hosts here are the hosts in
+# APP_ORIGIN / SANDBOX_ORIGIN (deployment.yaml), exactly; `tests/openshiftManifests.test.ts`
+# holds the two together.
+#
+# What must NOT stand in front of the sandbox host (README, "HTML sandbox"):
+#   - no oauth-proxy or SSO: the frame is loaded by the browser with no credential, and a login
+#     redirect inside it is a blank box at best and a sign-in page on the wrong origin at worst;
+#   - no proxy that rewrites security headers: the sandbox page's own Content-Security-Policy must
+#     arrive intact, and nothing may add X-Frame-Options or the APP's CSP to it, or the frame is
+#     refused (its frame-ancestors names APP_ORIGIN; the app's says 'none').
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: chemclaw3-ui
+  labels:
+    app.kubernetes.io/name: chemclaw3-ui
+spec:
+  host: chemclaw.apps.example.com
+  to:
+    kind: Service
+    name: chemclaw3-ui
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: chemclaw3-ui-sandbox
+  labels:
+    app.kubernetes.io/name: chemclaw3-ui
+  annotations:
+    # The router's sticky-session cookie would be the one cookie ever set on the sandbox origin.
+    # The shell is stateless and the same on every pod; it needs no affinity.
+    haproxy.router.openshift.io/disable_cookies: 'true'
+spec:
+  host: chemclaw-sandbox.example-usercontent.net
+  to:
+    kind: Service
+    name: chemclaw3-ui
+  port:
+    targetPort: sandbox
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

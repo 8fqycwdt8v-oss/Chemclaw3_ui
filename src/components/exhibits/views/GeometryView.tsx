@@ -1,5 +1,7 @@
 /**
- * A geometry artefact (wave 2): one 3D structure, inline or read from the calculation that made it.
+ * A geometry artefact (wave 2): one 3D structure, inline, read from the calculation that made it, or
+ * read from the structure store (`structure_id`, hardening item 1 — which the service resolves to
+ * `xyz` before the view ever sees it, so it is drawn exactly as an inline block is).
  *
  * Two sources, one drawing. An inline `xyz` block is drawn as it is; a `source` names a stored calc
  * by-product (`<calc_key>#<name>`) and its bytes are fetched through `GET /calc-artifacts/content`
@@ -12,8 +14,10 @@
  *
  * **What a failure says.** A source that is gone is the calc store doing what it was designed to do
  * (by-products are eviction-managed), and the sentence says so and points at the calculation; a
- * block that does not parse says which line. Neither falls back to drawing *something*: a partial
- * structure shown as the artefact would be a molecule nobody computed.
+ * stored structure that has vanished resolves to no `xyz` at all, and the sentence names the id
+ * (the pane's strip above says the same from the `bindings[]` row); a block that does not parse says
+ * which line. None falls back to drawing *something*: a partial structure shown as the artefact
+ * would be a molecule nobody computed.
  */
 
 import { lazy, Suspense, useMemo } from 'react';
@@ -102,6 +106,19 @@ function FromSource({
   return <Drawing text={data} spec={spec} view={view} />;
 }
 
+/**
+ * The `structure_id` a geometry cites, or `undefined`.
+ *
+ * From the **stored** spec first: the service resolves a cited structure to `xyz` in `spec` and
+ * drops the id there (`exhibits/sources.py::resolved_geometry`), so only `raw_spec` still names it.
+ * `spec` is the fallback for a structure that did not resolve (the service then serves the stored
+ * spec as it is) and for a service older than `raw_spec`.
+ */
+function citedStructure(view: ExhibitView, spec: GeometrySpec): string | undefined {
+  const raw = view.raw_spec;
+  return (raw?.kind === 'geometry' ? raw.structure_id : undefined) ?? spec.structure_id;
+}
+
 export function GeometryView({
   view,
   spec,
@@ -110,8 +127,27 @@ export function GeometryView({
   spec: GeometrySpec;
 }): React.JSX.Element {
   const reference = spec.source ? calcArtifactRef(spec.source) : null;
+  const structure = citedStructure(view, spec);
+  if (structure && spec.xyz === undefined) {
+    // Why there is no `xyz` is the binding row's to say: "gone" and "the store could not be read"
+    // are different facts, and only the first means the structure no longer exists.
+    const reason = view.bindings.find(
+      (b) => b.tool === 'structure' && !b.ok && b.pointer === structure,
+    )?.error;
+    return (
+      <EmptyState title="The stored structure cannot be drawn" className="py-6">
+        This geometry cites the structure <span className="font-mono break-all">{structure}</span>,
+        and it could not be read: {reason || 'the service gave no reason'}.
+      </EmptyState>
+    );
+  }
   return (
     <div className="flex flex-col gap-2">
+      {structure && (
+        <p className="text-2xs text-ink-muted">
+          From the stored structure <span className="font-mono break-all">{structure}</span>
+        </p>
+      )}
       {reference ? (
         <>
           <p className="flex flex-wrap items-center gap-2 text-2xs text-ink-muted">

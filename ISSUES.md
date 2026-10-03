@@ -1324,6 +1324,35 @@ bearer, and what a Chemclaw3-equivalent validator behind the BFF accepted.
   warnings per sign-in in every real deployment's browser log. One sign-in in flight, shared by
   every caller, would remove it.
 
+## Issue 25: HTML artefact scripts run by default, and WebRTC is outside every wall
+
+**Accepted by the product owner on 2026-10-03**, with the sandbox itself on by default in every
+shipped way to run the UI. An `html` artefact's script runs in a frame on a separate origin
+(`SANDBOX_ORIGIN`), opaque-origin (`sandbox="allow-scripts"`, no `allow-same-origin`), under
+`connect-src 'none'` — so it cannot fetch, read the app's cookie, storage or DOM, navigate the top
+window or open a popup, and `e2e/sandbox.spec.ts` drives each of those in a real browser.
+
+What it **can** still do, measured rather than argued: send data out over **WebRTC** (STUN/UDP; CSP
+has no directive for it and Chromium ignores `webrtc 'block'` — a prelude removes the constructors
+from the page's realm, and a nested `srcdoc` frame's fresh realm bypasses it) — **including anything
+typed into the page**: a form it draws, a fake password prompt among them, hands its input to the
+page's script — and write the **clipboard** after one click. It cannot navigate: the content frame
+sits under the shell's `default-src 'none'`, with no frame source, and cannot reach its parent's
+location. The view's notice tells the reader never to type a secret into it.
+
+The controls a deployment holds, in order of strength:
+
+1. `HTML_SCRIPTS_DEFAULT=off` — the kill switch. Nothing runs until somebody presses "Run scripts"
+   on one view, and `e2e/sandbox.spec.ts` proves no script runs and no UDP leaves.
+2. Browser policy: Chrome/Edge `WebRtcIPHandling=disable_non_proxied_udp` (reduces, does not
+   eliminate — WebRTC can still relay over TURN/TCP through a proxy), Firefox
+   `media.peerconnection.enabled=false`.
+3. A sandbox host on a separate registrable domain, so the two are different sites.
+
+**What would change this:** a browser control for WebRTC that a CSP directive or a sandbox token
+can express, or a decision to make `off` the default again. Production-readiness §4 carries the
+clause.
+
 ## Known gaps in the UI rebuild
 
 The commit messages describe what was built. This records what was not.

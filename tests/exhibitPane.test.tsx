@@ -250,6 +250,9 @@ describe('the right column', () => {
     expect(await screen.findByRole('heading', { name: 'Solvent ranking' })).toBeTruthy();
     // The head is a person's correction, and the reader is that person.
     expect(screen.getByText('edited by you')).toBeTruthy();
+    // On the head of a deployment that writes artefacts, cells are editable — the control the
+    // read-only case below asserts absent.
+    expect(screen.getAllByRole('button', { name: /^Edit/ }).length).toBeGreaterThan(0);
     // The picker names each revision the way the contract writes it.
     const picker = await screen.findByRole('combobox', { name: 'Revision' });
     await waitFor(() =>
@@ -337,13 +340,31 @@ describe('the right column', () => {
     expect(screen.queryByRole('heading', { name: 'Second' })).toBeNull();
   });
 
-  it('never appears where the deployment has artefacts turned off', async () => {
-    stubService(false);
+  it('never appears where the deployment has artefacts turned off and none were written', async () => {
+    const stub = stubFetch(() => json(200, { enabled: false, exhibits: [] }));
+    restore = stub.restore;
     act(() => useExhibitPane.getState().show(SID, XID));
     render(<RightColumn conversationId={CONVERSATION} />);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(screen.queryByRole('complementary', { name: 'Artefacts' })).toBeNull();
     expect(screen.queryByRole('tab')).toBeNull();
+  });
+
+  it('shows what was written, read-only, where artefacts are turned off (hardening item 6)', async () => {
+    // "My artefacts" lists these and opens the pane on them; a pane that refused to exist made
+    // every such row a click that landed nowhere.
+    stubService(false);
+    act(() => useExhibitPane.getState().show(SID, XID));
+    render(<RightColumn conversationId={CONVERSATION} />);
+    const pane = await screen.findByRole('complementary', { name: 'Artefacts' });
+    expect(await within(pane).findByRole('heading', { name: 'Solvent ranking' })).toBeTruthy();
+    expect(within(pane).getByRole('status').textContent).toMatch(/turned off .* read-only/);
+    // Reading, comparing and exporting stay; nothing that makes, edits or hands one on.
+    expect(within(pane).getByRole('button', { name: 'Compare' })).toBeTruthy();
+    expect(within(pane).getByRole('button', { name: 'Export' })).toBeTruthy();
+    expect(within(pane).queryByRole('button', { name: 'Ask about this' })).toBeNull();
+    expect(within(pane).queryByRole('button', { name: 'More for this artefact' })).toBeNull();
+    expect(within(pane).queryByRole('button', { name: /^Edit/ })).toBeNull();
   });
 });
 
@@ -368,6 +389,26 @@ describe('the card in the answer', () => {
     expect(await screen.findByText('Solvent ranking')).toBeTruthy();
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(screen.queryByRole('button', { name: /^Open artefact/ })).toBeNull();
+  });
+
+  it('offers Open into the read-only pane where artefacts are off but this one is listed', async () => {
+    const stub = stubFetch(() => json(200, { enabled: false, exhibits: [VIEW] }));
+    restore = stub.restore;
+    render(
+      <ExhibitCard
+        sessionId={SID}
+        exhibit={{
+          exhibitId: XID,
+          revision: 1,
+          kind: 'table',
+          title: 'Solvent ranking',
+          op: 'created',
+          authorKind: 'agent',
+          author: '',
+        }}
+      />,
+    );
+    expect(await screen.findByRole('button', { name: /^Open artefact/ })).toBeTruthy();
   });
 
   it('names the artefact, the revision this turn wrote, the head and who edited it', async () => {

@@ -580,7 +580,11 @@ function Row({
       return (
         <Step tone="ok">
           <div className="rounded-lg border border-border-subtle bg-surface-raised p-3">
-            <JobResultCard jobId={entry.job?.jobId ?? ''} summary={entry.job?.summary} />
+            <JobResultCard
+              jobId={entry.job?.jobId ?? ''}
+              summary={entry.job?.summary}
+              sessionId={sessionId}
+            />
           </div>
         </Step>
       );

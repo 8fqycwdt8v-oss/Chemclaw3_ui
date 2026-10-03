@@ -109,13 +109,13 @@ describe('every story this document marks SERVED names a route the BFF can reach
     .filter((line) => line.startsWith('| **') && line.includes('`SERVED`'));
 
   /** Every concrete path a documented template could produce, over every combination of samples. */
-  const concrete = (template: string): string[] =>
+  const concrete = (template: string, encode: (sample: string) => string = (x) => x): string[] =>
     template
       .split(/(\{[^}]+\})/)
       .reduce<string[]>(
         (paths, part) =>
           /^\{[^}]+\}$/.test(part)
-            ? paths.flatMap((prefix) => SAMPLES.map((sample) => prefix + sample))
+            ? paths.flatMap((prefix) => SAMPLES.map((sample) => prefix + encode(sample)))
             : paths.map((prefix) => prefix + part),
         [''],
       );
@@ -127,14 +127,23 @@ describe('every story this document marks SERVED names a route the BFF can reach
   it.each(rows.map((row) => [row.split('|')[1]?.trim() ?? '', row] as const))(
     '%s',
     (_story, row) => {
-      const claimed = [...row.matchAll(/`(GET|POST|PUT|DELETE) (\/[A-Za-z0-9_{}/-]+)/g)].map(
-        (m) => [m[1] ?? '', m[2] ?? ''] as const,
-      );
+      // The query is part of the claim where a route holds its id there (`?ref={ref}`, the calc
+      // byte route): the whitelist checks it, so a story naming the route without it names a
+      // request the BFF refuses.
+      const claimed = [
+        ...row.matchAll(/`(GET|POST|PUT|DELETE) (\/[A-Za-z0-9_{}/-]+)(\?[^`\s]*)?/g),
+      ].map((m) => [m[1] ?? '', m[2] ?? '', m[3] ?? ''] as const);
       const unreachable = claimed.filter(
-        ([method, path]) => !concrete(path).some((p) => resolveRoute(method, `/api${p}`) !== null),
+        ([method, path, query]) =>
+          !concrete(path).some((p) =>
+            // Encoded, as the client sends it: a real calc key's `+` is a space otherwise.
+            concrete(query, encodeURIComponent).some(
+              (q) => resolveRoute(method, `/api${p}`, q) !== null,
+            ),
+          ),
       );
       expect(
-        unreachable.map(([method, path]) => `${method} ${path}`),
+        unreachable.map(([method, path, query]) => `${method} ${path}${query}`),
         'marked SERVED over routes the BFF does not forward — the document is describing a ' +
           'capability this app cannot reach',
       ).toEqual([]);

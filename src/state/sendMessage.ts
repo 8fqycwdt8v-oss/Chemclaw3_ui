@@ -6,7 +6,7 @@
  */
 
 import type { ExhibitRef } from '../../shared/exhibitConstants.ts';
-import { exhibitArrived } from './exhibitEvents.ts';
+import { draftArrived, draftToolFailed, draftsEnded, exhibitArrived } from './exhibitEvents.ts';
 import { useExhibitPane } from './exhibitPane.ts';
 import { api } from '../api/client.ts';
 import type { TranscriptMessage } from '../api/client.ts';
@@ -56,6 +56,30 @@ const WITHDRAWN_BY_YOU =
  * answer.
  */
 const MAX_REATTACH = 2;
+
+/** The stop a `pagehide` sends: `keepalive` to outlive the page, and the reason that makes it wait
+ *  for a reload (see `abandon`). */
+const UNLOAD_STOP = { keepalive: true, reason: 'unload' } as const;
+
+/**
+ * How long a reloaded page reads the transcript for a turn it could not follow live.
+ *
+ * Short on purpose, because by then this turn is known to be over: the watch route answered with a
+ * running turn that is not this one (another participant's started since), or that a service too
+ * old to name its turn cannot vouch for. A session runs one turn at a time, so this one has ended,
+ * and a turn writes its transcript before it stops counting as running — its answer is there now or
+ * never will be. A few reads cover the write racing the watch.
+ *
+ * **Not for a 404.** A watch 404 says only that no turn runs *on the replica that answered*: the
+ * turn may have ended, or may be running on another front-door replica (the BFF's upstream hop has
+ * no session affinity) and still write its answer. That is the live path's case and gets its poll.
+ */
+const RELOAD_RECOVERY_MS = 20_000;
+
+/** What the bubble says when a reload cost the answer for good — said, rather than left as an
+ *  "interrupted" that implies it may still come. */
+const RELOAD_LOST =
+  'Interrupted by a page reload, and its answer could not be recovered from the server. Ask again to get one.';
 
 /**
  * What a Stop's request settled as, or `'pending'` once `STOP_CONFIRM_TIMEOUT_MS` has passed —
@@ -349,6 +373,11 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
    *    recover for.
    *  - **Nothing local.** No abort, no banner, no announcement, no awaiting the outcome. This
    *    document is going away; the only thing worth doing is getting the request onto the wire.
+   *  - **`reason: 'unload'`**, because a reload is a `pagehide` too and the browser cannot say
+   *    which this is. Sent plain, the stop killed the turn a reloaded page then waited 630 s for
+   *    (Chemclaw3_ui#131). With the reason the service holds the stop for a grace window and drops
+   *    it when `resumeInterruptedTurn` reattaches; a chemist who really left still frees the
+   *    turn's capacity, one window later.
    */
   const abandon = (): void => {
     const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
@@ -369,7 +398,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         .then((withdrawn) =>
           withdrawn
             ? undefined
-            : api.stopTurn(sessionId, () => Promise.resolve(lastToken), { keepalive: true }),
+            : api.stopTurn(sessionId, () => Promise.resolve(lastToken), UNLOAD_STOP),
         )
         .catch(() => {
           // Nothing to report to and nobody to report it: the page is unloading.
@@ -377,7 +406,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       return;
     }
     void api
-      .stopTurn(sessionId, () => Promise.resolve(lastToken), { keepalive: true })
+      .stopTurn(sessionId, () => Promise.resolve(lastToken), UNLOAD_STOP)
       .catch(() => {
         // Nothing to report to and nobody to report it: the page is unloading.
       });
@@ -517,6 +546,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
    */
   let watching = false;
   let reattached = 0;
+  /** The session a draft arrived on, so the turn's end can discard the ones that never landed. */
+  let draftSession: string | null = null;
 
   const runOnce = async (sessionId: string): Promise<void> => {
     // Per attempt: a replay after a 401 or a `session_not_found` starts a new turn, and what the
@@ -557,6 +588,14 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         if (drop.type) dropped.types.add(drop.type);
       },
       onEvent(event) {
+        // A document being drafted (wave 2). Not a trace row and not part of the message: it is a
+        // few seconds of stream that the `exhibit` frame after it replaces, so it goes to the draft
+        // store and nowhere else — and it is not a reason to flush the token batcher either.
+        if (event.type === 'exhibit_draft') {
+          draftSession = sessionId;
+          draftArrived(sessionId, event);
+          return;
+        }
         if (event.type === 'token') {
           // The first sign the chain is moving, and the client half of a measurement the service
           // cannot take: it knows when it started generating, not when the bytes reached a browser.
@@ -596,6 +635,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         // Refetch the session's artefacts and, for one the agent just created, open the pane on it
         // — unless the reader closed the pane during this turn (`useExhibitPane.autoOpen`).
         if (event.type === 'exhibit') exhibitArrived(sessionId, event);
+        // A refused `create_exhibit`/`revise_exhibit` takes its draft with it, so a retry's text is
+        // never shown under the refused call's draft.
+        if (event.type === 'tool_failed') draftToolFailed(sessionId, event);
         // The conversation's subject index. Fire-and-forget: ingestion canonicalises through
         // RDKit, so it is asynchronous, and the transcript must not wait on a WASM call to render
         // the event it has already applied. Named with this conversation's id rather than the
@@ -931,6 +973,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   } finally {
     const streaming = useChatStore.getState().streaming;
     if (streaming?.messageId === messageId) useChatStore.getState().setStreaming(null);
+    // However the turn ended — answered, stopped, failed, recovered — a draft whose `exhibit` frame
+    // never came is not a document anybody has, and it leaves the pane now.
+    if (draftSession) draftsEnded(draftSession);
 
     // The client half of the turn's timing. It composes with the service's own turn span, which
     // cannot see any of these three: when the chemist pressed Send, when the first byte reached
@@ -1011,7 +1056,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
  *
  * The wall clock stays the only bound: ~30 attempts fit inside it now instead of 210, and the
  * first is still within a few seconds, which is where the median detached answer lands. An attempt
- * cap on top would be a second number saying the same thing.
+ * cap on top would be a second number saying the same thing. `budgetMs` shortens it for a caller
+ * that already knows the turn is over (`RELOAD_RECOVERY_MS`).
  */
 export async function recoverDetachedAnswer(
   sessionId: string,
@@ -1020,8 +1066,9 @@ export async function recoverDetachedAnswer(
   correlationId: string,
   signal: AbortSignal,
   auth: AuthProvider,
+  budgetMs = 630_000,
 ): Promise<string | null> {
-  const deadline = Date.now() + 630_000;
+  const deadline = Date.now() + budgetMs;
   let attempt = 0;
   /**
    * The answer this turn's own must differ from.
@@ -1157,9 +1204,18 @@ function newestHeldAnswer(messages: ChatMessage[]): string | null {
  * Scoped to the conversation on screen, and to its newest turn. Doing this for every persisted
  * conversation on boot would be one long poll per conversation for answers nobody is waiting for.
  *
- * The same bounded poll as the live path, for the same reason: on the reload that matters the turn
- * is often still running, so a single read would answer "not yet" and stop — which is the failure
- * this exists to fix, one round shorter.
+ * **First it follows the turn live, because the turn is usually still running.** The page's own
+ * unload sent a stop, and a service that understands `reason: 'unload'` holds that stop for a grace
+ * window that this reattach (`GET /sessions/{id}/turn/stream`) cancels — so the reloaded page
+ * renders the rest of the turn and its answer instead of polling for it (Chemclaw3_ui#131: a plain
+ * unload stop killed the turn and the page then polled an empty transcript for 630 s). It follows
+ * only *its own* turn: the watch response names the turn it is a view of, and in a shared
+ * conversation the one running now may be somebody else's that started meanwhile.
+ *
+ * Then the transcript, bounded by what the follow learned. Another turn running in its place means
+ * this one is over and its answer is written or never will be — a short read (`RELOAD_RECOVERY_MS`),
+ * then an honest "could not be recovered". A 404 (no turn on the replica that answered — it may run
+ * on another) or a follow that *dropped* mid-turn is the live path's case, and gets its whole poll.
  */
 export function resumeInterruptedTurn(
   conversationId: string,
@@ -1177,6 +1233,9 @@ export function resumeInterruptedTurn(
   const question = conversation.messages[index - 1];
   if (!message || message.role !== 'assistant') return undefined;
   if (!question || question.role !== 'user') return undefined;
+  // Already being followed — this effect re-runs when the reader switches back to a conversation
+  // whose follow kept going, and a second reader of the same turn would be a second bubble writer.
+  if (useChatStore.getState().streaming?.messageId === message.id) return undefined;
 
   // What this conversation already held when the turn started, read the same way the live path
   // reads it — a chemist who asks the same thing twice must not be handed the first answer for the
@@ -1185,14 +1244,29 @@ export function resumeInterruptedTurn(
 
   const abort = new AbortController();
   const messageId = message.id;
+  const turnId = message.correlationId ?? '';
+  // Followed live only when it can be told apart from anybody else's turn (its id), when it is the
+  // conversation's newest turn (a running turn is the newest one), and when nothing else holds the
+  // app's one streaming slot.
+  const newest = index === conversation.messages.length - 1;
+  const followable = turnId !== '' && newest && useChatStore.getState().streaming === null;
   void (async () => {
+    // Not followed: a newer turn in this conversation means this one is over (`'gone'`); otherwise
+    // nothing is known about it, and the live path's whole poll is the honest wait.
+    const followed = followable
+      ? await followReloadedTurn(conversationId, sessionId, messageId, turnId, auth)
+      : newest
+        ? 'dropped'
+        : 'gone';
+    if (followed === 'settled') return;
     const recovered = await recoverDetachedAnswer(
       sessionId,
       question.text,
       heldAnswer,
-      message.correlationId ?? '',
+      turnId,
       abort.signal,
       auth,
+      followed === 'gone' ? RELOAD_RECOVERY_MS : undefined,
     );
     if (abort.signal.aborted) return;
     if (recovered === null) {
@@ -1200,8 +1274,9 @@ export function resumeInterruptedTurn(
       // the flag on every turn that settles, but this exit settles nothing — and leaving the flag
       // set is what made an unrecoverable turn re-run the full 630 s / 210-request poll on every
       // single page load, for ever, behind a message the reader already sees as aborted. The
-      // ownership check below applies here too: a newer turn must not be marked.
-      useChatStore.getState().giveUpOnInterruptedTurn(conversationId, messageId);
+      // ownership check below applies here too: a newer turn must not be marked. And it says so:
+      // "interrupted" reads as "may still come", which is no longer true.
+      useChatStore.getState().giveUpOnInterruptedTurn(conversationId, messageId, RELOAD_LOST);
       return;
     }
     const store = useChatStore.getState();
@@ -1226,7 +1301,127 @@ export function resumeInterruptedTurn(
     announceStatus(describeAnswer(recovered));
   })();
 
+  // The transcript poll belongs to the conversation on screen and stops with it. A live follow does
+  // not: it holds the streaming slot like any turn this tab sent, and runs on while the reader looks
+  // elsewhere, exactly as `sendMessage`'s does.
   return () => abort.abort();
+}
+
+/**
+ * Follow a reload-interrupted turn to its end through `GET /sessions/{id}/turn/stream`.
+ *
+ * `'settled'` when the bubble is final — answered, failed with the turn's own error, or stopped
+ * by the reader. `'gone'` when the running turn is not this page's: the response names another, or
+ * (an older service) names none. `'dropped'` when the turn may still run somewhere — a 404, which
+ * speaks only for the replica that answered, or a view that broke.
+ *
+ * While following it is this tab's turn in every way the app knows: it holds the streaming slot and
+ * the composer lock, Stop stops it, and a further reload sends the same deferred unload stop
+ * `sendMessage`'s `abandon` does. Tokens are not appended: the view starts at the moment of
+ * reattaching and replays nothing, so appending would splice the tail onto the text this page
+ * streamed before the reload with the middle missing — the `answer` at the end is the whole text.
+ */
+async function followReloadedTurn(
+  conversationId: string,
+  sessionId: string,
+  messageId: string,
+  turnId: string,
+  auth: AuthProvider,
+): Promise<'settled' | 'gone' | 'dropped'> {
+  const store = useChatStore.getState();
+  const follow = new AbortController();
+  let lastToken: string | null = null;
+  let stopped = false;
+  let someoneElses = false;
+  const stop = (): void => {
+    stopped = true;
+    void api
+      .stopTurn(sessionId, () => auth.getAccessToken())
+      .catch((err: unknown) => {
+        logger.warn('turn.stop_failed', { kind: err instanceof ApiError ? err.kind : 'unknown' });
+      });
+    follow.abort();
+  };
+  const abandon = (): void => {
+    void api
+      .stopTurn(sessionId, () => Promise.resolve(lastToken), UNLOAD_STOP)
+      .catch(() => {
+        // Nothing to report to and nobody to report it: the page is unloading.
+      });
+  };
+  const ours = (): boolean => useChatStore.getState().streaming?.messageId === messageId;
+
+  store.followInterruptedTurn(conversationId, messageId, true);
+  store.setStreaming({ conversationId, messageId, abort: follow, stop, abandon });
+  store.setComposerLock('turn_in_flight');
+  try {
+    await streamTurn({
+      sessionId,
+      message: '',
+      watch: true,
+      signal: follow.signal,
+      getToken: async () => {
+        lastToken = await auth.getAccessToken();
+        return lastToken;
+      },
+      onWatching(running) {
+        // Another participant's turn, or a service too old to say whose: not this bubble's to show.
+        if (running === turnId) return;
+        someoneElses = true;
+        follow.abort();
+      },
+      onEvent(event) {
+        // Nothing after an abort: a frame already buffered when the turn turned out to be somebody
+        // else's is still theirs.
+        if (event.type === 'token' || follow.signal.aborted) return;
+        useChatStore.getState().applyEvent(conversationId, messageId, event);
+        if (event.type === 'exhibit') exhibitArrived(sessionId, event);
+        void useEntityStore.getState().ingest(conversationId, messageId, event);
+      },
+    });
+    // An answer read out of a buffer after the abort is still somebody else's turn's.
+    if (someoneElses) {
+      useChatStore.getState().followInterruptedTurn(conversationId, messageId, false);
+      return 'gone';
+    }
+    useChatStore.getState().finishTurn(conversationId, messageId, 'done');
+    announceStatus(describeAnswer(answerText(conversationId, messageId)));
+    return 'settled';
+  } catch (err) {
+    const kind = err instanceof ApiError ? err.kind : 'stream';
+    if (stopped) {
+      useChatStore.getState().finishTurn(conversationId, messageId, 'aborted');
+      announceStatus('Stopped before the answer was complete.');
+      return 'settled';
+    }
+    useChatStore.getState().followInterruptedTurn(conversationId, messageId, false);
+    if (someoneElses) return 'gone';
+    // No turn on the replica that answered: ended in the gap, or running on another one — whose
+    // answer still lands in the transcript, so this gets the full poll (see `RELOAD_RECOVERY_MS`).
+    if (kind === 'session_not_found') return 'dropped';
+    // Aborted from outside — the conversation deleted, the store cleared: nobody is waiting.
+    if (follow.signal.aborted) return 'settled';
+    if (
+      kind === 'network' ||
+      kind === 'stream' ||
+      kind === 'stream_lagged' ||
+      kind === 'rate_limited' ||
+      kind === 'unauthorized' ||
+      kind === 'token_unavailable'
+    )
+      return 'dropped';
+    // The turn itself ended in an error, which the stream said: that is its outcome.
+    useChatStore.getState().failTurn(conversationId, messageId, {
+      kind,
+      message: err instanceof Error ? err.message : 'The turn failed.',
+    });
+    return 'settled';
+  } finally {
+    if (ours()) {
+      useChatStore.getState().setStreaming(null);
+      useChatStore.getState().setComposerLock(false);
+    }
+  }
 }
 
 /**

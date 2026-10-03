@@ -158,3 +158,16 @@ export const myExhibitsQuery = (auth: TokenGetter) => ({
   queryKey: keys.myExhibits,
   queryFn: () => api.listMyExhibits(auth),
 });
+
+/**
+ * A calculation by-product as text — what a geometry artefact that cites a calculation draws.
+ *
+ * Immutable, as a content-addressed read is: the bytes under one `<calc_key>#<name>` are what that
+ * calculation produced, and a calc key names its inputs, so the same ref can never mean other
+ * bytes. Eviction can make it *gone* (a 404), never *different*.
+ */
+export const calcArtifactTextQuery = (ref: string, auth: TokenGetter) => ({
+  queryKey: keys.calcArtifact(ref),
+  queryFn: async () => (await api.getCalcArtifact(ref, auth)).blob.text(),
+  ...IMMUTABLE,
+});

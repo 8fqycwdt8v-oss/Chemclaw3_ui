@@ -355,7 +355,8 @@ export function createRequestListener(): http.RequestListener {
     }
 
     if (path.startsWith('/api/')) {
-      const route = resolveRoute(method, path);
+      // The query rides along for the one route that holds its id there (`CALC_ARTIFACT_REF`).
+      const route = resolveRoute(method, path, rawUrl.slice(path.length));
       if (!route) {
         // Not whitelisted: answered here, upstream never contacted. Labelled as one bucket rather
         // than by path — an un-whitelisted path is attacker-chosen, so using it as a metric label

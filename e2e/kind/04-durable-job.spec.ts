@@ -9,10 +9,8 @@ import {
   expect,
   lastAnswer,
   newConversation,
-  notOnThisLane,
   openTrace,
-  realModel,
-  requireRealModel,
+  runTag,
   say,
   send,
   stopButton,
@@ -108,15 +106,20 @@ test('a calculation job runs to completion and its whole result is readable', as
 });
 
 test('a second, long job can be cancelled from the registry', async ({ alice }) => {
-  // The scripted mock's only job payload is fixed for the life of its process, so a second launch
-  // rejoins the first, finished run — there is nothing running to cancel.
-  requireRealModel('launching a second, long-running job');
+  // On the mock, `[[e2e:long-job]]` launches a BO campaign on the `measured` objective, which
+  // suspends on a person after its seed batch — running until cancelled. Its seed is derived from
+  // the message, and the run tag makes the message (so the job) this run's own: a payload already
+  // launched would rejoin that run (D-011) rather than start one.
   const { page } = alice;
+  const tag = runTag();
   await newConversation(page);
   await ask(
     page,
-    'Start a conformer search for C(CCCCCCCCO)CCCCCCCCO at the most thorough level as a durable ' +
-      'job and do not wait for it: tell me its job id as soon as it is launched.',
+    say(
+      `[[e2e:long-job]] ${tag} start a measured campaign`,
+      `${tag}: Start a conformer search for C(CCCCCCCCO)CCCCCCCCO at the most thorough level as ` +
+        'a durable job and do not wait for it: tell me its job id as soon as it is launched.',
+    ),
   );
   const text = (await lastAnswer(page).innerText()) + (await (await openTrace(page)).innerText());
   const id = /\b(?:calc|qm|bo)-[A-Za-z0-9_-]{8,}\b/.exec(text)?.[0];
@@ -149,7 +152,6 @@ test('the cancel control is offered to a privileged user', async ({ alice }) => 
         .__CHEMCLAW_CONFIG__,
   );
   test.skip(config.authMode !== 'msal', 'devauth opens the gate for everyone');
-  if (!realModel()) notOnThisLane('cancelling a running job (see the real-model scenario)');
   expect(
     config.reviewerRoles,
     'the BFF serves reviewerRoles: [] — REVIEWER_ROLES is unset, so "Request cancellation" is ' +

@@ -8,11 +8,11 @@ import {
   bearerOf,
   expect,
   lastAnswer,
+  NOTE_CHIP,
   newConversation,
-  notOnThisLane,
   openTrace,
   realModel,
-  requireRealModel,
+  runTag,
   say,
   send,
   stopButton,
@@ -70,19 +70,35 @@ test('the answer streams in, and every tool it called is on the card with its re
 });
 
 test('a citation in the answer opens the record it names', async ({ alice }) => {
-  // Whether the answer *cites* is the model's writing; the scripted mock's prose names no ids.
-  requireRealModel('citing a record in the answer');
+  // On the mock, `[[e2e:cite]]` searches first (`gather_evidence` on an amide-coupling anchor, plus
+  // `find_notes`) and writes the first record and note the tools returned into its prose — so the
+  // chip, the id it carries and the sheet it opens are all the service's, not the script's.
   const { page } = alice;
+  const tag = runTag();
   await newConversation(page);
   await ask(
     page,
-    'Search our ELN records for amide couplings run with EDC, and cite each record you use by ' +
-      'its id exactly as the search returned it.',
+    say(
+      `[[e2e:cite]] ${tag} EDC amide couplings`,
+      `${tag}: Search our ELN records for amide couplings run with EDC, and cite each record you ` +
+        'use by its id exactly as the search returned it.',
+    ),
   );
   const chip = lastAnswer(page)
     .getByRole('button', { name: /^(?:reaction|playbook|failure|rxn|compound|campaign)-/ })
     .first();
   await expect(chip, 'the answer carries no clickable citation').toBeVisible();
+  if (!realModel()) {
+    // The script cites one ELN/ORD record and one knowledge note; both must be chips.
+    await expect(
+      lastAnswer(page).getByRole('button', { name: /^reaction-/ }),
+      'no ELN/ORD record (reaction-…) chip',
+    ).not.toHaveCount(0);
+    await expect(
+      lastAnswer(page).getByRole('button', { name: NOTE_CHIP }),
+      'no knowledge-note chip',
+    ).not.toHaveCount(0);
+  }
   const id = (await chip.textContent())!.trim();
   await chip.click();
   const sheet = page.getByRole('dialog', { name: new RegExp(`Note ${id.replace(/[.]/g, '\\.')}`) });
@@ -101,13 +117,19 @@ const CITATION_ONLY = 'reaction-eln-ord.suzuki-flow-hte-04620';
 test('a citation-only ELN record says its structure was not given by the source', async ({
   alice,
 }) => {
-  requireRealModel('citing a citation-only record');
+  // On the mock, `[[e2e:cite]]` with a `reaction-…` id in the message looks that record up with
+  // `expand_note` and cites it only if the lookup returned it.
   const { page } = alice;
+  const tag = runTag();
   await newConversation(page);
   await ask(
     page,
-    'Look up our ORD record suzuki-flow-hte-04620 from the Suzuki flow HTE import and cite it by ' +
-      'its record id exactly as the search returns it. Do not summarise it; just cite it.',
+    say(
+      `[[e2e:cite]] ${tag} ${CITATION_ONLY}`,
+      `${tag}: Look up our ORD record suzuki-flow-hte-04620 from the Suzuki flow HTE import and ` +
+        'cite it by its record id exactly as the search returns it. Do not summarise it; just ' +
+        'cite it.',
+    ),
   );
   const chip = lastAnswer(page)
     .getByRole('button', { name: /^reaction-/ })
@@ -131,19 +153,4 @@ test('a citation-only record, read through the BFF, discloses its tier', async (
   const body = await res.text();
   expect(body).toMatch(/structure not given by the source/i);
   expect(body).toMatch(/citation-only/i);
-});
-
-test('without a model, a turn still reaches the knowledge base and shows the note it read', async ({
-  alice,
-}) => {
-  test.skip(realModel(), 'the mock-lane stand-in for the citation scenarios above');
-  notOnThisLane('citation chips: the scripted mock writes no note ids into its prose');
-  const { page } = alice;
-  await newConversation(page);
-  await ask(page, '[[a-retrieval]] amide coupling failure modes');
-  const trace = await openTrace(page);
-  // expand_note was asked for `failure-dcm-amide-coupling`; its body is what a citation chip
-  // would open, served through the same route (`GET /notes/{id}` and the tool share `expand_note`).
-  const preview = trace.getByRole('region', { name: 'Result preview from expand_note' });
-  await expect(preview).toContainText('failure-dcm-amide-coupling');
 });

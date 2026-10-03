@@ -82,6 +82,44 @@ export default defineConfig({
     // which was the only thing `'hidden'` was buying. Turn this back on together with whatever
     // consumes them, and strip the files from the image in the same change.
     sourcemap: false,
+    rolldownOptions: {
+      output: {
+        /**
+         * Everything the first paint needs, in one chunk with the entry.
+         *
+         * Rolldown (Vite 8's bundler) splits shared code by *which entries reach it*, and every
+         * `import()` is an entry — so a module the shell imports statically and a lazy chunk also
+         * imports landed in a chunk of its own, preloaded beside the entry rather than inside it.
+         * By wave 1 of the artefacts feature that was fourteen first-load files: react-router in
+         * `hooks-*.js`, valibot in `exhibitConstants-*.js` (named after the module that happened to
+         * reach it first, which is why it looked like the artefact feature's doing), the Radix
+         * dismissable-layer/focus-scope/dialog code in one `dist-*.js` and floating-ui/popper in
+         * another. None of it was lazy — the shell's tooltip and dropdown menu need all of it —
+         * so the split bought no deferral and cost each file its own gzip dictionary and its own
+         * import/export glue.
+         *
+         * `tags: ['$initial']` is Rolldown's built-in tag for "statically imported by an entry or
+         * part of its dependency chain", so this group captures exactly the first-load closure and
+         * nothing a lazy chunk alone reaches: Ketcher, RDKit, the pane, the markdown renderer and
+         * the panels stay where they were. Measured on 2026-10-03 the way `check:bundle` measures
+         * (entry plus every `modulepreload`, gzip level 9), bytes:
+         *
+         *     main before this (14 first-load chunks)   755,003 raw   238,985 gzip  (233.4 KiB)
+         *     main with this alone (2 chunks)           751,218 raw   231,417 gzip  (226.0 KiB)
+         *     with artefacts wave 2 on top              755,561 raw   232,743 gzip  (227.3 KiB)
+         *
+         * so this recovers 7,568 bytes gzip — slightly more than the 7,370 wave 1 added (230,015 →
+         * 237,385) — and the whole of `assets/*.js` shrank too (2,136,172 → 2,127,674 gzip), so
+         * nothing moved from the first load into a lazy chunk to buy the number. The runtime chunk
+         * stays its own file because Rolldown emits it separately whatever the groups say.
+         *
+         * One cost to know about: a module is placed whole in one chunk, so a dependency the first
+         * load shares with a lazy chunk (valibot) carries *every* export either side uses in the
+         * first-load chunk — measured, under a kilobyte raw for the geometry schema's validators.
+         */
+        codeSplitting: { groups: [{ name: 'app', tags: ['$initial'] }] },
+      },
+    },
   },
   server: {
     /**

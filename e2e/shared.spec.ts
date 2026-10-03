@@ -92,11 +92,13 @@ test.describe('in a conversation somebody else is talking in (Chemclaw3_ui #130)
     page,
     isMobile,
   }) => {
-    // The owner's turn is running: the line says so, and the turn's view streams an answer.
+    // The owner's turn starts once the member is looking (`started`): the line says so, and the
+    // turn's view streams an answer.
+    let started = false;
     let streamed = false;
     let readsAfter = 0;
     await page.route(`**/api/sessions/${MEMBER_SID}/queue`, (route) =>
-      route.fulfill({ json: { running: !streamed, waiting: [] } }),
+      route.fulfill({ json: { running: started && !streamed, waiting: [] } }),
     );
     await page.route(`**/api/sessions/${MEMBER_SID}/turn/stream`, (route) => {
       streamed = true;
@@ -154,6 +156,7 @@ test.describe('in a conversation somebody else is talking in (Chemclaw3_ui #130)
     const transcript = page.locator('#transcript');
     const answers = transcript.getByRole('article', { name: 'Assistant answer', exact: true });
     await expect(answers).toHaveCount(2);
+    started = true;
 
     // The answer arrives without anybody pressing anything — said to be somebody else's turn,
     // and one answer, not a second copy of anything.

@@ -107,6 +107,23 @@ function watchResponse(
   );
 }
 
+/** Captured before any test fakes the clock: the 404 and abort paths settle through I/O. */
+const realTimeout = globalThis.setTimeout;
+
+/**
+ * Advance the fake clock a second at a time, letting real I/O run between steps, until `done`.
+ *
+ * `advanceTimersByTimeAsync` alone races the response-body reads the fake clock does not drive, so
+ * under load it can run the whole budget before the follow has even ended.
+ */
+async function untilFake(done: () => boolean, maxSeconds = 60): Promise<void> {
+  for (let second = 0; second < maxSeconds && !done(); second += 1) {
+    await new Promise((resolve) => realTimeout(resolve, 5));
+    await vi.advanceTimersByTimeAsync(1_000);
+  }
+  expect(done()).toBe(true);
+}
+
 const json = (body: unknown): Response =>
   new Response(JSON.stringify(body), {
     status: 200,
@@ -239,8 +256,7 @@ describe('a reload mid-turn', () => {
     restore = stub.restore;
 
     resumeInterruptedTurn(cid, auth);
-    await vi.advanceTimersByTimeAsync(5_000);
-
+    await untilFake(() => message(cid, mid).finalText !== null);
     expect(message(cid, mid).finalText).toBe('4.76 in water at 25 °C.');
   });
 
@@ -256,8 +272,8 @@ describe('a reload mid-turn', () => {
     restore = stub.restore;
 
     resumeInterruptedTurn(cid, auth);
-    // The live path's budget is 630 s. This one is the bound a turn that is over deserves.
-    await vi.advanceTimersByTimeAsync(30_000);
+    // The live path's budget is 630 s; this must settle inside `untilFake`'s 60 fake seconds.
+    await untilFake(() => message(cid, mid).interruptedByReload === false);
 
     const settled = message(cid, mid);
     expect(settled.interruptedByReload).toBe(false);

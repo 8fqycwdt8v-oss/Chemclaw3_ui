@@ -12,14 +12,13 @@
  *  1. **Arrives** — `exhibit_draft` frames, each carrying the whole text so far, keyed by the
  *     provider's `call_id`. A later frame replaces an earlier one; a frame whose text is no longer
  *     than what is held (a reordered or repeated frame) is ignored, so the text on screen only grows.
- *  2. **Settles** — the turn's `exhibit` frame names the artefact the call became: the *first*
- *     unsettled create draft for a `created` frame (a create carries no id until the tool runs, and
- *     the service emits the `exhibit` frames in call order), the revise draft naming the same
- *     `exhibit_id` for a `revised` one. A settled draft stays on screen until the session's list has
+ *  2. **Settles** — the turn's `exhibit` frame names the artefact the call became, and the
+ *     `call_id` of the call (`settleDraft`); an older service's frame without one falls back to
+ *     order, for documents only. A settled draft stays on screen until the session's list has
  *     been refetched, so the swap from draft to artefact has nothing in between to flash.
- *  3. **Is dropped** — once settled and refetched; or, unsettled, when the turn ends: the tool was
- *     refused or the turn failed, and the text the reader watched being written is not a document
- *     anybody has.
+ *  3. **Is dropped** — once settled and refetched; at once when its tool call raises
+ *     (`failDraft`); or, unsettled, when the turn ends: the turn failed, and the text the reader
+ *     watched being written is not a document anybody has.
  */
 
 import { create } from 'zustand';
@@ -110,22 +109,53 @@ export function applyDraft(sessionId: string, event: ExhibitDraftEvent): boolean
 /**
  * The turn's `exhibit` frame arrived: mark the draft it replaces. Returns that draft's call id, or
  * `null` when no draft was waiting for this frame (a table, or a revise that streamed nothing).
+ *
+ * **By identity first.** The frame carries the `call_id` of the tool call that wrote it (the
+ * contract's wave-2 amendment), and when it does, only the draft of that call is settled — or
+ * none, if that call streamed nothing. Settling by position instead was wrong twice over: a refused
+ * document create followed by its retry let the retry's artefact settle the *stale* draft, leaving
+ * the pane on the retry's text until the turn ended; and a table created while a document streamed
+ * settled the document's draft with the table's id.
+ *
+ * Only an empty `call_id` — a service older than the field — falls back to the old rule, narrowed
+ * to what can have streamed: a `created` frame settles the oldest unsettled create draft only when
+ * the frame is a `document`, and a `revised` one the revise draft naming the same artefact.
  */
 export function settleDraft(
   sessionId: string,
-  op: 'created' | 'revised',
-  exhibitId: string,
+  event: { op: 'created' | 'revised'; exhibit_id: string; kind: string; call_id?: string },
 ): string | null {
+  const { op, exhibit_id: exhibitId } = event;
+  const callId = event.call_id ?? '';
   const waiting = draftsOf(useExhibitDrafts.getState(), sessionId).find(
     (d) =>
       d.settledAs === null &&
-      (op === 'created' ? d.op === 'create' : d.op === 'revise' && d.exhibitId === exhibitId),
+      (callId
+        ? d.callId === callId
+        : op === 'created'
+          ? d.op === 'create' && event.kind === 'document'
+          : d.op === 'revise' && d.exhibitId === exhibitId),
   );
   if (!waiting) return null;
   update(sessionId, (drafts) =>
     drafts.map((d) => (d === waiting ? { ...d, settledAs: exhibitId } : d)),
   );
   return waiting.callId;
+}
+
+/**
+ * A `create_exhibit` / `revise_exhibit` call raised (`tool_failed`): its draft is not a document
+ * anybody will have, so it leaves now rather than at the turn's end — where it would sit in front
+ * of the pane while the agent retries, and could be mistaken for the retry's text.
+ *
+ * `tool_failed` carries no call id on this wire, so the draft is the **oldest unsettled one of that
+ * op**: calls fail in the order they were made, and the drafts are held in arrival order.
+ */
+export function failDraft(sessionId: string, op: 'create' | 'revise'): void {
+  const failed = draftsOf(useExhibitDrafts.getState(), sessionId).find(
+    (d) => d.settledAs === null && d.op === op,
+  );
+  if (failed) update(sessionId, (drafts) => drafts.filter((d) => d !== failed));
 }
 
 /** A settled draft's artefact is in the list now: the draft has done its job. */

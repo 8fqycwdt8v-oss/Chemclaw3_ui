@@ -20,10 +20,16 @@
  */
 
 import { keys, queryClient } from '../api/queryClient.ts';
-import type { ExhibitDraftEvent, ExhibitEvent } from '../../shared/events.ts';
+import type { ExhibitDraftEvent, ExhibitEvent, ToolFailedEvent } from '../../shared/events.ts';
 import { useExhibitPane } from './exhibitPane.ts';
 import { useChatStore } from './chatStore.ts';
-import { applyDraft, discardUnsettled, dropDraft, settleDraft } from './exhibitDrafts.ts';
+import {
+  applyDraft,
+  discardUnsettled,
+  dropDraft,
+  failDraft,
+  settleDraft,
+} from './exhibitDrafts.ts';
 
 /** Refetch the session's list; resolves once it has answered (or failed — either way, settled). */
 function refetch(sessionId: string): Promise<void> {
@@ -42,7 +48,7 @@ export function exhibitArrived(sessionId: string, event: ExhibitEvent): void {
   const refreshed = refetch(sessionId);
   // The draft this frame replaces, if one was streaming: kept on screen until the list can show
   // the artefact in its place, then dropped — so the swap has no empty frame between the two.
-  const settled = event.exhibit_id ? settleDraft(sessionId, event.op, event.exhibit_id) : null;
+  const settled = event.exhibit_id ? settleDraft(sessionId, event) : null;
   if (settled !== null) void refreshed.finally(() => dropDraft(sessionId, settled));
   if (event.op !== 'created' || !event.exhibit_id) return;
   // Only where the reader is looking. A turn keeps running after its reader switches conversation,
@@ -69,6 +75,18 @@ export function exhibitPushed(sessionId: string): void {
 export function draftArrived(sessionId: string, event: ExhibitDraftEvent): void {
   const began = applyDraft(sessionId, event);
   if (began && onScreen(sessionId)) useExhibitPane.getState().openForDraft();
+}
+
+/** The two tools whose calls stream drafts, and the draft op each one's call is. */
+const DRAFTING_TOOLS: Readonly<Record<string, 'create' | 'revise'>> = {
+  create_exhibit: 'create',
+  revise_exhibit: 'revise',
+};
+
+/** A tool call raised on the turn stream: if it was one that drafts, its draft is discarded now. */
+export function draftToolFailed(sessionId: string, event: ToolFailedEvent): void {
+  const op = DRAFTING_TOOLS[event.tool];
+  if (op) failDraft(sessionId, op);
 }
 
 /** The turn is over: a draft that never became an artefact is discarded. */

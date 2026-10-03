@@ -640,6 +640,8 @@ const DRAFT_TURN: readonly Frame[] = [
       op: 'created',
       author_kind: 'agent',
       author: 'chemclaw',
+      // The call that streamed the draft — what the UI settles the draft by.
+      call_id: 'toolu_e2e_draft',
     },
     40,
   ],
@@ -732,7 +734,9 @@ const GEOMETRY_SESSION = '2'.repeat(32);
 const GEOMETRY_INLINE_ID = 'xb-9e0000000000a001';
 const GEOMETRY_CITED_ID = 'xb-9e0000000000a002';
 /** The calc artifact the cited geometry names, as `ArtifactRef.as_str()` spells it. */
-const CALC_KEY = 'xtb_opt@6.7.1:0123abcd:89efcdab';
+/** Shaped as the calc server writes one — its engine version carries `/` and `+` (the contract's
+ *  wave-2 amendment) — so the browser suite proves the whitelist takes a real key end to end. */
+const CALC_KEY = 'xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0/rdkit-2025.03.4:0123abcd:89efcdab';
 const CALC_NAME = 'xtbopt.xyz';
 const WATER_XYZ = `3
  energy: -5.070544440612 gnorm: 0.000123 xtb: 6.7.1

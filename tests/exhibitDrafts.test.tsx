@@ -15,7 +15,12 @@ import { act, cleanup, render, renderHook, screen, waitFor } from '@testing-libr
 import { RightColumn } from '../src/components/exhibits/RightColumn.tsx';
 import { PaneBody } from '../src/components/exhibits/ExhibitPane.tsx';
 import { useFrameThrottled } from '../src/components/exhibits/views/DraftView.tsx';
-import { draftArrived, draftsEnded, exhibitArrived } from '../src/state/exhibitEvents.ts';
+import {
+  draftArrived,
+  draftToolFailed,
+  draftsEnded,
+  exhibitArrived,
+} from '../src/state/exhibitEvents.ts';
 import {
   createDraftOf,
   draftsOf,
@@ -207,6 +212,57 @@ describe('replacement and discard', () => {
     expect(held.find((d) => d.callId === 'first')?.settledAs).toBe('xb-1111111111111111');
     expect(held.find((d) => d.callId === 'second')?.settledAs).toBeNull();
     expect(held.find((d) => d.callId === 'rev')?.settledAs).toBe(XID);
+  });
+
+  it('settles by call id: a refused create’s draft never takes its retry’s artefact', () => {
+    // Scenario A. The first document create is refused; the agent retries.
+    draftArrived(SID, draft({ call_id: 'refused', markdown: '# Old' }));
+    draftArrived(SID, draft({ call_id: 'retry', markdown: '# New' }));
+    exhibitArrived(SID, exhibit({ call_id: 'retry' }));
+    const held = draftsOf(useExhibitDrafts.getState(), SID);
+    expect(held.find((d) => d.callId === 'retry')?.settledAs).toBe(NEW_XID);
+    expect(held.find((d) => d.callId === 'refused')?.settledAs).toBeNull();
+    // A frame naming a call that streamed nothing settles nothing.
+    exhibitArrived(SID, exhibit({ call_id: 'never-streamed', exhibit_id: 'xb-2222222222222222' }));
+    expect(
+      draftsOf(useExhibitDrafts.getState(), SID).filter((d) => d.settledAs !== null),
+    ).toHaveLength(1);
+  });
+
+  it('never lets a table settle a streaming document, with or without a call id', () => {
+    // Scenario B: a table and a document created in parallel.
+    draftArrived(SID, draft({ call_id: 'doc' }));
+    exhibitArrived(
+      SID,
+      exhibit({ kind: 'table', exhibit_id: 'xb-3333333333333333', call_id: 'table' }),
+    );
+    exhibitArrived(SID, exhibit({ kind: 'table', exhibit_id: 'xb-4444444444444444' }));
+    expect(createDraftOf(useExhibitDrafts.getState(), SID)?.settledAs).toBeNull();
+    // An older service's frame with no call id still settles the document by order.
+    exhibitArrived(SID, exhibit({ kind: 'document' }));
+    expect(createDraftOf(useExhibitDrafts.getState(), SID)?.settledAs).toBe(NEW_XID);
+  });
+
+  it('discards a draft as soon as its tool call fails, oldest of that op first', () => {
+    draftArrived(SID, draft({ call_id: 'refused' }));
+    draftArrived(SID, draft({ call_id: 'rev', op: 'revise', exhibit_id: XID }));
+    const failed = (tool: string) =>
+      draftToolFailed(SID, {
+        type: 'tool_failed',
+        tool,
+        message: 'spec too large',
+        reason: null,
+        agent: '',
+      });
+    failed('find_notes');
+    expect(draftsOf(useExhibitDrafts.getState(), SID)).toHaveLength(2);
+    failed('create_exhibit');
+    expect(draftsOf(useExhibitDrafts.getState(), SID).map((d) => d.callId)).toEqual(['rev']);
+    // The retry streams, and is the draft in front — the refused one is gone.
+    draftArrived(SID, draft({ call_id: 'retry', markdown: '# Retry' }));
+    expect(createDraftOf(useExhibitDrafts.getState(), SID)?.callId).toBe('retry');
+    failed('revise_exhibit');
+    expect(reviseDraftOf(useExhibitDrafts.getState(), SID, XID)).toBeNull();
   });
 
   it('is discarded when the turn ends without its artefact, and a settled one is left to land', () => {

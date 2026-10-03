@@ -948,8 +948,20 @@ const exhibitEvent = v.object({
   author_kind: oneOf(['agent', 'human'] as const, 'agent'),
   /** The agent's name or the person's actor id, as the service records it. */
   author: text(),
+  /**
+   * The provider tool-call id of the `create_exhibit`/`revise_exhibit` call that wrote this
+   * revision — the same id the `exhibit_draft` frames of that call carried (the frozen contract's
+   * wave-2 amendment). **Empty** for a human write, a report artefact and every push.
+   *
+   * It is what makes a draft's replacement a matter of identity rather than of order: settled by
+   * position, a refused create's stale draft took the retry's artefact, and a table created beside
+   * a streaming document took the document's place (`src/state/exhibitDrafts.ts`). Optional in the
+   * type and always populated by `normalizeEvent`, for `agent`'s reason — an older service sends
+   * nothing, and every construction site would otherwise have to name a field that means "none".
+   */
+  call_id: text(),
 });
-export type ExhibitEvent = v.InferOutput<typeof exhibitEvent>;
+export type ExhibitEvent = Loosen<v.InferOutput<typeof exhibitEvent>, 'call_id'>;
 
 /**
  * A document artefact **while the model is still writing it** (artefacts wave 2).

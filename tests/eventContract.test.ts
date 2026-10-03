@@ -195,6 +195,7 @@ const full: Array<[string, Record<string, unknown>]> = [
       op: 'created',
       author_kind: 'human',
       author: 'chemist@example.com',
+      call_id: 'toolu_01',
     },
   ],
   // Every field away from its fallback: `create` is the op an unknown value does NOT read as, and

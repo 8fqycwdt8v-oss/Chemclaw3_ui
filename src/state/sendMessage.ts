@@ -6,7 +6,7 @@
  */
 
 import type { ExhibitRef } from '../../shared/exhibitConstants.ts';
-import { draftArrived, draftsEnded, exhibitArrived } from './exhibitEvents.ts';
+import { draftArrived, draftToolFailed, draftsEnded, exhibitArrived } from './exhibitEvents.ts';
 import { useExhibitPane } from './exhibitPane.ts';
 import { api } from '../api/client.ts';
 import type { TranscriptMessage } from '../api/client.ts';
@@ -606,6 +606,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         // Refetch the session's artefacts and, for one the agent just created, open the pane on it
         // — unless the reader closed the pane during this turn (`useExhibitPane.autoOpen`).
         if (event.type === 'exhibit') exhibitArrived(sessionId, event);
+        // A refused `create_exhibit`/`revise_exhibit` takes its draft with it, so a retry's text is
+        // never shown under the refused call's draft.
+        if (event.type === 'tool_failed') draftToolFailed(sessionId, event);
         // The conversation's subject index. Fire-and-forget: ingestion canonicalises through
         // RDKit, so it is asynchronous, and the transcript must not wait on a WASM call to render
         // the event it has already applied. Named with this conversation's id rather than the

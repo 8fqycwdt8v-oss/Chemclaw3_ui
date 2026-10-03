@@ -164,13 +164,16 @@ services:
       API_SCOPE: ${API_SCOPE:-}
       APP_VERSION: ${APP_VERSION:-compose}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      # The HTML sandbox (artefacts wave 3): the BFF's second listener, published on its own port so
-      # it is a different origin from the app. Both origins are what the *browser* types, so they
-      # follow the published ports below; reach the app at exactly APP_ORIGIN or the sandboxed
-      # frame stays blank. A deployment uses a distinct hostname instead (README, "HTML sandbox").
+      # The HTML sandbox, ON here: the BFF's second listener, published on its own port so it is a
+      # different origin from the app. Both origins are what the *browser* types, so they follow
+      # the published ports below; open the app at exactly APP_ORIGIN, or HTML artefacts show as
+      # source with both origins named. Sharing on a LAN (`UI_BIND=0.0.0.0`) means setting both to
+      # the host's address. A deployment uses a distinct hostname instead (README, "HTML sandbox").
       APP_ORIGIN: ${APP_ORIGIN:-http://localhost:${UI_PORT:-3000}}
       SANDBOX_ORIGIN: ${SANDBOX_ORIGIN:-http://localhost:${UI_SANDBOX_PORT:-3001}}
       SANDBOX_PORT: '8081'
+      # Artefact scripts run by default (owner decision, 2026-10-03); `off` is the kill switch.
+      HTML_SCRIPTS_DEFAULT: ${HTML_SCRIPTS_DEFAULT:-on}
     ports:
       # Loopback by default: the stack it brings up requires no sign-in, so publishing it on every
       # interface of the host is a decision too. `UI_BIND=0.0.0.0` to share it deliberately.

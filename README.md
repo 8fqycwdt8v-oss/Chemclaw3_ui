@@ -142,6 +142,27 @@ The UI server is configured entirely by environment — see [`.env.example`](.en
 Vite inlines `import.meta.env` at build time, browser-facing settings are served at runtime from
 `GET /config.js` instead, so **one image runs in any tenant** with no rebuild.
 
+### What the BFF refuses to start with
+
+`validateConfig` (`server/config.ts`) refuses — logs one `config:` line per problem and exits 1 —
+rather than serving a configuration that would look like it works:
+
+- `CHEMCLAW_API_URL` that is not a valid http(s) URL, or that carries a path (use the service root;
+  put a prefix in the ingress);
+- `AUTH_MODE` other than `dev` or `msal` (a typo never falls back to no sign-in);
+- `MAX_MESSAGE_CHARS` that is not a whole number above zero;
+- under `AUTH_MODE=msal`: a missing `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID` or `API_SCOPE`; an
+  `ENTRA_AUTHORITY` that is not a URL, not https, carries a query, fragment or userinfo, or names a
+  host CSP would read as syntax;
+- `AUTH_MODE=dev` on a non-loopback `BIND_HOST` without `ALLOW_INSECURE_AUTH=true`;
+- the HTML sandbox: `SANDBOX_ORIGIN` or `APP_ORIGIN` not a plain http(s) origin, `SANDBOX_ORIGIN`
+  without `APP_ORIGIN` or equal to it, an http sandbox under an https app, `SANDBOX_PORT` not a port
+  from 1 to 65535 or equal to `PORT`, and `HTML_SCRIPTS_DEFAULT` other than `on`/`off` (see "HTML
+  sandbox" below).
+
+A listener that cannot bind (`EADDRINUSE` on `PORT` or `SANDBOX_PORT`) exits 1 with one structured
+line naming the address.
+
 ### Enabling Entra SSO
 
 The backend enforces Entra when `CHEMCLAW_ENTRA_REQUIRED=true`. Set `AUTH_MODE=msal` here at the
@@ -197,20 +218,30 @@ holds the bearer token: it is shown in a frame served by the BFF's **second list
 different origin, embedded with `sandbox="allow-scripts"` and nothing else (no `allow-same-origin`,
 `allow-popups`, `allow-top-navigation`, `allow-forms` or `allow-modals`). That listener serves
 `GET /sandbox/frame` and nothing else, under `default-src 'none'; connect-src 'none'` and
-`frame-ancestors <APP_ORIGIN>`; the app listener answers that path with a 404.
+`frame-ancestors <APP_ORIGIN>`; the app listener answers that path with a 404. The shell posts
+`{type: "ready"}` once its listener is armed and the app sends the artefact only in answer to it;
+after that the shell posts back nothing but its height.
 
-**Scripts are off by default.** The script `allow-scripts` permits is the shell's own: it puts the
-artefact in a nested `srcdoc` frame with `sandbox=""`, so the artefact's own script does not run. A
-per-view **Run scripts** button (never persisted; a new revision or a reload turns it off again)
-re-renders it with `allow-scripts`, after a warning naming what that still allows:
+**The sandbox is on by default, and so are the artefact's scripts** (owner decisions of 2026-10-03).
+The shell puts the artefact in a nested `srcdoc` frame with `allow-scripts` behind a prelude, and
+the view always says, briefly, that scripts run isolated and what they can still do, with a link
+here. A per-view **Disable scripts** re-renders it with `sandbox=""` (no script at all); the choice
+is never persisted — a new revision, another artefact or a reload is back to the default.
+**`HTML_SCRIPTS_DEFAULT=off` is the kill switch**: nothing runs until somebody presses **Run
+scripts** on one view.
+
+What a running script can still do — an **owner-accepted residual risk**
+(`docs/production-readiness.md` §4, `ISSUES.md` Issue 25):
 
 - **Network egress over WebRTC.** CSP does not govern WebRTC — measured under this shell, a scripted
   page sent UDP carrying data it read to an arbitrary host through a STUN candidate, and Chromium
-  ignores `webrtc 'block'`. A scripted render gets a prelude that removes `RTCPeerConnection`,
-  `webkitRTCPeerConnection` and `RTCDataChannel` from the page's realm; that is defence in depth and
-  **bypassable** (a nested `srcdoc` realm is untouched). So this is not a "no network" sandbox. A
-  deployment that can should set the browser policy **`WebRtcIPHandling=disable_non_proxied_udp`**
-  (Chrome/Edge enterprise policy), which stops non-proxied UDP from WebRTC.
+  ignores `webrtc 'block'`. The prelude removes `RTCPeerConnection`, `webkitRTCPeerConnection` and
+  `RTCDataChannel` from the page's realm; that is defence in depth and **bypassable** (a nested
+  `srcdoc` realm is untouched). So this is not a "no network" sandbox. Browser policy narrows it:
+  on Chrome/Edge set **`WebRtcIPHandling=disable_non_proxied_udp`** — which _reduces_ the exposure and
+  does not eliminate it (WebRTC can still relay over TURN/TCP through a proxy) — and on Firefox
+  **`media.peerconnection.enabled=false`**, which removes WebRTC. `HTML_SCRIPTS_DEFAULT=off` removes
+  the script.
 - **Clipboard writes** after one click in the frame.
 - **Self-navigation, bounded by `frame-src`.** The outer frame can only be navigated to an origin the
   app's CSP lists in `frame-src`: the sandbox origin — and, in MSAL mode, the Entra authority, which
@@ -218,27 +249,76 @@ re-renders it with `allow-scripts`, after a warning naming what that still allow
   `data:`/`blob:` navigations to anywhere else are refused. The nested content frame is bounded by
   the shell's `default-src 'none'`, which lists no frame source at all.
 
-| Variable            | Value                                                                                                 |
-| ------------------- | ----------------------------------------------------------------------------------------------------- |
-| `SANDBOX_ORIGIN`    | the origin the browser reaches the sandbox at, e.g. `https://sandbox.ui.example`                      |
-| `APP_ORIGIN`        | the origin the browser reaches the app at, e.g. `https://ui.example` — required with `SANDBOX_ORIGIN` |
-| `SANDBOX_PORT`      | the second listener's port (default `8081`)                                                           |
-| `SANDBOX_BIND_HOST` | its bind address (default: `BIND_HOST`)                                                               |
+The **Export** menu offers the source as `<title>.html.txt` and says that the file runs its scripts if
+opened as a web page: outside the sandbox it is an ordinary page with nothing around it.
 
-**A deployment must give the sandbox a distinct hostname** — its own Route/Ingress host pointing at
-the pod's `SANDBOX_PORT`, with TLS like the app's (an https app cannot frame an http sandbox). A
-different port on the same host is a different origin, which is all the frame strictly needs, and
-is what local dev and compose use; but it is the same _site_, so the BFF logs a warning when the two
-share a non-loopback hostname. Both origins must be exact: the shell takes content only from
-`APP_ORIGIN`, so a chemist reaching the app at an address other than `APP_ORIGIN` sees a blank frame.
-The BFF refuses to start when `SANDBOX_ORIGIN` is set without `APP_ORIGIN`, equals it, or carries a
-path. Unset, the second listener does not start, `/config.js` serves `sandboxOrigin: ""`, and HTML
-artefacts are shown as escaped source with the notice "HTML preview needs a separate sandbox origin".
-The CSP gains `frame-src <SANDBOX_ORIGIN>` only when the sandbox is on.
+| Variable               | Value                                                                                                 |
+| ---------------------- | ----------------------------------------------------------------------------------------------------- |
+| `SANDBOX_ORIGIN`       | the origin the browser reaches the sandbox at, e.g. `https://sandbox.ui.example`                      |
+| `APP_ORIGIN`           | the origin the browser reaches the app at, e.g. `https://ui.example` — required with `SANDBOX_ORIGIN` |
+| `SANDBOX_PORT`         | the second listener's port (default `8081`), a whole number from 1 to 65535, not `PORT`               |
+| `SANDBOX_BIND_HOST`    | its bind address (default: `BIND_HOST`)                                                               |
+| `HTML_SCRIPTS_DEFAULT` | `on` (default) or `off` — whether an artefact's script runs without a click                           |
 
-Locally, `npm run dev` and `docker compose` set both origins for you; `start.sh` does not (it is
-also what a hosted preview runs, where `localhost` would be the _viewer's_ machine), so set
-`SANDBOX_ORIGIN`/`APP_ORIGIN` there yourself or HTML artefacts are shown as source.
+**Both origins are exact.** They are what the _browser_ types, scheme, host and port. The shell
+takes content only from `APP_ORIGIN`, so a page opened at any other address — `localhost` for
+`127.0.0.1`, a second hostname, a LAN address — shows the artefact as escaped source with a notice
+naming both origins (`/config.js` publishes `appOrigin` for exactly that comparison). Unset
+`SANDBOX_ORIGIN`, the second listener does not start, `/config.js` serves `sandboxOrigin: ""`, and
+HTML artefacts are shown as escaped source with the notice "HTML preview needs a separate sandbox
+origin". The CSP gains `frame-src <SANDBOX_ORIGIN>` only when the sandbox is on.
+
+The BFF **refuses to start** when `SANDBOX_ORIGIN` or `APP_ORIGIN` is not a plain http(s) origin
+(no path, query or userinfo), when `SANDBOX_ORIGIN` is set without `APP_ORIGIN` or equals it, when
+the sandbox is http under an https app (mixed content), when `SANDBOX_PORT` is not a port or is
+`PORT`, and when `HTML_SCRIPTS_DEFAULT` is anything but `on`/`off`. **`ALLOW_FRAMING=true` turns the
+sandbox off** rather than refusing — a framed app cannot frame the sandbox, whose `frame-ancestors`
+names `APP_ORIGIN` alone while the browser checks every ancestor — and the HTML is shown as source.
+Either way **one startup line says whether the sandbox is on and why** (`html sandbox on: …` /
+`html sandbox off: …`).
+
+Where it is on, and at which addresses:
+
+| How you run it                 | App                            | Sandbox                                                        |
+| ------------------------------ | ------------------------------ | -------------------------------------------------------------- |
+| `docker compose up`            | `http://localhost:3000`        | `http://localhost:3001`                                        |
+| `npm run dev`                  | `http://127.0.0.1:5173` (Vite) | `http://127.0.0.1:8788`                                        |
+| the browser suite              | `http://127.0.0.1:4321`        | `http://127.0.0.1:4323` (and the kill switch on `4324`/`4325`) |
+| kind (Chemclaw3 `deploy/kind`) | `http://127.0.0.1:15173`       | `http://sandbox.localhost:15174`                               |
+| `start.sh` (hosted)            | the platform's                 | **off** — see below                                            |
+
+**On a LAN**, compose publishes on loopback unless `UI_BIND=0.0.0.0`; a colleague reaching
+`http://<host>:3000` is then at a different origin from `APP_ORIGIN`, so set both to what they type —
+`APP_ORIGIN=http://<host>:3000 SANDBOX_ORIGIN=http://<host>:3001` — and reach it only there.
+
+**`start.sh` leaves the sandbox off**, deliberately. It is what a hosted preview (Replit) runs, and
+nothing reliable says where the browser would reach a _second_ listener: the platform publishes its
+public hostname (`REPLIT_DEV_DOMAIN`), but a second external port is a `.replit` `[[ports]]` mapping
+this repository does not ship (and a published deployment exposes one port), and guessing
+`localhost` would frame the _viewer's_ own machine and post the artefact to whatever runs there. Set
+`SANDBOX_ORIGIN`/`APP_ORIGIN`/`SANDBOX_PORT` yourself once a second host or port is routed, or HTML
+artefacts are shown as source.
+
+**Probes.** `/healthz` (liveness) and `/readyz` (readiness) are on the **app** port; the sandbox port
+has one page, so `/sandbox/frame` is its probe.
+
+**In a deployment the sandbox needs a host of its own.** On OpenShift — example manifests in
+[`deploy/openshift/`](deploy/openshift/README.md), held to `server/config.ts` by
+`tests/openshiftManifests.test.ts`:
+
+- a **second container port** (`SANDBOX_PORT`) and a **Service port named `sandbox`**;
+- a **separate Route with its own host**, edge TLS with `insecureEdgeTerminationPolicy: Redirect`
+  (an https app cannot frame an http sandbox), annotated
+  `haproxy.router.openshift.io/disable_cookies: "true"` so the router's affinity cookie is not the one
+  cookie the sandbox origin ever sets;
+- **no oauth-proxy or SSO in front of the sandbox host** — the browser loads the frame with no
+  credential;
+- **proxies pass the sandbox page's CSP through untouched** and add neither `X-Frame-Options` nor the
+  app's CSP to it, or the frame is refused;
+- prefer a host under a **separate registrable domain** from the app's, so the two are different
+  _sites_ and not only different origins. A different port on the same host is a different origin,
+  which is all the frame strictly needs and what local dev and compose use; it is the same site,
+  so the BFF warns when the two share a non-loopback hostname.
 
 ## Layout
 
@@ -254,6 +334,7 @@ shared/     the contracts mirrored by hand from the service — events.ts (the S
 scripts/    the gate (ci.mjs) and its checks, dev launcher, server bundler, smoke test
 e2e/        Playwright specs and the SSE fixture service
 public/     theme boot script, favicon — served as-is by the BFF
+deploy/     example OpenShift manifests (Deployment, Service, the app and sandbox Routes) — not a chart
 docs/       the production-readiness record, the dependency record, and concept studies — what the chemistry
             surface is for, and what it still is not
 ```
@@ -472,9 +553,10 @@ an operator rather than by either pipeline; see Testing above for why they are o
 what `check:live` is and is not.
 
 This repository ships no chart, so a rollout is `oc set image` against a Deployment an operator
-created. That Deployment owes the HTML sandbox a second container port (`SANDBOX_PORT`, default
-8081), a Service port for it, and a Route on a **distinct hostname** — see "HTML sandbox" under
-Configuration. The four-repository release, its ordering (the UI last — it is useless before the API it
+created; [`deploy/openshift/`](deploy/openshift/README.md) is an example of that Deployment, its
+Service and its two Routes. The Deployment owes the HTML sandbox a second container port
+(`SANDBOX_PORT`, default 8081), a Service port for it, and a Route on a **distinct hostname** — see
+"HTML sandbox" under Configuration. The four-repository release, its ordering (the UI last — it is useless before the API it
 proxies answers) and the reasoning are in Chemclaw3: `deploy/jenkins/README.md` and
 `D-2026-08-26-a-release-is-a-descriptor-and-a-target`.
 

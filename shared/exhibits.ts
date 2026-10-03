@@ -391,8 +391,11 @@ const checkedSpec = v.pipe(
 const checkedRawSpec = v.pipe(
   rawExhibitSpec,
   v.check((spec) => oneGeometrySource(spec), 'a geometry takes exactly one of `xyz` or `source`'),
+  // The service sends a whole-table binding as `{"rows": [], "rows_from": {...}}` — `rows` is a
+  // defaulted field of its model — so an *empty* `rows` beside `rows_from` is the wire shape, and
+  // refusing it read every such table's raw_spec as null: no marker, no Detach, no edit.
   v.check(
-    (spec) => spec.kind !== 'table' || spec.rows === undefined || spec.rows_from === undefined,
+    (spec) => spec.kind !== 'table' || !spec.rows?.length || spec.rows_from === undefined,
     'a table takes `rows` or `rows_from`, not both',
   ),
 );

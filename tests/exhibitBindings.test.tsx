@@ -26,6 +26,7 @@ import {
   isSpec,
   type ChartSpec,
   type ExhibitView,
+  type RawExhibitSpec,
   type StructuresSpec,
   type TableSpec,
 } from '../shared/exhibits.ts';
@@ -154,14 +155,12 @@ describe('the wire', () => {
       raw_spec: null,
     });
     expect(chart.spec).toEqual(expect.objectContaining({ series: [{ name: 'A', x: [], y: [] }] }));
-    // The two table bodies are exclusive, as the service holds them.
+    // The two table bodies are exclusive — but an *empty* `rows` beside `rows_from` is how the
+    // service serialises a whole-table binding (its `rows` is a defaulted field), so that is read.
+    const rowsFrom = { result: REF, pointer: '/rows', columns: { yield: '/y' } };
+    expect(isSpec({ kind: 'table', columns: COLUMNS, rows: [], rows_from: rowsFrom })).toBe(true);
     expect(
-      isSpec({
-        kind: 'table',
-        columns: COLUMNS,
-        rows: [],
-        rows_from: { result: REF, pointer: '/rows', columns: { yield: '/y' } },
-      }),
+      isSpec({ kind: 'table', columns: COLUMNS, rows: [{ yield: 1 }], rows_from: rowsFrom }),
     ).toBe(false);
   });
 
@@ -272,15 +271,18 @@ describe('a table with bound cells', () => {
   it('reads a table bound whole as read-only, and detaches it into rows', async () => {
     const whole = decodeExhibitView({
       ...TABLE_BODY,
+      // The service's own serialisation: `rows` is a defaulted field, so it is sent, empty.
       raw_spec: {
         kind: 'table',
         columns: COLUMNS,
+        rows: [],
         rows_from: { result: REF, pointer: '/screen', columns: { solvent: '/s', yield: '/y' } },
       },
       bindings: [
         { path: 'rows_from', result_ref: REF, tool: 'screen', pointer: '/screen', ok: true },
       ],
     }) as ExhibitView & { spec: TableSpec };
+    expect(whole.raw_spec).not.toBeNull();
     const stub = stubFetch(() => json(201, { ...TABLE_BODY, revision: 3, head_revision: 3 }));
     restore = stub.restore;
     render(<TableView sessionId={SID} view={whole} spec={whole.spec} isHead />);
@@ -365,6 +367,51 @@ describe('a chart with bound series', () => {
         },
       ),
     ).toEqual([]);
+  });
+
+  it('takes the caption off only the series a person detached', async () => {
+    // r1 (agent): Measured bound, Literature literal. r2 (a person): Measured detached. The agent
+    // still transcribed Literature; Measured holds the tool's values verbatim.
+    const agentRaw = { ...resolved, series: [measured, resolved.series[1]!] } as RawExhibitSpec;
+    const stub = stubFetch((url) =>
+      url.endsWith('/revisions')
+        ? json(200, {
+            revisions: [
+              { revision: 1, parent_revision: 0, author_kind: 'agent', author: 'chemclaw' },
+              { revision: 2, parent_revision: 1, author_kind: 'human', author: 'me' },
+            ],
+          })
+        : json(200, {
+            ...TABLE_BODY,
+            kind: 'chart',
+            revision: 1,
+            spec: resolved,
+            raw_spec: agentRaw,
+          }),
+    );
+    restore = stub.restore;
+    const view = decodeExhibitView({
+      ...TABLE_BODY,
+      exhibit_id: 'xb-0000000000de7ac4',
+      kind: 'chart',
+      author_kind: 'human',
+      spec: resolved,
+      raw_spec: resolved,
+      bindings: [],
+    }) as ExhibitView & { spec: ChartSpec };
+    render(<ChartView sessionId={SID} view={view} spec={view.spec} isHead />);
+    expect(
+      await screen.findByText(
+        'Values of “Literature” transcribed by the agent — not linked to tool results. The other series are linked.',
+      ),
+    ).toBeTruthy();
+    // And the rule itself, without the network: literal now, linked in the agent's revision.
+    expect(transcribedSeries(view.raw_spec, resolved, agentRaw)).toEqual(['Literature']);
+    expect(transcribedSeries(view.raw_spec, resolved, null)).toEqual([]);
+    expect(transcribedSeries(view.raw_spec, resolved, undefined)).toEqual([
+      'Measured',
+      'Literature',
+    ]);
   });
 
   it('offers no detach for a series whose source is gone — there is nothing to keep', async () => {

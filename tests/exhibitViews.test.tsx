@@ -46,6 +46,17 @@ const XID = VIEW.exhibit_id;
 const json = (status: number, body: unknown): Response =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
+/** One revision-log row, as the service serialises it. */
+const REVISION = {
+  revision: 1,
+  parent_revision: 0,
+  author_kind: 'human',
+  author: 'chemist@example.com',
+  change_note: '',
+  created_at: '2026-10-02T14:00:00Z',
+  byte_size: 100,
+};
+
 const table = decodeExhibitView(VIEW) as ExhibitView & { spec: TableSpec };
 
 let restore: (() => void) | null = null;
@@ -310,10 +321,34 @@ describe('a chart artefact', () => {
     expect(screen.getByRole('list', { name: 'Series' }).textContent).toBe('Run ARun B');
   });
 
-  it('says nothing about transcription over a chemist’s own revision', () => {
-    const view = { ...table, kind: 'chart', author_kind: 'human', spec } as ExhibitView;
+  it('keeps the caption over a person’s revision for the values the agent still transcribed', async () => {
+    // Review finding: the caption used to follow the revision's author, so a chemist's first write
+    // to a chart (a Detach) dropped it from every series. Now it follows the stored specs: both
+    // series were literal in the agent's r1 and still are, so both are still the agent's.
+    const stub = stubFetch((url) =>
+      url.endsWith('/revisions')
+        ? json(200, {
+            revisions: [
+              { ...REVISION, revision: 1, author_kind: 'agent', author: 'chemclaw' },
+              { ...REVISION, revision: 2, parent_revision: 1, author_kind: 'human' },
+            ],
+          })
+        : json(200, { ...VIEW, kind: 'chart', revision: 1, spec, raw_spec: spec }),
+    );
+    restore = stub.restore;
+    const view = {
+      ...table,
+      exhibit_id: 'xb-0000000000c4a7a1',
+      kind: 'chart',
+      author_kind: 'human',
+      spec,
+      raw_spec: spec,
+    } as ExhibitView;
     render(<ChartView sessionId={SID} view={view} spec={spec} isHead />);
-    expect(screen.queryByText(TRANSCRIBED_CAPTION)).toBeNull();
+    expect(await screen.findByText(TRANSCRIBED_CAPTION)).toBeTruthy();
+    expect(stub.calls.some((c) => /\/exhibits\/xb-0000000000c4a7a1\?revision=1$/.test(c.url))).toBe(
+      true,
+    );
   });
 
   it('draws a bar chart over categories, starting at zero', () => {
@@ -327,7 +362,7 @@ describe('a chart artefact', () => {
     render(
       <ChartView
         sessionId={SID}
-        view={{ ...table, spec: bars } as ExhibitView}
+        view={{ ...table, author_kind: 'agent', spec: bars } as ExhibitView}
         spec={bars}
         isHead
       />,

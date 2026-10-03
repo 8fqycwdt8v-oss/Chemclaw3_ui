@@ -3,11 +3,12 @@
  *
  * **The caption is the point.** A drawn line reads as a measurement whether or not it is one, and
  * a series' points are either literal values the agent transcribed or — since wave 3 — bound to a
- * tool result, verbatim. So an agent-authored revision says, under the figure, which it is: every
- * series transcribed is the contract's sentence unchanged; some is the same sentence naming those
- * series; none is no caption, because every value on it is linked and each series' marker says to
- * what. A chemist's revision carries no caption: a person who typed the numbers knows where they
- * came from, and the caption would be wrong about them.
+ * tool result, verbatim. So the figure says, under it, which series are transcribed: every series
+ * is the contract's sentence unchanged; some is the same sentence naming those series; none is no
+ * caption. **Decided per series from the stored specs, not from the revision's author**: a
+ * person's first write to a chart (a Detach, today) used to drop the caption from every series,
+ * including the ones the agent still transcribed. Only the series a person detached lose it — they
+ * hold the tool's values verbatim (`transcribedSeries`).
  *
  * A bound series carries a provenance marker in the series list (one per bound axis), and its rows
  * in the values table are marked as linked. Detach, from the marker, is the one write this view
@@ -20,7 +21,10 @@
 
 import { forwardRef } from 'react';
 import { Link2 } from 'lucide-react';
-import type { ChartSpec, ExhibitView } from '../../../../shared/exhibits.ts';
+import type { ChartSpec, ExhibitView, RawExhibitSpec } from '../../../../shared/exhibits.ts';
+import { useAuth } from '../../../auth/AuthContext.tsx';
+import { useApiQuery } from '../../../api/queryClient.ts';
+import { exhibitQuery, exhibitRevisionsQuery } from '../../../api/queries.ts';
 import { formatScientificNumber } from '../../../lib/format.ts';
 import { SeriesChart, SeriesSwatch } from '@/components/chem/SeriesChart';
 import { ProvenanceMarker, SOURCE_GONE } from '../Provenance.tsx';
@@ -40,7 +44,7 @@ import {
 export const TRANSCRIBED_CAPTION = 'Values transcribed by the agent — not linked to tool results.';
 
 /**
- * The caption for an agent-authored chart, or `null` when nothing on it is transcribed.
+ * The caption for a chart, or `null` when nothing on it is transcribed.
  *
  * Partial names the series, quoted, because "some values" would leave the reader to guess which
  * line to distrust.
@@ -54,6 +58,32 @@ export function transcribedCaption(transcribed: readonly string[], total: number
 
 const cell = (value: number | string | undefined): string =>
   value === undefined ? '—' : typeof value === 'number' ? formatScientificNumber(value) : value;
+
+/**
+ * The stored spec of the latest agent-authored revision at or before `view` — what decides which
+ * literal series the agent wrote (`transcribedSeries`). The revision itself when the agent wrote
+ * it; otherwise one read of the revision log (the picker's, cached) and one of that revision.
+ * `null` when the agent wrote none; `undefined` while it is not known.
+ */
+function useAgentRaw(sessionId: string, view: ExhibitView): RawExhibitSpec | null | undefined {
+  const { auth, ready } = useAuth();
+  const human = view.author_kind === 'human';
+  const { data: revisions } = useApiQuery({
+    ...exhibitRevisionsQuery(sessionId, view.exhibit_id, auth),
+    enabled: ready && human,
+  });
+  const base = revisions
+    ?.filter((r) => r.author_kind === 'agent' && r.revision <= view.revision)
+    .reduce((latest, r) => Math.max(latest, r.revision), 0);
+  const { data: baseView } = useApiQuery({
+    ...exhibitQuery(sessionId, view.exhibit_id, base ?? 0, auth),
+    enabled: ready && human && base !== undefined && base > 0,
+  });
+  if (!human) return view.raw_spec;
+  if (base === undefined) return undefined;
+  if (base === 0) return null;
+  return baseView ? baseView.raw_spec : undefined;
+}
 
 export const ChartView = forwardRef<
   HTMLDivElement,
@@ -74,10 +104,11 @@ export const ChartView = forwardRef<
       linked: Boolean(bound[index]?.y),
     })),
   );
-  const caption =
-    view.author_kind === 'agent'
-      ? transcribedCaption(transcribedSeries(view.raw_spec, spec), spec.series.length)
-      : null;
+  const agentRaw = useAgentRaw(sessionId, view);
+  const caption = transcribedCaption(
+    transcribedSeries(view.raw_spec, spec, agentRaw),
+    spec.series.length,
+  );
 
   const detachFor = (target: BoundTarget, provenance: Provenance): (() => void) | undefined => {
     if (!isHead || !raw || !canDetach(target, provenance)) return undefined;

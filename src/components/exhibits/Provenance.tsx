@@ -143,7 +143,8 @@ export function GoneSourcesStrip({ gone }: { gone: readonly Binding[] }): React.
       <TriangleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0" />
       <span>
         {gone.length === 1 ? 'One linked value: ' : `${gone.length} linked values: `}
-        {SOURCE_GONE} — the tool result it was taken from has been removed. Shown as “—”:{' '}
+        {SOURCE_GONE} — the tool result it was taken from has been removed. Where it stood, the
+        artefact says “{SOURCE_GONE}” (a chart series draws no points):{' '}
         <span className="font-mono">{gone.map((b) => b.path).join(', ')}</span>
       </span>
     </p>

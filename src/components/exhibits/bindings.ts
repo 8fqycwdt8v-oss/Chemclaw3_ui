@@ -203,20 +203,45 @@ export function detach(
   }
 }
 
+/** Whether a stored series is linked: its `y` bound, and its `x` bound or only category names. */
+function seriesLinked(
+  stored: { x: unknown; y: unknown } | undefined,
+  resolvedX: readonly (number | string)[],
+): boolean {
+  const xLinked = isBind(stored?.x) || resolvedX.every((x) => typeof x === 'string');
+  return isBind(stored?.y) && xLinked;
+}
+
 /**
- * The series of a chart whose plotted values are the agent's own transcription.
+ * The series of a chart whose plotted values are the agent's own transcription — decided per
+ * series from the stored specs, never from who wrote the revision on screen.
  *
  * A series is linked when its `y` is bound and its `x` is too — or is only category names, which
- * are labels rather than figures anybody could have mistyped. Everything else is transcribed, and
- * the chart's caption names it.
+ * are labels rather than figures anybody could have mistyped. A literal series is transcribed when
+ * the agent wrote it literally; the one other way a chart series becomes literal is a person
+ * detaching it (a chart has no point editor), and a detached series holds the tool's values
+ * verbatim, so calling it transcribed would be false.
+ *
+ * `agentRaw` is the stored spec of the most recent **agent-authored** revision at or before this
+ * one: a series literal here and linked there was detached since. `undefined` while that revision
+ * is not known yet, which reads every literal series as transcribed — the cautious answer, and the
+ * one this function gave before it knew.
  */
-export function transcribedSeries(raw: RawExhibitSpec | null, resolved: ExhibitSpec): string[] {
+export function transcribedSeries(
+  raw: RawExhibitSpec | null,
+  resolved: ExhibitSpec,
+  agentRaw?: RawExhibitSpec | null,
+): string[] {
   if (resolved.kind !== 'chart') return [];
   return resolved.series.flatMap((series, index) => {
     const stored = raw?.kind === 'chart' ? raw.series[index] : undefined;
-    const yBound = isBind(stored?.y);
-    const xBound = isBind(stored?.x) || series.x.every((x) => typeof x === 'string');
-    return yBound && xBound ? [] : [series.name || `Series ${index + 1}`];
+    if (seriesLinked(stored, series.x)) return [];
+    if (agentRaw !== undefined) {
+      const agentStored = agentRaw?.kind === 'chart' ? agentRaw.series[index] : undefined;
+      // No agent revision at all, or the agent linked it and a person detached it since.
+      if (agentRaw === null || seriesLinked(agentStored, series.x)) return [];
+    }
+    return [series.name || `Series ${index + 1}`];
   });
 }
 

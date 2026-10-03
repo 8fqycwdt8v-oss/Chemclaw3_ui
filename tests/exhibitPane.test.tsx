@@ -8,10 +8,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 import { useState } from 'react';
 import { Resizer } from '../src/components/exhibits/Resizer.tsx';
 import { RightColumn } from '../src/components/exhibits/RightColumn.tsx';
+import { PaneBody } from '../src/components/exhibits/ExhibitPane.tsx';
 import { ExhibitCard } from '../src/components/exhibits/ExhibitCard.tsx';
 import { exhibitArrived, exhibitPushed } from '../src/state/exhibitEvents.ts';
 import {
@@ -398,5 +400,78 @@ describe('the card in the answer', () => {
       sheetOpen: true,
       focus: { [SID]: { exhibitId: XID, revision: 0 } },
     });
+  });
+});
+
+describe('printing an artefact', () => {
+  /**
+   * The print stylesheet (`src/index.css`) hides every branch of the page that does not contain
+   * `[data-print="document"]`, and `[data-print="hide"]` inside it. So what prints is decided by
+   * where that mark is and when — which is what these assert, since happy-dom applies no `@media
+   * print` and a screenshot of a print preview is not something this tier can take.
+   */
+  it('marks the artefact — and only for the duration of window.print — so that is what prints', async () => {
+    const stub = stubFetch((url) =>
+      url.includes('/revisions') ? json(200, { revisions: [] }) : json(200, VIEW),
+    );
+    restore = stub.restore;
+    let during: { marked: Element[]; tabs: boolean; close: boolean; controls: boolean } | null =
+      null;
+    const print = vi.fn(() => {
+      const marked = [...document.querySelectorAll('[data-print="document"]')];
+      const inside = (el: Element | null): boolean => Boolean(el && marked[0]?.contains(el));
+      during = {
+        marked,
+        tabs: inside(screen.getByRole('tablist')),
+        close: inside(screen.getByRole('button', { name: 'Close the artefact pane' })),
+        // The revision picker and its buttons are paper-irrelevant: hidden by their own mark.
+        controls: Boolean(
+          screen.getByRole('combobox', { name: 'Revision' }).closest('[data-print="hide"]'),
+        ),
+      };
+    });
+    vi.stubGlobal('print', print);
+    useExhibitPane.getState().show(SID, XID);
+    render(
+      <PaneBody
+        conversationId="c"
+        sessionId={SID}
+        exhibits={[VIEW] as never}
+        onClose={() => undefined}
+      />,
+    );
+    await screen.findByRole('heading', { name: 'Solvent ranking' });
+    // Not marked at rest: a Ctrl+P on the conversation must print the conversation, not the pane.
+    expect(document.querySelector('[data-print="document"]')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Print' }));
+    await waitFor(() => expect(print).toHaveBeenCalledTimes(1));
+    expect(during!.marked).toHaveLength(1);
+    const article = during!.marked[0]!;
+    expect(article.tagName).toBe('ARTICLE');
+    // The artefact — its title and its body — is inside the mark; the pane's chrome is not.
+    expect(
+      within(article as HTMLElement).getByRole('heading', { name: 'Solvent ranking' }),
+    ).toBeTruthy();
+    expect(
+      within(article as HTMLElement).getByRole('columnheader', { name: 'Yield (%)' }),
+    ).toBeTruthy();
+    expect(during!.tabs).toBe(false);
+    expect(during!.close).toBe(false);
+    expect(during!.controls).toBe(true);
+
+    // And off again once the dialog returns.
+    await waitFor(() => expect(document.querySelector('[data-print="document"]')).toBeNull());
+    vi.unstubAllGlobals();
+  });
+
+  it('is a stylesheet that prints the marked branch and only it, and nothing on an unmarked page', () => {
+    const css = readFileSync('src/index.css', 'utf8');
+    const print = css.slice(css.indexOf('@media print'));
+    // Scoped by `:has()` on the body, so a page with no mark prints whole.
+    expect(print).toMatch(
+      /body:has\(\[data-print='document'\]\)\s+#root\s+\*:not\(:has\(\[data-print='document'\]\)\)/,
+    );
+    expect(print).toMatch(/\[data-print='hide'\]\s*\{\s*display:\s*none !important;/);
   });
 });

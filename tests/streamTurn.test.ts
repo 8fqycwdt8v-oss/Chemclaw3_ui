@@ -514,6 +514,30 @@ describe('streamTurn', () => {
     );
   });
 
+  it('keys a reference refusal on the service’s code, with or without its wording', async () => {
+    // Artefacts wave 2: the 422 carries `detail.code = "invalid_exhibit_ref"`. The code is the
+    // service naming the refusal; the sentence is free to change, and to say nothing this client's
+    // wording test would recognise.
+    const coded = new Response(
+      JSON.stringify({
+        detail: { code: 'invalid_exhibit_ref', message: 'xb-0123456789abcdef r9 does not exist' },
+      }),
+      { status: 422, headers: { 'content-type': 'application/json' } },
+    );
+    const stub = stubFetch(() => coded);
+    restore = stub.restore;
+    const err = (await streamTurn({
+      sessionId: SESSION,
+      message: 'x',
+      exhibitRefs: [{ exhibit_id: 'xb-0123456789abcdef', revision: 9 }],
+      signal: new AbortController().signal,
+      getToken: async () => null,
+      onEvent: () => undefined,
+    }).catch((e: unknown) => e)) as ApiError;
+    expect(err.kind).toBe('invalid_reference');
+    expect(err.message).toBe('xb-0123456789abcdef r9 does not exist');
+  });
+
   it('sends the artefacts attached to the message as exhibit_refs', async () => {
     const stub = stubFetch(() => sseResponse(sseFrames([answerEvent()])));
     restore = stub.restore;

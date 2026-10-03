@@ -157,8 +157,10 @@ rather than serving a configuration that would look like it works:
 - `AUTH_MODE=dev` on a non-loopback `BIND_HOST` without `ALLOW_INSECURE_AUTH=true`;
 - the HTML sandbox: `SANDBOX_ORIGIN` or `APP_ORIGIN` not a plain http(s) origin, `SANDBOX_ORIGIN`
   without `APP_ORIGIN` or equal to it, an http sandbox under an https app, `SANDBOX_PORT` not a port
-  from 1 to 65535 or equal to `PORT`, and `HTML_SCRIPTS_DEFAULT` other than `on`/`off` (see "HTML
-  sandbox" below).
+  from 1 to 65535 (checked even with no sandbox configured) or equal to `PORT`, and
+  `HTML_SCRIPTS_DEFAULT` other than `on`/`off` (see "HTML sandbox" below);
+- `DOCS_BASE_URL` that is neither an http(s) URL nor a path on this origin (it becomes a link's
+  `href`).
 
 A listener that cannot bind (`EADDRINUSE` on `PORT` or `SANDBOX_PORT`) exits 1 with one structured
 line naming the address.
@@ -242,23 +244,37 @@ What a running script can still do — an **owner-accepted residual risk**
   does not eliminate it (WebRTC can still relay over TURN/TCP through a proxy) — and on Firefox
   **`media.peerconnection.enabled=false`**, which removes WebRTC. `HTML_SCRIPTS_DEFAULT=off` removes
   the script.
+- **Anything typed into the artefact can leave the same way.** A form the page draws — a fake
+  password prompt inside the pane looks exactly like a real one — hands what is typed to the page's
+  script, and WebRTC can carry it out. The view's notice says never to type a secret there.
 - **Clipboard writes** after one click in the frame.
-- **Self-navigation, bounded by `frame-src`.** The outer frame can only be navigated to an origin the
-  app's CSP lists in `frame-src`: the sandbox origin — and, in MSAL mode, the Entra authority, which
-  the hidden-iframe token refresh needs. Measured: self-navigation, meta refresh, anchor clicks and
-  `data:`/`blob:` navigations to anywhere else are refused. The nested content frame is bounded by
-  the shell's `default-src 'none'`, which lists no frame source at all.
+
+What it **cannot** do is navigate anywhere else. The content is a nested `srcdoc` frame under the
+shell's `default-src 'none'`, which lists no frame source, and it cannot reach its parent's
+location. The shell's own frame can only be navigated to an origin the app's CSP lists in
+`frame-src`: the sandbox origin — and, in MSAL mode, the Entra authority, which the hidden-iframe
+token refresh needs. Measured: self-navigation, meta refresh, anchor clicks and `data:`/`blob:`
+navigations to anywhere else are refused (`e2e/sandbox.spec.ts`).
+
+**A frame that does not answer is not left blank.** The app re-sends the artefact on every `ready`
+from its frame, so a shell that reloads recovers; and if no `ready` arrives within
+`SANDBOX_READY_TIMEOUT_MS` (5 s, `shared/sandbox.ts`) — the sandbox host unreachable, a proxy that
+rewrote its CSP, a login page inside it — the view shows the source with "The sandbox did not
+answer". The "How the sandbox works" link resolves this section against **`DOCS_BASE_URL`**
+(default `https://github.com/8fqycwdt8v-oss/Chemclaw3_ui/blob/main/`, published in `/config.js`):
+an air-gapped deployment points it at an internal mirror, or at a path its own ingress serves.
 
 The **Export** menu offers the source as `<title>.html.txt` and says that the file runs its scripts if
 opened as a web page: outside the sandbox it is an ordinary page with nothing around it.
 
-| Variable               | Value                                                                                                 |
-| ---------------------- | ----------------------------------------------------------------------------------------------------- |
-| `SANDBOX_ORIGIN`       | the origin the browser reaches the sandbox at, e.g. `https://sandbox.ui.example`                      |
-| `APP_ORIGIN`           | the origin the browser reaches the app at, e.g. `https://ui.example` — required with `SANDBOX_ORIGIN` |
-| `SANDBOX_PORT`         | the second listener's port (default `8081`), a whole number from 1 to 65535, not `PORT`               |
-| `SANDBOX_BIND_HOST`    | its bind address (default: `BIND_HOST`)                                                               |
-| `HTML_SCRIPTS_DEFAULT` | `on` (default) or `off` — whether an artefact's script runs without a click                           |
+| Variable               | Value                                                                                                     |
+| ---------------------- | --------------------------------------------------------------------------------------------------------- |
+| `SANDBOX_ORIGIN`       | the origin the browser reaches the sandbox at, e.g. `https://sandbox.ui.example`                          |
+| `APP_ORIGIN`           | the origin the browser reaches the app at, e.g. `https://ui.example` — required with `SANDBOX_ORIGIN`     |
+| `SANDBOX_PORT`         | the second listener's port (default `8081`), a whole number from 1 to 65535 — always checked — not `PORT` |
+| `SANDBOX_BIND_HOST`    | its bind address (default: `BIND_HOST`)                                                                   |
+| `HTML_SCRIPTS_DEFAULT` | `on` (default) or `off` — whether an artefact's script runs without a click                               |
+| `DOCS_BASE_URL`        | where the app links to this README — an http(s) URL or a path on this origin (default: github.com)        |
 
 **Both origins are exact.** They are what the _browser_ types, scheme, host and port. The shell
 takes content only from `APP_ORIGIN`, so a page opened at any other address — `localhost` for
@@ -271,7 +287,8 @@ origin". The CSP gains `frame-src <SANDBOX_ORIGIN>` only when the sandbox is on.
 The BFF **refuses to start** when `SANDBOX_ORIGIN` or `APP_ORIGIN` is not a plain http(s) origin
 (no path, query or userinfo), when `SANDBOX_ORIGIN` is set without `APP_ORIGIN` or equals it, when
 the sandbox is http under an https app (mixed content), when `SANDBOX_PORT` is not a port or is
-`PORT`, and when `HTML_SCRIPTS_DEFAULT` is anything but `on`/`off`. **`ALLOW_FRAMING=true` turns the
+`PORT` (checked whether or not the sandbox is configured), when `HTML_SCRIPTS_DEFAULT` is anything
+but `on`/`off`, and when `DOCS_BASE_URL` is neither an http(s) URL nor a path on this origin. **`ALLOW_FRAMING=true` turns the
 sandbox off** rather than refusing — a framed app cannot frame the sandbox, whose `frame-ancestors`
 names `APP_ORIGIN` alone while the browser checks every ancestor — and the HTML is shown as source.
 Either way **one startup line says whether the sandbox is on and why** (`html sandbox on: …` /

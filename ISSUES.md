@@ -1351,8 +1351,11 @@ window or open a popup, and `e2e/sandbox.spec.ts` drives each of those in a real
 
 What it **can** still do, measured rather than argued: send data out over **WebRTC** (STUN/UDP; CSP
 has no directive for it and Chromium ignores `webrtc 'block'` — a prelude removes the constructors
-from the page's realm, and a nested `srcdoc` frame's fresh realm bypasses it), write the
-**clipboard** after one click, and **navigate its own frame** within the app's `frame-src`.
+from the page's realm, and a nested `srcdoc` frame's fresh realm bypasses it) — **including anything
+typed into the page**: a form it draws, a fake password prompt among them, hands its input to the
+page's script — and write the **clipboard** after one click. It cannot navigate: the content frame
+sits under the shell's `default-src 'none'`, with no frame source, and cannot reach its parent's
+location. The view's notice tells the reader never to type a secret into it.
 
 The controls a deployment holds, in order of strength:
 

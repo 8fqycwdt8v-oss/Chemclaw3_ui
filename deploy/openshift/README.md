@@ -33,6 +33,8 @@ listener, which serves `GET /sandbox/frame` and nothing else (README, "HTML sand
   `Content-Security-Policy` through untouched and must not add `X-Frame-Options` or the app's CSP to
   it — the page's `frame-ancestors` names `APP_ORIGIN`, the app's says `'none'`, and either
   substitution makes the frame a blank box.
+- **Monitor and renew the sandbox's domain exactly as you do the app's.** It is a second domain
+  the app posts every HTML artefact to: one that lapses, or is taken over, receives the artefacts.
 - **`APP_ORIGIN` and `SANDBOX_ORIGIN` are the Routes' hosts, over https, exactly.** The shell takes
   content only from `APP_ORIGIN`; a chemist reaching the app at another address sees the artefact as
   source with both origins named.

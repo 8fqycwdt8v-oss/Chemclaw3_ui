@@ -80,6 +80,18 @@ export interface RuntimeConfig {
    * older BFF that predates the field, or a `vite dev` with no server behind it.
    */
   maxMessageChars: number;
+  /**
+   * The origin of the HTML sandbox (wave 3) — `SANDBOX_ORIGIN`, served by the BFF's second
+   * listener — or `''` when this deployment has none.
+   *
+   * An `html` artefact runs only in a frame from this origin, never on the app's own: the frame's
+   * document is opaque-origin (`sandbox="allow-scripts"`, no `allow-same-origin`), and the origin
+   * being a *different* one is the second wall, so that even a sandbox attribute lost in some
+   * future edit would not hand agent-written script the origin holding the bearer token. Empty, or
+   * equal to the page's own origin, and the artefact is shown as escaped source instead
+   * (`HtmlView`), never inline.
+   */
+  sandboxOrigin: string;
 }
 
 declare global {
@@ -136,6 +148,7 @@ function resolve(): RuntimeConfig {
     // is what made this guard unreachable: the BFF clamped a bad value up to 1 before it crossed
     // `/config.js`, and 1 passes any test for "usable" that only asks about the sign.
     maxMessageChars: isUsableMessageCap(w.maxMessageChars) ? w.maxMessageChars : MAX_MESSAGE_CHARS,
+    sandboxOrigin: pick(w.sandboxOrigin),
   };
 }
 

@@ -20,6 +20,7 @@
 import { lazy, Suspense } from 'react';
 import { Shapes } from 'lucide-react';
 import { useExhibitPane } from '../../state/exhibitPane.ts';
+import { createDraftOf, useExhibitDrafts } from '../../state/exhibitDrafts.ts';
 import { EntityRail } from '../EntityRail.tsx';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetTrigger } from '@/components/ui/sheet';
@@ -30,6 +31,17 @@ const loadPane = () => import('./ExhibitPane.tsx');
 const PaneColumn = lazy(() => loadPane().then((m) => ({ default: m.ExhibitPaneColumn })));
 const PaneBody = lazy(() => loadPane().then((m) => ({ default: m.PaneBody })));
 
+/**
+ * Whether the agent is drafting a *new* document in this session right now (wave 2).
+ *
+ * A draft counts as something the pane can hold before the session has a single artefact: the
+ * first report of a conversation is exactly the one worth watching being written, and "no
+ * artefacts yet" would otherwise keep the column on the rail until the tool had finished.
+ */
+function useDrafting(sessionId: string | null): boolean {
+  return useExhibitDrafts((s) => (sessionId ? createDraftOf(s, sessionId) !== null : false));
+}
+
 export function RightColumn({
   conversationId,
 }: {
@@ -38,8 +50,9 @@ export function RightColumn({
   const { sessionId, enabled, exhibits } = useSessionExhibits(conversationId);
   const open = useExhibitPane((s) => s.open);
   const wide = useWideScreen();
+  const drafting = useDrafting(sessionId);
 
-  if (!wide || !enabled || !sessionId || exhibits.length === 0 || !open) {
+  if (!wide || !enabled || !sessionId || (exhibits.length === 0 && !drafting) || !open) {
     return <EntityRail conversationId={conversationId} />;
   }
   return (
@@ -64,9 +77,16 @@ export function ExhibitPaneTrigger({
   const open = useExhibitPane((s) => s.open);
   const sheetOpen = useExhibitPane((s) => s.sheetOpen);
   const wide = useWideScreen();
+  const drafting = useDrafting(sessionId);
 
-  if (!enabled || !sessionId || exhibits.length === 0) return null;
+  if (!enabled || !sessionId || (exhibits.length === 0 && !drafting)) return null;
   const label = `Artefacts (${exhibits.length})`;
+  // Open where it was, or — with nothing listed yet, only a draft — open on the draft.
+  const reveal = (): void => {
+    const first = exhibits[0]?.exhibit_id;
+    if (first) useExhibitPane.getState().reveal(sessionId, first);
+    else useExhibitPane.setState({ open: true, sheetOpen: true, tab: 'artefacts' });
+  };
 
   if (wide) {
     return (
@@ -77,11 +97,7 @@ export function ExhibitPaneTrigger({
         aria-label={
           open ? `Hide artefacts (${exhibits.length})` : `Show artefacts (${exhibits.length})`
         }
-        onClick={() =>
-          open
-            ? useExhibitPane.getState().close()
-            : useExhibitPane.getState().reveal(sessionId, exhibits[0]!.exhibit_id)
-        }
+        onClick={() => (open ? useExhibitPane.getState().close() : reveal())}
       >
         <Shapes aria-hidden />
         <span className="text-xs">{exhibits.length}</span>
@@ -93,7 +109,7 @@ export function ExhibitPaneTrigger({
     <Sheet
       open={sheetOpen}
       onOpenChange={(next) => {
-        if (next) useExhibitPane.getState().reveal(sessionId, exhibits[0]!.exhibit_id);
+        if (next) reveal();
         else useExhibitPane.getState().close();
       }}
     >

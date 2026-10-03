@@ -164,10 +164,18 @@ services:
       API_SCOPE: ${API_SCOPE:-}
       APP_VERSION: ${APP_VERSION:-compose}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # The HTML sandbox (artefacts wave 3): the BFF's second listener, published on its own port so
+      # it is a different origin from the app. Both origins are what the *browser* types, so they
+      # follow the published ports below; reach the app at exactly APP_ORIGIN or the sandboxed
+      # frame stays blank. A deployment uses a distinct hostname instead (README, "HTML sandbox").
+      APP_ORIGIN: ${APP_ORIGIN:-http://localhost:${UI_PORT:-3000}}
+      SANDBOX_ORIGIN: ${SANDBOX_ORIGIN:-http://localhost:${UI_SANDBOX_PORT:-3001}}
+      SANDBOX_PORT: '8081'
     ports:
       # Loopback by default: the stack it brings up requires no sign-in, so publishing it on every
       # interface of the host is a decision too. `UI_BIND=0.0.0.0` to share it deliberately.
       - '${UI_BIND:-127.0.0.1}:${UI_PORT:-3000}:8080'
+      - '${UI_BIND:-127.0.0.1}:${UI_SANDBOX_PORT:-3001}:8081'
 
 volumes:
   postgres-data:

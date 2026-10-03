@@ -535,7 +535,9 @@ beforeEach(() => {
   jobReads = [];
   const original = globalThis.fetch;
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-    const jobRead = /\/api\/jobs\/([^/?]+)$/.exec(String(input));
+    // With the launch's `?session_id=` (the artefacts contract's wave-2 amendment), which keeps a
+    // report's `exhibit_id` in the answer.
+    const jobRead = /\/api\/jobs\/([^/?]+)(?:\?session_id=[0-9a-f]{32})?$/.exec(String(input));
     if (jobRead) {
       const jobId = decodeURIComponent(jobRead[1]!);
       jobReads.push(jobId);

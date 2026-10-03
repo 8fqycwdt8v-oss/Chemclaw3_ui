@@ -24,7 +24,7 @@ import { api } from '../../api/client.ts';
 import { StaleRevisionError } from '../../api/errors.ts';
 import { keys, queryClient } from '../../api/queryClient.ts';
 import { useExhibitPane } from '../../state/exhibitPane.ts';
-import { isSpec, type ExhibitSpec, type ExhibitView } from '../../../shared/exhibits.ts';
+import { isSpec, type ExhibitView, type RawExhibitSpec } from '../../../shared/exhibits.ts';
 
 export type ReviseState =
   | { status: 'idle' }
@@ -35,7 +35,7 @@ export type ReviseState =
       base: number;
       /** The head the service named, or `null` when it named none (then the head is re-read). */
       head: number | null;
-      spec: ExhibitSpec;
+      spec: RawExhibitSpec;
       changeNote: string;
     }
   | { status: 'failed'; message: string };
@@ -50,8 +50,11 @@ export interface Revise {
    * the moment of saving: the head refetches while a chemist types (an `exhibit` frame, a focus
    * refetch), and a save that read `view.revision` then would post its edit as the child of a
    * revision it never saw — accepted, with no 409, and that revision's changes silently gone.
+   *
+   * `spec` is a **stored** spec (wave 3): built from `raw_spec`, so the bindings an edit did not
+   * touch go back verbatim rather than as the literals they resolved to.
    */
-  save: (spec: ExhibitSpec, changeNote: string, base: number) => Promise<boolean>;
+  save: (spec: RawExhibitSpec, changeNote: string, base: number) => Promise<boolean>;
   /** Apply the stale edit on top of the head the service named. */
   retryOnHead: () => Promise<boolean>;
   /** Drop the stale edit and show the head. */
@@ -65,7 +68,7 @@ export function useRevise(sessionId: string, view: ExhibitView): Revise {
 
   const write = async (
     parentRevision: number,
-    spec: ExhibitSpec,
+    spec: RawExhibitSpec,
     changeNote: string,
   ): Promise<boolean> => {
     // The service is the authority on a spec and will say so in its own words; this catches an

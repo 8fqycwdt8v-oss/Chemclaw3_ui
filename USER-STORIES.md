@@ -130,12 +130,12 @@ so a SMARTS query is still typed into a chat box.
 
 ## C — Long-running work
 
-| #      | Persona and story                                                 | Aim                                                                                | Backend                                                                       | Verdict           |
-| ------ | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ----------------- |
-| **C1** | Chemist: submit a conformer or scan job and get on with the day   | Know it landed, be told when it finishes — **and be told when it fails**           | `job_started` / `job_completed` / `job_failed` on `GET /sessions/{id}/events` | **`SERVED`**      |
-| **C2** | Chemist: _"what is running, and can I stop it?"_                  | Kill a mis-launched durable job before it burns a worker slot                      | `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` (reviewer role)            | **`SERVED`**      |
-| **C3** | Chemist: _"what did we run three months ago, and why?"_           | Reuse a result instead of re-running it — `job_records` keeps the launch rationale | `find_past_jobs`, `GET /jobs?text=&connector=`                                | **`SERVED`**      |
-| **C4** | Computational chemist: download the optimized geometry or Hessian | Take it into another package                                                       | `list_artifacts` / `fetch_artifact` — text only, refuses binaries             | `BLOCKED-BACKEND` |
+| #      | Persona and story                                                 | Aim                                                                                | Backend                                                                       | Verdict      |
+| ------ | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------ |
+| **C1** | Chemist: submit a conformer or scan job and get on with the day   | Know it landed, be told when it finishes — **and be told when it fails**           | `job_started` / `job_completed` / `job_failed` on `GET /sessions/{id}/events` | **`SERVED`** |
+| **C2** | Chemist: _"what is running, and can I stop it?"_                  | Kill a mis-launched durable job before it burns a worker slot                      | `GET /jobs`, `GET /jobs/{id}`, `DELETE /jobs/{id}` (reviewer role)            | **`SERVED`** |
+| **C3** | Chemist: _"what did we run three months ago, and why?"_           | Reuse a result instead of re-running it — `job_records` keeps the launch rationale | `find_past_jobs`, `GET /jobs?text=&connector=`                                | **`SERVED`** |
+| **C4** | Computational chemist: download the optimized geometry or Hessian | Take it into another package                                                       | `GET /calc-artifacts/content?ref={ref}` (the file) beside `list_artifacts`    | **`SERVED`** |
 
 **C1 was the sharpest defect in this document, and is fixed.** `job_failed` was absent from
 `EVENT_TYPES`, so `normalizeEvent` returned `null` and both consumers — the turn stream and
@@ -150,8 +150,15 @@ opens one; a reviewer can request cancellation. The wording never says the job s
 service answers 202 and a workflow past its last cancellation point finishes anyway — which is the
 difference between a control and a claim.
 
-**C4** needs a byte route on the service. An agent tool that returns truncated text cannot hand a
-browser a file.
+**C4.** ~~Needs a byte route on the service.~~ **Built** (artefacts wave 2). The service serves a
+stored by-product's bytes at `GET /calc-artifacts/content?ref=<calc_key>#<name>`, with its stored
+media type and filename, a 404 when the calc store has reclaimed it and a 413 above the
+deployment's download cap. The BFF whitelists the path and holds the query to exactly one `ref` of
+that shape (`CALC_ARTIFACT_REF`), because the resolver otherwise sees only paths. Every place the UI
+shows a calc artifact ref offers **Download**: a `list_artifacts` result is a table of files with
+their sizes, a `fetch_artifact` result marks a truncated read as _part of the file_ and offers the
+whole one, and a geometry artefact that cites a calculation draws from — and downloads — the same
+bytes.
 
 ---
 
@@ -281,7 +288,7 @@ cannot record. It is not enforcement and says so: the service decides, and will 
 
 | #      | Persona and story                                                 | Aim                                                                                                                   | Backend                                                                                                                                                        | Verdict      |
 | ------ | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
-| **G1** | Chemist: assemble a submission section from what we actually have | A draft where each paragraph is wikilinked to its source, and an unsupported section is _marked_ rather than invented | `request_development_report` — durable, per-section memory layer (`evidence` / `episodic` / `semantic`), renders only retrieved chunks, writes a `report` note | `PROSE-ONLY` |
+| **G1** | Chemist: assemble a submission section from what we actually have | A draft where each paragraph is wikilinked to its source, and an unsupported section is _marked_ rather than invented | `request_development_report` — durable, per-section memory layer (`evidence` / `episodic` / `semantic`), renders only retrieved chunks, writes a `report` note | **`SERVED`** |
 | **G2** | Chemist: correct the assistant when it is wrong                   | The correction survives, and contradicts the note that did not hold                                                   | `record_failure` (a `failure-mode` note with a `contradicts` edge), `record_confirmed_answer`                                                                  | `NO-UI`      |
 
 **G1** is one of the service's best-served workflows — the report harness is purpose-built for
@@ -297,6 +304,16 @@ listed above it as _unchecked_. What is still `PROSE-ONLY` is the durable harnes
 `request_development_report` writes a `report` note and the UI still sees only `job_completed{summary}`
 — the artefact pane does not open that note, and nothing on the service links the two. The verdict
 stays where it is until one of them does.
+
+**G1, since artefacts wave 2: `SERVED`.** The service now links the two. A report requested from a
+conversation also lands there as a `document` artefact (author: the agent; id deterministic per
+workflow, so a retried activity names the same one), `job_completed.summary` carries its
+`exhibit_id` beside the `note_id`, and an `exhibit` push on `/events` refreshes the list. The job
+card — in the trace and in _Finished in the background_ — shows **Open report**, which goes to the
+conversation if the card is elsewhere and puts that artefact in front of the pane: rendered,
+versioned, editable, exportable and printable like any document. A report the agent writes _inside_
+a turn is watched being written: the document streams into the pane as `exhibit_draft` frames and is
+replaced by the artefact when the tool returns.
 
 **G2.** There is no feedback affordance anywhere in the UI. (`components/chem/Feedback.tsx` is a
 spinner and empty-state helper, not user feedback.) The correction path exists on the service and
@@ -434,6 +451,7 @@ way.
 | Shared sessions (Chemclaw3 #483): the member routes and `GET /sessions/shared` whitelisted with an `ACTOR` segment encoded like a note id; a people panel (owner adds and removes, member sees and leaves); a "Shared with me" sidebar group; a sender label over each question once more than one person is in the conversation (`TranscriptMessage.author` read); a plan card that names its author and disables the decision for anybody else; Branch/Delete not offered to a member, and each 403 said as the rule it is                                                                                                                                                                                                                                                                                                            | F10              |
 | `GET/POST /protocols[...]` whitelisted and mirrored in `shared/protocols.ts`; a `/protocols` list and a `/protocols/{id}` document with basis chips, a plate map, a run-sheet CSV and a revision history; a field-level editor whose save is a new revision bound to its parent and whose 409 is a re-read rather than a retry; and a `protocol` result block in the answer                                                                                                                                                                                                                                                                                                                                                                                                                                                             | I1, I2, I3, I4   |
 | Artefacts (code name `exhibit`, the frozen contract shared with Chemclaw3): every `/sessions/{id}/exhibits[...]` route and `GET /exhibits` whitelisted with an `XID` segment and a closed `FMT`; `shared/exhibits.ts` decoding every body with valibot and the `exhibit` event mirrored; a resizable right-hand pane, tabbed _Artefacts \| Index_ with the entity rail unchanged as the index, opened by the agent's new artefact and closed for the turn by the reader; a card in the answer; document, table, structures, chart, pinned-result and link views; a revision picker, a comparison through `RevisionDiff`, a 409 met with the diff and a choice; service exports plus SDF and SVG made here; _unchecked_ figures listed; Pin as artefact; `@artefact` chips sent as `exhibit_refs`; and `/artefacts` across conversations | G1 (partly)      |
+| Artefacts wave 2: a `geometry` kind drawn by a hand-written, dependency-free 3D viewer (ball and stick, covalent-radius bonds, orthographic painter's projection with depth cueing, keyboard and pointer rotation, an atom table as its accessible reading) from an inline XYZ block or a cited calc file; `GET /calc-artifacts/content` whitelisted with its query held to one `ref`, and a Download wherever a calc artifact ref is shown; `exhibit_draft` mirrored and streamed into the pane while a document is written, over an artefact being revised, replaced by the `exhibit` frame and discarded with a turn that has none; **Open report** on a report job's card; `invalid_exhibit_ref` read off the 422's code                                                                                                            | C4, G1           |
 
 One thing fell out of the work rather than being planned, and is worth recording because it was
 invisible until a realistic payload went through it: the trace panel's `<pre>` blocks and the new
@@ -448,9 +466,7 @@ first time a real 200-character tool result did.
 
 Filed here rather than in `ISSUES.md` because each is a capability request, not a defect:
 
-1. **An artifact byte route** (C4). `fetch_artifact` returns truncated text and refuses binaries by
-   design. A browser download needs `GET /artifacts/{ref}` streaming bytes with a content type.
-2. **A stable conversation id** (H3). See `ISSUES.md` #4.
-3. **An HTTP surface for subscriptions** (H4). `watch_for` / `list_watches` / `stop_watching` are
+1. **A stable conversation id** (H3). See `ISSUES.md` #4.
+2. **An HTTP surface for subscriptions** (H4). `watch_for` / `list_watches` / `stop_watching` are
    agent tools only; a standing query the chemist cannot see or cancel is a standing query they
    will not create.

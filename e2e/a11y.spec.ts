@@ -60,6 +60,37 @@ async function scan(page: Page, exclude?: string): Promise<void> {
   ).toEqual([]);
 }
 
+/** Seed one conversation bound to a fixture session, as a returning reader's browser holds it. */
+async function seedArtefactConversation(page: Page, id: string, sessionId: string): Promise<void> {
+  await page.addInitScript(
+    ([key, value]) => window.localStorage.setItem(key as string, value as string),
+    [
+      'chemclaw3.chat.v2.dev-user',
+      JSON.stringify({
+        version: 3,
+        state: {
+          conversations: {
+            [id]: {
+              id,
+              sessionId,
+              title: 'Amination',
+              createdAt: 1700000000000,
+              updatedAt: 1700000000000,
+              messages: [],
+              contextLost: false,
+              sessionOrigin: 'local',
+            },
+          },
+          order: [id],
+          activeId: id,
+          jobFeed: [],
+          notifyOnJobComplete: false,
+        },
+      }),
+    ],
+  );
+}
+
 for (const theme of ['light', 'dark'] as const) {
   test.describe(theme, () => {
     test.beforeEach(async ({ page }) => {
@@ -243,6 +274,92 @@ for (const theme of ['light', 'dark'] as const) {
 
       await pane.getByRole('tab', { name: /^Index/ }).click();
       await expect(pane.getByRole('tabpanel')).toBeVisible();
+      await scan(page);
+    });
+
+    test('a 3D structure in the artefact pane, with its atom table open', async ({
+      page,
+      isMobile,
+    }) => {
+      // The geometry viewer: an `application` frame that takes the arrow keys, an SVG drawing named
+      // by its summary, three buttons, and a disclosure holding a scrollable table — in the column,
+      // or in the sheet below `lg`. Its own read-only fixture session (`GEOMETRY_SESSION`).
+      await seedArtefactConversation(page, 'e2e-a11y-geometry', '2'.repeat(32));
+      await page.goto('/c/e2e-a11y-geometry');
+      await page
+        .getByRole('button', { name: isMobile ? 'Artefacts (2)' : 'Show artefacts (2)' })
+        .click();
+      const pane = isMobile
+        ? page.getByRole('dialog', { name: 'Artefacts' })
+        : page.getByRole('complementary', { name: 'Artefacts' });
+      await pane.getByRole('combobox', { name: 'Artefact' }).selectOption('xb-9e0000000000a001');
+      await expect(pane.getByRole('img', { name: /^Water, GFN2-xTB/ })).toBeVisible();
+      await pane.getByText('Atom table (3)').click();
+      await expect(pane.getByRole('region', { name: /atoms and coordinates/ })).toBeVisible();
+      await expectTheme(page, theme);
+      await scan(page);
+    });
+
+    test('linked values and a sandboxed HTML artefact in the artefact pane', async ({
+      page,
+      isMobile,
+    }) => {
+      // Wave 3: provenance markers (buttons named by their tool and pointer, one of them for a
+      // source that is gone, with the strip above), then the HTML view — whose frame must carry a
+      // title, and whose content axe scans *inside* the cross-origin frame.
+      await seedArtefactConversation(page, 'e2e-a11y-wave3', '1'.repeat(32));
+      await page.goto('/c/e2e-a11y-wave3');
+      await page
+        .getByRole('button', { name: isMobile ? 'Artefacts (3)' : 'Show artefacts (3)' })
+        .click();
+      const pane = isMobile
+        ? page.getByRole('dialog', { name: 'Artefacts' })
+        : page.getByRole('complementary', { name: 'Artefacts' });
+      const picker = pane.getByRole('combobox', { name: 'Artefact' });
+
+      await picker.selectOption('xb-3b0000000000b001');
+      await expect(
+        pane.getByRole('button', { name: 'From predict_yield, /0/yield' }),
+      ).toBeVisible();
+      await expect(
+        pane.getByRole('note').filter({ hasText: 'source no longer available' }),
+      ).toBeVisible();
+      await scan(page);
+
+      await pane.getByRole('button', { name: 'From predict_yield, /0/yield' }).click();
+      await expect(page.getByRole('dialog', { name: 'Where this value came from' })).toBeVisible();
+      await scan(page);
+      await page.keyboard.press('Escape');
+
+      await picker.selectOption('xb-3b0000000000b003');
+      const frame = pane.locator('iframe[title="Sandbox probe — sandboxed HTML preview"]');
+      await expect(frame).toBeVisible();
+      // Scanned with scripts running: with them off (the default) the content frame is
+      // `sandbox=""`, where no script runs — axe's included, so it could not look inside. The
+      // markup is the same in both modes, and so are the two frames' titles.
+      await pane.getByRole('button', { name: 'Run scripts' }).click();
+      await expect(
+        page
+          .frameLocator('iframe[title="Sandbox probe — sandboxed HTML preview"]')
+          .frameLocator('iframe[title="Sandbox probe — sandboxed HTML preview — content"]')
+          .getByRole('heading', { name: 'Sandbox probe' }),
+      ).toBeVisible();
+      await expectTheme(page, theme);
+      await scan(page);
+    });
+
+    test('a report being drafted in the artefact pane', async ({ page, isMobile }) => {
+      // The draft: a heading, one polite status, and a busy body of rendered Markdown. At `lg`
+      // only, where the draft opens the column by itself (`e2e/exhibits.spec.ts` says why).
+      test.skip(isMobile, 'the draft opens the column, which a phone does not have');
+      await seedArtefactConversation(page, 'e2e-a11y-draft', '3'.repeat(32));
+      await page.goto('/c/e2e-a11y-draft');
+      await page.getByPlaceholder(/Ask about a reaction/).fill('Write up the amination.');
+      await page.getByRole('button', { name: 'Send', exact: true }).click();
+      const pane = page.getByRole('complementary', { name: 'Artefacts' });
+      await expect(pane.getByRole('heading', { name: /^Drafting/ })).toBeVisible();
+      await expect(pane).toContainText('The Buchwald–Hartwig amination');
+      await expectTheme(page, theme);
       await scan(page);
     });
 

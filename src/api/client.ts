@@ -43,10 +43,13 @@ import type {
   ExhibitRevisionsOut,
   ExhibitSpec,
   ExhibitView,
+  RawExhibitSpec,
   ExportFormat,
   ExhibitIndexOut,
 } from '../../shared/exhibits.ts';
 import { keys, queryClient } from './queryClient.ts';
+import { CALC_ARTIFACT_REF } from '../../shared/exhibitConstants.ts';
+import { SESSION_ID_RE } from '../../shared/events.ts';
 
 /**
  * The artefact decoders, fetched with the first artefact body rather than with the app.
@@ -1611,8 +1614,22 @@ export const api = {
     }
   },
 
-  getJob(jobId: string, getToken: TokenGetter): Promise<DurableJobStatus> {
-    return request<DurableJobStatus>(`/jobs/${encodeURIComponent(jobId)}`, getToken);
+  /**
+   * One run's status, from the run registry.
+   *
+   * `sessionId` is the conversation the card asking belongs to (the frozen contract's wave-2
+   * amendment): the service keeps a result's `exhibit_id` — the report artefact G1's **Open
+   * report** focuses — only for a caller who names the run's origin session and can read it, and
+   * strips it otherwise, because an artefact id is a pointer into a session the registry's other
+   * readers may not be in. A card reconciled without it would lose its Open report on reload.
+   * Anything that is not a session id is not sent; the BFF refuses any other query on this route.
+   */
+  getJob(jobId: string, getToken: TokenGetter, sessionId?: string): Promise<DurableJobStatus> {
+    const suffix =
+      sessionId && SESSION_ID_RE.test(sessionId)
+        ? `?session_id=${encodeURIComponent(sessionId)}`
+        : '';
+    return request<DurableJobStatus>(`/jobs/${encodeURIComponent(jobId)}${suffix}`, getToken);
   },
 
   /**
@@ -1882,7 +1899,7 @@ export const api = {
     } catch (err) {
       if (err instanceof ApiError && err.kind === 'session_not_found') {
         logger.warn('api.list_route_missing', { route: '/sessions/{id}/exhibits' });
-        return { enabled: false, exhibits: [] };
+        return { enabled: false, html_enabled: false, exhibits: [] };
       }
       throw err;
     }
@@ -1966,7 +1983,7 @@ export const api = {
   async postExhibitRevision(
     sessionId: string,
     exhibitId: string,
-    edit: { parentRevision: number; spec: ExhibitSpec; changeNote: string; title?: string },
+    edit: { parentRevision: number; spec: RawExhibitSpec; changeNote: string; title?: string },
     getToken: TokenGetter,
   ): Promise<ExhibitView> {
     // The URL written out whole at the call, because the contract check reads the route off the
@@ -2069,7 +2086,81 @@ export const api = {
       filename: filenameFrom(res.headers.get('content-disposition'), `${exhibitId}.${format}`),
     };
   },
+
+  /**
+   * One calculation by-product's bytes — `GET /calc-artifacts/content?ref=<calc_key>#<name>`.
+   *
+   * The route the C4 story waited on (artefacts wave 2): `fetch_artifact` hands the *model* bounded
+   * text and refuses binaries, which is right for a context window and useless for "take this
+   * geometry into another package". This is the file itself, with the stored media type and the
+   * name the calculation gave it. A geometry artefact that cites a calculation reads its XYZ here
+   * too, so the viewer and the download are one fetch of one thing.
+   *
+   * **Not session-scoped, and that is the service's decision, not a gap here**: the calc cache is
+   * shared across sessions (D-011's "a persisted result is never recomputed"), so any authenticated
+   * caller may read a stored by-product, as with notes and jobs.
+   *
+   * The ref is a **query parameter, encoded whole** — its `#` would otherwise end the URL at the
+   * fragment and its `:`/`@` are the calc key's own punctuation. The BFF whitelists the path and
+   * holds the parameter to `CALC_ARTIFACT_REF` before anything is forwarded.
+   *
+   * Fetched rather than linked, for `exportExhibit`'s reason: the bearer token rides a header, so a
+   * plain `<a href>` would reach the service unauthenticated. Two refusals get their own sentence
+   * because the service's status alone reads as something else here — a 404 is the calc store's
+   * eviction (by-products are reclaimed by design), not an unknown session; a 413 is the deployment's
+   * `calc_artifact_max_download_bytes`, not a fault. A ref that is not one (`CALC_ARTIFACT_REF`) is
+   * said to be not one, before any request and when the BFF refuses it, rather than as evicted.
+   */
+  async getCalcArtifact(
+    ref: string,
+    getToken: TokenGetter,
+  ): Promise<{ blob: Blob; filename: string; mediaType: string }> {
+    // A ref the BFF would refuse is never asked about: its 404 would otherwise read as the calc
+    // store having reclaimed a file that was never a file at all.
+    if (!CALC_ARTIFACT_REF.test(ref)) throw errorFromStatus(404, NOT_A_CALC_REF);
+    // Written out whole at the one `send`, for the contract check (see `postExhibitRevision`).
+    const fetchFile = (): Promise<Response> =>
+      send(`/calc-artifacts/content?ref=${encodeURIComponent(ref)}`, getToken, {
+        headers: { accept: '*/*' },
+      });
+    let res = await fetchFile();
+    if (res.status === 401 && (await recoverFrom(getToken))) res = await fetchFile();
+    if (!res.ok) {
+      const failure = await readFailure(res);
+      // Two 404s, told apart by who sent them: the BFF's own refusal of a request it does not
+      // forward is the bare `{"detail": "not found"}` (`server/app.ts`), and only the service's
+      // means the calc store has no such file.
+      const sentence =
+        res.status === 404 && failure.detail === BFF_NOT_FOUND
+          ? NOT_A_CALC_REF
+          : res.status === 404
+            ? 'That calculation file is no longer stored. By-products are reclaimed over time; re-running the calculation stores it again.'
+            : res.status === 413
+              ? 'That calculation file is larger than this deployment will send to a browser.'
+              : failure.detail;
+      throw errorFromStatus(
+        res.status,
+        sentence,
+        res.headers.get('retry-after'),
+        failure.correlationId,
+        failure.code,
+      );
+    }
+    const name = ref.slice(ref.lastIndexOf('#') + 1) || 'artifact';
+    return {
+      blob: await res.blob(),
+      filename: filenameFrom(res.headers.get('content-disposition'), name),
+      mediaType: res.headers.get('content-type') ?? 'application/octet-stream',
+    };
+  },
 };
+
+/** The BFF's body for a request it refuses to forward (`server/app.ts`), verbatim. */
+const BFF_NOT_FOUND = 'not found';
+
+/** What a reference that cannot name a calc file is called — never "no longer stored". */
+const NOT_A_CALC_REF =
+  'That reference is not a calculation file (expected `<calculation key>#<file name>`), so there is nothing to download.';
 
 /**
  * The filename a `Content-Disposition: attachment` names, or the fallback.

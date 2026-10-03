@@ -526,15 +526,16 @@ describe('proxy route whitelist', () => {
       }
     });
 
-    it('exports only the three formats the service renders', () => {
+    it('exports only the four formats the service renders', () => {
       // SDF and SVG are made in the browser; a request for them here could only be a 404 upstream,
       // and a format list wider than the service's is a door to whatever `export.{x}` means later.
-      for (const format of ['md', 'csv', 'smi']) {
+      // `xyz` is the geometry kind's (wave 2).
+      for (const format of ['md', 'csv', 'smi', 'xyz']) {
         expect(
           resolveRoute('GET', `/api/sessions/${SID}/exhibits/${XID}/export.${format}`),
         ).not.toBeNull();
       }
-      for (const format of ['sdf', 'svg', 'pdf', 'csv/x', 'CSV', '']) {
+      for (const format of ['sdf', 'svg', 'pdf', 'csv/x', 'CSV', 'XYZ', 'mol2', '']) {
         expect(
           resolveRoute('GET', `/api/sessions/${SID}/exhibits/${XID}/export.${format}`),
           format,
@@ -570,6 +571,100 @@ describe('proxy route whitelist', () => {
       expect(resolveRoute('GET', `/api/sessions/${SID}/exhibits/${XID}/export.md`)?.sse).toBe(
         false,
       );
+    });
+  });
+  describe('calculation files (the C4 byte route)', () => {
+    const PATH = '/api/calc-artifacts/content';
+    const ref = (value: string): string => `?ref=${encodeURIComponent(value)}`;
+    /**
+     * A key shaped as the calc server writes one: its engine version is
+     * `tblite-{v}/rdkit-{v}/scipy-{v}/{rev}`, so a real key carries `/` and `+`. The first pattern
+     * here allowed only the alphabet a key looked written in and refused every real one.
+     */
+    const KEY =
+      'xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0/rdkit-2025.03.4/scipy-1.15.2/a1b2c3d:abc:def';
+
+    it('forwards one encoded `ref` naming `<calc_key>#<name>`, query and all', () => {
+      const resolved = resolveRoute('GET', PATH, ref(`${KEY}#xtbopt.xyz`));
+      expect(resolved?.path).toBe('/calc-artifacts/content');
+      expect(resolved?.template).toBe('/calc-artifacts/content');
+      expect(resolved?.sse).toBe(false);
+      // The leading `?` is optional to the resolver, as the raw URL slice may or may not carry it.
+      expect(resolveRoute('GET', PATH, ref(`${KEY}#hessian`).slice(1))).not.toBeNull();
+      // A version with a build suffix and a name with a second dot are ordinary.
+      expect(
+        resolveRoute('GET', PATH, ref('crest@3.0.2+gfn2:aa:bb#crest_conformers.xyz')),
+      ).not.toBeNull();
+    });
+
+    it('takes a real calc key — slashes, plusses, at-signs and colons — and refuses whitespace or a second `#`', () => {
+      for (const key of [
+        KEY,
+        'xtb_opt@gfn2+xtb+xtb-6.7.1/tblite-0.4.0:abc:def',
+        'crest@3.0.2:aa:bb',
+        'k',
+      ]) {
+        expect(resolveRoute('GET', PATH, ref(`${key}#xtbopt.xyz`)), key).not.toBeNull();
+      }
+      for (const key of ['a b', 'a\tb', 'a\nb', 'a#b', '']) {
+        expect(resolveRoute('GET', PATH, ref(`${key}#xtbopt.xyz`)), JSON.stringify(key)).toBeNull();
+      }
+    });
+
+    it('is not whitelisted at all without exactly that query', () => {
+      for (const search of [
+        '',
+        '?',
+        ref('xtbopt.xyz'), // no calc key
+        ref(`${KEY}#`), // no name
+        ref(`${KEY}#..`), // a name that is only dots
+        ref(`${KEY}#.`),
+        ref(`${KEY}#../../etc/passwd`),
+        ref(`${KEY}#a/b`),
+        ref(`${KEY} #x`), // whitespace
+        ref(`${KEY}#x#y`), // two fragments
+        `${ref(`${KEY}#x`)}&ref=${encodeURIComponent(`${KEY}#y`)}`, // two refs
+        `${ref(`${KEY}#x`)}&limit=5`, // a second key
+        '?ref=%zz', // a malformed escape
+        `?REF=${encodeURIComponent(`${KEY}#x`)}`,
+      ]) {
+        expect(resolveRoute('GET', PATH, search), search).toBeNull();
+      }
+    });
+
+    it('takes GET only, and no path below it', () => {
+      const ok = ref(`${KEY}#xtbopt.xyz`);
+      expect(resolveRoute('POST', PATH, ok)).toBeNull();
+      expect(resolveRoute('DELETE', PATH, ok)).toBeNull();
+      expect(resolveRoute('GET', `${PATH}/x`, ok)).toBeNull();
+      expect(resolveRoute('GET', '/api/calc-artifacts', ok)).toBeNull();
+    });
+  });
+  describe('a job, read with the session that launched it', () => {
+    const JOB_PATH = '/api/jobs/calc-compare_solvents-0123456789abcdef';
+
+    it('forwards no query, or exactly one 32-hex `session_id`', () => {
+      expect(resolveRoute('GET', JOB_PATH, '')?.path).toBe(
+        '/jobs/calc-compare_solvents-0123456789abcdef',
+      );
+      expect(resolveRoute('GET', JOB_PATH, `?session_id=${SID}`)).not.toBeNull();
+    });
+
+    it('refuses anything else in the query, so the read cannot be widened', () => {
+      for (const search of [
+        '?session_id=',
+        `?session_id=${SID.toUpperCase()}`,
+        `?session_id=${SID}0`,
+        `?session_id=${SID}&session_id=${SID}`,
+        `?session_id=${SID}&limit=1`,
+        '?session_id=..%2F..',
+        '?session_id=%zz',
+        '?limit=1',
+      ]) {
+        expect(resolveRoute('GET', JOB_PATH, search), search).toBeNull();
+      }
+      // The cancel takes no query and is not affected.
+      expect(resolveRoute('DELETE', JOB_PATH)).not.toBeNull();
     });
   });
 });

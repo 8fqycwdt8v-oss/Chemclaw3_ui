@@ -16,6 +16,13 @@ import { defineConfig, devices } from '@playwright/test';
 
 const PORT = 4321;
 const FIXTURE_PORT = 4322;
+/**
+ * The HTML sandbox's listener (wave 3) — a second origin, as in a deployment, so the browser suite
+ * proves the isolation with the real headers and a real cross-origin frame. `127.0.0.1` on both
+ * sides because the app is reached at `baseURL` below, and `APP_ORIGIN` must be that origin
+ * exactly: it is the one the sandbox shell takes content from and may be framed by.
+ */
+const SANDBOX_PORT = 4323;
 
 /**
  * Which client build the BFF serves here.
@@ -73,7 +80,7 @@ export default defineConfig({
     // a non-loopback bind, and this suite runs unauthenticated. Binding loopback is the honest way
     // to satisfy that — the server really is only reachable from this machine — rather than
     // setting ALLOW_INSECURE_AUTH and teaching the test harness to wave the check through.
-    command: `node --experimental-strip-types e2e/fixture-service.ts ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
+    command: `node --experimental-strip-types e2e/fixture-service.ts ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 APP_ORIGIN=http://127.0.0.1:${PORT} SANDBOX_ORIGIN=http://127.0.0.1:${SANDBOX_PORT} SANDBOX_PORT=${SANDBOX_PORT} CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
     url: `http://127.0.0.1:${PORT}/api/healthz`,
     reuseExistingServer: !process.env.CI,
     timeout: 60_000,

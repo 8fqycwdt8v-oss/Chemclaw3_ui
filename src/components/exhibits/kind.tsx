@@ -6,7 +6,17 @@
  * card, the pane's badge and the "My artefacts" list cannot call one kind two things.
  */
 
-import { ChartLine, FileText, Hexagon, Link2, Pin, Shapes, Table2 } from 'lucide-react';
+import {
+  Atom,
+  ChartLine,
+  CodeXml,
+  FileText,
+  Hexagon,
+  Link2,
+  Pin,
+  Shapes,
+  Table2,
+} from 'lucide-react';
 import { KIND_LABEL } from '../../../shared/exhibitConstants.ts';
 
 const ICONS: Record<string, typeof FileText> = {
@@ -16,6 +26,8 @@ const ICONS: Record<string, typeof FileText> = {
   chart: ChartLine,
   result: Pin,
   link: Link2,
+  geometry: Atom,
+  html: CodeXml,
 };
 
 /** The icon for a kind; a kind this build does not know gets the generic one rather than none. */

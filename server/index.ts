@@ -8,7 +8,7 @@
  */
 
 import { cfg, isLoopbackHost, validateConfig } from './config.ts';
-import { createBffServer } from './app.ts';
+import { createBffServer, createSandboxServer } from './app.ts';
 import { log } from './log.ts';
 import { beginDraining } from './ready.ts';
 
@@ -125,6 +125,45 @@ server.listen(cfg.port, cfg.bindHost, () => {
 });
 
 /**
+ * The HTML sandbox's listener (wave 3), when this deployment has a sandbox origin.
+ *
+ * Started beside the app listener and failing the same way: a sandbox port that cannot be bound is
+ * a process that cannot do what it was configured to, and `die` says so in the shape everything
+ * else here does. Not started at all without `SANDBOX_ORIGIN` — the app then shows `html`
+ * artefacts as source, and there is no second port to secure.
+ */
+const sandbox = cfg.sandboxEnabled ? createSandboxServer() : null;
+
+if (sandbox) {
+  sandbox.on('error', (error: NodeJS.ErrnoException) => {
+    die('sandbox server error', {
+      code: error.code ?? 'EUNKNOWN',
+      error: error.message,
+      address: `${cfg.sandboxBindHost}:${cfg.sandboxPort}`,
+    });
+  });
+  sandbox.listen(cfg.sandboxPort, cfg.sandboxBindHost, () => {
+    log.info('sandbox listening', {
+      address: `http://${cfg.sandboxBindHost}:${cfg.sandboxPort}`,
+      sandbox_origin: cfg.sandboxOrigin,
+      app_origin: cfg.appOrigin,
+    });
+    // Different ports on one hostname are different origins — which is what the frame needs — but
+    // the same *site*, so a cookie scoped to the host is sent to both. The app sets none and the
+    // shell reads none; a deployment is still told, because the documented shape is a hostname.
+    if (
+      new URL(cfg.sandboxOrigin).hostname === new URL(cfg.appOrigin).hostname &&
+      !isLoopbackHost(new URL(cfg.appOrigin).hostname)
+    ) {
+      log.warn(
+        `SANDBOX_ORIGIN ${cfg.sandboxOrigin} shares a hostname with APP_ORIGIN ${cfg.appOrigin}. ` +
+          'Serve the sandbox from a distinct hostname in deployment (README, "HTML sandbox").',
+      );
+    }
+  });
+}
+
+/**
  * How long to keep answering after `server.close()` before giving up on what is still open.
  *
  * Unchanged from when this was the whole shutdown: an SSE stream holds the server open for as long
@@ -159,6 +198,8 @@ const CLOSE_GRACE_MS = 5_000;
  */
 const closeAndExit = (signal: string): void => {
   log.info('closing listener', { signal });
+  // The sandbox serves one static page and holds no stream, so it closes without a drain.
+  sandbox?.close();
   server.close(() => process.exit(0));
   // Open SSE streams hold the server open indefinitely; don't wait forever on them.
   setTimeout(() => process.exit(0), CLOSE_GRACE_MS).unref();

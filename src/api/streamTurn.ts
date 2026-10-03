@@ -212,10 +212,14 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
     const failure = await readFailure(res);
     // A 422 about the attached artefacts is its own refusal; `errorFromStatus` alone would call
     // every turn-route 422 a message that is too long.
+    //
+    // Keyed on the service's code (`detail.code = "invalid_exhibit_ref"`, artefacts wave 2) — a code
+    // is the service naming which refusal this is, which a sentence only implies. The wording test
+    // stays as the fallback for a service older than the code, and only where references were sent.
     if (
       res.status === 422 &&
-      (opts.exhibitRefs?.length ?? 0) > 0 &&
-      isReferenceRefusal(failure.detail)
+      (failure.code === 'invalid_exhibit_ref' ||
+        ((opts.exhibitRefs?.length ?? 0) > 0 && isReferenceRefusal(failure.detail)))
     ) {
       throw new ApiError(
         'invalid_reference',

@@ -263,11 +263,14 @@ describe('a reload mid-turn', () => {
   it('gives a turn that is gone a short read and then says the answer is lost', async () => {
     vi.useFakeTimers();
     const { cid, mid } = interrupted();
-    const stub = stubFetch((url) =>
+    const stub = stubFetch((url, init) =>
       url.endsWith('/turn/stream')
-        ? jsonError(404, 'no turn is running for this session')
-        : // A service that stopped the turn on unload: the transcript never gets its answer.
-          json([{ index: 0, role: 'user', text: QUESTION, tool_calls: [] }]),
+        ? // Another turn runs in this session now, so this one is over — and stored nothing.
+          watchResponse('d'.repeat(32), sseFrames([toolResultEvent()]), {
+            open: true,
+            signal: init?.signal,
+          })
+        : json([{ index: 0, role: 'user', text: QUESTION, tool_calls: [] }]),
     );
     restore = stub.restore;
 
@@ -281,5 +284,45 @@ describe('a reload mid-turn', () => {
     const reads = stub.calls.filter((c) => c.url.endsWith('/messages')).length;
     expect(reads).toBeGreaterThan(0);
     expect(reads).toBeLessThan(10);
+  });
+
+  it('keeps the full poll after a 404, which speaks only for the replica that answered', async () => {
+    vi.useFakeTimers();
+    const { cid, mid } = interrupted();
+    let answered = false;
+    const stub = stubFetch((url) => {
+      if (url.endsWith('/turn/stream'))
+        return jsonError(404, 'no turn is running for this session');
+      // The turn runs on another front-door replica and writes its answer two minutes later —
+      // long past the 20 s a turn known to be over is given.
+      return json(
+        answered
+          ? [
+              { index: 0, role: 'user', text: QUESTION, tool_calls: [] },
+              {
+                index: 1,
+                role: 'assistant',
+                text: '4.76 in water at 25 °C.',
+                tool_calls: [],
+                correlation_id: OURS,
+              },
+            ]
+          : [{ index: 0, role: 'user', text: QUESTION, tool_calls: [] }],
+      );
+    });
+    restore = stub.restore;
+
+    resumeInterruptedTurn(cid, auth);
+    await untilFake(() => stub.calls.some((c) => c.url.endsWith('/messages')));
+    // Two fake minutes: the bounded read would have given up six times over.
+    for (let second = 0; second < 120; second += 1) {
+      await new Promise((resolve) => realTimeout(resolve, 2));
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    expect(message(cid, mid).interruptedByReload).toBe(true);
+    expect(message(cid, mid).error?.message ?? '').not.toMatch(/could not be recovered/);
+    answered = true;
+    await untilFake(() => message(cid, mid).finalText !== null, 120);
+    expect(message(cid, mid).finalText).toBe('4.76 in water at 25 °C.');
   });
 });

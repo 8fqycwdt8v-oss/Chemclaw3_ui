@@ -64,11 +64,15 @@ const UNLOAD_STOP = { keepalive: true, reason: 'unload' } as const;
 /**
  * How long a reloaded page reads the transcript for a turn it could not follow live.
  *
- * Short on purpose, because by then the turn is over *here*: the watch route answered 404 (no turn
- * running), or named a turn that is not this one (another participant's started since). A turn
- * writes its transcript before it stops counting as running, so its answer is either there now or
- * was never written — a service that stopped the turn on unload is the second case, and waiting the
- * live path's 630 s for it was defect Chemclaw3_ui#131. A few reads cover a write racing the 404.
+ * Short on purpose, because by then this turn is known to be over: the watch route answered with a
+ * running turn that is not this one (another participant's started since), or that a service too
+ * old to name its turn cannot vouch for. A session runs one turn at a time, so this one has ended,
+ * and a turn writes its transcript before it stops counting as running — its answer is there now or
+ * never will be. A few reads cover the write racing the watch.
+ *
+ * **Not for a 404.** A watch 404 says only that no turn runs *on the replica that answered*: the
+ * turn may have ended, or may be running on another front-door replica (the BFF's upstream hop has
+ * no session affinity) and still write its answer. That is the live path's case and gets its poll.
  */
 const RELOAD_RECOVERY_MS = 20_000;
 
@@ -1192,10 +1196,10 @@ function newestHeldAnswer(messages: ChatMessage[]): string | null {
  * only *its own* turn: the watch response names the turn it is a view of, and in a shared
  * conversation the one running now may be somebody else's that started meanwhile.
  *
- * Then the transcript, bounded by what the follow learned. No turn running here, or another one,
- * means this one is over and its answer is written or never will be — a short read
- * (`RELOAD_RECOVERY_MS`), then an honest "could not be recovered". A follow that *dropped* mid-turn
- * is the live path's case, and gets the live path's whole poll.
+ * Then the transcript, bounded by what the follow learned. Another turn running in its place means
+ * this one is over and its answer is written or never will be — a short read (`RELOAD_RECOVERY_MS`),
+ * then an honest "could not be recovered". A 404 (no turn on the replica that answered — it may run
+ * on another) or a follow that *dropped* mid-turn is the live path's case, and gets its whole poll.
  */
 export function resumeInterruptedTurn(
   conversationId: string,
@@ -1228,14 +1232,16 @@ export function resumeInterruptedTurn(
   // Followed live only when it can be told apart from anybody else's turn (its id), when it is the
   // conversation's newest turn (a running turn is the newest one), and when nothing else holds the
   // app's one streaming slot.
-  const followable =
-    turnId !== '' &&
-    index === conversation.messages.length - 1 &&
-    useChatStore.getState().streaming === null;
+  const newest = index === conversation.messages.length - 1;
+  const followable = turnId !== '' && newest && useChatStore.getState().streaming === null;
   void (async () => {
+    // Not followed: a newer turn in this conversation means this one is over (`'gone'`); otherwise
+    // nothing is known about it, and the live path's whole poll is the honest wait.
     const followed = followable
       ? await followReloadedTurn(conversationId, sessionId, messageId, turnId, auth)
-      : 'gone';
+      : newest
+        ? 'dropped'
+        : 'gone';
     if (followed === 'settled') return;
     const recovered = await recoverDetachedAnswer(
       sessionId,
@@ -1289,8 +1295,9 @@ export function resumeInterruptedTurn(
  * Follow a reload-interrupted turn to its end through `GET /sessions/{id}/turn/stream`.
  *
  * `'settled'` when the bubble is final — answered, failed with the turn's own error, or stopped
- * by the reader. `'gone'` when no turn of this page's is running here: a 404, or a running turn
- * the response names as another one. `'dropped'` when the view broke while the turn may still run.
+ * by the reader. `'gone'` when the running turn is not this page's: the response names another, or
+ * (an older service) names none. `'dropped'` when the turn may still run somewhere — a 404, which
+ * speaks only for the replica that answered, or a view that broke.
  *
  * While following it is this tab's turn in every way the app knows: it holds the streaming slot and
  * the composer lock, Stop stops it, and a further reload sends the same deferred unload stop
@@ -1372,7 +1379,10 @@ async function followReloadedTurn(
       return 'settled';
     }
     useChatStore.getState().followInterruptedTurn(conversationId, messageId, false);
-    if (someoneElses || kind === 'session_not_found') return 'gone';
+    if (someoneElses) return 'gone';
+    // No turn on the replica that answered: ended in the gap, or running on another one — whose
+    // answer still lands in the transcript, so this gets the full poll (see `RELOAD_RECOVERY_MS`).
+    if (kind === 'session_not_found') return 'dropped';
     // Aborted from outside — the conversation deleted, the store cleared: nobody is waiting.
     if (follow.signal.aborted) return 'settled';
     if (

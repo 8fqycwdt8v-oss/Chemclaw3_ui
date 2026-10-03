@@ -59,6 +59,9 @@ const ENV: Record<string, string> = {
   // seam reads as the default rather than as this.
   CLIENT_LOG_LEVEL: 'debug',
   MAX_MESSAGE_CHARS: '250000',
+  // Wave 3: both set and different, so the sandbox is on and its origin crosses the seam.
+  SANDBOX_ORIGIN: 'https://sandbox-from-the-server.example',
+  APP_ORIGIN: 'https://app-from-the-server.example',
 };
 
 /** Boot the server half against `ENV` and hand back its config plus the script it would serve. */
@@ -135,6 +138,9 @@ describe('what /config.js actually delivers', () => {
     // (`CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`), so one that fails to cross leaves the composer
     // refusing at the built-in default while the service would have accepted the message.
     expect(client.maxMessageChars).toBe(250_000);
+    // Wave 3: an origin that failed to cross reads as `''`, which shows every HTML artefact as
+    // source — a working-looking downgrade nobody would trace to this seam.
+    expect(client.sandboxOrigin).toBe('https://sandbox-from-the-server.example');
     // `false` and not the `true` default: a boolean that failed to cross reads as its fallback,
     // which for this one is the *on* state and therefore invisible.
     expect(client.warmSessions).toBe(false);
@@ -167,6 +173,7 @@ describe('what /config.js actually delivers', () => {
       reviewerRoles: [],
       logLevel: 'info',
       maxMessageChars: 100_000,
+      sandboxOrigin: '',
     });
 
     expect(script).not.toContain('</script>');

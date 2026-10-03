@@ -111,6 +111,46 @@ const authorityOrigin = (authority: string): string => {
 };
 
 /**
+ * A plain `http(s)://host[:port]` origin, or `''` for anything else.
+ *
+ * For `SANDBOX_ORIGIN` and `APP_ORIGIN` (wave 3). Both are written into a CSP — `frame-src` on the
+ * app, `frame-ancestors` on the sandbox shell — and the second is also injected into the shell's
+ * script as the one origin it takes content from. So the value must be an origin and nothing else:
+ * no path (a CSP source with a path matches only that path), no userinfo, no query, and a host CSP
+ * reads as a host, for `AUTHORITY_HOSTNAME`'s reason — `http://*` would admit every host.
+ */
+export function plainOrigin(raw: string): string {
+  if (!raw) return '';
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return '';
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+  if (url.username || url.password || url.search || url.hash) return '';
+  if (url.pathname !== '/' && url.pathname !== '') return '';
+  if (!AUTHORITY_HOSTNAME.test(url.hostname)) return '';
+  return url.origin;
+}
+
+/**
+ * The HTML sandbox's origin and the app's own, as given and as origins (wave 3).
+ *
+ * `SANDBOX_ORIGIN` is where the browser reaches this process's **second listener** — the one that
+ * serves `GET /sandbox/frame` and nothing else (`server/sandbox.ts`). `APP_ORIGIN` is where the
+ * browser reaches the app; the sandbox shell takes content only from it and may be framed only by
+ * it. The process cannot learn either from a request — a public origin is the ingress's to choose —
+ * so both are stated. The sandbox is on only when both are origins and they **differ**:
+ * `validateConfig` refuses the other combinations rather than serving a sandbox that is not one.
+ */
+const rawSandboxOrigin = str('SANDBOX_ORIGIN');
+const rawAppOrigin = str('APP_ORIGIN');
+const sandboxOrigin = plainOrigin(rawSandboxOrigin);
+const appOrigin = plainOrigin(rawAppOrigin);
+const sandboxEnabled = Boolean(sandboxOrigin && appOrigin && sandboxOrigin !== appOrigin);
+
+/**
  * Content-Security-Policy for the SPA.
  *
  * Built conditionally on auth mode because MSAL refreshes tokens silently through a hidden
@@ -118,7 +158,12 @@ const authorityOrigin = (authority: string): string => {
  * would break that refresh roughly an hour after login — a failure that looks like a random
  * logout and is miserable to trace back to a header.
  */
-function buildCsp(mode: AuthMode, allowFraming: boolean, authority: string = ENTRA_HOST): string {
+function buildCsp(
+  mode: AuthMode,
+  allowFraming: boolean,
+  authority: string = ENTRA_HOST,
+  sandbox = '',
+): string {
   const directives: Record<string, string[]> = {
     'default-src': ["'self'"],
     // No inline scripts: /config.js is a real same-origin file precisely so this can stay strict.
@@ -169,6 +214,14 @@ function buildCsp(mode: AuthMode, allowFraming: boolean, authority: string = ENT
     directives['connect-src'] = ["'self'", origin];
     directives['frame-src'] = [origin];
     directives['form-action'] = ["'self'", origin];
+  }
+
+  // The HTML sandbox's origin, and only when it is on: the one other origin this page may frame
+  // (`HtmlView`). Its own page carries its own, far stricter policy (`server/sandbox.ts`); this
+  // line only lets the frame exist. Off, the header is byte-for-byte what it was.
+  if (sandbox) {
+    const framed = directives['frame-src']!.filter((source) => source !== "'none'");
+    directives['frame-src'] = [...framed, sandbox];
   }
 
   return Object.entries(directives)
@@ -286,6 +339,17 @@ export interface BffConfig {
   rawMaxMessageChars: string;
   maxMessageCharsIsValid: boolean;
   csp: string;
+  /** `SANDBOX_ORIGIN` and `APP_ORIGIN` as given, so a refusal can quote them. */
+  rawSandboxOrigin: string;
+  rawAppOrigin: string;
+  /** Both as plain origins, or `''` where the value is not one. See `plainOrigin`. */
+  sandboxOrigin: string;
+  appOrigin: string;
+  /** Whether the second listener runs: both origins set, valid, and different. */
+  sandboxEnabled: boolean;
+  /** Where the second listener binds. Its own port, and by default the app's own host. */
+  sandboxPort: number;
+  sandboxBindHost: string;
   logLevel: string;
   /** How much the BROWSER records, served through `/config.js`. Separate from `logLevel`, which
    *  is this process's own verbosity: turning the pod's logs up is not the same decision as
@@ -454,7 +518,14 @@ export const cfg: BffConfig = {
   // constant of its own, so this knob configured nothing and a deployment that raised it changed
   // no behaviour at all.
   clientEventsRatePerMin: Math.max(1, Math.floor(num('CLIENT_EVENTS_RATE_PER_MIN', 3_000))),
-  csp: buildCsp(authMode, allowFraming, entraAuthority),
+  csp: buildCsp(authMode, allowFraming, entraAuthority, sandboxEnabled ? sandboxOrigin : ''),
+  rawSandboxOrigin,
+  rawAppOrigin,
+  sandboxOrigin,
+  appOrigin,
+  sandboxEnabled,
+  sandboxPort: num('SANDBOX_PORT', 8081),
+  sandboxBindHost: str('SANDBOX_BIND_HOST', str('BIND_HOST', '0.0.0.0')),
   logLevel: str('LOG_LEVEL', 'info'),
   // Defaults to `info` rather than to this process's own level: the two are independent knobs and
   // an operator debugging the BFF has not asked every open tab to start reporting.
@@ -583,5 +654,59 @@ export function validateConfig(c: BffConfig = cfg): string[] {
     );
   }
 
+  problems.push(...sandboxProblems(c));
+
+  return problems;
+}
+
+/**
+ * What makes a sandbox configuration not a sandbox — refused, in this function's usual posture,
+ * rather than served half-working.
+ *
+ * Every refusal here is a deployment that would otherwise *look* configured: a frame that never
+ * paints because `frame-ancestors` names an origin the app is not served from, a shell that ignores
+ * every message because it was told the wrong app origin, or — worst — a "sandbox" on the app's own
+ * origin, which is not one. Unset `SANDBOX_ORIGIN` is not a problem: `html` artefacts then show as
+ * escaped source, and the second listener does not start.
+ */
+function sandboxProblems(c: BffConfig): string[] {
+  const problems: string[] = [];
+  if (c.rawSandboxOrigin && !c.sandboxOrigin) {
+    problems.push(
+      `SANDBOX_ORIGIN must be a plain http(s) origin (scheme, host, optional port — no path), got ` +
+        `${JSON.stringify(c.rawSandboxOrigin)}. It is written into the app's CSP.`,
+    );
+  }
+  if (c.rawAppOrigin && !c.appOrigin) {
+    problems.push(
+      `APP_ORIGIN must be a plain http(s) origin (scheme, host, optional port — no path), got ` +
+        `${JSON.stringify(c.rawAppOrigin)}. It is written into the sandbox shell's CSP and script.`,
+    );
+  }
+  if (!c.sandboxOrigin) return problems;
+  if (!c.rawAppOrigin) {
+    problems.push(
+      'APP_ORIGIN is required when SANDBOX_ORIGIN is set: the sandbox shell takes content only ' +
+        'from the app origin and may be framed only by it, and this process cannot learn the ' +
+        "browser's origin from a request.",
+    );
+  } else if (c.appOrigin && c.appOrigin === c.sandboxOrigin) {
+    problems.push(
+      `SANDBOX_ORIGIN must differ from APP_ORIGIN (both ${JSON.stringify(c.appOrigin)}): a frame ` +
+        'on the origin that holds the sign-in is not a sandbox. Use a distinct hostname, or unset ' +
+        'SANDBOX_ORIGIN to show HTML artefacts as source.',
+    );
+  } else if (c.appOrigin.startsWith('https:') && c.sandboxOrigin.startsWith('http:')) {
+    problems.push(
+      `SANDBOX_ORIGIN ${JSON.stringify(c.sandboxOrigin)} is http under an https app: the browser ` +
+        'blocks the frame as mixed content. Serve the sandbox over https too.',
+    );
+  }
+  if (c.sandboxEnabled && c.sandboxPort === c.port) {
+    problems.push(
+      `SANDBOX_PORT ${c.sandboxPort} is the app's own PORT. The sandbox is a second listener; give ` +
+        'it a port of its own.',
+    );
+  }
   return problems;
 }

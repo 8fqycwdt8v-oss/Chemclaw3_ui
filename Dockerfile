@@ -21,12 +21,15 @@ RUN npm run build
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production \
     PORT=8080 \
+    SANDBOX_PORT=8081 \
     BIND_HOST=0.0.0.0 \
     CLIENT_DIR=/app/dist/client
 WORKDIR /app
 COPY --from=build --chown=node:node /app/dist ./dist
 USER node
-EXPOSE 8080
+# 8081 is the HTML sandbox's listener, which runs only when SANDBOX_ORIGIN (and APP_ORIGIN) are set;
+# a deployment routes a distinct hostname to it (README, "HTML sandbox").
+EXPOSE 8080 8081
 # LIVENESS, and `/healthz` deliberately: it answers from a literal and never touches the upstream,
 # so it asks "is this process serving?" — the only question a restart may be decided on. Readiness
 # is `/readyz`, which probes the Chemclaw service; point a readiness probe or a load balancer at

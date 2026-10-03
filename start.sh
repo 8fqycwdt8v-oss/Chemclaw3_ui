@@ -25,6 +25,13 @@ export UPSTREAM_CONNECT_TIMEOUT_MS="${UPSTREAM_CONNECT_TIMEOUT_MS:-10000}"
 # PORT is assigned by Replit or falls back to 8100
 export PORT="${PORT:-8099}"
 
+# The HTML sandbox (artefacts wave 3): a second listener on the next port, so it is a different
+# origin from the app. Both origins are what the browser types; override them when this runs behind
+# a proxy or a preview host, which must route a distinct hostname to SANDBOX_PORT.
+export SANDBOX_PORT="${SANDBOX_PORT:-$((PORT + 1))}"
+export APP_ORIGIN="${APP_ORIGIN:-http://localhost:${PORT}}"
+export SANDBOX_ORIGIN="${SANDBOX_ORIGIN:-http://localhost:${SANDBOX_PORT}}"
+
 # Tell the BFF where its built client assets are
 export CLIENT_DIR="$SCRIPT_DIR/dist/client"
 
@@ -43,6 +50,7 @@ fi
 echo "Starting Chemclaw3 UI (BFF) on http://${BIND_HOST}:${PORT}"
 echo "  Proxying /api -> ${CHEMCLAW_API_URL}"
 echo "  Auth mode    : ${AUTH_MODE}"
+echo "  HTML sandbox : ${SANDBOX_ORIGIN} (app at ${APP_ORIGIN})"
 
 # Node 22+ strips TypeScript types natively — no build step needed for the server
 exec node --experimental-strip-types server/index.ts

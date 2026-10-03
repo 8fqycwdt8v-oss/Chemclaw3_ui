@@ -190,6 +190,36 @@ document's. The document never gets it. A proxy or CDN in front of the BFF must 
 through per path, not overwrite every response with one policy — or no structure is drawn
 (`ISSUES.md` Issue 10).
 
+### HTML sandbox (artefacts)
+
+An `html` artefact is markup and script the agent wrote. It never runs on the app's origin, which
+holds the bearer token: it runs in a frame served by the BFF's **second listener**, on a different
+origin, embedded with `sandbox="allow-scripts"` and nothing else (no `allow-same-origin`,
+`allow-popups`, `allow-top-navigation`, `allow-forms` or `allow-modals`). That listener serves
+`GET /sandbox/frame` and nothing else, under `default-src 'none'; connect-src 'none'` and
+`frame-ancestors <APP_ORIGIN>`; the app listener answers that path with a 404.
+
+| Variable            | Value                                                                                                 |
+| ------------------- | ----------------------------------------------------------------------------------------------------- |
+| `SANDBOX_ORIGIN`    | the origin the browser reaches the sandbox at, e.g. `https://sandbox.ui.example`                      |
+| `APP_ORIGIN`        | the origin the browser reaches the app at, e.g. `https://ui.example` — required with `SANDBOX_ORIGIN` |
+| `SANDBOX_PORT`      | the second listener's port (default `8081`)                                                           |
+| `SANDBOX_BIND_HOST` | its bind address (default: `BIND_HOST`)                                                               |
+
+**A deployment must give the sandbox a distinct hostname** — its own Route/Ingress host pointing at
+the pod's `SANDBOX_PORT`, with TLS like the app's (an https app cannot frame an http sandbox). A
+different port on the same host is a different origin, which is all the frame strictly needs, and
+is what local dev and compose use; but it is the same _site_, so the BFF logs a warning when the two
+share a non-loopback hostname. Both origins must be exact: the shell takes content only from
+`APP_ORIGIN`, so a chemist reaching the app at an address other than `APP_ORIGIN` sees a blank frame.
+The BFF refuses to start when `SANDBOX_ORIGIN` is set without `APP_ORIGIN`, equals it, or carries a
+path. Unset, the second listener does not start, `/config.js` serves `sandboxOrigin: ""`, and HTML
+artefacts are shown as escaped source with the notice "HTML preview needs a separate sandbox origin".
+The CSP gains `frame-src <SANDBOX_ORIGIN>` only when the sandbox is on.
+
+What the sandbox does not stop: a page navigating _its own frame_ to another site with data in the
+URL — no CSP directive bounds that. What such a page could carry is the artefact's own HTML.
+
 ## Layout
 
 ```
@@ -417,7 +447,9 @@ an operator rather than by either pipeline; see Testing above for why they are o
 what `check:live` is and is not.
 
 This repository ships no chart, so a rollout is `oc set image` against a Deployment an operator
-created. The four-repository release, its ordering (the UI last — it is useless before the API it
+created. That Deployment owes the HTML sandbox a second container port (`SANDBOX_PORT`, default
+8081), a Service port for it, and a Route on a **distinct hostname** — see "HTML sandbox" under
+Configuration. The four-repository release, its ordering (the UI last — it is useless before the API it
 proxies answers) and the reasoning are in Chemclaw3: `deploy/jenkins/README.md` and
 `D-2026-08-26-a-release-is-a-descriptor-and-a-target`.
 

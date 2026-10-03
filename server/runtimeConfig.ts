@@ -44,6 +44,18 @@ export interface RuntimeConfig {
    * SPA never frames an origin this process is not serving. See `sandboxOrigin` in src/env.ts.
    */
   sandboxOrigin: string;
+  /**
+   * The origin the browser is meant to reach the app at (`APP_ORIGIN`), or `''` when unset — the
+   * one origin the sandbox shell takes content from and may be framed by. Published so a page
+   * opened at some other address shows the artefact as source with both origins named, rather
+   * than a frame that stays blank because the shell ignored it (contract, hardening item 5).
+   */
+  appOrigin: string;
+  /**
+   * Whether an `html` artefact's script runs as soon as it is shown (`HTML_SCRIPTS_DEFAULT`, on by
+   * the owner's decision of 2026-10-03). Off puts back the per-view "Run scripts".
+   */
+  htmlScriptsDefault: boolean;
 }
 
 const LOG_LEVELS = ['silent', 'error', 'warn', 'info', 'debug'] as const;
@@ -67,6 +79,8 @@ export function runtimeConfig(): RuntimeConfig {
     logLevel: clientLogLevel(),
     maxMessageChars: cfg.maxMessageChars,
     sandboxOrigin: cfg.sandboxEnabled ? cfg.sandboxOrigin : '',
+    appOrigin: cfg.appOrigin,
+    htmlScriptsDefault: cfg.htmlScriptsDefault,
   };
 }
 

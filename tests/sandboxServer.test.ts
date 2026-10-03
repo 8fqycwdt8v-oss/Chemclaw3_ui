@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { RTC_PRELUDE, renderSandboxShell, sandboxCsp } from '../server/sandbox.ts';
-import { validateConfig, type BffConfig } from '../server/config.ts';
+import { sandboxState, validateConfig, type BffConfig } from '../server/config.ts';
 
 const APP = 'http://127.0.0.1:4321';
 
@@ -92,11 +92,26 @@ describe('the sandbox listener', () => {
     const post = await fetch(`${base}/sandbox/frame`, { method: 'POST', body: 'x' });
     expect(post.status).toBe(405);
     expect(post.headers.get('allow')).toBe('GET, HEAD');
+    // A refusal carries the closed policy too, so no response on this origin goes out without one.
+    expect(post.headers.get('content-security-policy')).toBe(
+      "default-src 'none'; frame-ancestors 'none'",
+    );
+    expect(post.headers.get('x-content-type-options')).toBe('nosniff');
     for (const other of ['/', '/index.html', '/config.js', '/api/healthz', '/healthz', '/x']) {
       const res = await fetch(`${base}${other}`);
       expect(res.status, other).toBe(404);
       expect(res.headers.get('content-security-policy'), other).toContain("default-src 'none'");
     }
+  });
+
+  it('says it is ready, to the app origin only, once its listener is armed', () => {
+    const shell = renderSandboxShell(APP);
+    const listening = shell.indexOf("addEventListener('message'");
+    const ready = shell.indexOf("up.postMessage({ type: 'ready' }, APP)");
+    expect(listening).toBeGreaterThan(0);
+    expect(ready).toBeGreaterThan(listening);
+    // Nothing else is posted but the height.
+    expect(shell.match(/postMessage\(/g)).toHaveLength(2);
   });
 
   it('writes the app origin into its script as a literal that cannot close the tag', () => {
@@ -239,8 +254,81 @@ describe('turning the sandbox on', () => {
       },
       /a port of its own/,
     ],
+    ...['0', '65536', '-1', '80.5', 'abc', '8081x'].map(
+      (port) =>
+        [
+          {
+            SANDBOX_ORIGIN: 'http://localhost:8081',
+            APP_ORIGIN: 'http://localhost:8080',
+            SANDBOX_PORT: port,
+          },
+          /SANDBOX_PORT .* is not a port/,
+        ] as [Record<string, string>, RegExp],
+    ),
+    [{ HTML_SCRIPTS_DEFAULT: 'yes' }, /HTML_SCRIPTS_DEFAULT "yes" is not "on" or "off"/],
   ])('refuses %j rather than serving a sandbox that is not one', async (env, problem) => {
     const c = await configFrom({ BIND_HOST: '127.0.0.1', ...env });
     expect(validateConfig(c).join('\n')).toMatch(problem);
+  });
+
+  it.each(['1', '8081', '65535'])('takes SANDBOX_PORT=%s', async (port) => {
+    const c = await configFrom({
+      BIND_HOST: '127.0.0.1',
+      SANDBOX_ORIGIN: 'http://localhost:8081',
+      APP_ORIGIN: 'http://localhost:8080',
+      SANDBOX_PORT: port,
+    });
+    expect(validateConfig(c)).toEqual([]);
+  });
+});
+
+describe('the sandbox beside ALLOW_FRAMING', () => {
+  it('is turned off with its reason rather than refused, and frame-src stays closed', async () => {
+    // Chosen over a refusal (README "HTML sandbox"): every shipped launcher sets the sandbox
+    // origins, and the shell's `frame-ancestors` names APP_ORIGIN alone while CSP checks every
+    // ancestor, so inside a preview host's frame the sandbox could only ever be a blank box.
+    const c = await configFrom({
+      BIND_HOST: '127.0.0.1',
+      SANDBOX_ORIGIN: 'http://localhost:8081',
+      APP_ORIGIN: 'http://localhost:8080',
+      ALLOW_FRAMING: 'true',
+    });
+    expect(validateConfig(c)).toEqual([]);
+    expect(c.sandboxEnabled).toBe(false);
+    expect(c.sandboxReason).toMatch(/^ALLOW_FRAMING=true/);
+    expect(frameSrc(c.csp)).toBe("frame-src 'none'");
+    vi.resetModules();
+    const { runtimeConfig } = await import('../server/runtimeConfig.ts');
+    expect(runtimeConfig().sandboxOrigin).toBe('');
+  });
+
+  it('says why in every state', () => {
+    const base = { rawSandboxOrigin: '', sandboxOrigin: '', appOrigin: '', allowFraming: false };
+    expect(sandboxState(base)).toEqual({
+      on: false,
+      reason: expect.stringMatching(/SANDBOX_ORIGIN is unset/),
+    });
+    const set = {
+      rawSandboxOrigin: 'http://s:2',
+      sandboxOrigin: 'http://s:2',
+      appOrigin: 'http://a:1',
+      allowFraming: false,
+    };
+    expect(sandboxState(set)).toEqual({ on: true, reason: expect.stringContaining('http://s:2') });
+    expect(sandboxState({ ...set, allowFraming: true }).on).toBe(false);
+    expect(sandboxState({ ...set, appOrigin: 'http://s:2' }).on).toBe(false);
+  });
+});
+
+describe('HTML_SCRIPTS_DEFAULT', () => {
+  it.each([
+    [{}, true],
+    [{ HTML_SCRIPTS_DEFAULT: 'on' }, true],
+    [{ HTML_SCRIPTS_DEFAULT: 'OFF' }, false],
+    [{ HTML_SCRIPTS_DEFAULT: 'off' }, false],
+  ])('%j runs scripts by default: %s', async (env, on) => {
+    const c = await configFrom({ BIND_HOST: '127.0.0.1', ...env });
+    expect(validateConfig(c)).toEqual([]);
+    expect(c.htmlScriptsDefault).toBe(on);
   });
 });

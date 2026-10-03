@@ -92,6 +92,21 @@ export interface RuntimeConfig {
    * (`HtmlView`), never inline.
    */
   sandboxOrigin: string;
+  /**
+   * The origin this app is meant to be reached at (`APP_ORIGIN`), or `''` when the BFF was told
+   * none. The sandbox shell takes content only from this origin, so a page opened at another
+   * address (a second hostname, `localhost` for `127.0.0.1`) would frame a shell that ignores it;
+   * `HtmlView` compares it with `window.location.origin` and shows the source, naming both,
+   * instead of a blank frame.
+   */
+  appOrigin: string;
+  /**
+   * Whether an `html` artefact's own script runs as soon as it is shown (`HTML_SCRIPTS_DEFAULT`).
+   * On by the owner's decision of 2026-10-03, with the per-view control "Disable scripts"; off is
+   * the kill switch that restores "Run scripts". Absent — a `vite dev` with no BFF — reads as off:
+   * a security default nobody stated is the closed one.
+   */
+  htmlScriptsDefault: boolean;
 }
 
 declare global {
@@ -149,6 +164,8 @@ function resolve(): RuntimeConfig {
     // `/config.js`, and 1 passes any test for "usable" that only asks about the sign.
     maxMessageChars: isUsableMessageCap(w.maxMessageChars) ? w.maxMessageChars : MAX_MESSAGE_CHARS,
     sandboxOrigin: pick(w.sandboxOrigin),
+    appOrigin: pick(w.appOrigin),
+    htmlScriptsDefault: w.htmlScriptsDefault === true,
   };
 }
 

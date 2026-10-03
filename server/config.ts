@@ -148,7 +148,60 @@ const rawSandboxOrigin = str('SANDBOX_ORIGIN');
 const rawAppOrigin = str('APP_ORIGIN');
 const sandboxOrigin = plainOrigin(rawSandboxOrigin);
 const appOrigin = plainOrigin(rawAppOrigin);
-const sandboxEnabled = Boolean(sandboxOrigin && appOrigin && sandboxOrigin !== appOrigin);
+
+/**
+ * Whether the sandbox runs, and the sentence the startup line says about it (hardening, 2026-10-03).
+ *
+ * On only when both origins are origins, they differ, **and the app is not framable by anyone**
+ * (`ALLOW_FRAMING`). The last is a choice, documented in README "HTML sandbox": the shell's
+ * `frame-ancestors` names `APP_ORIGIN` alone, and CSP checks *every* ancestor, so inside a preview
+ * host's iframe the sandbox frame is blocked by the browser and the artefact is a blank box. That
+ * combination is not refused — every launcher this repository ships now sets the sandbox origins,
+ * so a refusal would turn the preview opt-in into a process that cannot start — it is turned off
+ * with its reason logged, and HTML artefacts are shown as escaped source, which is what a framed
+ * app can honestly offer.
+ *
+ * Exported for the tests and for `index.ts`'s one line; `cfg` carries the result.
+ */
+export function sandboxState(c: {
+  rawSandboxOrigin: string;
+  sandboxOrigin: string;
+  appOrigin: string;
+  allowFraming: boolean;
+}): { on: boolean; reason: string } {
+  if (!c.rawSandboxOrigin) {
+    return { on: false, reason: 'SANDBOX_ORIGIN is unset; HTML artefacts are shown as source' };
+  }
+  if (!c.sandboxOrigin || !c.appOrigin || c.sandboxOrigin === c.appOrigin) {
+    // `validateConfig` refuses every one of these before anything serves; said for completeness.
+    return { on: false, reason: 'SANDBOX_ORIGIN/APP_ORIGIN do not name two distinct origins' };
+  }
+  if (c.allowFraming) {
+    return {
+      on: false,
+      reason:
+        'ALLOW_FRAMING=true: a framed app cannot frame the sandbox (its frame-ancestors names ' +
+        'APP_ORIGIN only, and every ancestor is checked), so HTML artefacts are shown as source',
+    };
+  }
+  return {
+    on: true,
+    reason: `SANDBOX_ORIGIN ${c.sandboxOrigin} is a separate origin from APP_ORIGIN ${c.appOrigin}`,
+  };
+}
+
+const sandbox = sandboxState({ rawSandboxOrigin, sandboxOrigin, appOrigin, allowFraming });
+const sandboxEnabled = sandbox.on;
+
+/**
+ * Whether an `html` artefact's own script runs without anybody pressing a button (contract,
+ * hardening item 4). **On by default — an owner decision of 2026-10-03**, taken with the residual
+ * risks written down (README "HTML sandbox"); `HTML_SCRIPTS_DEFAULT=off` is the kill switch that
+ * puts back "Run scripts". Anything but `on`/`off` is refused by `validateConfig` rather than read
+ * as either: a typo in a security switch must not silently pick a side.
+ */
+const rawHtmlScriptsDefault = str('HTML_SCRIPTS_DEFAULT', 'on').toLowerCase();
+const htmlScriptsDefaultIsValid = rawHtmlScriptsDefault === 'on' || rawHtmlScriptsDefault === 'off';
 
 /**
  * Content-Security-Policy for the SPA.
@@ -345,11 +398,21 @@ export interface BffConfig {
   /** Both as plain origins, or `''` where the value is not one. See `plainOrigin`. */
   sandboxOrigin: string;
   appOrigin: string;
-  /** Whether the second listener runs: both origins set, valid, and different. */
+  /** Whether the second listener runs: both origins set, valid, and different, and the app not
+   *  framable (`sandboxState`). */
   sandboxEnabled: boolean;
+  /** Why the sandbox is on or off, as the startup line says it (`sandboxState`). */
+  sandboxReason: string;
   /** Where the second listener binds. Its own port, and by default the app's own host. */
   sandboxPort: number;
+  /** `SANDBOX_PORT` as given, so a port that is not one can be quoted in the refusal. */
+  rawSandboxPort: string;
   sandboxBindHost: string;
+  /** `HTML_SCRIPTS_DEFAULT`, lower-cased: `on` (the default) or `off`; anything else is refused. */
+  rawHtmlScriptsDefault: string;
+  htmlScriptsDefaultIsValid: boolean;
+  /** Whether an `html` artefact's script runs until somebody presses "Disable scripts". */
+  htmlScriptsDefault: boolean;
   logLevel: string;
   /** How much the BROWSER records, served through `/config.js`. Separate from `logLevel`, which
    *  is this process's own verbosity: turning the pod's logs up is not the same decision as
@@ -524,7 +587,12 @@ export const cfg: BffConfig = {
   sandboxOrigin,
   appOrigin,
   sandboxEnabled,
+  sandboxReason: sandbox.reason,
   sandboxPort: num('SANDBOX_PORT', 8081),
+  rawSandboxPort: str('SANDBOX_PORT'),
+  rawHtmlScriptsDefault,
+  htmlScriptsDefaultIsValid,
+  htmlScriptsDefault: rawHtmlScriptsDefault !== 'off',
   sandboxBindHost: str('SANDBOX_BIND_HOST', str('BIND_HOST', '0.0.0.0')),
   logLevel: str('LOG_LEVEL', 'info'),
   // Defaults to `info` rather than to this process's own level: the two are independent knobs and
@@ -671,6 +739,13 @@ export function validateConfig(c: BffConfig = cfg): string[] {
  */
 function sandboxProblems(c: BffConfig): string[] {
   const problems: string[] = [];
+  if (!c.htmlScriptsDefaultIsValid) {
+    problems.push(
+      `HTML_SCRIPTS_DEFAULT ${JSON.stringify(c.rawHtmlScriptsDefault)} is not "on" or "off". It ` +
+        'decides whether agent-written script runs without a click, so a typo is refused rather ' +
+        'than read as either.',
+    );
+  }
   if (c.rawSandboxOrigin && !c.sandboxOrigin) {
     problems.push(
       `SANDBOX_ORIGIN must be a plain http(s) origin (scheme, host, optional port — no path), got ` +
@@ -700,6 +775,20 @@ function sandboxProblems(c: BffConfig): string[] {
     problems.push(
       `SANDBOX_ORIGIN ${JSON.stringify(c.sandboxOrigin)} is http under an https app: the browser ` +
         'blocks the frame as mixed content. Serve the sandbox over https too.',
+    );
+  }
+  // Whole digits as typed *and* in range: `num()` falls back to 8081 on a non-number, so only the
+  // raw value can show that `SANDBOX_PORT=abc` was asked for; and a `0` would make Node bind a
+  // random port no Route points at, while 70000 throws at listen.
+  if (
+    (c.rawSandboxPort && !/^\d+$/.test(c.rawSandboxPort)) ||
+    !Number.isInteger(c.sandboxPort) ||
+    c.sandboxPort < 1 ||
+    c.sandboxPort > 65_535
+  ) {
+    problems.push(
+      `SANDBOX_PORT ${JSON.stringify(c.rawSandboxPort || String(c.sandboxPort))} is not a port ` +
+        '(expected a whole number from 1 to 65535).',
     );
   }
   if (c.sandboxEnabled && c.sandboxPort === c.port) {

@@ -53,8 +53,13 @@ const base: BffConfig = {
   sandboxOrigin: '',
   appOrigin: '',
   sandboxEnabled: false,
+  sandboxReason: '',
   sandboxPort: 8081,
+  rawSandboxPort: '',
   sandboxBindHost: '127.0.0.1',
+  rawHtmlScriptsDefault: 'on',
+  htmlScriptsDefaultIsValid: true,
+  htmlScriptsDefault: true,
   logLevel: 'error',
   clientLogLevel: 'info',
 };

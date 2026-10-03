@@ -134,6 +134,21 @@ server.listen(cfg.port, cfg.bindHost, () => {
  */
 const sandbox = cfg.sandboxEnabled ? createSandboxServer() : null;
 
+/**
+ * The one line that says whether HTML artefacts run in the sandbox, and why (hardening, 2026-10-03).
+ *
+ * Every shipped launcher now turns the sandbox on, and the two ways it ends up off — no
+ * `SANDBOX_ORIGIN` (the hosted `start.sh`, deliberately) and `ALLOW_FRAMING` — both look like a
+ * working app until somebody opens an HTML artefact and gets its source. So the state is stated at
+ * boot, once, in one record a log query finds: `on` after the listener is bound (a sandbox that
+ * cannot bind dies instead), `off` at once with the reason. Off because of `ALLOW_FRAMING` is a
+ * warning — configured, and overridden — and off because nothing was configured is not.
+ */
+if (!sandbox) {
+  const record = cfg.allowFraming && cfg.rawSandboxOrigin ? log.warn : log.info;
+  record(`html sandbox off: ${cfg.sandboxReason}`, { sandbox: 'off', reason: cfg.sandboxReason });
+}
+
 if (sandbox) {
   sandbox.on('error', (error: NodeJS.ErrnoException) => {
     die('sandbox server error', {
@@ -143,10 +158,14 @@ if (sandbox) {
     });
   });
   sandbox.listen(cfg.sandboxPort, cfg.sandboxBindHost, () => {
-    log.info('sandbox listening', {
+    const scripts = cfg.htmlScriptsDefault ? 'run by default' : 'off until "Run scripts"';
+    log.info(`html sandbox on: ${cfg.sandboxReason}; artefact scripts ${scripts}`, {
+      sandbox: 'on',
+      reason: cfg.sandboxReason,
       address: `http://${cfg.sandboxBindHost}:${cfg.sandboxPort}`,
       sandbox_origin: cfg.sandboxOrigin,
       app_origin: cfg.appOrigin,
+      html_scripts_default: cfg.htmlScriptsDefault ? 'on' : 'off',
     });
     // Different ports on one hostname are different origins — which is what the frame needs — but
     // the same *site*, so a cookie scoped to the host is sent to both. The app sets none and the

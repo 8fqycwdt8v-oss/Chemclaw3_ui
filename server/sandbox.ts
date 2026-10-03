@@ -15,18 +15,21 @@
  * A static shell with one inline script, under the contract's policy: no network the CSP governs
  * (`connect-src 'none'`, `default-src 'none'`), inline script and style only, images and fonts
  * only from `data:`/`blob:`, no form submissions, no `<base>`, and framable **only by the app
- * origin**. It accepts one message — `{type: "html", html, scripts, height, title}` from its parent
- * window *and* from the app origin injected below — and from then on posts back
- * `{type: "height", px}` and nothing else, debounced and clamped (`shared/sandbox.ts`).
+ * origin**. Once its listener is armed it posts `{type: "ready"}` to the app origin (the contract's
+ * hardening handshake — the app sends nothing before it), then accepts one message —
+ * `{type: "html", html, scripts, height, title}` from its parent window *and* from the app origin
+ * injected below — and from then on posts back `{type: "height", px}` and nothing else, debounced
+ * and clamped (`shared/sandbox.ts`).
  *
- * ## Scripts are off unless a person turned them on (wave-3 amendment)
+ * ## Scripts: the app decides, per view (hardening item 4)
  *
  * The shell does not write the artefact into its own document. It puts it in a nested `srcdoc`
- * frame with `sandbox=""` — no script at all — at the spec's height. Only a message carrying
- * `scripts: true`, which the app sends after a click on "Run scripts", gets `sandbox="allow-scripts"`,
- * and then with `RTC_PRELUDE` in front. The reason is measured, not argued: CSP does not govern
- * WebRTC, so a scripted page can send data out over STUN/UDP whatever `connect-src` says, and can
- * write the clipboard after one click. The nested frame inherits this response's CSP, and its
+ * frame at the spec's height, with `sandbox=""` — no script at all — unless the message carries
+ * `scripts: true`, which gets `sandbox="allow-scripts"` with `RTC_PRELUDE` in front. Which one the
+ * app sends is `HTML_SCRIPTS_DEFAULT` (on by the owner's decision of 2026-10-03) and the per-view
+ * "Disable scripts"/"Run scripts" control. What scripts can still do is measured, not argued: CSP
+ * does not govern WebRTC, so a scripted page can send data out over STUN/UDP whatever `connect-src`
+ * says, and can write the clipboard after one click. The nested frame inherits this response's CSP, and its
  * navigations are bounded by this document's `default-src 'none'` (no `frame-src`), so it cannot
  * navigate itself anywhere; the shell's own frame is bounded by the app's `frame-src`.
  *
@@ -84,9 +87,11 @@ const scriptLiteral = (value: string): string => JSON.stringify(value).replace(/
  *
  * **Defence in depth only, and bypassable.** It reaches the realm it runs in and no other: a page
  * that creates a nested `srcdoc` frame gets a fresh realm whose constructors were never touched, and
- * a scripted render inherits `allow-scripts` into it. The control that holds is the *default*: no
- * script runs at all until a person presses "Run scripts" — and, for a deployment, the browser
- * policy `WebRtcIPHandling=disable_non_proxied_udp` (README, "HTML sandbox").
+ * a scripted render inherits `allow-scripts` into it. With scripts on by default that residual is an
+ * owner-accepted risk (docs/production-readiness.md); what narrows it for a deployment is the
+ * browser policy (`WebRtcIPHandling=disable_non_proxied_udp`, or Firefox's
+ * `media.peerconnection.enabled=false`), and what removes it is `HTML_SCRIPTS_DEFAULT=off`
+ * (README, "HTML sandbox").
  */
 export const RTC_PRELUDE =
   '<script>(function () {' +
@@ -96,6 +101,17 @@ export const RTC_PRELUDE =
   'catch (e) {}' +
   '}' +
   '})();</script>';
+
+/**
+ * What every refusal on the sandbox listener is sent with: text, nothing renderable, nothing
+ * framable. The shell's own policy is not reused — a refusal has no script to permit.
+ */
+const REFUSAL_HEADERS: Readonly<Record<string, string>> = {
+  'content-type': 'text/plain; charset=utf-8',
+  'content-security-policy': "default-src 'none'; frame-ancestors 'none'",
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+};
 
 /** The shell page itself, for one app origin. */
 export function renderSandboxShell(appOrigin: string): string {
@@ -142,6 +158,9 @@ export function renderSandboxShell(appOrigin: string): string {
     if (typeof ResizeObserver === 'function') new ResizeObserver(report).observe(document.documentElement);
     report();
   });
+  // Armed: say so, to the app origin only. Without it the app had to guess from \`load\` that this
+  // listener existed, and a message posted a moment early was lost with nothing to say so.
+  if (up !== window) up.postMessage({ type: 'ready' }, APP);
 })();`;
   return (
     '<!doctype html><html lang="en"><head><meta charset="utf-8">' +
@@ -167,17 +186,14 @@ export function createSandboxHandler(
     const path = (req.url ?? '/').split('?', 1)[0] ?? '/';
     const method = req.method ?? 'GET';
     if (path !== SANDBOX_FRAME_PATH) {
-      res.writeHead(404, {
-        'content-type': 'text/plain; charset=utf-8',
-        'content-security-policy': "default-src 'none'; frame-ancestors 'none'",
-        'x-content-type-options': 'nosniff',
-        'referrer-policy': 'no-referrer',
-      });
+      res.writeHead(404, REFUSAL_HEADERS);
       res.end('Not Found');
       return 'sandbox:other';
     }
     if (method !== 'GET' && method !== 'HEAD') {
-      res.writeHead(405, { allow: 'GET, HEAD', 'content-type': 'text/plain; charset=utf-8' });
+      // The same closed headers as the 404: every response this origin sends carries a policy, so
+      // a refusal is not the one page here a browser would render with none.
+      res.writeHead(405, { ...REFUSAL_HEADERS, allow: 'GET, HEAD' });
       res.end('Method Not Allowed');
       return SANDBOX_FRAME_PATH;
     }

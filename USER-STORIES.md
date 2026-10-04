@@ -2,8 +2,9 @@
 
 **What this is.** Twenty-four workflows a chemist, a reviewer or an operator would want from
 [Chemclaw3](https://github.com/8fqycwdt8v-oss/Chemclaw3) through this UI, derived from a read of
-what the service can actually do — 25 HTTP routes, 15 SSE event types, ~56 agent-reachable tools,
-28 skills, 20 durable workflows. Each story names the **aim**: the state the person is trying to
+what the service could actually do when this audit was written — 25 HTTP routes, 15 SSE event
+types, ~56 agent-reachable tools, 28 skills, 20 durable workflows (all larger today; the BFF
+whitelist in `server/routes.ts` is the current count of what this UI reaches). Each story names the **aim**: the state the person is trying to
 reach, not the feature they would click.
 
 Then the part that matters: a verdict on whether **this** frontend serves that workflow well
@@ -327,7 +328,7 @@ is unreachable from the browser.
 | ------ | ------------------------------------------------------------------ | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------ |
 | **H1** | Chemist: use a cheap narrow agent for a lookup                     | Not pay for a full research loop to convert a pKa                            | `SessionIn.profile` + `GET /profiles`                                                   | **`SERVED`**       |
 | **H2** | Chemist: reload and still see the agent's work                     | The trace survives a refresh from the _server_, not just from `localStorage` | `TranscriptMessage.tool_calls` — `tool`, `arguments`, `result`                          | **`SERVED`**       |
-| **H3** | Chemist: send a colleague a link to this conversation              | A link that still resolves next month                                        | The session id is a disposable handle                                                   | `BLOCKED-BACKEND`  |
+| **H3** | Chemist: send a colleague a link to this conversation              | A link that still resolves next month                                        | Durable under `session_store=postgres`; a colleague needs membership (F10)              | `BLOCKED-BACKEND`  |
 | **H4** | Chemist: be told when new ELN data matches a question I care about | Standing queries instead of re-asking                                        | `watch_for` / `list_watches` / `stop_watching` + `DigestWorkflow`                       | `BLOCKED-BACKEND`  |
 | **H5** | Operator: is the ELN sync actually running?                        | Catch a silently failing sync before the agent goes stale for weeks          | `GET /schedules` — `last_run`, `runs_total`, `skipped_overlap`, `running_now`, `paused` | `NO-UI`, by choice |
 
@@ -344,8 +345,11 @@ rehydrated transcript, so reading a conversation back from the server loses the 
 entirely; and `created_at` is a field nothing populates — as is `SessionSummary.title`, which is
 why every server-side session in the sidebar reads "Earlier conversation".
 
-**H3** is `ISSUES.md` #4 and needs a stable server-side conversation id, distinct from the session
-handle. The half of it that was about _a colleague_ is F10 now: a membership, not a link, is what
+**H3** was filed as needing a stable server-side conversation id, distinct from the session handle.
+Half of that premise has since been measured false (`ISSUES.md`, "Closed: the second-device link now
+says that is what it is"): under `session_store=postgres` the session id is a durable row and an
+`/open/<id>` link still resolves for its owner next month; under the in-memory store it lasts one
+process. The half of it that was about _a colleague_ is F10 now: a membership, not a link, is what
 admits somebody, and a member finds the conversation under "Shared with me" without being sent one.
 
 **H5 is left unbuilt on purpose**, and the reason is worth stating rather than leaving as a gap.
@@ -468,7 +472,8 @@ first time a real 200-character tool result did.
 
 Filed here rather than in `ISSUES.md` because each is a capability request, not a defect:
 
-1. **A stable conversation id** (H3). See `ISSUES.md` #4.
+1. **A stable conversation id** (H3) — narrowed: durable under `session_store=postgres`, and a
+   colleague is admitted by membership (F10) rather than by a link. See the H3 note above.
 2. **An HTTP surface for subscriptions** (H4). `watch_for` / `list_watches` / `stop_watching` are
    agent tools only; a standing query the chemist cannot see or cancel is a standing query they
    will not create.

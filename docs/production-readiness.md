@@ -222,8 +222,8 @@ indistinguishable from one that does not work — and this repository has produc
   fit is refused rather than queued, and the socket pool comes back without anyone intervening
   (`tests/serverLimits.test.ts`, `tests/upstreamPool.test.ts`, `tests/upstreamHang.test.ts`).
 - **Bounded.** `POST /api/client-events` is unauthenticated by construction — the page that posts is
-  served before sign-in — so the pod takes at most 600 batches a minute and answers the rest with a
-  429 and a `Retry-After` the browser's sink waits out; a message full of newlines cannot forge a
+  served before sign-in — so the pod takes at most `CLIENT_EVENTS_RATE_PER_MIN` batches a minute
+  (default 3000) and answers the rest with a 429 and a `Retry-After` the browser's sink waits out; a message full of newlines cannot forge a
   second log line (`tests/bffObservability.test.ts`, `tests/clientLogging.test.ts`).
 - **Bounded.** Every metric label is the route **pattern**, never the id-bearing path, and no
   actor, session or correlation id is a label; an un-whitelisted path is bucketed rather than

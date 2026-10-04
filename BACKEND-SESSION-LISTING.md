@@ -1,5 +1,14 @@
 # Handoff: make `GET /sessions` answer the question a conversation list asks
 
+> **Historical — the handoff is done.** Chemclaw3 now ships it: `SessionSummary` in
+> `src/chemclaw/api/schemas.py` carries `session_id`, `created_at`, `updated_at` (the last stored
+> message) and `title`, and `GET /sessions` lists what the sidebar needs. This UI reads both fields
+> (`ISSUES.md`, "Closed: `GET /sessions` now names and dates its sessions" and "Closed: warmed
+> sessions no longer fill the listing"). Nothing below needs applying; the patch at the end is a
+> record of how it was first built, not a change waiting for anyone. For what the UI needs from the
+> backend today, read [`docs/operations.md`](docs/operations.md) §4 and the README's "Backend
+> requirements".
+
 **For a session in [`8fqycwdt8v-oss/Chemclaw3`](https://github.com/8fqycwdt8v-oss/Chemclaw3), not
 this repo.** It lives here only because it was written here and could not be pushed there — the
 session that produced it had read access to the backend and no write credential. Chemclaw3's own

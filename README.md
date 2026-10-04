@@ -616,5 +616,5 @@ there is a real fault.
 
 Conversation history also needs the service running with `CHEMCLAW_SESSION_STORE=postgres`. Under
 the in-memory store there is nothing durable to list or read back. Every backend setting this UI
-depends on — Entra, roles, the message cap, the stream caps, and the attachment-affinity limit of
-an in-cluster deployment — is listed in [`docs/operations.md`](docs/operations.md) §4.
+depends on — Entra, roles, the message cap, the stream caps, and running more than one backend
+replica — is listed in [`docs/operations.md`](docs/operations.md) §4.

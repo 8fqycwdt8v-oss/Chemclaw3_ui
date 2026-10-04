@@ -185,12 +185,13 @@ later release is Jenkins re-pointing the Deployment by digest
   429 over either, which the SPA backs off from. The UI's own stream pool
   (`MAX_UPSTREAM_STREAM_SOCKETS`, 1024) is sized for 200 chemists × 4 streams, so at that load the
   backend's per-process cap binds first: scale the backend, not only the UI.
-- **Uploaded attachments live in one backend pod's memory** (Chemclaw3
-  `chemclaw/agent/attachments.py`), and the chart's Route uses a cookie for affinity for that
-  reason. The BFF reaches the backend through its Service, not its Route, so that cookie does not
-  apply. With more than one backend replica, a file uploaded on one pod may not be visible to a
-  turn served by another. Until attachments have a durable home upstream, either run the backend
-  at one replica when attachments matter, or accept that the agent may not see an upload.
+- **The backend can run more than one replica behind its Service.** The BFF reaches it through
+  the Service, not the Route, so no affinity cookie applies — and none is needed: uploaded
+  attachments are stored in Postgres (Chemclaw3 `session_attachments`, migration 120), and a
+  running turn can be followed or stopped from any replica, which asks the pod holding it
+  through Postgres (migration 121). Both need `CHEMCLAW_SESSION_STORE=postgres`, which this
+  guide already requires. If the replica holding a turn does not answer in time, re-attach and
+  Stop return 503 with `Retry-After`, which the SPA treats as retryable.
 
 ---
 

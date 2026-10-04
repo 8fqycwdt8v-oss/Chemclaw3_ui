@@ -1,5 +1,10 @@
 # Closing out the front-end review
 
+> **State, re-checked 2026-10-04: this file is a completed work log.** Every checkbox in it is
+> ticked and no wave below is in progress. Live work is tracked in [`ISSUES.md`](../ISSUES.md) (open
+> entries listed at its top); how to run the UI is [`docs/operations.md`](../docs/operations.md).
+> Where a sentence below says something is still missing, a `Since:` note says if that changed.
+
 Every finding from the review of 2026-09-04, worked to completion. The seven already fixed are in
 `74e3f2c`; what follows is the remainder — 20 open defects, 15 feature gaps and 4 stale claims in
 prose.
@@ -136,7 +141,9 @@ measured, not argued. Anything that turns out to be wrong is corrected in place 
 
 ## Deliberately not built
 
-- **Bulk actions in the review queue.** The PR gate exists so a human reads each note; rejection
+- **Bulk actions in the review queue.** (Since: the PR gate and its review section were deleted
+  upstream — `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` — so only the jobs half of this
+  still applies.) The PR gate exists so a human reads each note; rejection
   needs a reason; every decision is confirmed because it is irreversible and attributable.
   Bulk-approve deletes the control. Bulk-cancel in the jobs panel is defensible but `cancelJob`
   answers 202, so it would need per-row outcome reporting to stay honest — and pagination is the gap
@@ -197,7 +204,9 @@ measured), and the `Intl` cost (50× predicted, 47× measured).
   notification, `GET /pending` carries the truth.
 - **The 600-character SMILES cap bounds the unrecoverable failure, not the slow one.** A legal
   600-character chain still costs ~0.3 s to parse and ~1.7 s to draw on the main thread. Bounding
-  that means a worker, which is a change of shape rather than a constant.
+  that means a worker, which is a change of shape rather than a constant. (Since: done — RDKit runs
+  in a dedicated worker, `src/chem/rdkit.worker.ts`; `docs/production-readiness.md` §7 has the
+  measurement.)
 - **No cross-tab _live_ sync.** Writes now merge rather than replace, so nothing one tab did is
   destroyed by the other — but a conversation started in tab B does not appear in tab A until it
   reloads. That is a feature with a real question attached (rehydrating over an in-flight turn),

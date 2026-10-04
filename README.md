@@ -25,8 +25,8 @@ bearer token.
 - **Shows the agent's work** as a rail rather than a list: one line per step, its state in the dot,
   how long it took on the right, and what it returned one disclosure in. A refused call is amber
   and counted as _held_, not as a failure — the gate working is not the gate breaking.
-- **Renders structures** from SMILES — the `molecule_smiles` a finished QM job pushes back, plus an
-  opt-in toggle on inline SMILES in answers.
+- **Renders structures** from SMILES — the `molecule_smiles` a finished calculation job pushes back,
+  plus an opt-in toggle on inline SMILES in answers.
 - **Ranks what qualifies an answer** rather than stacking it. What stops a reader acting on the
   answer — "needs expert review", "cut short" — keeps a full-width alert above the text; what they
   merely consult — a connector that did not come up, the verifier's score, the methods behind the
@@ -84,9 +84,13 @@ bearer token.
   Delete, which stay the owner's. The service enforces every one of those; this UI just does not
   offer what would be refused.
 - **Survives a reload** — conversations persist locally and rehydrate from the service.
-- **Is ready for Entra SSO** without a rewrite: one env var switches the auth provider.
+- **Signs in with Entra SSO** (auth code + PKCE in the browser): `AUTH_MODE=msal` and the tenant's
+  ids switch the provider at runtime, with no rebuild.
 
 ## Quick start
+
+**Operators:** building the image, every environment variable, deploying to OpenShift, verifying
+a deployment and troubleshooting it are in [`docs/operations.md`](docs/operations.md).
 
 ### Both servers with Docker Compose
 
@@ -97,17 +101,19 @@ Expects the Chemclaw3 checkout as a sibling directory (override with `CHEMCLAW_R
 export CHEMCLAW_LLM_BASE_URL=https://openrouter.ai/api/v1   # any OpenAI-compatible /v1 base
 export CHEMCLAW_LLM_MODEL=...                               # a model id that gateway serves
 export CHEMCLAW_LLM_API_KEY=...                             # the gateway's credential
-ALLOW_INSECURE_AUTH=true docker compose up --build
+ALLOW_DEV_AUTH=true ALLOW_INSECURE_AUTH=true docker compose up --build
 open http://localhost:3000
 ```
 
 This brings up Postgres/pgvector, Temporal, the Chemclaw3 service, and this UI. Only the UI
 publishes a port — on `127.0.0.1` by default — and the backend stays on the internal network.
 
-`ALLOW_INSECURE_AUTH=true` is not optional and is not a default this repository sets for you: the
-stack runs `AUTH_MODE=dev`, which requires no sign-in and drives the backend as a shared principal
-with every authorization gate open, and the BFF refuses to serve that on a non-loopback bind unless
-somebody says it is deliberate. Share it beyond the host with `UI_BIND=0.0.0.0`, and allow it to be
+Neither flag is optional, and neither is a default this repository sets for you. The stack runs
+`AUTH_MODE=dev`, which requires no sign-in and drives the backend as a shared principal with every
+authorization gate open. `ALLOW_DEV_AUTH=true` is the **build** argument that compiles the no-token
+provider into the UI image at all — without it the page refuses with "AUTH_MODE=dev is not permitted
+in this production build" — and `ALLOW_INSECURE_AUTH=true` is the BFF's opt-in for serving it on the
+container's non-loopback bind. Share it beyond the host with `UI_BIND=0.0.0.0`, and allow it to be
 framed (a preview iframe) with `ALLOW_FRAMING=true` — each one a separate decision.
 
 ### Against a locally-run backend
@@ -119,11 +125,14 @@ Node **22.12 or newer** (`engines` in `package.json`; CI and the Dockerfile run 
 uvicorn chemclaw.api.app:create_app --factory --port 8080
 
 # here
-npm install
-npm run dev            # UI on :5173, proxying through the BFF on :8787
+npm ci
+npm run dev            # UI on :5173, proxying through the BFF on :8787; sandbox on :8788
 ```
 
-`CHEMCLAW_API_URL` points the UI server at the service (default `http://127.0.0.1:8080`).
+`CHEMCLAW_API_URL` points the UI server at the service (default `http://127.0.0.1:8080`). Open
+`http://127.0.0.1:5173` exactly — that is the sandbox's `APP_ORIGIN` in dev, and `localhost:5173`
+is a different origin. The backend needs Postgres, Temporal and a model gateway of its own; see
+[`docs/operations.md`](docs/operations.md) §5 and Chemclaw3's `docs/guides/runbook.md`.
 
 ### Verifying the chain
 
@@ -138,7 +147,9 @@ inspects the final answer will catch it.
 
 ## Configuration
 
-The UI server is configured entirely by environment — see [`.env.example`](.env.example). Because
+The UI server is configured entirely by environment — every variable, its default and whether it
+is required is tabled in [`docs/operations.md`](docs/operations.md) §3, and
+[`.env.example`](.env.example) carries the measurement behind each limit. Because
 Vite inlines `import.meta.env` at build time, browser-facing settings are served at runtime from
 `GET /config.js` instead, so **one image runs in any tenant** with no rebuild.
 
@@ -157,7 +168,8 @@ rather than serving a configuration that would look like it works:
 - `AUTH_MODE=dev` on a non-loopback `BIND_HOST` without `ALLOW_INSECURE_AUTH=true`;
 - the HTML sandbox: `SANDBOX_ORIGIN` or `APP_ORIGIN` not a plain http(s) origin, `SANDBOX_ORIGIN`
   without `APP_ORIGIN` or equal to it, an http sandbox under an https app, `SANDBOX_PORT` not a port
-  from 1 to 65535 (checked even with no sandbox configured) or equal to `PORT`, and
+  from 1 to 65535 (checked even with no sandbox configured) or, with the sandbox on, equal to
+  `PORT`, and
   `HTML_SCRIPTS_DEFAULT` other than `on`/`off` (see "HTML sandbox" below);
 - `DOCS_BASE_URL` that is neither an http(s) URL nor a path on this origin (it becomes a link's
   `href`).
@@ -186,8 +198,9 @@ Three things account for most "the token looks fine but the API returns 401" inc
 2. **The API app registration needs `accessTokenAcceptedVersion: 2`.** The backend pins the issuer
    to `https://login.microsoftonline.com/{tenant}/v2.0`; a v1 token is issued by `sts.windows.net`
    and fails the issuer check.
-3. **There is no `CHEMCLAW_ENTRA_CLIENT_ID` on the backend.** Its settings model is
-   `extra="forbid"`, so exporting one aborts its startup. The SPA client id belongs only here.
+3. **There is no `CHEMCLAW_ENTRA_CLIENT_ID` on the backend.** An exported one is silently ignored
+   (only an unknown key in a backend _dotenv file_ fails its startup), so do not expect the backend
+   to read it. The SPA client id belongs only here.
 
 Silent token refresh uses a hidden iframe to `login.microsoftonline.com`, so the CSP is built
 conditionally on `AUTH_MODE` (`server/config.ts`). Copying the backend's `connect-src 'self'`
@@ -286,8 +299,8 @@ origin". The CSP gains `frame-src <SANDBOX_ORIGIN>` only when the sandbox is on.
 
 The BFF **refuses to start** when `SANDBOX_ORIGIN` or `APP_ORIGIN` is not a plain http(s) origin
 (no path, query or userinfo), when `SANDBOX_ORIGIN` is set without `APP_ORIGIN` or equals it, when
-the sandbox is http under an https app (mixed content), when `SANDBOX_PORT` is not a port or is
-`PORT` (checked whether or not the sandbox is configured), when `HTML_SCRIPTS_DEFAULT` is anything
+the sandbox is http under an https app (mixed content), when `SANDBOX_PORT` is not a port (checked
+whether or not the sandbox is configured) or is `PORT` while the sandbox is on, when `HTML_SCRIPTS_DEFAULT` is anything
 but `on`/`off`, and when `DOCS_BASE_URL` is neither an http(s) URL nor a path on this origin. **`ALLOW_FRAMING=true` turns the
 sandbox off** rather than refusing — a framed app cannot frame the sandbox, whose `frame-ancestors`
 names `APP_ORIGIN` alone while the browser checks every ancestor — and the HTML is shown as source.
@@ -346,14 +359,17 @@ src/        the SPA — api/ auth/ state/ components/
   components/ui/    primitives (button, sheet, alert-dialog, …) on Radix + cva
   components/chem/  composites built from them (StatusDot, ConfirmDialog, …)
   results/          the tool-result renderers, keyed on payload shape, and their registry
-shared/     the contracts mirrored by hand from the service — events.ts (the SSE union,
-            from api/events.py) and protocols.ts (the experiment-design schemas)
+shared/     what the SPA and the BFF both import: the contracts mirrored by hand from the
+            service — events.ts (the SSE union, from api/events.py), protocols.ts (the
+            experiment-design schemas), exhibits.ts and exhibitConstants.ts (artefacts) — plus
+            sandbox.ts and sharedPoll.ts (constants both sides must agree on)
 scripts/    the gate (ci.mjs) and its checks, dev launcher, server bundler, smoke test
 e2e/        Playwright specs and the SSE fixture service
 public/     theme boot script, favicon — served as-is by the BFF
 deploy/     example OpenShift manifests (Deployment, Service, the app and sandbox Routes) — not a chart
-docs/       the production-readiness record, the dependency record, and concept studies — what the chemistry
-            surface is for, and what it still is not
+docs/       operations.md (build, configure, deploy, troubleshoot), the production-readiness
+            record, the dependency record, and concept studies — what the chemistry surface is
+            for, and what it still is not
 ```
 
 Three files carry most of the difficulty and are commented accordingly:
@@ -416,8 +432,9 @@ beside it) and releases the in-flight gauge, which is what the bookkeeping ran o
 therefore did not do.
 
 **A bound on what the browser may write here.** `POST /api/client-events` is unauthenticated by
-construction — the page that posts is served before sign-in — so the pod takes at most 600 batches
-a minute and answers the rest with a `429` and a `Retry-After` the browser's sink waits out. That
+construction — the page that posts is served before sign-in — so the pod takes at most
+`CLIENT_EVENTS_RATE_PER_MIN` batches a minute (default 3000, sized for 200 chemists flushing every
+5 s) and answers the rest with a `429` and a `Retry-After` the browser's sink waits out. That
 sink backs off and **recovers**; it used to disable itself for the life of the page after three
 non-2xx replies, so one rolling restart silenced a chemist's browser for the rest of the session.
 
@@ -467,7 +484,12 @@ npm run check:no-dev-auth
 npm run check:serving   # the four promises a running UI makes, against any base URL
 npm run test:e2e        # Playwright — layout, focus, keyboard, theme, mobile drawer
 npm run test:e2e:oidc-mock  # real MSAL sign-in against Chemclaw3_mock's tenant (CI's oidc-mock job)
+npm run test:e2e:full-stack # four repositories as host processes — Chemclaw3 `make live-e2e-full-stack` first
+npm run test:e2e:kind       # four repositories on kind — Chemclaw3 `make kind-up` first
 ```
+
+The last two start nothing and need the whole system already up; they are in no pipeline
+(`playwright.full-stack.config.ts` and `playwright.kind.config.ts` say why).
 
 `npm run smoke` and `npm run check:openapi` are deliberately **not** in the gate: both need a live
 Chemclaw3 service and both exit non-zero when they cannot reach one, which is the honest behaviour
@@ -593,4 +615,6 @@ there is a real fault.
 `USER-STORIES.md` records which chemist-facing workflows this reaches and which it does not.
 
 Conversation history also needs the service running with `CHEMCLAW_SESSION_STORE=postgres`. Under
-the in-memory store there is nothing durable to list or read back.
+the in-memory store there is nothing durable to list or read back. Every backend setting this UI
+depends on — Entra, roles, the message cap, the stream caps, and the attachment-affinity limit of
+an in-cluster deployment — is listed in [`docs/operations.md`](docs/operations.md) §4.

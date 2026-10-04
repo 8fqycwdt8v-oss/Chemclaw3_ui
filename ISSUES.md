@@ -2,6 +2,17 @@
 
 File these at: https://github.com/8fqycwdt8v-oss/Chemclaw3_ui/issues/new
 
+**How to read this file (re-checked 2026-10-04).** Entries headed **Open**, or `Issue N` without
+"(closed)", are live: the `CHEMCLAW3_REF` fork question, 8 (token custody — accepted), 12 (the
+core half), 13 (step 3 waits on a rollout), 14 (what the contract check cannot see), 20, 21, 22
+(the upstream asks), 23 (the open sub-bullets), 25 (accepted) and "Known gaps" under "Still not
+done". Everything headed **Closed** or "(closed)" is history, kept so a fixed gap can be found
+again; facts inside a closed entry (versions, line numbers, commits) describe the day it closed,
+not today. Some entries are also read by the suite — `tests/backendContract.test.ts` retires an
+argued wire name when the row it names here is deleted — so delete an open entry only with the
+change that closes it. How to run and troubleshoot the UI is
+[`docs/operations.md`](docs/operations.md), not this file.
+
 **Verified against `8fqycwdt8v-oss/Chemclaw3` @ `c46b004`** — the whole route table, plus
 `api/schemas.py`, `api/deps.py` and `core/config/service.py`. Several entries here were written
 from the outside and turned out to be wrong about the service in both directions: things assumed
@@ -50,8 +61,10 @@ security cost and is not a line to add casually).
 
 ## Closed: happy-dom blocked by the Replit security policy (was Issue 1)
 
-`happy-dom` is pinned at `^15.11.7` and `vitest` is back in devDependencies. The 403 was on
-`16.8.1`; the first of the three recorded options was taken. `npm test` runs.
+`happy-dom` was pinned at `^15.11.7` and `vitest` put back in devDependencies. The 403 was on
+`16.8.1`; the first of the three recorded options was taken. `npm test` runs. (Since then both
+moved on with ordinary upgrades — `package.json` is the current pin, `happy-dom` `^20` and
+`vitest` `^5` as of 2026-10-04.)
 
 ## Closed: `GET /sessions` and `GET /sessions/{id}/messages` missing (was Issue 2)
 
@@ -320,7 +333,7 @@ symptom below is recognised when it appears, because it will not look like a dec
 
 **Where things stand.** `src/auth/msalAuth.ts` holds an Entra access token in the browser, and
 `src/api/client.ts` and `src/api/streamTurn.ts` send it as an `Authorization` header. This origin
-sets no cookies at all, and `server/proxy.ts:92` strips the `cookie` header on the way upstream to
+sets no cookies at all, and `server/proxy.ts` strips the `cookie` header on the way upstream to
 keep the service's `allow_credentials=false` posture true — so neither side has a CSRF surface
 today.
 
@@ -1253,8 +1266,8 @@ roster (`GET /sessions/{id}/members`, the people panel's own query) names anybod
   question's words, in order. A turn this browser holds is never traded for its stored copy — least
   of all one it is streaming or one waiting in line; a turn only the service holds is inserted where
   the service has it, folded to one answer, attributed to its sender.
-- **follows somebody else's running turn live.** It reads `GET /sessions/{id}/queue` every 5 s (a new
-  BFF route, GET only) and, when a turn is running that is not this browser's, attaches one watcher
+- **follows somebody else's running turn live.** It reads `GET /sessions/{id}/queue` every
+  `SHARED_POLL_MS` (default 5 s; a BFF route, GET only) and, when a turn is running that is not this browser's, attaches one watcher
   through `GET /sessions/{id}/turn/stream`. The answer streams into a placeholder
   (`AssistantMessage.watched`: no Stop, no recovery, never persisted) that the re-read at the turn's
   end replaces with the stored question and answer. `404` (the turn ended, or runs on another
@@ -1424,11 +1437,11 @@ in `rdkit.client.ts` — see Issue 10.
 
 - **Screenshot baselines.** The axe pass covers the mechanical half of the visual contract; nothing
   guards a layout regression that is still accessible.
-- **A real MSAL redirect has not been exercised against this router.** `/auth/callback` is
-  structured so nothing writes the URL until `handleRedirectPromise()` has consumed the fragment,
-  and the URL-sync effects live inside the `/c/:id` element rather than behind a pathname check, so
-  they structurally cannot run on the callback path. The e2e suite runs in `dev` auth mode and
-  cannot prove any of it.
+- ~~**A real MSAL redirect has not been exercised against this router.**~~ **Closed** (Issue 23,
+  #126, #139): `e2e/oidc-mock.spec.ts` signs in through a real authorization-code redirect against
+  Chemclaw3_mock's tenant — from `/`, from a deep link, from a signed-out `/open/<id>` and from a
+  conversation link — and counts exactly one code returned on `/auth/callback` and redeemed, on
+  every pull request (the workflow's `oidc-mock` job).
 - **`npm run smoke` against a real service.** The e2e fixture emits real time-gapped SSE frames
   through the real BFF, which is not the same thing as a real backend. It is now `npm run
 check:live` together with `check:openapi` — deliberately outside `npm run ci`, because both exit

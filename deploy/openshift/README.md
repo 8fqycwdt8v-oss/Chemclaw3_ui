@@ -10,6 +10,29 @@ apply them once:
 oc apply -n chemclaw -f deploy/openshift/
 ```
 
+The full operator story — building the image, every variable, Entra registration, what the backend
+must be configured with, verification and troubleshooting — is
+[`docs/operations.md`](../../docs/operations.md). This file covers only what the manifests encode.
+
+## What to change before applying
+
+- **The two hosts** in `routes.yaml`, and `APP_ORIGIN` / `SANDBOX_ORIGIN` in `deployment.yaml` to
+  `https://` plus exactly those hosts.
+- **`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `API_SCOPE`, `REVIEWER_ROLES`** — the placeholders are
+  zeros and ones. The SPA's registration needs `https://<app host>/auth/callback` as a redirect URI.
+- **`CHEMCLAW_API_URL`** — `http://chemclaw-service:8080` is Chemclaw3's chart Service under its
+  default name in the **same namespace**; from another namespace use
+  `http://chemclaw-service.<namespace>.svc:8080`. The service root only, never a path. The BFF
+  reaches the backend over the cluster network; no Route to the backend is involved, and a
+  NetworkPolicy on the backend must admit this Deployment's pods.
+- **The image** — anything; Jenkins replaces it by digest on the first release.
+
+Nothing here is secret (the bearer token comes from the browser), so there is no Secret, and the
+`env` block can equally be a ConfigMap. Before this UI is ready, the backend must answer its own
+`/readyz`, and under `AUTH_MODE=msal` it must refuse an anonymous `GET /sessions`
+(`CHEMCLAW_ENTRA_REQUIRED=true`) — otherwise `/readyz` here stays 503 with
+`"detail":"upstream accepts anonymous"`, by design.
+
 | File              | What it is                                                                                      |
 | ----------------- | ----------------------------------------------------------------------------------------------- |
 | `deployment.yaml` | the BFF with **two container ports** — `http` (`PORT`) and `sandbox` (`SANDBOX_PORT`) — and env |
@@ -46,6 +69,13 @@ listener, which serves `GET /sandbox/frame` and nothing else (README, "HTML sand
 | readiness | `http`    | `/readyz`        | asks the service's own `/readyz`; 503 while draining on SIGTERM         |
 | liveness  | `http`    | `/healthz`       | the process serves; consults nothing upstream                           |
 | startup   | `sandbox` | `/sandbox/frame` | the sandbox is on — a config that turned it off fails here, not quietly |
+
+## Streaming through the router
+
+Both Routes use the router's defaults. Turn and job streams are long-lived SSE responses; the BFF
+sends a comment frame on any stream idle for `SSE_HEARTBEAT_MS` (15 s), which is under the
+OpenShift router's default 30 s timeout, so no `haproxy.router.openshift.io/timeout` annotation is
+needed. Raise one only if you also raise the heartbeat above it.
 
 ## What holds this file to the code
 

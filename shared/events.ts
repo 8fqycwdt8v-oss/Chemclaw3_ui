@@ -659,6 +659,14 @@ export type ErrorCode =
    */
   | 'context_length'
   /**
+   * The model gateway refused the service's own credential — HTTP 401 or 403 from the LLM
+   * endpoint. Nothing the chemist did and nothing transient: no turn can run until an operator
+   * fixes the deployment's key, so it is never retryable. The service reported it as `internal`
+   * until 2026-10-04, which hid a rotated key behind "internal
+   * error" from the chemist and from the operator they reported it to.
+   */
+  | 'llm_auth'
+  /**
    * A message that waited in a shared session's line and never ran: its sender withdrew it, the
    * owner did, the sender was removed while it waited, or the session was deleted. Nothing failed
    * and nothing was spent, so a surface must not render it as a failed turn.
@@ -685,6 +693,7 @@ const ERROR_CODES: readonly ErrorCode[] = [
   'spend_cap_reached',
   'bad_tool_arguments',
   'context_length',
+  'llm_auth',
   'queue_cancelled',
   'stream_lagged',
   'empty_answer',

@@ -452,6 +452,19 @@ export const CONTEXT_LENGTH_MESSAGE =
   'to carry on — asking again here will hit the same limit.';
 
 /**
+ * What a chemist reads when the model gateway refused the service's own credential (`llm_auth`).
+ *
+ * This app's sentence for `CONTEXT_LENGTH_MESSAGE`'s reason: the one thing to get across is who
+ * can fix it. It is the deployment's key, not the chemist's sign-in and not a passing outage, so
+ * signing in again or pressing Retry cannot help — reporting it, with the reference beside it,
+ * is the whole remedy.
+ */
+export const GATEWAY_AUTH_MESSAGE =
+  "The AI model service rejected this deployment's credentials, so no question can be answered " +
+  'until an administrator fixes them. Retrying will not help — please report this, with the ' +
+  'reference shown.';
+
+/**
  * What a chemist reads when their view of a running turn was cut off for falling behind.
  *
  * This app's sentence rather than the event's, for `CONTEXT_LENGTH_MESSAGE`'s reason: what matters
@@ -513,6 +526,15 @@ export function errorFromEvent(event: {
       // this app's own: it has to say what to do next, and "Retry" is the one thing that cannot
       // work. Not retryable whatever the event says — resending re-reads the same too-long thread.
       return new ApiError('context_length', CONTEXT_LENGTH_MESSAGE, undefined, {
+        ...options,
+        retryable: false,
+      });
+    case 'llm_auth':
+      // An operator's fault, never the chemist's and never transient, so the sentence names who
+      // fixes it and Retry is withheld whatever the event says: the next turn sends the same key.
+      // Kept as `agent` rather than a kind of its own, because nothing the UI *does* differs from
+      // any other final failure — only what the chemist is told.
+      return new ApiError('agent', GATEWAY_AUTH_MESSAGE, undefined, {
         ...options,
         retryable: false,
       });

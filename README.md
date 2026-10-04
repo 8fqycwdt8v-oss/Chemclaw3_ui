@@ -199,7 +199,7 @@ Three things account for most "the token looks fine but the API returns 401" inc
    to `https://login.microsoftonline.com/{tenant}/v2.0`; a v1 token is issued by `sts.windows.net`
    and fails the issuer check.
 3. **There is no `CHEMCLAW_ENTRA_CLIENT_ID` on the backend.** An exported one is silently ignored
-   (only an unknown key in a backend *dotenv file* fails its startup), so do not expect the backend
+   (only an unknown key in a backend _dotenv file_ fails its startup), so do not expect the backend
    to read it. The SPA client id belongs only here.
 
 Silent token refresh uses a hidden iframe to `login.microsoftonline.com`, so the CSP is built

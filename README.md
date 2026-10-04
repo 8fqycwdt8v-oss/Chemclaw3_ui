@@ -198,8 +198,9 @@ Three things account for most "the token looks fine but the API returns 401" inc
 2. **The API app registration needs `accessTokenAcceptedVersion: 2`.** The backend pins the issuer
    to `https://login.microsoftonline.com/{tenant}/v2.0`; a v1 token is issued by `sts.windows.net`
    and fails the issuer check.
-3. **There is no `CHEMCLAW_ENTRA_CLIENT_ID` on the backend.** Its settings model is
-   `extra="forbid"`, so exporting one aborts its startup. The SPA client id belongs only here.
+3. **There is no `CHEMCLAW_ENTRA_CLIENT_ID` on the backend.** An exported one is silently ignored
+   (only an unknown key in a backend *dotenv file* fails its startup), so do not expect the backend
+   to read it. The SPA client id belongs only here.
 
 Silent token refresh uses a hidden iframe to `login.microsoftonline.com`, so the CSP is built
 conditionally on `AUTH_MODE` (`server/config.ts`). Copying the backend's `connect-src 'self'`

@@ -1,99 +1,65 @@
 /**
- * Typed API errors.
- *
- * The Chemclaw service's status codes each mean something specific and each want a different
- * response from the UI, so they are mapped once here rather than being re-interpreted at every
- * call site. Statuses verified against service/app.py @ d5ed9e3.
+ * Typed API errors: each status maps once here to a kind the UI acts on, rather than being
+ * re-interpreted at every call site.
  */
 
 export type ApiErrorKind =
   /** 401 — missing or invalid bearer token. Re-authenticate. */
   | 'unauthorized'
   /**
-   * 403 — the service understood the call, identified the caller, and refused it: the caller does
-   * not hold the role or the ownership the route asks for.
-   *
-   * A refusal, never a fault, and the distinction is the whole reason this kind exists. Before it,
-   * a 403 fell to the `default` branch and became `network` — the kind meaning "`fetch` threw, the
-   * service is unreachable" — which is wrong in three ways at once: it is `retryable`, so anything
-   * reading that flag offers Retry for a call that will refuse identically for as long as it is
-   * pressed; its fallback sentence is "an unexpected status", which is what you say about a
-   * response nobody predicted rather than about a documented gate; and it left every caller that
-   * wanted to tell an entitlement apart from an outage comparing `err.status === 403` by hand,
-   * which is exactly the raw-number guessing the 409 comment below argues against.
-   *
-   * Three live producers, and each detail is written for the person reading it — the operator role
-   * a job cancellation needs, "this request is not routed to you" on a held-open question, the
-   * review role somebody else's design needs — so the service's own sentence is preferred to
-   * anything this table could invent, exactly as everywhere else here.
-   *
-   * Distinct from `unauthorized` (401): re-authenticating changes nothing, because the token was
-   * read and accepted. It is the roles inside it that are the answer, and only an administrator
-   * can change those. Sending a chemist to a login page for one is a loop.
+   * 403: the caller was identified and lacks the role or ownership. A refusal, not a fault and not
+   * retryable; re-authenticating does not help. The service's own sentence (naming the entitlement)
+   * is preferred.
    */
   | 'forbidden'
-  /** 404 — unknown session, someone else's session, or one evicted from the backend's live-session
-   *  LRU. The backend deliberately makes these indistinguishable, so treat all three the same:
-   *  the handle is dead, mint a new one. */
+  /**
+   * 404: unknown, someone else's, or evicted session — indistinguishable by design. The handle is
+   * dead; mint a new one.
+   */
   | 'session_not_found'
-  /** 409 on the turn route — the session could not take this message. Before shared-session
-   *  queueing (Chemclaw3 #499) that meant "a turn is already running"; since, a busy session queues
-   *  the message instead, and the 409 is left for a line that cannot take it — full, or already
-   *  holding one of this sender's. Either way a hard refusal, not a wait, and the service's own
-   *  detail says which. */
+  /**
+   * 409 on the turn route: the session could not take this message (a busy session queues instead).
+   * The service's detail says why.
+   */
   | 'turn_in_flight'
-  /** 409 on the turn route, `{"code": "queue_full"}` — the session's line is full. The remedy is
-   *  to wait for it to move and send again, never "start a fresh session": the turn running is
-   *  somebody's real work, and the line is the service's own bound on how many may wait behind it.
-   *  A service that predates the code sends the same refusal as a sentence, which stays
-   *  `turn_in_flight`. */
+  /**
+   * 409 `queue_full`: the session's line is full. Wait and send again; never reset. Older services
+   * send a sentence, which stays `turn_in_flight`.
+   */
   | 'queue_full'
-  /** 409 on the turn route, `{"code": "already_waiting"}` — this sender already has a message in
-   *  the session's line (one each). Nothing to retry and nothing to reset: the waiting message is
-   *  the one to withdraw or wait for. Same fallback as `queue_full` for an older service. */
+  /**
+   * 409 `already_waiting`: this sender already has a message in the line. Same fallback as
+   * `queue_full`.
+   */
   | 'already_waiting'
-  /** 409 on the plan-decision route only — the plan changed between being shown and being
-   *  approved, so the human agreed to something else and the service refuses rather than
-   *  silently approving the current plan. The status alone cannot be told apart from
-   *  `turn_in_flight`, which is why `api.decidePlan` re-kinds it instead of `errorFromStatus`
-   *  guessing from a number that means two different things on two different routes. */
+  /**
+   * 409 on the plan-decision route: the plan changed since it was shown. Re-kinded by
+   * `api.decidePlan`, since the status alone also means `turn_in_flight`.
+   */
   | 'plan_changed'
-  /** 409 on the protocol-revision route only — the design moved between being opened for editing
-   *  and being saved, so this edit was written against a revision that is no longer the head and
-   *  saving it would silently discard whatever landed in between. Re-kinded by
-   *  `api.putProtocolRevision` for exactly the reason `plan_changed` is: the status alone cannot be
-   *  told apart from `turn_in_flight`, and only the caller knows which route it asked. */
+  /**
+   * 409 on the protocol-revision route: the design moved since it was opened for editing. Re-kinded
+   * by `api.putProtocolRevision`.
+   */
   | 'revision_conflict'
-  /** 409 on the protocol-status route only — somebody else *decided* while this chemist was
-   *  deciding. Distinct from `revision_conflict` because the document did not move, so the remedy
-   *  is not a diff: a colleague already approved, executed or abandoned this design, and the
-   *  question is whether to override them. The service is what tells the two apart —
-   *  `{"code": "status_conflict"}` against `{"code": "revision_conflict"}` on one route — because
-   *  the status number cannot: before this, `expected_revision` was a compare-and-set on the
-   *  *document* alone and two people at revision 1 could approve and abandon it with both told
-   *  204, so the case had no 409 to carry a code at all. */
+  /**
+   * 409 `status_conflict` on the protocol-status route: someone else changed the status meanwhile.
+   * The document did not move, so the remedy is not a diff.
+   */
   | 'status_conflict'
   /**
-   * 409 on the artefact-revision route, `{"code": "stale_revision", "head_revision": N}` — the
-   * artefact moved between being opened for editing and being saved (the agent revised it, or a
-   * colleague in a shared session did). Its own kind rather than `revision_conflict` because the
-   * service hands back the head it moved to, and that number is the whole remedy: the editor
-   * fetches that head, shows what changed against the base the edit was written on, and offers to
-   * apply the edit on top. Always raised as a `StaleRevisionError`, which carries it.
+   * 409 `stale_revision` on the artefact-revision route, with the head revision it moved to; the
+   * editor diffs and offers to reapply. Always raised as `StaleRevisionError`.
    */
   | 'stale_revision'
   /**
-   * 409 on the artefact-create route, `{"code": "exhibit_limit"}` — the session already holds as
-   * many artefacts as the deployment allows. Nothing to retry: an existing one has to be revised
-   * instead, and the sentence says so.
+   * 409 `exhibit_limit`: the session holds the maximum number of artefacts; revise an existing one
+   * instead.
    */
   | 'exhibit_limit'
   /**
-   * 422 on the turn route for the *references* rather than the text — an `exhibit_refs` entry
-   * naming an artefact (or a revision) this session does not hold, or more of them than the
-   * service's cap. It was read as `message_too_long`, the turn route's only 422 before references
-   * existed, so a chemist who attached a deleted artefact was told to shorten a short question.
-   * Re-kinded by `streamTurn`, which is the one caller that knows it sent references.
+   * 422 on the turn route about the attached artefact references (unknown, or too many), not the
+   * text. Re-kinded by `streamTurn`, which knows it sent references.
    */
   | 'invalid_reference'
   /** 422 — message over the backend's character cap. */
@@ -101,72 +67,59 @@ export type ApiErrorKind =
   /** 429 without a `Retry-After` — the turn/token budget is spent, or too many concurrent event
    *  streams are open. Terminal: neither replenishes because somebody pressed a button. */
   | 'budget_exhausted'
-  /** 429 *with* a `Retry-After` — the per-principal request limiter refused this call and said
-   *  when to come back. The service computes that number specifically so a client can wait it
-   *  out, so this is a pause, not a refusal. */
+  /**
+   * 429 with a `Retry-After`: the per-principal limiter said when to come back. A pause, not a
+   * refusal.
+   */
   | 'rate_limited'
-  /** Admission control shed the turn; the service is at capacity, and it will not be in a
-   *  moment. Retryable. Reached two ways for one condition: a 503 from the front door when the
-   *  turn is refused before the response is open, and an in-stream `at_capacity` error event when
-   *  the shed happens after it — the service sends the same sentence on both. */
+  /**
+   * Admission control shed the turn (a 503 before the stream, or an in-stream `at_capacity`).
+   * Retryable.
+   */
   | 'capacity'
   /** `fetch` itself threw — the service is unreachable. */
   | 'network'
   /** The user pressed Stop. */
   | 'aborted'
-  /** The stream was malformed, truncated, or dropped — a connection problem, plausibly
-   *  recoverable by polling the session transcript for the answer the server is still producing. */
+  /**
+   * The stream was malformed, truncated or dropped; possibly recoverable by polling the transcript.
+   */
   | 'stream'
-  /** The stream ended cleanly with the server's own `empty_answer` event: the turn ran to
-   *  completion and produced nothing. Not a connection problem — polling the transcript would
-   *  wait for an answer the server has already said will never arrive. */
+  /** The stream ended with `empty_answer`: the turn completed with nothing. Do not poll. */
   | 'empty_answer'
-  /** The stream ended with the server's `context_length` event: the conversation has outgrown
-   *  the model's context window. Not a fault and not retryable — the same thread overflows the
-   *  same window — so the offer is a fresh session, not Retry. */
+  /**
+   * `context_length`: the conversation outgrew the model's window. Not retryable; offer a fresh
+   * session.
+   */
   | 'context_length'
-  /** The stream ended with the server's `queue_cancelled` event: this message waited in a shared
-   *  session's line and was withdrawn before it ran — by its sender, by the owner, because the
-   *  sender was removed, or because the session was deleted. Nothing ran and nothing was spent, so
-   *  it is not a failure of the turn: the question goes back to the composer. */
+  /**
+   * `queue_cancelled`: the message was withdrawn from the line before it ran. Not a failure; the
+   * question goes back to the composer.
+   */
   | 'queue_cancelled'
-  /** The stream ended with the server's `stream_lagged` event: this browser's view of the turn fell
-   *  a full buffer behind and the service cut it off. The turn itself runs on, so the remedy is to
-   *  reattach (`GET /sessions/{id}/turn/stream`) or read the answer back from the transcript. */
+  /**
+   * `stream_lagged`: this view fell behind and was cut off; the turn runs on. Reattach or read the
+   * transcript.
+   */
   | 'stream_lagged'
   /**
-   * The turn this browser was following died with the service process running it — a restart, a
-   * killed pod — and will never answer. Reached two ways for one fact: the reattach
-   * (`GET /sessions/{id}/turn/stream`) answering 410 `{"code": "turn_interrupted"}`, and the
-   * transcript marking the turn's question `interrupted` (Chemclaw3
-   * `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`). Nothing ran twice, the
-   * question is in the conversation, and the remedy is to send it again — so it is offered as
-   * Retry rather than polled for, which is what a dropped stream used to get for ten minutes.
+   * The followed turn died with its service process (a 410 `turn_interrupted` on reattach, or an
+   * `interrupted` question in the transcript). Offer Retry; do not poll.
    */
   | 'turn_interrupted'
   /** An `error` event arrived in-stream. Includes the turn timeout, which the backend reports as
    *  a final SSE event rather than an HTTP status. */
   | 'agent'
   /**
-   * The auth provider could not produce a bearer token, for a reason it did not resolve into an
-   * interactive sign-in itself — `msalAuth.getAccessToken` rethrows exactly this shape, on
-   * purpose: a silent-refresh failure is very often a network blip, not proof the session is
-   * gone, and forcing a redirect on one would send a chemist to a login page to fix an unplugged
-   * VPN.
-   *
-   * Distinct from `network` although the message reads the same: this failure happens strictly
-   * BEFORE any request is opened, so unlike a `fetch` that throws after being sent, there is no
-   * chance whatsoever that the server received anything. `stream`/`network` recovery polls the
-   * session transcript on exactly that chance — for this kind there is none to poll for, and
-   * `sendMessage` must not read "no bearer token" as "the turn may still be running server-side". */
+   * The auth provider could not produce a token (e.g. a silent-refresh network failure, which
+   * deliberately does not force a redirect). Happens before any request, so the server received
+   * nothing and there is nothing to recover.
+   */
   | 'token_unavailable';
 
 /**
- * What a chemist reads about a turn that died with the service process running it.
- *
- * This client's own sentence rather than the service's 410 detail, because the same fact also
- * arrives from the transcript, which carries no sentence at all — and one fact should read one
- * way wherever it was learned. The Retry beside it is `MessageList`'s, and sends the question again.
+ * This app's sentence for an interrupted turn, the same whether learned from a 410 or from the
+ * transcript.
  */
 export const TURN_INTERRUPTED_TEXT = 'This answer was interrupted (the service restarted).';
 
@@ -176,34 +129,19 @@ export class ApiError extends Error {
   /** Whether a bare retry of the same request could plausibly succeed. */
   readonly retryable: boolean;
   /**
-   * The service's own id for the request or turn that failed, when it sent one.
-   *
-   * It used to come only from an in-stream `error` event, so every HTTP-level failure — a 401, a
-   * 409, a dropped connection — reached the banner with nothing to quote, and "it broke at 14:32"
-   * could not be joined to a single line of the service's logs. The service stamps this id on
-   * every JSON log record it writes, so the join key exists; what was missing was reading it back.
-   * Now `errorFromStatus` takes it from the response (the `X-Chemclaw-Correlation-Id` header, or
-   * `correlation_id` in the error body) and `streamTurn` carries the turn's own.
-   *
-   * Still empty when the service did not send one — an older deployment, or a `fetch` that never
-   * reached it — and empty is the honest reading, never a placeholder. It is shown to the user
-   * rather than only logged, because the browser console is not somewhere a chemist looks and this
-   * string is the entire content of a useful support message.
+   * The service's id for the failed request or turn (from `X-Chemclaw-Correlation-Id`, a body
+   * `correlation_id`, or the turn's own), shown in the banner so it can be quoted to support. Empty
+   * when not sent.
    */
   readonly correlationId: string;
-  /**
-   * Seconds to wait before retrying, from the service's own `Retry-After`. Zero when it sent none,
-   * which is every failure but `rate_limited`.
-   */
+  /** Seconds to wait before retrying, from `Retry-After`; zero when none was sent. */
   readonly retryAfterSeconds: number;
 
   constructor(
     kind: ApiErrorKind,
     message: string,
     status?: number,
-    /** Overrides the kind-derived default. The service knows things about one specific failure
-     *  that its category does not — a `storage_unavailable` may or may not be worth retrying,
-     *  and it is the only party that can tell. */
+    /** Overrides the kind-derived default; the service may know better about one failure. */
     options?: { retryable?: boolean; correlationId?: string; retryAfterSeconds?: number },
   ) {
     super(message);
@@ -218,14 +156,8 @@ export class ApiError extends Error {
 }
 
 /**
- * An artefact edit written against a revision that is no longer the head.
- *
- * A subclass rather than a field on `ApiError`, because only one route can raise it and only one
- * caller can act on it: `ExhibitPane`'s editors catch exactly this type and read `headRevision`
- * off it, and every other caller sees an ordinary 409 `ApiError` with the service's sentence.
- *
- * `headRevision` is `null` when the 409 named no head — an older or misbehaving service — and the
- * editor then re-reads the artefact's head itself rather than guessing a number to rebase onto.
+ * An artefact edit written against a revision that is no longer the head. `headRevision` is `null`
+ * when the 409 named none; the editor then re-reads the head rather than guessing.
  */
 export class StaleRevisionError extends ApiError {
   readonly headRevision: number | null;
@@ -238,24 +170,16 @@ export class StaleRevisionError extends ApiError {
 }
 
 /**
- * Whether a turn-route 422 is about the artefacts the message carried rather than the message.
- *
- * Read off the service's own sentence, because it sends no code for either: an unresolvable
- * reference is `"no artefact 'xb-…' in this session"`, and an over-cap list is pydantic's
- * `exhibit_refs: List should have at most 5 items`. Asked only when the request *had* references,
- * so a long message that happens to mention an artefact is still `message_too_long`.
+ * Whether a turn-route 422 is about the attached artefact references. The service sends no code, so
+ * this reads its sentence; only asked when the request had references.
  */
 export function isReferenceRefusal(detail: string | undefined): boolean {
   return /exhibit_refs|\bartefact\b|\bexhibit\b/i.test(detail ?? '');
 }
 
 /**
- * The response header the service stamps its per-request correlation id on.
- *
- * Read, never sent. Sending one is a dead end twice over: the BFF strips every `x-chemclaw-*`
- * request header deliberately (`server/proxy.ts`, a trap removed before somebody adds a reader),
- * and the service mints the id itself and has no reader for a client-supplied one. The id is the
- * service's to issue and this app's to quote back.
+ * The response header carrying the service's per-request correlation id. Read, never sent: the BFF
+ * strips `x-chemclaw-*` request headers.
  */
 export const CORRELATION_HEADER = 'x-chemclaw-correlation-id';
 
@@ -264,17 +188,8 @@ export const correlationFrom = (res: { headers: Headers }): string =>
   res.headers.get(CORRELATION_HEADER)?.trim() ?? '';
 
 /**
- * Seconds a `Retry-After` asks for, or `null` when there is no usable one.
- *
- * Exported because `useJobStreams` reads the same header off the same status for the same reason,
- * and the header's meaning is one fact — a second copy of this parse is a second answer to
- * "was this the rate limiter?".
- *
- * Delta-seconds only. The one producer of this header in the chain is the service's
- * per-principal request limiter, which sends `str(ceil(seconds))`; an HTTP-date would come from
- * something else in the path whose meaning we cannot vouch for, and misreading it as a wait is
- * worse than not having one. Zero is not "immediately" here — it is a value we cannot act on —
- * so it does not count.
+ * Seconds a `Retry-After` asks for, or `null`. Delta-seconds only (the service's limiter sends
+ * `ceil(seconds)`); an HTTP-date or zero is not usable. Shared with `useJobStreams`.
  */
 export function retryAfterSeconds(header: string | null | undefined): number | null {
   if (!header) return null;
@@ -283,24 +198,9 @@ export function retryAfterSeconds(header: string | null | undefined): number | n
 }
 
 /**
- * Map an HTTP failure onto a typed error.
- *
- * `retryAfter` is the response's own `Retry-After`, and it is what tells the two 429s apart. The
- * service refuses with that status for three structurally different reasons: the per-principal
- * request limiter, which computes the wait and sends it precisely so a client backs off by the
- * right amount; the turn/token budget; and the concurrent-event-stream cap. Only the first
- * replenishes on its own, and only the first says so. Collapsing all three into
- * `budget_exhausted` locked the composer on a limit that had already refilled by the time the
- * banner rendered — the same conflation `errorFromEvent` below records for the in-band path,
- * fixed here on the same principle: the service's own signal decides, not the status number.
- *
- * (The event-stream cap does not come through here at all — `useJobStreams` reads that status
- * itself, and honours a `Retry-After` for the same reason.)
- *
- * `correlationId` is threaded onto every branch so that EVERY banner can carry a reference, not
- * only the ones raised by an in-stream `error` event. Both trailing arguments are read off the
- * same failed response, which is why `readFailure` hands back the id and the caller passes the
- * header straight through.
+ * Map an HTTP failure to a typed error. A 429 with `Retry-After` is the refilling rate limiter;
+ * without one it is a spent budget. `correlationId` is carried on every branch so every banner has
+ * a reference.
  */
 export function errorFromStatus(
   status: number,
@@ -311,15 +211,9 @@ export function errorFromStatus(
    *  `correlation_id`. */
   correlationId?: string,
   /**
-   * The service's own machine-readable discriminator, from an object `detail`'s `code`.
-   *
-   * Only 409 reads it, and only because that status genuinely means several things: a line that
-   * cannot take another message (full, or already holding one of this sender's), an edit against a
-   * stale revision, and a sign-off against a status somebody else already moved. The comment
-   * above says the *number* must not be guessed from, and that stands — this is not the number,
-   * it is the service naming which of its own refusals this is. A response without one falls
-   * through to the message-route default exactly as before, which is what keeps an older
-   * deployment working.
+   * The service's discriminator from an object `detail`'s `code`. Only 409 reads it, because that
+   * status means several things on one route; without a code it falls back to the message-route
+   * default.
    */
   code?: string,
 ): ApiError {
@@ -338,9 +232,7 @@ export function errorFromStatus(
         options,
       );
     case 403:
-      // The service's own sentence when it sent one — each of the three producers names the
-      // entitlement, which nothing here could reconstruct. The fallback says what kind of refusal
-      // this is rather than that it was unexpected, because a gate answering is not a surprise.
+      // Prefer the service's sentence (it names the entitlement).
       return new ApiError(
         'forbidden',
         detail || 'You do not have permission to do that.',
@@ -362,9 +254,7 @@ export function errorFromStatus(
       if (code === 'status_conflict' || code === 'revision_conflict') {
         return new ApiError(code, detail || 'Somebody else changed this design.', 409, options);
       }
-      // The turn route's two queue refusals (Chemclaw3 #503). Read off the code, never the
-      // sentence: a service that sends the sentence alone falls through to `turn_in_flight`, which
-      // is what this client did with both of them before they had codes.
+      // Queue refusals by code only; an uncoded sentence stays `turn_in_flight`.
       if (code === 'queue_full') {
         return new ApiError(
           code,
@@ -396,19 +286,10 @@ export function errorFromStatus(
         options,
       );
     case 429: {
-      // The *presence* of the header picks the kind; parsing it only supplies the number. These
-      // are two decisions and they used to be one: a `Retry-After` this parser could not read —
-      // an HTTP-date from a gateway, a `0`, a stray character — fell through to the terminal
-      // branch, which locks the composer with "the usage budget is exhausted" over a limiter that
-      // refills in seconds, and nothing in the UI clears that lock. Refusing to invent a *wait*
-      // from an unreadable value is right; inventing a *ceiling* from it is not.
-      //
-      // A `rate_limited` carrying zero renders correctly: `Countdown` shows nothing at zero, so
-      // the banner is the sentence without a number.
+      // The header's presence picks the kind; parsing only supplies the number. An unreadable value
+      // is still a rate limit, shown without a countdown.
       if (retryAfter?.trim()) {
-        // The one status whose `detail` is not used. The limiter's is the fixed string "too many
-        // requests", which says nothing the kind does not, and the banner appends the wait to
-        // this — so a lower-case fragment from the service would land mid-sentence.
+        // The limiter's `detail` is a fixed string, so this app's sentence is used.
         return new ApiError(
           'rate_limited',
           'The service is limiting how fast requests can be made.',
@@ -440,53 +321,28 @@ export function errorFromStatus(
   }
 }
 
-/**
- * What a chemist reads when the conversation has outgrown the model's context window.
- *
- * Written here rather than taken from the event because the service's generic sentence is the
- * wrong one for this code (it said "internal error" until the code existed), and because the
- * remedy — a fresh session — is an offer this app makes, beside this sentence, on the banner.
- */
+/** This app's sentence for `context_length`: the remedy (a fresh session) is offered beside it. */
 export const CONTEXT_LENGTH_MESSAGE =
   'This conversation has grown too long for the model to read in one go. Start a fresh session ' +
   'to carry on — asking again here will hit the same limit.';
 
 /**
- * What a chemist reads when the model gateway refused the service's own credential (`llm_auth`).
- *
- * This app's sentence for `CONTEXT_LENGTH_MESSAGE`'s reason: the one thing to get across is who
- * can fix it. It is the deployment's key, not the chemist's sign-in and not a passing outage, so
- * signing in again or pressing Retry cannot help — reporting it, with the reference beside it,
- * is the whole remedy.
+ * This app's sentence for `llm_auth`: the deployment's key is at fault; only reporting it helps.
  */
 export const GATEWAY_AUTH_MESSAGE =
   "The AI model service rejected this deployment's credentials, so no question can be answered " +
   'until an administrator fixes them. Retrying will not help — please report this, with the ' +
   'reference shown.';
 
-/**
- * What a chemist reads when their view of a running turn was cut off for falling behind.
- *
- * This app's sentence rather than the event's, for `CONTEXT_LENGTH_MESSAGE`'s reason: what matters
- * is what to do next, and the one thing that must not be read into it is that the turn failed.
- */
+/** This app's sentence for `stream_lagged`: it must not read as a failed turn. */
 export const STREAM_LAGGED_MESSAGE =
   'This browser fell behind the answer and the service cut its view off. The turn itself is ' +
   'still running — reconnect to follow it, or wait for the answer to land in the conversation.';
 
 /**
- * Map an in-stream `error` event onto a typed error.
- *
- * The event's `code` is a closed set the service maintains, and each member wants something
- * different from the UI. Before this every one of them became `agent` with no action offered,
- * which had two visible costs: a `budget_exhausted` that arrived as an event rather than as a 429
- * left the composer unlocked, so the next message was sent into a budget that was already gone;
- * and a `storage_unavailable` the service had marked retryable was presented as final.
- *
- * Only the codes that change what the UI must *do* change the kind. The rest stay `agent` and are
- * differentiated by the service's own message — which is already user-safe, and is better wording
- * than a mapping table here would invent. `retryable` comes from the event in every case: it is
- * the service's judgement, not a property of the category.
+ * Map an in-stream `error` event to a typed error. Only codes that change what the UI does change
+ * the kind; the rest stay `agent` with the service's message. `retryable` always comes from the
+ * event.
  */
 export function errorFromEvent(event: {
   message: string;
@@ -497,51 +353,30 @@ export function errorFromEvent(event: {
   const options = { retryable: event.retryable, correlationId: event.correlation_id };
   switch (event.code) {
     case 'budget_exhausted':
-      // The kind that can lock the composer — the same terminal state a 429 produces. Whether it
-      // *does* is still the event's call rather than this table's, and `retryable` is passed
-      // through for that reason: the service is the only party that knows whether the budget it
-      // refused on has any way back.
-      //
-      // This code used to carry a shed turn as well, and telling the two apart from `retryable`
-      // alone was all this branch could do. The service split them (`at_capacity`, below), so the
-      // guess is gone — but the fallback is not, because an older deployment still sends a shed
-      // here as `budget_exhausted` with `retryable=true`, and `sendMessage` locks the composer
-      // only on a refusal the event itself calls final.
+      // Can lock the composer, but only if the event says it is not retryable (older services send
+      // a shed turn here with `retryable=true`).
       return new ApiError('budget_exhausted', event.message, undefined, options);
     case 'at_capacity':
-      // Shedding is "not now", not "not ever": the service had no admission permit free and ran
-      // nothing, so the turn is worth sending again in a moment and the composer must stay open.
-      // Same kind as the 503 the front door answers with when it sheds before the stream opens —
-      // one condition, one thing for the chemist to do, whichever side of the response header it
-      // lands on.
+      // Shed: "not now". Same kind as the front door's 503.
       return new ApiError('capacity', event.message, undefined, options);
     case 'empty_answer':
-      // Not a service failure, and not a connection problem either — the turn ran to completion
-      // and produced nothing. Its own kind, so callers don't run connection-drop recovery (polling
-      // the transcript for an answer that will never land) against an outcome the server has
-      // already resolved.
+      // The turn completed with nothing: its own kind so no recovery polling runs.
       return new ApiError('empty_answer', event.message, undefined, options);
     case 'context_length':
-      // The one code whose remedy is the chemist's rather than an operator's, so the sentence is
-      // this app's own: it has to say what to do next, and "Retry" is the one thing that cannot
-      // work. Not retryable whatever the event says — resending re-reads the same too-long thread.
+      // The chemist's remedy, so this app's sentence; never retryable.
       return new ApiError('context_length', CONTEXT_LENGTH_MESSAGE, undefined, {
         ...options,
         retryable: false,
       });
     case 'llm_auth':
-      // An operator's fault, never the chemist's and never transient, so the sentence names who
-      // fixes it and Retry is withheld whatever the event says: the next turn sends the same key.
-      // Kept as `agent` rather than a kind of its own, because nothing the UI *does* differs from
-      // any other final failure — only what the chemist is told.
+      // An operator's fault: name who fixes it, no Retry. Kept as `agent` since the UI does nothing
+      // different.
       return new ApiError('agent', GATEWAY_AUTH_MESSAGE, undefined, {
         ...options,
         retryable: false,
       });
     case 'queue_cancelled':
-      // Not a failure and not retryable as-is: the service decided this message will not run, and
-      // the service's sentence says why (withdrawn, or no longer a participant). The caller puts the
-      // question back in the composer rather than painting a failed turn.
+      // Not a failure: the caller puts the question back.
       return new ApiError(
         'queue_cancelled',
         event.message || 'Your message was withdrawn before it ran.',
@@ -549,8 +384,7 @@ export function errorFromEvent(event: {
         { ...options, retryable: false },
       );
     case 'stream_lagged':
-      // Only the *view* ended. Retryable whatever the event says, because the remedy is to look
-      // again, not to send again — the turn this view was of is still running.
+      // Only the view ended: retryable (look again, do not resend).
       return new ApiError('stream_lagged', STREAM_LAGGED_MESSAGE, undefined, {
         ...options,
         retryable: true,
@@ -561,36 +395,8 @@ export function errorFromEvent(event: {
 }
 
 /**
- * What a failed response says about itself: FastAPI's `{"detail": …}` and the correlation id.
- *
- * Both halves are best-effort and neither may mask the real error — an error page, an empty body
- * or a gateway's HTML is common on exactly these paths. The header is read first because it is
- * present on every response the service writes, including the ones with no body at all; the body's
- * `correlation_id` is the fallback for a response that carries one there instead.
- */
-/**
- * The service's `detail`, as a sentence, whatever shape it arrived in.
- *
- * **A pydantic validation error is an array of objects, and dropping it made every rejected edit
- * read as the wrong thing.** `detail` was kept only when it was a string, so a 422 from
- * `POST /protocols/{id}/revisions` fell through to `errorFromStatus`'s message-route default and
- * told a chemist "That message exceeds the service's length limit." — for typing `0` into
- * "Time (h)", or clearing a factor level's label. Those are ordinary states of the editor's own
- * controls, and the actual reason (`Input should be greater than 0`, and the field it came from)
- * was discarded on the way.
- *
- * `loc` is trimmed of its `body`/`document` prefix, because a chemist reads
- * `base.setpoints.time_h`, not the transport's framing of it.
- *
- * **The third shape is an object, and it is the one this function was first written blind to.**
- * `POST /protocols/{id}/revisions` answers a stale edit with
- * `{"code": "revision_conflict", "message": …}` — a `detail` that is neither a string nor an array
- * — so the message naming the head revision was dropped and `errorFromStatus`'s 409 default put
- * "A turn is already running for this conversation." on a banner about a concurrent *edit*. The
- * `code` is still not *rendered* — a machine-readable code is for the code that branches on it,
- * not for the chemist — but `detailCode` above now hands it to `errorFromStatus`, because the
- * status route answers with two of them (`revision_conflict` and `status_conflict`) and only the
- * service can say which refusal this is.
+ * The service's discriminator from an object `detail` (`{code, message}`), passed to
+ * `errorFromStatus`; never rendered.
  */
 function detailCode(detail: unknown): string | undefined {
   if (detail && !Array.isArray(detail) && typeof detail === 'object') {
@@ -601,12 +407,8 @@ function detailCode(detail: unknown): string | undefined {
 }
 
 /**
- * The head revision a `stale_revision` 409 names — `{"detail": {"code": …, "head_revision": N}}`.
- *
- * Read beside `detailCode` rather than by the one caller that needs it, because `request` consumes
- * the body before any caller sees the response: the number has to be lifted out here or it is
- * gone. A non-integer is dropped rather than coerced — a rebase onto a revision the service did
- * not name would be the silent overwrite the 409 exists to prevent.
+ * The head revision a `stale_revision` 409 names. Lifted here because `request` consumes the body;
+ * a non-integer is dropped rather than coerced.
  */
 function detailHead(detail: unknown): number | undefined {
   if (detail && !Array.isArray(detail) && typeof detail === 'object') {
@@ -616,6 +418,10 @@ function detailHead(detail: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * The service's `detail` as a sentence, whatever its shape: a string, `{code, message}`, or a
+ * pydantic validation array (rendered as `field.path: message`, without the `body` prefix).
+ */
 function detailText(detail: unknown): string | undefined {
   if (typeof detail === 'string') return detail;
   if (detail && !Array.isArray(detail) && typeof detail === 'object') {
@@ -639,6 +445,11 @@ function detailText(detail: unknown): string | undefined {
   return parts.length > 0 ? parts.join('; ') : undefined;
 }
 
+/**
+ * What a failed response says about itself: FastAPI's `detail` and the correlation id (header
+ * first, body `correlation_id` as fallback). Best-effort: an empty or HTML body must not mask the
+ * real error.
+ */
 export async function readFailure(
   res: Response,
 ): Promise<{ detail?: string; code?: string; headRevision?: number; correlationId: string }> {

@@ -1,8 +1,6 @@
 /**
- * The turn orchestrator: everything that happens between pressing Send and the answer settling.
- *
- * Lives outside React deliberately — it is a sequence, not a render concern, and it drives the
- * store directly via `getState()`.
+ * The turn orchestrator: everything between pressing Send and the answer settling. Lives outside
+ * React (a sequence, not a render concern) and drives the store via `getState()`.
  */
 
 import type { ExhibitRef } from '../../shared/exhibitConstants.ts';
@@ -26,19 +24,16 @@ import { endedError, endingOfTurn } from './transcript.ts';
 import type { UnansweredEnding } from './transcript.ts';
 
 /**
- * What the reader is told when Stop was pressed and the server never confirmed it.
- *
- * The turn keeps running server-side — holding the session's turn lock and spending budget — so
- * the 409 their next message gets is a consequence of this, not a fault of their own. Saying so
- * here is what turns that 409 from "the app is broken" into something they were warned about.
+ * Told when Stop was pressed and the server never confirmed it: the turn may still be running and
+ * holding the session, so the next message may get a 409.
  */
 const STOP_UNCONFIRMED =
   'Stopped here, but the server did not confirm it. The turn may still be running, so the next ' +
   'message may be refused until it finishes.';
 
 /**
- * What a 403 on `POST /sessions/{id}/turn/stop` means: in a shared conversation a turn is its
- * sender's to stop, or the owner's (Chemclaw3 #483), so a member cannot cancel somebody else's.
+ * A 403 on `POST /sessions/{id}/turn/stop`: in a shared conversation only the sender or owner may
+ * stop a turn.
  */
 const STOP_REFUSED =
   'Stopped watching here, but the service did not cancel the turn: in a shared conversation only ' +
@@ -52,10 +47,8 @@ const WITHDRAWN_BY_YOU =
   'You withdrew this message before it ran. Your question is back in the box.';
 
 /**
- * How many times one turn reattaches after its view was cut off for falling behind
- * (`stream_lagged`). Bounded for `recreatedSession`'s reason: a browser that keeps falling behind
- * will keep being cut off, and past the bound the transcript read below is the cheaper way to the
- * answer.
+ * How many times one turn reattaches after `stream_lagged`; past this the transcript read is
+ * cheaper.
  */
 const MAX_REATTACH = 2;
 
@@ -64,17 +57,9 @@ const MAX_REATTACH = 2;
 const UNLOAD_STOP = { keepalive: true, reason: 'unload' } as const;
 
 /**
- * How long a reloaded page reads the transcript for a turn it could not follow live.
- *
- * Short on purpose, because by then this turn is known to be over: the watch route answered with a
- * running turn that is not this one (another participant's started since), or that a service too
- * old to name its turn cannot vouch for. A session runs one turn at a time, so this one has ended,
- * and a turn writes its transcript before it stops counting as running — its answer is there now or
- * never will be. A few reads cover the write racing the watch.
- *
- * **Not for a 404.** A watch 404 says only that no turn runs *on the replica that answered*: the
- * turn may have ended, or may be running on another front-door replica (the BFF's upstream hop has
- * no session affinity) and still write its answer. That is the live path's case and gets its poll.
+ * How long a reloaded page reads the transcript for a turn it could not follow live because another
+ * turn (or an unnamed one) is running — so this turn is over and its answer is written or never
+ * will be. Not used for a watch 404, which only speaks for one replica; that gets the full poll.
  */
 const RELOAD_RECOVERY_MS = 20_000;
 
@@ -84,9 +69,8 @@ const RELOAD_LOST =
   'Interrupted by a page reload, and its answer could not be recovered from the server. Ask again to get one.';
 
 /**
- * What a Stop's request settled as, or `'pending'` once `STOP_CONFIRM_TIMEOUT_MS` has passed —
- * the bound `announceStop` keeps, for its reason: the service not answering is one of the states
- * being reported, and an unbounded wait would hang the turn on it.
+ * A Stop request's outcome, or `'pending'` after `STOP_CONFIRM_TIMEOUT_MS`, so an unresponsive
+ * service cannot hang the turn.
  */
 async function settledWithin<T>(pending: Promise<T>): Promise<T | 'pending'> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -110,30 +94,21 @@ export interface SendOptions {
 }
 
 /**
- * Sessions being minted right now, keyed by conversation.
- *
- * Module scope, not the store (a Promise is not serialisable, and `clearAll` would drop it
- * mid-flight) and not a ref (the composer's keystroke and the send path are different callers that
- * must share). It also survives StrictMode's double-invoke, which is the bug this defends.
+ * Sessions being minted, per conversation. Module scope (a Promise is not serialisable, and the
+ * composer and send path must share it); survives StrictMode's double-invoke.
  */
 const sessionsInFlight = new Map<string, Promise<string>>();
 
 /**
- * The agent profile this conversation's session should be minted on, if one was chosen.
- *
- * Read at every mint rather than once, and that is the point: a session is replaced on
- * `session_not_found` recovery and by `resetSession`, and a replacement that silently dropped
- * the profile would move the conversation onto a different agent without saying so.
+ * The chosen agent profile for this conversation, read at every mint so a replacement session keeps
+ * it.
  */
 const profileFor = (conversationId: string): string | undefined =>
   useChatStore.getState().sessionProfiles[conversationId];
 
 /**
- * Ensure the conversation has a live server session, creating one if needed.
- *
- * Shared by the send path and by `warmSession`, so a warm already in flight is awaited rather than
- * raced. Two concurrent creates would otherwise mint two backend sessions and leave the store
- * pointing at the one the in-flight turn is NOT using — context lost with nothing to flag it.
+ * Ensure the conversation has a live session, awaiting a warm already in flight so two creates
+ * never race.
  */
 async function ensureSession(conversationId: string, auth: AuthProvider): Promise<string> {
   const existing = useChatStore.getState().conversations[conversationId]?.sessionId;
@@ -156,14 +131,8 @@ async function ensureSession(conversationId: string, auth: AuthProvider): Promis
 }
 
 /**
- * Mint the session ahead of the first send.
- *
- * The first message otherwise costs two sequential round-trips — `POST /sessions`, then
- * `POST /messages` — with the user's bubble and a spinner already on screen for both. Doing the
- * first one while they are still typing hides it entirely.
- *
- * Failure is deliberately silent: this is speculative, and `ensureSession` will try again for
- * real when they actually send.
+ * Mint the session while the user is still typing, so the first send is one round trip. Failures
+ * are silent; `ensureSession` retries on send.
  */
 export function warmSession(conversationId: string, auth: AuthProvider): void {
   if (!config.warmSessions) return;
@@ -172,12 +141,8 @@ export function warmSession(conversationId: string, auth: AuthProvider): void {
 }
 
 /**
- * Batch token events to one store write per animation frame.
- *
- * At ~60 fps this is invisible to the user but turns a 2000-token answer from 2000 renders into
- * roughly 100. The flush is exposed so non-token events can force ordering: the backend emits a
- * turn's tokens before the tool calls of the same update, so a trace entry landing ahead of its
- * pending text would misrepresent what happened.
+ * Batch token events to one store write per animation frame. `flush` lets non-token events keep
+ * ordering (tokens precede tool calls of the same update).
  */
 export function createTokenBatcher(conversationId: string, messageId: string) {
   let pending = '';
@@ -221,25 +186,19 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   if (store.composerLock) return;
   if (!text.trim()) return;
 
-  // Snapshotted before `appendUserMessage` — which now runs inside the `try` below — adds this
-  // turn's own message, so detach recovery can tell an answer written for this turn from one that
-  // was already in the transcript when it started (see `recoverDetachedAnswer`). It stays out here
-  // because it is a read: it is the store *writes* that had to move inside the `try`, and this one
-  // must happen before them either way.
+  // Snapshot the newest held answer before this turn's writes, so detach recovery can tell this
+  // turn's answer from one already there (`recoverDetachedAnswer`).
   const heldAnswer = newestHeldAnswer(store.conversations[conversationId]?.messages ?? []);
 
   const abort = new AbortController();
 
   /**
-   * The bearer this turn's request actually carried.
-   *
-   * Kept so `abandon()` below can send the stop without awaiting a token acquisition that may need
-   * the network — see its docstring. Refreshed on every attempt, so a replay after a 401 leaves
-   * the newer token here rather than the one that was rejected.
+   * The bearer this turn's request carried, so `abandon()` can stop the turn without acquiring a
+   * token during unload. Updated on every attempt.
    */
   let lastToken: string | null = null;
 
-  /** When Send was pressed. The client half of a turn's timing, which the service cannot see. */
+  /** When Send was pressed (client-side timing the service cannot see). */
   const startedAt = Date.now();
   let firstTokenAt: number | null = null;
   let answeredAt: number | null = null;
@@ -248,28 +207,18 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   /** Frames this build could not use. One is forward compatibility; every one is a version skew. */
   const dropped = { malformed: 0, unknown: 0, types: new Set<string>() };
   /**
-   * What the explicit Stop reported, awaited before the reader is told what happened.
-   *
-   * `api.stopTurn` resolves `false` when the backend has no such route and THROWS on a 500/503,
-   * and both outcomes used to be discarded — after which the user was reliably told "Stopped
-   * before the answer was complete" while the turn kept running server-side, kept spending budget
-   * and kept the session's turn lock, so their next message came back 409 and was rendered as a
-   * "reset the conversation" banner: an app bug to a chemist and nothing at all to an operator.
+   * What the explicit Stop reported, awaited before telling the reader. A missing route (`false`)
+   * or a 5xx must not be reported as "stopped".
    */
   let stopOutcome: Promise<'stopped' | 'unconfirmed' | 'refused' | 'withdrawn'> | null = null;
 
   /**
-   * Where this message stands in a shared conversation's line, when it is waiting in one.
-   *
-   * Read at the moment Stop is pressed, because it decides what Stop *is*: while the message waits,
-   * the running turn is somebody else's, and `POST /turn/stop` would either be refused (a member)
-   * or cancel a colleague's work (the owner). Withdrawing the ticket is the only stop that reaches
-   * this message and nothing else.
+   * Whether Stop chose to withdraw a queued message; only then does settling wait on the service's
+   * answer.
    */
-  /** Whether Stop chose to withdraw. Only then does the stop's ending wait on the service's answer
-   *  before settling the bubble — an ordinary Stop settles at once, as it always has. */
   let withdrawing = false;
 
+  /** This message's place in a shared conversation's line, read when Stop is pressed. */
   const placeInLine = (): { ticket: number; position: number } | null => {
     const message = useChatStore
       .getState()
@@ -281,26 +230,15 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   let messageId = '';
 
   /**
-   * Whether the service took this turn — the POST was answered `2xx`.
-   *
-   * The fact detach recovery is gated on, rather than the error's kind, and it composes with
-   * `token_unavailable` rather than duplicating it. That kind (`src/api/errors.ts`) names the one
-   * pre-flight failure that has a classification of its own: the auth provider refusing to produce
-   * a token. What it cannot name is everything else that fails before the stream exists, because
-   * those failures have no kind — the catch below wraps any non-`ApiError` as `stream`, which is
-   * documented as "plausibly recoverable by polling the session transcript", and it is not. The
-   * five setup writes at the top of the `try` are the live example: `chatStore` records a
-   * `QuotaExceededError` from `appendUserMessage`, and with a session already minted that threw a
-   * chemist into the banner "Connection lost — the turn is still running on the server; recovering
-   * the answer…" with the composer locked, for a turn nothing had sent. Measured on the merged
-   * tree with this flag ignored: **630 s** and **210** poll attempts; with it, one tick.
+   * Whether the service accepted this turn (POST answered 2xx). Detach recovery is gated on this,
+   * not on the error kind: a failure before the stream existed (e.g. a local storage write
+   * throwing) is wrapped as `stream` but has nothing to recover.
    */
   let turnAccepted = false;
 
   const stop = (): void => {
-    // Server first, then socket: the backend detaches on disconnect
-    // (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so aborting the fetch alone would
-    // leave the turn running — and the session 409-busy — for its whole remaining duration.
+    // Server first, then socket: a disconnect only detaches, so aborting alone would leave the turn
+    // running.
     const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
     const place = placeInLine();
     if (sessionId && place) {
@@ -329,15 +267,13 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         .stopTurn(sessionId, () => auth.getAccessToken())
         .then((stopped) => {
           if (stopped) return 'stopped' as const;
-          // `false` is "there was nothing to stop": the turn finished in the race, or this backend
-          // predates the route. Not an error, but not a confirmation either.
+          // `false`: nothing to stop (finished in the race, or the route is missing). Not a
+          // confirmation.
           logger.warn('turn.stop_not_confirmed', { sessionId });
           return 'unconfirmed' as const;
         })
         .catch((err: unknown) => {
-          // In a shared conversation a turn is its sender's to stop, or the owner's (Chemclaw3
-          // #483): a member pressing Stop on a turn that is not theirs is refused, and that is a
-          // rule answering rather than a fault — said as such below, not as "unconfirmed".
+          // A member stopping someone else's turn is refused by rule, not a fault.
           if (err instanceof ApiError && err.kind === 'forbidden') return 'refused' as const;
           logger.error('turn.stop_failed', {
             sessionId,
@@ -347,50 +283,25 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           return 'unconfirmed' as const;
         });
     }
-    // Unconditional and immediate, whatever the server ends up saying: the local half of Stop —
-    // stop rendering, release the composer — is right either way, and waiting on a request that
-    // may be the thing that is broken would freeze the one control the user reached for.
+    // The local half of Stop happens immediately, whatever the server says.
     abort.abort();
   };
 
   /**
-   * Stop the turn on the way out of the document — Stop's unload-time half.
+   * Stop the turn as the document unloads. Differs from `stop()`:
    *
-   * A closed tab, a reload and a navigation away all *detach* rather than cancel
-   * (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`), so the turn kept running to completion:
-   * one of the front door's `service_max_concurrent_turns` (8 per process), a database connection
-   * and an LLM bill, for up to the 600 s wall clock, on work nobody will read. Two abandoned turns
-   * per pod is a quarter of its admission capacity. It also compounds — the chemist who reloaded
-   * because it felt stuck comes back, re-asks, gets a 409 from the turn that is still running, and
-   * reaches for `resetSession`, which mints a second session while the first turn keeps burning.
-   *
-   * Three things make this different from `stop()` above rather than a call to it:
-   *
-   *  - **`keepalive`**, because an ordinary `fetch` started from `pagehide` dies with the page.
-   *    Same trick, and the same reason, as the log sink's final batch (`src/lib/logger.ts`).
-   *  - **A token already in hand.** `auth.getAccessToken()` may need a silent MSAL refresh, and a
-   *    refresh is an iframe to `login.microsoftonline.com` — impossible during unload. `lastToken`
-   *    is the bearer this turn's own POST went out with, which is by construction at most one turn
-   *    old, and passing it as a bare getter also declines the 401 retry: there is nobody left to
-   *    recover for.
-   *  - **Nothing local.** No abort, no banner, no announcement, no awaiting the outcome. This
-   *    document is going away; the only thing worth doing is getting the request onto the wire.
-   *  - **`reason: 'unload'`**, because a reload is a `pagehide` too and the browser cannot say
-   *    which this is. Sent plain, the stop killed the turn a reloaded page then waited 630 s for
-   *    (Chemclaw3_ui#131). With the reason the service holds the stop for a grace window and drops
-   *    it when `resumeInterruptedTurn` reattaches; a chemist who really left still frees the
-   *    turn's capacity, one window later.
+   * - `keepalive`, since an ordinary `fetch` from `pagehide` dies with the page.
+   * - A token already in hand (`lastToken`): a silent MSAL refresh is impossible during unload, and
+   *   a bare getter declines the 401 retry.
+   * - Nothing local: no abort, banner or await.
+   * - `reason: 'unload'`: a reload is also a `pagehide`, so the service defers the stop and drops
+   *   it if `resumeInterruptedTurn` reattaches.
    */
   const abandon = (): void => {
     const sessionId = useChatStore.getState().conversations[conversationId]?.sessionId;
     if (!sessionId) return;
-    // A message still waiting in a shared conversation's line is withdrawn, not stopped: the turn
-    // running there is somebody else's, and an owner's unload must not cancel it. A detach does
-    // not lose a waiting message its place, so leaving it would run a question nobody is reading.
-    // A 404 there means the message left the line first — usually because it started, between
-    // the service taking the turn and this client hearing about it — so the fallback is the same
-    // stop the Composer's Withdraw falls back to. Best effort: the second request leaves after
-    // the first one answers, and the page may be gone by then.
+    // A message still waiting in a shared line is withdrawn, not stopped (the running turn is
+    // someone else's). A 404 means it already started, so fall back to stop. Best effort.
     const place = placeInLine();
     if (place) {
       void api
@@ -420,16 +331,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   };
 
   /**
-   * Say what Stop actually achieved.
-   *
-   * Both stop paths come through here — the one that ends the stream and the one that abandons
-   * recovery — so the wording cannot drift between them.
-   *
-   * The wait is BOUNDED, and that is not a detail: `api.stopTurn` has no timeout of its own, and
-   * "the server stopped answering" is one of the states this is trying to report, so an unbounded
-   * await would hang the turn's own promise on exactly the failure it exists to describe — leaving
-   * `streaming` occupied and the Stop control on screen for ever. Past the bound the reader is told
-   * the ordinary thing and the answer, if it ever comes, corrects it.
+   * Say what Stop achieved, for both stop paths. The wait is bounded (`settledWithin`), since an
+   * unresponsive server is one of the states being reported.
    */
   const announceStop = async (): Promise<void> => {
     if (!stopOutcome) {
@@ -469,13 +372,6 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     }
   };
 
-  /**
-   * Set the composer lock, but only while this turn is still the one the app is waiting on.
-   *
-   * The lock is a single global slot, and so is `streaming`. An older turn finishing must not
-   * unlock a composer that a newer one owns — `finishTurn` and `setStreaming` are already keyed
-   * on `messageId` for exactly that reason, and this was the one write that was not.
-   */
   /** Whether this turn still owns the single global composer/banner slot. */
   const stillOurs = (): boolean => {
     const streaming = useChatStore.getState().streaming;
@@ -483,13 +379,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   };
 
   /**
-   * The chemist's question, back where they typed it — only into an empty draft, because whatever
-   * they have typed since is newer than this.
-   *
-   * **And the artefacts it carried.** `Composer` clears the `@artefact` chips at submit, as it
-   * clears the text, so a refused turn that put only the text back returned a question about "this
-   * table" with the table no longer attached — sent again, the agent would be asked about an
-   * artefact it was never shown. Same rule as the text: only into an empty set of chips.
+   * Put the question and its `@artefact` chips back in the composer, only if both are empty
+   * (anything typed since is newer).
    */
   const restoreDraft = (): void => {
     if (!useChatStore.getState().drafts[conversationId]) {
@@ -500,23 +391,15 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     }
   };
 
+  /** Set the composer lock only while this turn still owns it. */
   const releaseComposer = (lock: ComposerLock): void => {
     if (!stillOurs()) return;
     useChatStore.getState().setComposerLock(lock);
   };
 
   /**
-   * Write the banner, but only while this turn still owns it — the same rule as the lock.
-   *
-   * **The guard was put on the lock and on `releaseTurn`, and every other banner write in this
-   * function went straight through.** `releaseTurn` below documents the scenario in full; running
-   * it one statement further is the defect: its guarded `setBanner(null)` is immediately followed
-   * by `await announceStop()`, which paints "Stopped here, but the server did not confirm it" with
-   * no ownership check at all. Measured on turn A abandoned → conversation deleted → turn B sent →
-   * A's poll wakes: B's composer stayed correctly locked and B's screen got A's warning.
-   *
-   * So the banner goes through one guarded door rather than six unguarded ones, because the next
-   * failure exit somebody adds here will otherwise be the seventh.
+   * Write the banner only while this turn still owns the slot, so a stale turn's recovery cannot
+   * paint over a newer turn.
    */
   const showBanner = (banner: Banner | null): void => {
     if (!stillOurs()) return;
@@ -524,17 +407,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   };
 
   /**
-   * Hand back the composer *and* the banner, for a turn that has ended without one to show.
-   *
-   * The banner needs the same guard as the lock and did not have it. Both detach-recovery exits
-   * below wrote `setComposerLock(false)` and `setBanner(null)` straight through — on the
-   * longest-lived path in this file, since `recoverDetachedAnswer` polls for 630 s. Reachable
-   * without contrivance: turn A drops and its recovery starts; the chemist deletes A's
-   * conversation, which clears `streaming` and the lock; they send turn B; up to three seconds
-   * later A's poll wakes, sees the abort, and unlocks **B's** composer and clears **B's** banner
-   * while B is still streaming. The `finishTurn`/`applyEvent` calls beside them were always keyed
-   * on `messageId`; these two were the pair that was not, which is the same finding
-   * `releaseComposer`'s own docstring records about the lock alone.
+   * Release the composer and clear the banner for a turn ending without one, only while this turn
+   * owns them (a long recovery poll can wake after a newer turn started).
    */
   const releaseTurn = (): void => {
     if (!stillOurs()) return;
@@ -543,15 +417,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   };
 
   /**
-   * Settle this turn as one the service ended without an answer, and say so.
-   *
-   * `interrupted` is the one the rest of this exists for: the service process running the turn
-   * died (a restart, a killed pod), and the reattach or the transcript said so (Chemclaw3
-   * `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`). The bubble carries
-   * the sentence and a Retry that sends the question again (`MessageList`), and the composer is
-   * free — before this, the same turn polled the transcript for ten minutes and then reported a
-   * dropped connection. The question is not put back in the draft: Retry is the offer, and a
-   * second copy in the box would be a second, silent one.
+   * Settle this turn as ended by the service without an answer (e.g. `interrupted` when the process
+   * died). The bubble offers Retry; the question is not also put back in the draft.
    */
   const settleUnanswered = (ending: UnansweredEnding): void => {
     batcher?.flush();
@@ -568,8 +435,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   };
 
   /**
-   * Whether the next attempt follows the running turn rather than sending the message: set after
-   * the service cut this browser's view off (`stream_lagged`), and the turn it was a view of runs on.
+   * Whether the next attempt follows the running turn instead of sending: set after
+   * `stream_lagged`.
    */
   let watching = false;
   let reattached = 0;
@@ -577,9 +444,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   let draftSession: string | null = null;
 
   const runOnce = async (sessionId: string): Promise<void> => {
-    // Per attempt: a replay after a 401 or a `session_not_found` starts a new turn, and what the
-    // previous attempt got as far as says nothing about this one. A reattach is not a new turn —
-    // the one the service already accepted is still running — so it keeps the flag.
+    // Reset per attempt, except on a reattach (same accepted turn).
     if (!watching) turnAccepted = false;
     await streamTurn({
       sessionId,
@@ -596,10 +461,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         turnAccepted = true;
       },
       onCorrelationId(id) {
-        // Kept in three places, each for a different reader: the store, so the trace panel can
-        // show a reference on a turn that SUCCEEDED; the logger's context, so every subsequent
-        // entry from this browser carries it; and here, so the banner below can quote it even
-        // when the failure carried none of its own.
+        // Kept for the trace panel, the logger context and the banner.
         correlationId = id;
         logger.setContext({ correlationId: id });
         useChatStore.getState().setCorrelationId(conversationId, messageId, id);
@@ -615,9 +477,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         if (drop.type) dropped.types.add(drop.type);
       },
       onEvent(event) {
-        // A document being drafted (wave 2). Not a trace row and not part of the message: it is a
-        // few seconds of stream that the `exhibit` frame after it replaces, so it goes to the draft
-        // store and nowhere else — and it is not a reason to flush the token batcher either.
+        // A draft document goes only to the draft store; it is not a trace row and does not flush
+        // tokens.
         if (event.type === 'exhibit_draft') {
           draftSession = sessionId;
           draftArrived(sessionId, event);
@@ -627,12 +488,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           // The first sign the chain is moving, and the client half of a measurement the service
           // cannot take: it knows when it started generating, not when the bytes reached a browser.
           firstTokenAt ??= Date.now();
-          // Unattributed tokens only, which is the backend's own rule for this stream: a token
-          // carrying an `agent` is a subagent's working prose, and concatenating it splices
-          // another agent's notes into the answer a chemist reads. Invisible most of the time
-          // because the root-only `answer` event replaces the render — and not invisible at all
-          // when the turn is stopped, times out, or hits the loop cap, where the streamed text is
-          // what is kept and persisted.
+          // Only unattributed tokens are part of the answer; attributed ones are a subagent's
+          // working notes.
           if (!event.agent) batcher?.push(event.text);
           return;
         }
@@ -665,20 +522,15 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
         // A refused `create_exhibit`/`revise_exhibit` takes its draft with it, so a retry's text is
         // never shown under the refused call's draft.
         if (event.type === 'tool_failed') draftToolFailed(sessionId, event);
-        // The conversation's subject index. Fire-and-forget: ingestion canonicalises through
-        // RDKit, so it is asynchronous, and the transcript must not wait on a WASM call to render
-        // the event it has already applied. Named with this conversation's id rather than the
-        // store's idea of the active one — the rail and the transcript have to describe the same
-        // conversation even when the reader has switched away mid-turn.
+        // Index the conversation's entities asynchronously (RDKit canonicalisation), keyed by this
+        // conversation even if the reader switched away.
         void useEntityStore.getState().ingest(conversationId, messageId, event);
       },
     });
     batcher?.flush();
   };
 
-  // Guards a single recovery attempt each. Booleans, not a loop: retrying a turn costs real
-  // money and can collide with the backend's per-session lock, so recovery must be bounded and
-  // obviously so.
+  // One recovery attempt each: retrying a turn costs money and can hit the session lock.
   let recreatedSession = false;
   let reauthed = false;
 
@@ -686,22 +538,15 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   let batcher: ReturnType<typeof createTokenBatcher> | null = null;
 
   try {
-    // The turn's five setup writes, INSIDE the try.
-    //
-    // They ran before it, and `Composer` floats this promise with `void` — no handler, and (until
-    // `main.tsx` grew one) no global listener either. So a throw in any of them, which is a real
-    // class rather than a hypothetical one (`chatStore` records a `QuotaExceededError` that
-    // produced "no bubble, no answer, no banner, no lock — Send did nothing, for ever"), was an
-    // unhandled rejection. The storage layer swallowing that one exception fixed the instance;
-    // this closes the shape.
+    // The setup writes run inside the try, so a throw (e.g. quota) reaches the catch instead of
+    // becoming an unhandled rejection.
     logger.setContext({ correlationId: '', sessionId: '' });
     store.appendUserMessage(conversationId, text);
     messageId = store.startAssistantMessage(conversationId);
     store.setStreaming({ conversationId, messageId, abort, stop, abandon });
     store.setComposerLock('turn_in_flight');
     store.setBanner(null);
-    // A new question re-arms the artefact pane's auto-open: a close during the *previous* answer
-    // was about that answer.
+    // A new question re-arms the artefact pane's auto-open.
     useExhibitPane.getState().turnStarted();
     batcher = createTokenBatcher(conversationId, messageId);
 
@@ -721,9 +566,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       } catch (err) {
         if (!(err instanceof ApiError)) throw err;
 
-        // The service cut this browser's view of the turn off for falling behind, and the turn
-        // runs on (Chemclaw3 #499). Reattach to it rather than read that as the turn failing — a
-        // bounded number of times, after which the transcript read below takes over.
+        // The view fell behind and was cut off; the turn runs on. Reattach a bounded number of
+        // times.
         if (err.kind === 'stream_lagged' && reattached < MAX_REATTACH) {
           reattached += 1;
           watching = true;
@@ -735,9 +579,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           announceStatus('Fell behind the answer; reconnecting.');
           continue;
         }
-        // A reattach answered 404: no turn is running here any more. It ended in the gap, or it
-        // runs on another replica — both are a turn whose answer lands in the transcript, so this
-        // is a dropped stream to recover, never a dead session to replace.
+        // A reattach 404: the turn ended or runs on another replica. Recover from the transcript;
+        // never replace the session.
         if (watching && err.kind === 'session_not_found') {
           throw new ApiError(
             'stream',
@@ -747,15 +590,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
           );
         }
 
-        // The session handle is dead: unknown, someone else's, or evicted from the backend's
-        // live-session LRU. Mint a new one and replay the message exactly once. The transcript
-        // belongs to the local conversation, so nothing visible is lost — but the AGENT has
-        // lost its context, and we mark that rather than pretending continuity.
-        //
-        // **Not in a conversation somebody else owns** (Chemclaw3 #483). There a 404 means the
-        // owner removed this person, and minting a replacement would quietly move their question
-        // into a private session of their own — answered with none of the shared context, under a
-        // title that still reads as the shared conversation. Say what happened instead.
+        // The session is dead (unknown, not ours, or evicted): mint a new one and replay once,
+        // marking the context lost. Not in a conversation somebody else owns — there a 404 means
+        // this person was removed.
         if (
           err.kind === 'session_not_found' &&
           useChatStore.getState().conversations[conversationId]?.membership
@@ -792,12 +629,9 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
 
     batcher?.flush();
 
-    // The signal, not only the error kind: a Stop pressed just as the server ends the stream
-    // surfaces as a `stream` error with the abort already set, and that is a stop, not a drop —
-    // recovering it would poll for an answer the user just cancelled.
+    // Check the signal too: a Stop racing the end of the stream is a stop, not a drop.
     if (apiError.kind === 'aborted' || abort.signal.aborted) {
-      // A Stop on a message still waiting in line withdrew it, and whether it did is only known
-      // once the service answers: a 404 there means it had started, and was stopped instead.
+      // Whether a Stop withdrew the message is known only once the service answers.
       if (withdrawing && stopOutcome && (await settledWithin(stopOutcome)) === 'withdrawn') {
         useChatStore.getState().withdrawTurn(conversationId, messageId, WITHDRAWN_BY_YOU);
         restoreDraft();
@@ -811,18 +645,14 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       return;
     }
 
-    // The turn this browser was following died with the service process running it — the
-    // reattach answered 410 `turn_interrupted`. Nothing will answer it, so there is nothing to
-    // poll for; say so and offer the question again.
+    // The followed turn died with its process (410 `turn_interrupted`): nothing to poll for; offer
+    // the question again.
     if (apiError.kind === 'turn_interrupted') {
       settleUnanswered('interrupted');
       return;
     }
 
-    // Withdrawn from a shared conversation's line by somebody else — the owner, the service on
-    // the sender's removal, the session's deletion (Chemclaw3 #499). Nothing ran and nothing was
-    // spent, so this is not painted as a failed turn: the bubble says why, the question goes back
-    // in the box, and the banner is information rather than an error.
+    // Withdrawn from the line by someone else: not a failure. Say why and put the question back.
     if (apiError.kind === 'queue_cancelled') {
       useChatStore.getState().withdrawTurn(conversationId, messageId, apiError.message);
       restoreDraft();
@@ -832,24 +662,12 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       return;
     }
 
-    // An accidental drop is not a stop: the backend detaches and the turn runs to completion
-    // server-side (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so a broken stream is a
-    // *recoverable* state — the answer will land in the session transcript. Poll it back rather
-    // than surfacing a dead-end banner for work that is still happening.
+    // A dropped stream is recoverable: the turn runs on and its answer lands in the transcript.
     //
-    // The two kinds are gated differently because they are different claims, and reading them as
-    // one is what sent turns that never existed into a ten-minute poll:
-    //
-    //  - `network` is `fetch` itself rejecting, which happens as readily *after* the request bytes
-    //    are on the wire as before. Whether the service got it is genuinely unknowable from here,
-    //    and a dropped Wi-Fi mid-POST is the case detach recovery was built for, so it keeps its
-    //    poll unconditionally.
-    //  - `stream` is only ever a real claim about a running turn when a stream actually existed.
-    //    It is also the kind the catch above stamps on any non-`ApiError`, including one thrown by
-    //    this function's own setup writes — for which there is nothing to recover and nothing to
-    //    wait for. `turnAccepted` is what tells those apart; see its docstring.
-    //  - `stream_lagged` is the service saying so outright: only this view ended, and the
-    //    reattaches above are spent.
+    // - `network`: `fetch` rejected; whether the request was received is unknowable, so always
+    //   poll.
+    // - `stream`: only a real claim when a stream existed (`turnAccepted`).
+    // - `stream_lagged`: the service says the turn runs on and reattaches are spent.
     const mayStillBeRunning =
       apiError.kind === 'network' ||
       (turnAccepted && (apiError.kind === 'stream' || apiError.kind === 'stream_lagged'));
@@ -881,8 +699,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
             unsupported_claims: [],
             review_required: false,
             verified_by: null,
-            // A recovered answer was never reviewed by a second pass — this is the transcript
-            // being rebuilt, not a fresh turn — so the pair is the service's "nothing happened".
+            // A recovered answer had no second-pass review.
             challenged: false,
             review_hold_id: null,
             checks_run: [], // a transcript rebuilt locally had no gate run on it, which is what empty means
@@ -914,38 +731,20 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       .getState()
       .failTurn(conversationId, messageId, { kind: apiError.kind, message: apiError.message });
 
-    // The service's own id for the failed turn, when it sent one. Appended to the banner text
-    // rather than given a field of its own: it is the one thing a support conversation needs and
-    // nothing in the UI can act on it, so it belongs where it can be selected and copied.
-    // `correlationId` is the turn's, read back from the response header or a frame that carried
-    // one; the error's own wins when it has one. Before this, every HTTP-level failure — 401, 409,
-    // 422, 429, 503, a network drop, a mid-stream disconnect — printed no reference at all, so the
-    // one string a support conversation needs existed on the server and nowhere a chemist could
-    // see it.
+    // The service's id for the failed turn, appended to the banner so it can be quoted to support.
+    // The error's own id wins over the turn's.
     const reference = apiError.correlationId || correlationId;
     const text = reference ? `${apiError.message} (reference ${reference})` : apiError.message;
 
-    // The chemist's question, back where they typed it. `Composer` clears the draft at submit,
-    // so before this a failed turn also destroyed the message — the "Retry" on the banner is a
-    // rehydrate of the transcript and has never re-sent anything. Only into an empty draft:
-    // whatever they have typed since is newer than this.
+    // Put the question back in the composer (only into an empty draft).
     restoreDraft();
 
-    // A rate limit is a pause with a number on it, and the number is the service's own: the
-    // per-principal limiter computes how long until one token refills and sends it as
-    // `Retry-After` precisely so a client waits the right amount. So the composer stays open, the
-    // question is already back in the draft above, and the banner counts the wait down.
-    //
-    // Deliberately not an automatic re-send. Nothing in this app has ever re-posted a turn on the
-    // user's behalf — the banner's Retry re-reads the transcript — and a client that resends on a
-    // timer turns one refused request into a queue of them against the very budget it is waiting
-    // on. The countdown says when; the human still presses Send.
+    // A rate limit: keep the composer open and count down the service's `Retry-After`. Never
+    // auto-resend.
     if (apiError.kind === 'rate_limited') {
       releaseComposer(false);
       const seconds = Math.ceil(apiError.retryAfterSeconds);
-      // A limiter that sent a `Retry-After` this app could not read is still a limiter, and it
-      // arrives here with no number. Saying "try again in 0 s" would be a countdown to now, so
-      // the sentence loses the figure rather than gaining a wrong one.
+      // No readable `Retry-After`: say "try again shortly" rather than "in 0 s".
       const banner: Banner =
         seconds > 0
           ? { kind: 'warn', text: `${text} Try again in ${seconds} s.`, retryAfterSeconds: seconds }
@@ -954,11 +753,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       return;
     }
 
-    // The line could not take this message (Chemclaw3 #503's codes). Neither remedy the 409 used to
-    // get applies: "start a fresh session" leaves a conversation whose turn is somebody's real
-    // work, and Retry re-reads a transcript this message never entered. The question is already
-    // back in the draft; the banner says what to wait for. A service that sends these refusals
-    // as a sentence without a code still lands on `turn_in_flight` below, as before.
+    // The shared line could not take this message: wait, rather than reset or retry. An uncoded 409
+    // still lands on `turn_in_flight`.
     if (apiError.kind === 'queue_full' || apiError.kind === 'already_waiting') {
       releaseComposer(false);
       showBanner({
@@ -974,12 +770,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       return;
     }
 
-    // A budget that is genuinely gone is terminal — it does not replenish because somebody
-    // pressed a button — so leave the composer locked and say so. A turn the service *shed* is a
-    // different code now (`at_capacity`, kind `capacity`) and falls through to the ordinary
-    // branch below, which offers Retry; the `retryable` guard stays because an older deployment
-    // still sends a shed as a retryable `budget_exhausted`, and locking the composer on it would
-    // be the same defect one release earlier.
+    // A non-retryable `budget_exhausted` is terminal: keep the composer locked. A shed turn is
+    // `at_capacity` and offers Retry; the `retryable` check handles older services.
     if (apiError.kind === 'budget_exhausted' && !apiError.retryable) {
       releaseComposer('budget_exhausted');
       showBanner({ kind: 'error', text });
@@ -987,9 +779,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     }
 
     releaseComposer(false);
-    // In a conversation somebody else owns, "start a fresh session" would leave it: the new session
-    // is this person's own and nobody else is in it. A turn in flight there is usually another
-    // member's, which ends by itself — so the remedy is to wait and retry, not to reset.
+    // In someone else's conversation, a fresh session would leave it; advise waiting instead.
     const member = Boolean(useChatStore.getState().conversations[conversationId]?.membership);
     showBanner({
       kind: 'error',
@@ -1016,10 +806,7 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
     // never came is not a document anybody has, and it leaves the pane now.
     if (draftSession) draftsEnded(draftSession);
 
-    // The client half of the turn's timing. It composes with the service's own turn span, which
-    // cannot see any of these three: when the chemist pressed Send, when the first byte reached
-    // this browser, and when the answer settled. Together they are what answers "is it the
-    // frontend or the backend?" — a question nothing in this app could contribute to before.
+    // Client-side turn timing (send, first byte, settled), to compare with the service's span.
     const settled = useChatStore
       .getState()
       .conversations[conversationId]?.messages.find((m) => m.id === messageId);
@@ -1030,9 +817,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
       totalMs: Date.now() - startedAt,
     });
 
-    // Dropping a malformed or unknown frame is right and is pinned by tests. Doing it silently is
-    // what made "one bad frame" and "this build cannot read anything a newer service sends" the
-    // same observation.
+    // Dropped frames are logged so "one bad frame" and "cannot read a newer service" are
+    // distinguishable.
     if (dropped.malformed > 0 || dropped.unknown > 0) {
       logger.warn('stream.frames_dropped', {
         malformed: dropped.malformed,
@@ -1043,69 +829,23 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
   }
 }
 
-/**
- * A turn detach recovery found *ended* rather than answered — its stored question says it failed,
- * was stopped, or was interrupted by the service restarting under it.
- */
+/** A turn detach recovery found ended rather than answered (failed, stopped or interrupted). */
 export interface TurnEnded {
   ended: UnansweredEnding;
 }
 
 /**
- * Read a detached turn's answer back from the transcript, or `null` when it never appears — or,
- * from a service that marks how a turn ended, `{ ended }` once its question says it never will.
+ * Read a detached turn's answer back from the transcript, or `null` when it never appears, or `{
+ * ended }` when its question says it never will. Bounded by the server's 600 s turn deadline (or
+ * `budgetMs`) and abandoned on Stop.
  *
- * The detached turn writes its exchange to `session_messages` at its true end, so the recovery
- * signal is the transcript's newest question-and-answer pair turning into this turn's. Bounded — the server's turn deadline is 600 s, and polling much past it would wait
- * on a turn that can no longer exist — and abandoned early if the user presses Stop, whose
- * `stop()` both cancels the server turn and flips this signal.
+ * Matched by turn identity (`correlation_id`) when the service stamps rows. Otherwise by position:
+ * the service writes a turn's exchange once, at the end, and runs one turn at a time, so this
+ * turn's pair is the last one once it differs from `heldAnswer` (the newest answer already held). A
+ * single anchor rather than a count, because local history may be trimmed.
  *
- * **By identity first.** A service that stamps each transcript row with the turn that stored it
- * (`TranscriptMessage.correlation_id`) lets this find the turn's answer by the `correlationId` its
- * own response header carried, wherever it sits and whatever its text — which is the only way to
- * see an answer that landed before the first read with nothing held, or one byte-identical to the
- * held answer. Everything below is the fallback for when that cannot be done: an older service
- * that sends no id, a row stored without one, or a turn whose header never arrived (`''`).
- *
- * Without a turn id, the question text is all there is to match on — but a chemist
- * retrying an identical failed question (the banner's own "Retry" refills the same text) makes
- * that text non-unique, and an answer bound to the wrong copy is this app's worst output: a
- * three-week-old "no alerts fired" presented as this turn's answer to a genotoxicity question.
- *
- * Two facts decide which copy is this turn's, and both are read off the transcript this loop
- * already fetches. The service writes a turn's exchange **once, when the answer exists**
- * (`api/runner._record_transcript`), and a session runs one turn at a time — so this turn's
- * question and answer are the *last* pair in the transcript, or the service has not written it yet
- * and nothing of this turn is there at all. `heldAnswer` is what tells those two apart: the newest
- * answer this client already holds, so an unchanged last pair is the one that was already there
- * and a changed one is this turn's.
- *
- * **It is one scalar rather than a count, and that is the whole point.** This used to skip
- * `priorOccurrences` matches while walking the transcript — a count taken over
- * `conversation.messages`, which is not the population being walked: `partialize` persists only the
- * newest `MAX_PERSISTED_MESSAGES` and `shedOldest` halves a conversation on a quota refusal, which
- * is precisely the reload path `resumeInterruptedTurn` exists for. Driven: a transcript holding the
- * question twice against a local list the trim had shortened undercounted by one, stopped at the
- * older copy, and bound *that* turn's answer into this turn's bubble. A single answer read from the
- * message next to this turn cannot come apart that way — every path that shortens a conversation
- * keeps its *tail*, so the turn's own neighbour survives whatever the head loses.
- *
- * **The cadence is backed off with jitter, and the reason is the trigger.** This loop starts on
- * any dropped turn stream, and the thing that drops every turn stream at once is a backend rolling
- * restart — so at the 200-user target every client with a turn in flight entered it in the same
- * second and, at the fixed 3 s interval this used to run at, produced 210 unpaginated
- * `GET /sessions/{id}/messages` each: ~16.7 requests a second of transcript reads, every one of
- * them `resolve_session`-gated and therefore a full session *rehydrate* on the pod that had just
- * restarted, for ten and a half minutes. The condition that starts this loop is backend distress
- * and what it did was add load to a distressed backend. `src/lib/backoff.ts` is the same helper
- * the job-stream client already used, and the same jitter is what desynchronises the herd; the
- * failure path uses it too, which is the other half — a poll that failed used to `continue`
- * straight into the next one at full speed.
- *
- * The wall clock stays the only bound: ~30 attempts fit inside it now instead of 210, and the
- * first is still within a few seconds, which is where the median detached answer lands. An attempt
- * cap on top would be a second number saying the same thing. `budgetMs` shortens it for a caller
- * that already knows the turn is over (`RELOAD_RECOVERY_MS`).
+ * Polling backs off with jitter (`src/lib/backoff.ts`) so clients recovering from a backend restart
+ * do not all poll in lockstep.
  */
 export async function recoverDetachedAnswer(
   sessionId: string,
@@ -1119,34 +859,21 @@ export async function recoverDetachedAnswer(
   const deadline = Date.now() + budgetMs;
   let attempt = 0;
   /**
-   * The answer this turn's own must differ from.
-   *
-   * `null` on the way in means this client cannot say what the session's newest answer is — the
-   * previous turn left none here, and the service may hold one it never saw — so the first read
-   * becomes the anchor and only an answer that appears *after* recovery started can be this turn's.
-   *
-   * **Two answers the text anchor cannot find**, and `tests/detachRecoveryLimits.test.ts` pins
-   * both: this turn's own answer when it landed before the first read (it becomes the anchor), and
-   * one byte-identical to the held answer. Turn identity finds both, so they are misses only
-   * against a service that sends no `correlation_id`. Accepting a matching question when nothing is
-   * held is *not* the fix for that service: a retry repeats its question, and that would bind the
-   * aborted turn's stored answer into this one.
+   * The answer this turn's own must differ from. `null` means unknown, so the first read becomes
+   * the anchor. Without turn ids, an answer that landed before the first read, or one identical to
+   * the held answer, cannot be found (`tests/detachRecoveryLimits.test.ts`).
    */
   let held = heldAnswer;
   while (Date.now() < deadline && !signal.aborted) {
     attempt += 1;
     await backoff(attempt, signal);
-    // Re-checked AFTER the wait, not only before it. At a fixed 3 s interval the two were the same
-    // question; a wait that can be 30 s long can start inside the deadline and end well outside it,
-    // and a poll issued then is asking about a turn the service's own 600 s wall clock has ended.
+    // Re-check after the wait: a long backoff can end past the deadline.
     if (signal.aborted || Date.now() >= deadline) return null;
     let transcript;
     try {
       transcript = await api.getMessages(sessionId, () => auth.getAccessToken());
     } catch (err) {
-      // The network that dropped the stream may still be flapping — keep trying, and leave a
-      // record. Recovery giving up after ten minutes of this used to look, from outside the
-      // browser, exactly like recovery never having been attempted.
+      // Keep trying through a flapping network, and log it.
       logger.debug('recovery.poll_failed', {
         kind: err instanceof ApiError ? err.kind : 'unknown',
       });
@@ -1154,16 +881,13 @@ export async function recoverDetachedAnswer(
     }
     const own = correlationId ? answerOfTurn(transcript, correlationId) : null;
     if (own !== null) return own;
-    // **An ending is an answer to the question this loop asks**, and the one a dead process gives.
-    // A turn whose service process died writes no answer, ever; its question is marked
-    // `interrupted` once its lease lapses, and this read is one of the things that notices. Asked
-    // only by identity: a question's text says nothing about which turn's ending it carries.
+    // A dead process writes no answer; its question is marked `interrupted`. Matched by identity
+    // only.
     const ended = correlationId ? endingOfTurn(transcript, correlationId) : null;
     if (ended !== null) return { ended };
     const newest = newestExchange(transcript);
     if (held === null) {
-      // The anchor this client could not supply, taken from the same population the search runs on.
-      // An empty transcript anchors on `''`, which is the honest reading: nothing was there.
+      // Anchor on the first read when the client had none; an empty transcript anchors on `''`.
       held = newest?.answer ?? '';
       continue;
     }
@@ -1178,10 +902,7 @@ export async function recoverDetachedAnswer(
 }
 
 /**
- * The answer the turn `correlationId` stored, or `null` when the transcript holds none stamped so.
- *
- * Newest first, and an empty one is skipped for the same reason `newestExchange` skips it: a turn
- * whose record is its work alone is not an answer anybody is waiting on.
+ * The answer the turn `correlationId` stored, or `null`. Newest first; empty answers are skipped.
  */
 function answerOfTurn(transcript: TranscriptMessage[], correlationId: string): string | null {
   for (let i = transcript.length - 1; i >= 0; i -= 1) {
@@ -1193,14 +914,9 @@ function answerOfTurn(transcript: TranscriptMessage[], correlationId: string): s
 }
 
 /**
- * The newest question-and-answer pair in a stored transcript, or `null` when it holds none.
- *
- * Searched from the end because that is where the newest turn is: the transcript is a conversation
- * in order, and a session runs one turn at a time, so nothing is written after the pair at the end
- * until the next turn finishes. An assistant entry with no text is skipped — a turn whose record is
- * its work alone is not an answer anybody is waiting on — and so is a stored `system` entry, by
- * looking back for a `user` role rather than for the entry immediately before. `turn` is the
- * answer's `correlation_id` as sent — a string, `null`, or absent from an older service.
+ * The newest question-and-answer pair in a transcript, or `null`. Searched from the end; empty
+ * assistant entries and `system` entries are skipped. `turn` is the answer's `correlation_id` as
+ * sent.
  */
 function newestExchange(
   transcript: TranscriptMessage[],
@@ -1219,16 +935,9 @@ function newestExchange(
 }
 
 /**
- * The newest answer this client already holds, as detach recovery's anchor.
- *
- * `''` when `messages` carries no turn at all, which for the two callers means this turn is the
- * conversation's first: there is no older copy of anything to confuse its answer with. `null` when
- * the newest turn left no answer here — an aborted or failed one, whose answer the service may
- * hold anyway (a detach whose recovery gave up is exactly that case), so an answer already in the
- * transcript might be *its* and recovery must wait for the transcript to move rather than adopt it.
- *
- * Only `finalText` counts. A partially streamed answer is a prefix of what the service stored, so
- * treating it as the anchor would make the previous turn's *whole* answer look like a new one.
+ * The newest answer this client holds, as detach recovery's anchor: `''` for a conversation's first
+ * turn, `null` when the newest turn left no answer here (the service may hold one). Only
+ * `finalText` counts; a partial stream is a prefix.
  */
 function newestHeldAnswer(messages: ChatMessage[]): string | null {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -1241,35 +950,13 @@ function newestHeldAnswer(messages: ChatMessage[]): string | null {
 }
 
 /**
- * Go and find the answer a reload interrupted.
+ * Find the answer a reload interrupted. A disconnect detaches rather than cancels, so the turn
+ * usually runs on. Scoped to the conversation on screen and its newest turn.
  *
- * **The turn was not cancelled — it was detached.** `partialize` rewrites a message still marked
- * `streaming` to `aborted`, on the correct reasoning that a *stream* cannot be resumed across a
- * reload, and `chatStore` carried the conclusion "there is no resume endpoint, so on reload it
- * would hang forever". That conclusion stopped being true at
- * `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`: a disconnect detaches, the service's own
- * pump runs the turn to completion, and `api/detach.py` says in as many words that "the client
- * recovers the answer from `GET /sessions/{id}/messages` on reconnect". This app already
- * implements exactly that — and only inside the tab that started the turn, which is the one tab a
- * reload destroys. So a chemist who reloaded during a ten-minute multi-tool turn was shown
- * "Interrupted by a page reload" over an answer that existed, and the transcript rehydrate could
- * not reach it either: that effect runs only for a conversation with **no local messages at all**.
- *
- * Scoped to the conversation on screen, and to its newest turn. Doing this for every persisted
- * conversation on boot would be one long poll per conversation for answers nobody is waiting for.
- *
- * **First it follows the turn live, because the turn is usually still running.** The page's own
- * unload sent a stop, and a service that understands `reason: 'unload'` holds that stop for a grace
- * window that this reattach (`GET /sessions/{id}/turn/stream`) cancels — so the reloaded page
- * renders the rest of the turn and its answer instead of polling for it (Chemclaw3_ui#131: a plain
- * unload stop killed the turn and the page then polled an empty transcript for 630 s). It follows
- * only *its own* turn: the watch response names the turn it is a view of, and in a shared
- * conversation the one running now may be somebody else's that started meanwhile.
- *
- * Then the transcript, bounded by what the follow learned. Another turn running in its place means
- * this one is over and its answer is written or never will be — a short read (`RELOAD_RECOVERY_MS`),
- * then an honest "could not be recovered". A 404 (no turn on the replica that answered — it may run
- * on another) or a follow that *dropped* mid-turn is the live path's case, and gets its whole poll.
+ * First follow the turn live via `GET /sessions/{id}/turn/stream`, which also cancels the deferred
+ * unload stop — but only if the running turn is this one. Then read the transcript: briefly
+ * (`RELOAD_RECOVERY_MS`) when another turn is running, or the full poll after a 404 or a dropped
+ * follow.
  */
 export function resumeInterruptedTurn(
   conversationId: string,
@@ -1291,17 +978,14 @@ export function resumeInterruptedTurn(
   // whose follow kept going, and a second reader of the same turn would be a second bubble writer.
   if (useChatStore.getState().streaming?.messageId === message.id) return undefined;
 
-  // What this conversation already held when the turn started, read the same way the live path
-  // reads it — a chemist who asks the same thing twice must not be handed the first answer for the
-  // second, and the local list this is read from may be a trim of the real one.
+  // What the conversation held when the turn started, so a repeated question does not get the
+  // earlier answer.
   const heldAnswer = newestHeldAnswer(conversation.messages.slice(0, index - 1));
 
   const abort = new AbortController();
   const messageId = message.id;
   const turnId = message.correlationId ?? '';
-  // Followed live only when it can be told apart from anybody else's turn (its id), when it is the
-  // conversation's newest turn (a running turn is the newest one), and when nothing else holds the
-  // app's one streaming slot.
+  // Follow live only when the turn is identifiable, is the newest, and the streaming slot is free.
   const newest = index === conversation.messages.length - 1;
   const followable = turnId !== '' && newest && useChatStore.getState().streaming === null;
   void (async () => {
@@ -1327,19 +1011,15 @@ export function resumeInterruptedTurn(
       const store = useChatStore.getState();
       const current = store.conversations[conversationId]?.messages.find((m) => m.id === messageId);
       if (!current || current.role !== 'assistant' || !current.interruptedByReload) return;
-      // Settled as the live path settles it, without the banner: nobody was waiting on this page.
+      // Settled as the live path does, without a banner.
       const error = endedError(recovered.ended);
       if (error) store.failTurn(conversationId, messageId, error);
       else store.finishTurn(conversationId, messageId, 'aborted');
       return;
     }
     if (recovered === null) {
-      // **Recovery ran its whole budget and found nothing, so stop asking.** `finishTurn` clears
-      // the flag on every turn that settles, but this exit settles nothing — and leaving the flag
-      // set is what made an unrecoverable turn re-run the full 630 s / 210-request poll on every
-      // single page load, for ever, behind a message the reader already sees as aborted. The
-      // ownership check below applies here too: a newer turn must not be marked. And it says so:
-      // "interrupted" reads as "may still come", which is no longer true.
+      // Recovery found nothing: clear the flag so later loads do not re-poll, only if no newer turn
+      // took its place.
       useChatStore.getState().giveUpOnInterruptedTurn(conversationId, messageId, RELOAD_LOST);
       return;
     }
@@ -1355,8 +1035,7 @@ export function resumeInterruptedTurn(
       unsupported_claims: [],
       review_required: false,
       verified_by: null,
-      // A recovered answer was never reviewed by a second pass — this is the transcript being
-      // rebuilt, not a fresh turn — so the pair is the service's own "nothing happened" values.
+      // A recovered answer had no second-pass review.
       challenged: false,
       review_hold_id: null,
       checks_run: [], // a transcript rebuilt locally had no gate run on it, which is what empty means
@@ -1365,25 +1044,15 @@ export function resumeInterruptedTurn(
     announceStatus(describeAnswer(recovered));
   })();
 
-  // The transcript poll belongs to the conversation on screen and stops with it. A live follow does
-  // not: it holds the streaming slot like any turn this tab sent, and runs on while the reader looks
-  // elsewhere, exactly as `sendMessage`'s does.
+  // The transcript poll stops with the conversation; a live follow runs on like any turn.
   return () => abort.abort();
 }
 
 /**
- * Follow a reload-interrupted turn to its end through `GET /sessions/{id}/turn/stream`.
- *
- * `'settled'` when the bubble is final — answered, failed with the turn's own error, or stopped
- * by the reader. `'gone'` when the running turn is not this page's: the response names another, or
- * (an older service) names none. `'dropped'` when the turn may still run somewhere — a 404, which
- * speaks only for the replica that answered, or a view that broke.
- *
- * While following it is this tab's turn in every way the app knows: it holds the streaming slot and
- * the composer lock, Stop stops it, and a further reload sends the same deferred unload stop
- * `sendMessage`'s `abandon` does. Tokens are not appended: the view starts at the moment of
- * reattaching and replays nothing, so appending would splice the tail onto the text this page
- * streamed before the reload with the middle missing — the `answer` at the end is the whole text.
+ * Follow a reload-interrupted turn through `GET /sessions/{id}/turn/stream`. `'settled'` when the
+ * bubble is final; `'gone'` when the running turn is not this one; `'dropped'` when it may still
+ * run elsewhere (404 or broken view). While following it holds the streaming slot and lock like any
+ * turn. Tokens are not appended (the view replays nothing); the final `answer` is the whole text.
  */
 async function followReloadedTurn(
   conversationId: string,
@@ -1489,13 +1158,8 @@ async function followReloadedTurn(
 }
 
 /**
- * Stop the in-flight turn.
- *
- * Two acts now, in order: `POST /sessions/{id}/turn/stop` cancels the turn on the server, and
- * aborting the fetch closes the local stream. The socket close alone used to be the whole stop —
- * the backend read any disconnect as cancellation — but a disconnect only *detaches* now
- * (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop), so without the explicit request the turn
- * would run on and the next message would 409 until it finished.
+ * Stop the in-flight turn: `POST /sessions/{id}/turn/stop`, then abort the local stream (a
+ * disconnect alone only detaches).
  */
 export function stopStreaming(): void {
   const { streaming } = useChatStore.getState();
@@ -1503,12 +1167,8 @@ export function stopStreaming(): void {
 }
 
 /**
- * Abandon the current server session and start a fresh one for the same conversation.
- *
- * The escape hatch from a stuck 409. The backend has a cancel endpoint now
- * (`stopStreaming` uses it), so this is for the narrower case it cannot reach: a turn wedged on
- * a *different* front-door replica, whose pump only that process can cancel. Marks the
- * conversation context-lost.
+ * Abandon the server session and start a fresh one for the same conversation — for a turn wedged on
+ * another replica that `stopStreaming` cannot reach. Marks the conversation context-lost.
  */
 export async function resetSession(conversationId: string, auth: AuthProvider): Promise<void> {
   const { session_id } = await api.createSession(auth, profileFor(conversationId));

@@ -1,16 +1,10 @@
 /**
- * The upstream route whitelist.
+ * The upstream route whitelist. The BFF never forwards `/api/*` wholesale: the service exposes
+ * routes the browser must not reach (`/metrics`, `/schedules`, ...), so an open proxy would widen
+ * any bug here to the whole backend.
  *
- * The BFF deliberately does NOT forward `/api/*` wildcard-style to the Chemclaw service. That
- * service sits on an internal network and exposes routes this UI has no business reaching
- * (`/metrics`, `/events/knowledge-merged`, `/schedules`), so an open proxy would widen the blast
- * radius of any bug in this process to the whole backend surface.
- *
- * Session ids are matched as exactly 32 lowercase hex chars (uuid4 hex, which is what
- * `POST /sessions` returns). That validation doubles as traversal protection: a path segment
- * that matches this pattern cannot contain `/`, `.` or an encoded escape.
- *
- * Route list verified against 8fqycwdt8v-oss/Chemclaw3 @ d5ed9e3 (service/app.py).
+ * Id patterns are per shape. Narrow ones (session ids are 32 lowercase hex) are also structural
+ * traversal protection; wide ones are checked by `isTraversal`.
  */
 
 import { CALC_ARTIFACT_REF } from '../shared/exhibitConstants.ts';
@@ -18,161 +12,62 @@ import { CALC_ARTIFACT_REF } from '../shared/exhibitConstants.ts';
 const SID = '([0-9a-f]{32})';
 
 /**
- * Knowledge-note ids.
- *
- * Wider than `SID` on purpose, and the reason is worth stating: a note id is `note-{slug}` where
- * the slug comes from whatever the note is about, and for a compound note that is a name the
- * *model* wrote. So unlike a session id — which the service mints as uuid4 hex — its characters
- * are not guaranteed. A pattern that only accepted `[A-Za-z0-9._:-]` would refuse any id the
- * model happened to write with a space, a slash, or a bracket: the citation would render and its
- * chip would 404 here, never reaching the service.
- *
- * The set is therefore exactly what `encodeURIComponent` can emit: its unreserved characters
- * `A-Za-z0-9-_.!~*'()` plus `%` for the escapes it produces. Note it does NOT escape `!~*'()`,
- * so `note-Pd(OAc)2` arrives literally — a pattern that merely added `%` would still have
- * refused that one. A test pins each case.
- *
- * Widening here is safe in a way it would not be for `SID`, and the reason used to be stated as a
- * property of this file when it was a property of somebody else's: the segment is forwarded
- * still-encoded, and a direct uvicorn + Starlette upstream decodes it into a path parameter that
- * `[^/]+` cannot span. That is true and it is **not local**. Driven through the real listener,
- * `GET /api/notes/..%2F..%2Fmetrics` resolved and was forwarded as `/notes/..%2F..%2Fmetrics`; any
- * hop that normalises before the service — an Envoy sidecar with
- * `path_with_escaped_slashes_action: UNESCAPE_AND_FORWARD`, some nginx-ingress configurations —
- * makes that a traversal, and this is the component everyone would believe had prevented it. So
- * `isTraversal` below decides it here instead. A *raw* `/` still fails to match the pattern,
- * because that would change the route's shape rather than its parameter. The closed character set
- * still holds.
- *
- * **The length cap is measured against the ENCODED segment, which is why 128 was too small.** The
- * paragraph above argues for a wide character class precisely so a model-written slug never 404s
- * here — and then capped it at a length a non-ASCII slug reaches three times faster, because
- * `encodeURIComponent` spends three characters per byte. Measured: `note-Löslichkeit-…` encodes to
- * 89 and passes, `note-ミトコンドリア酸化的リン酸化阻害剤` encodes to 158 and did not. Seventeen CJK
- * characters was enough, and `api.getNote` deliberately does not swallow a 404, so the citation
- * chip hard-errors. 512 keeps the cap doing its real job — bounding the URL — without contradicting
- * the character set beside it.
+ * Knowledge-note ids: `note-{slug}`, where the slug may be model-written, so the set is everything
+ * `encodeURIComponent` emits (including `!~*'()` and `%`). The segment is forwarded still-encoded;
+ * `isTraversal` refuses anything a normalising hop would decode into a traversal. The length cap
+ * applies to the encoded segment (non-ASCII costs three characters per byte), hence 512.
  */
 const NOTE = "([A-Za-z0-9._:~!*'()%-]{1,512})";
 
 /**
- * Durable job ids.
- *
- * Minted by the service and by Temporal rather than by the model, so unlike `NOTE` these are
- * not arbitrary in principle — but a connector job's id embeds a workflow id whose shape this
- * repo does not own, and pinning it to a guess is how a route spends a release 404-ing every id
- * with a bracket in it. Same closed set, same length cap, same argument: the segment is
- * forwarded still-encoded and the service uses it as a lookup key, never as a path.
+ * Durable job ids: may embed a Temporal workflow id this repo does not own, so `NOTE`'s set and
+ * cap. Used upstream as a lookup key, never a path.
  */
 const JOB = "([A-Za-z0-9._:~!*'()%-]{1,512})";
 
 /**
- * A held-open question's id.
- *
- * `JOB`'s shape, and for `JOB`'s reason rather than by copying it: the two producers mint it
- * differently — the agent tool uses `await-` plus a stable hash, while a BO campaign uses
- * `<parent workflow id>:await:<round>` so that round 4 is a different wait from round 3 — so the
- * set is as wide as a Temporal workflow id. Pinning it to either shape is how a route spends a
- * release 404-ing the other one. Same closed set, same length cap, same argument: the segment is
- * forwarded still-encoded and the service uses it as a lookup key, never as a path. The cap is
- * `NOTE`'s 512 for `NOTE`'s reason — `<workflow id>:await:<round>` costs three characters per
- * colon once encoded.
+ * A held-open question's id: `await-<hash>` or `<workflow id>:await:<round>`, so `JOB`'s set; cap
+ * as `NOTE`'s (colons triple when encoded).
  */
 const PENDING = "([A-Za-z0-9._:~!*'()%-]{1,512})";
 
-/**
- * A stored tool result's ref.
- *
- * Narrower than every other id here, and it can be: the service defines the ref as the SHA-256
- * hex digest of the result text, so 64 lowercase hex characters is the whole set — the same kind
- * of structural traversal protection `SID` gets, for the same reason.
- */
+/** A stored tool result's ref: a SHA-256 hex digest, 64 lowercase hex. */
 const RESULT_REF = '([0-9a-f]{64})';
 
 /**
- * An experiment design's id.
- *
- * As narrow as `SID` and `RESULT_REF`, and for the same reason: the service mints it as
- * `design-` plus twelve lowercase hex characters, so the whole set is known and a segment matching
- * it cannot contain `/`, `.` or an encoded escape. This is deliberately NOT the `NOTE`/`JOB`
- * treatment — those are wide because their ids embed something this repo does not own (a slug the
- * model wrote, a Temporal workflow id). A design id embeds nothing.
- *
- * The revision selectors (`?revision=`, `?from=`, `?to=`) are not matched here at all. This
- * resolver is handed the pathname alone — `server/app.ts` slices the query string off, forwards it
- * untouched and lets the service validate it — which is the same arrangement `GET /jobs` already
- * runs under. `src/api/client.ts` coerces each to an integer before it builds the URL, so a
- * non-integer is not a request this app can make.
+ * An experiment design id: `design-` plus twelve lowercase hex. Revision query parameters are
+ * forwarded untouched for the service to validate (the client sends integers).
  */
 const DESIGN = '(design-[0-9a-f]{12})';
 
 /**
- * A skill's name, which is also its directory and its store key.
- *
- * `NOTE`'s closed set, and for `NOTE`'s reason: the name is one this repo does not own, and the
- * service's rule for it is a *refusal list* rather than an alphabet. `local_skills.validated_skill`
- * refuses a `/`, a leading `.`, whitespace and non-printable characters, and nothing else — so
- * `löslichkeit-workup`, `pd(OAc)2-removal` and `_draft` are all names the service stores. An
- * ASCII-alphanumeric pattern 404'd every one of them here, for read, delete, versions, revert and
- * the proposal decision alike: a skill that acts on every turn could not be deleted from the UI.
- *
- * The set is what `encodeURIComponent` emits (`src/api/client.ts` encodes every name with it),
- * and `isTraversal` — run on every capture — is what refuses an encoded `/` or `\`, a bare `..`
- * and a malformed escape. The length cap is measured against the ENCODED segment, which is why it
- * is wider than `NOTE`'s: the service bounds a name in characters, and one character can cost
- * twelve here (four UTF-8 bytes, three per escape), so a name the service accepts in full reaches
- * past 512. The cap bounds the URL; it does not restate a number another repository owns.
+ * A skill name (also its store key). The service only refuses `/`, a leading `.`, whitespace and
+ * non-printables, so the set is `NOTE`'s; the encoded cap is wider because one character can cost
+ * twelve encoded.
  */
 const SKILL = "([A-Za-z0-9._:~!*'()%-]{1,1024})";
 
-/**
- * A ticket in a session's line: the service's `GENERATED ALWAYS AS IDENTITY` integer. Digits only,
- * bounded to what a Postgres `bigint` can hold, so nothing but a number reaches the upstream path.
- */
+/** A ticket in a session's line: a `bigint` identity, digits only. */
 const TICKET = '([0-9]{1,19})';
 
 /**
- * A session member's actor id — the Entra object id the owner names when admitting somebody.
- *
- * `NOTE`'s closed set and `NOTE`'s cap, for `NOTE`'s reason: this repo does not own the shape.
- * Under Entra it is the `oid` claim (a GUID), under dev auth it is `dev-user`, and the service's
- * own validation (`routes/members.py`'s `MemberId`) is `Path(min_length=1)` stripped and nothing
- * else — no alphabet at all. Pinning it to a GUID would 404 every dev principal and every tenant
- * whose identity provider mints something else, for the one act (`DELETE`, "leave") a member
- * needs most. `src/api/client.ts` encodes it with `encodeURIComponent`, so the set is what that
- * function emits; `isTraversal` below refuses an encoded `/`, `\`, a bare `.`/`..` and a malformed
- * escape on this capture as on every other.
+ * A session member's actor id (an Entra `oid`, `dev-user`, or anything the identity provider mints;
+ * the service validates nothing more than non-empty). `NOTE`'s set and cap; `isTraversal` applies.
  */
 const ACTOR = "([A-Za-z0-9._:~!*'()%-]{1,512})";
 
-/**
- * An artefact's id: `xb-` plus sixteen lowercase hex characters, minted at random by the service.
- *
- * As narrow as `DESIGN`, and for `DESIGN`'s reason: the whole set is known (`shared/exhibits.ts`'s
- * `EXHIBIT_ID_RE`), so a segment matching it cannot contain `/`, `.` or an escape, and it embeds
- * nothing the service did not mint. The code name is `exhibit` because the service's tree already
- * spends `artifact` on calculation by-products; a chemist only ever reads "Artefact".
- */
+/** An artefact id: `xb-` plus sixteen lowercase hex (`EXHIBIT_ID_RE` in `shared/exhibits.ts`). */
 const XID = '(xb-[0-9a-f]{16})';
 
 /**
- * What an artefact can be downloaded as from the service. A closed list rather than a pattern,
- * because it is one: the contract's export table names five formats (`xyz` arrived with the
- * `geometry` kind in wave 2, `html` with the `html` kind in wave 3) and the service 404s every
- * other one, so admitting a sixth here would forward a request with no answer. SDF and SVG are
- * made in the browser and never reach this route.
- *
- * `html` is safe to proxy on the app origin only because of how the service sends it —
- * `text/plain` and `Content-Disposition: attachment` (the frozen contract) — and because this
- * process replaces any upstream CSP and adds `nosniff` on every response (`proxy.ts`), so even a
- * mis-typed body could not render as a page here.
+ * Artefact export formats the service renders. SDF and SVG are made in the browser. `html` is safe
+ * to proxy because the service sends it as `text/plain` attachment and this process sets its own
+ * CSP and `nosniff` (`proxy.ts`).
  */
 const FMT = '(md|csv|smi|xyz|html)';
 
 /**
- * Whether a query string is exactly one `ref` that is a calc artifact reference — nothing else.
- * A second `ref`, an extra key or a malformed escape is refused, because each is a request this
- * app never makes and a forwarded one would be the service's to interpret.
+ * Whether a query is exactly one `ref` that is a calc artifact reference; anything else is refused.
  */
 function onlyCalcArtifactRef(search: string): boolean {
   // `CALC_ARTIFACT_REF` (in `shared/`, so the client checks a ref against it before it asks) is
@@ -191,9 +86,8 @@ function onlyCalcArtifactRef(search: string): boolean {
 }
 
 /**
- * Whether a query string is empty or exactly one `session_id` that is a session id — the one query
- * `GET /jobs/{id}` takes from this app. Same refusals as `onlyCalcArtifactRef`: a repeat, a second
- * key or a malformed escape is a request this app never makes.
+ * Whether a query is empty or exactly one valid `session_id` (what `GET /jobs/{id}` takes);
+ * anything else is refused.
  */
 function onlySessionId(search: string): boolean {
   if (search === '') return true;
@@ -227,19 +121,13 @@ export interface Route {
   /** True for the one route that carries a file, and so a much larger body cap than the rest. */
   upload?: boolean;
   /**
-   * What each capture group is called in the route's metrics/log template, in group order.
-   *
-   * Omitted for a route with one capture, which is labelled `{id}`. A route that captures twice
-   * names both, because two different things read as one in a log otherwise — and the upstream's
-   * own path template is the spelling to copy.
+   * Names for the capture groups in the route's metrics/log template, in order; omitted for one
+   * capture (`{id}`).
    */
   labels?: readonly string[];
   /**
-   * What the route's query string may hold, for the one route whose id travels there.
-   *
-   * Absent means the query is forwarded untouched and the service validates it — the arrangement
-   * every revision selector runs under. Present, the query is checked *here*, and a request whose
-   * query fails it is not whitelisted at all.
+   * A validator for the query string, for the routes whose id travels there; absent means the query
+   * is forwarded for the service to validate.
    */
   query?: (search: string) => boolean;
 }
@@ -250,9 +138,7 @@ export const ROUTES: readonly Route[] = [
 
   // Sessions.
   { method: 'POST', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false },
-  // The agent profiles `POST /sessions` will accept. Whitelisted because the alternative is a
-  // picker with hardcoded names: the service 400s an unknown profile, and the set is a
-  // deployment's own, so guessing is how the picker breaks in the tenant nobody tested in.
+  // The deployment's agent profiles, so the picker never hardcodes names.
   { method: 'GET', pattern: /^\/api\/profiles$/, target: () => '/profiles', sse: false },
   // Added by the companion backend change: list the caller's sessions.
   { method: 'GET', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false },
@@ -270,37 +156,28 @@ export const ROUTES: readonly Route[] = [
     target: (m) => `/sessions/${m[1]}/messages`,
     sse: true,
   },
-  // The chemist's own erasure of one conversation. Whitelisted because the alternative — what this
-  // app did before — is a "Delete conversation" that deletes it in this browser only, leaving the
-  // transcript, the checkpoints and the attachments on the service while telling somebody who
-  // deleted it *because* of what it held that it was gone.
+  // Delete one conversation on the service, not just in the browser.
   {
     method: 'DELETE',
     pattern: new RegExp(`^/api/sessions/${SID}$`),
     target: (m) => `/sessions/${m[1]}`,
     sse: false,
   },
-  // Branch a conversation from where it stands — "try a different direction from here without
-  // losing this thread". The service copies the whole thread and refuses (409) while a turn is in
-  // flight, so a fork is never a half-copied conversation.
+  // Branch a conversation; the service refuses (409) while a turn is in flight.
   {
     method: 'POST',
     pattern: new RegExp(`^/api/sessions/${SID}/fork$`),
     target: (m) => `/sessions/${m[1]}/fork`,
     sse: false,
   },
-  // The explicit stop. A disconnect only *detaches* from a running turn now
-  // (D-2026-08-27-a-disconnect-is-a-detach-not-a-stop in the backend), so pressing Stop is a
-  // request of its own rather than a closed socket.
+  // The explicit stop: a disconnect only detaches.
   {
     method: 'POST',
     pattern: new RegExp(`^/api/sessions/${SID}/turn/stop$`),
     target: (m) => `/sessions/${m[1]}/turn/stop`,
     sse: false,
   },
-  // Shared-session queueing (Chemclaw3 #499). A message sent while another participant's turn
-  // runs waits in the session's line; its sender (or the owner) withdraws it by ticket before it
-  // runs. The ticket is the service's identity column — a positive integer, nothing else.
+  // Withdraw a message queued in a shared session's line, by ticket.
   {
     method: 'DELETE',
     pattern: new RegExp(`^/api/sessions/${SID}/queue/${TICKET}$`),
@@ -308,18 +185,14 @@ export const ROUTES: readonly Route[] = [
     sse: false,
     labels: ['{id}', '{ticket}'],
   },
-  // The session's line, and whether a turn is running ahead of it. Read by an open shared
-  // conversation to learn that somebody else's turn has started (and ended), which is what decides
-  // when to follow it live and when to re-read the transcript (Chemclaw3_ui #130).
+  // The session's line and whether a turn is running, polled by an open shared conversation.
   {
     method: 'GET',
     pattern: new RegExp(`^/api/sessions/${SID}/queue$`),
     target: (m) => `/sessions/${m[1]}/queue`,
     sse: false,
   },
-  // A further view of the running turn. The app opens it after the service cut this browser's own
-  // view off for falling behind (`stream_lagged`): the turn ran on, and this is how to follow it
-  // again. An event stream, so it gets the turn stream's SSE handling.
+  // Reattach to a running turn after `stream_lagged`, or follow another member's; SSE.
   {
     method: 'GET',
     pattern: new RegExp(`^/api/sessions/${SID}/turn/stream$`),
@@ -341,11 +214,8 @@ export const ROUTES: readonly Route[] = [
     upload: true,
   },
 
-  // Shared sessions (Chemclaw3 #483, `D-2026-09-27-in-a-shared-session-the-sender-governs`).
-  //
-  // The sessions somebody else owns that the caller has been let into — the other half of
-  // `GET /sessions`, which lists only what the caller owns. No `{id}` segment, and `shared` can
-  // never match `SID`, so it cannot be mistaken for a session-scoped route.
+  // Shared sessions. Sessions others own that the caller was let into (`shared` cannot match
+  // `SID`).
   {
     method: 'GET',
     pattern: /^\/api\/sessions\/shared$/,
@@ -376,11 +246,7 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
-  // The untruncated text of one tool result.
-  //
-  // `ToolResultEvent.preview` is 200 characters and the service says it will stay that way; this
-  // is the other half of that split. Session-scoped upstream, so the ownership check the turn
-  // stream already passed covers it too — a ref from someone else's session finds nothing.
+  // The untruncated text of one tool result; session-scoped upstream.
   {
     method: 'GET',
     pattern: new RegExp(`^/api/sessions/${SID}/tool-results/${RESULT_REF}$`),
@@ -389,11 +255,8 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
-  // One knowledge note, with its provenance and its neighbourhood.
-  //
-  // Whitelisted so a `note-…` citation resolves to the note it cites instead of prefilling a
-  // question about it. `hops` rides through as a query parameter; the proxy forwards the query
-  // string, and the service clamps it.
+  // One knowledge note with provenance and neighbourhood; `hops` is forwarded and clamped by the
+  // service.
   {
     method: 'GET',
     pattern: new RegExp(`^/api/notes/${NOTE}$`),
@@ -401,10 +264,7 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
-  // The harness plan gate: read the plan awaiting a decision — with the hash that binds it — then
-  // answer it. Deliberately HTTP routes on the service and not agent tools: until they existed,
-  // the agent moved itself out of plan mode through MAF's own `mode_set` and the audit trail
-  // recorded that under the asking chemist's identity.
+  // The plan gate: read the plan awaiting a decision (with its hash), then answer it.
   {
     method: 'GET',
     pattern: new RegExp(`^/api/sessions/${SID}/plan$`),
@@ -418,21 +278,12 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
-  // Every plan of the caller's that nobody has decided yet, across conversations.
-  //
-  // The only plan route that is not session-scoped, because it is what answers "which session" —
-  // the decision card lives inside a turn, and a chemist who closed the tab has the id nowhere.
-  // The service scopes it to the caller through the same ownership registry `GET /sessions` reads.
+  // Every undecided plan of the caller's, across conversations (scoped to the caller upstream).
   { method: 'GET', pattern: /^\/api\/plans\/pending$/, target: () => '/plans/pending', sse: false },
 
-  // Questions the agent is holding a workflow open for, and the answer that releases one.
-  //
-  // **Not the `/approvals` shape that was deleted.** That mechanism had three consumers and no
-  // producer, and `tests/routes.test.ts` pins its three routes as deliberately *not* whitelisted so
-  // that re-adding a consumer without a producer fails loudly. This one has three live producers —
-  // the `request_external_input` agent tool, a BO campaign pausing for measured yields, and the
-  // connector-job path — and the service filters the listing to what the caller may actually
-  // answer, so a row that reaches the browser is one somebody can act on.
+  // Questions a workflow is holding open, and the answer that releases one. The service filters to
+  // what the caller may answer. (The old `/approvals` routes stay un-whitelisted;
+  // `tests/routes.test.ts` pins that.)
   { method: 'GET', pattern: /^\/api\/pending$/, target: () => '/pending', sse: false },
   {
     method: 'POST',
@@ -441,29 +292,17 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
-  // Standing-query findings. The read is the CONSUME — the service's mailbox claim marks every row
-  // it returns as read and never re-delivers it — which is why the client claims this once at boot
-  // straight into persisted state rather than polling it from a screen.
+  // Standing-query findings. Reading consumes them, so the client claims once at boot.
   { method: 'GET', pattern: /^\/api\/digests$/, target: () => '/digests', sse: false },
 
-  // The caller's own blocked work, as last night's check-in sweep left it. The same mailbox as
-  // `/digests` and the same destructive claim, which is why the client reads it once at boot into
-  // persisted state; a route of its own upstream because "somebody owes you an answer" and "the
-  // corpus learned something" are different things to tell a reader. It takes no id — the service
-  // derives the mailbox from the authenticated principal, exactly as `/digests` does, so there is
-  // no path segment here to get right.
+  // The caller's own blocked questions: same destructive mailbox as `/digests`, scoped to the
+  // principal.
   { method: 'GET', pattern: /^\/api\/check-ins$/, target: () => '/check-ins', sse: false },
 
-  // The durable-run registry.
-  //
-  // Job ids are minted by the service and by Temporal, so they are constrained like an approval
-  // id rather than like a session id. `DELETE` is the operator cancel, role-gated upstream; it is
-  // whitelisted here anyway, because hiding a control the caller is entitled to use is the
-  // frontend's job and refusing to proxy it would break the caller who *is* entitled.
+  // The durable-run registry. `DELETE` (cancel) is role-gated upstream; whitelisted because hiding
+  // the control is the frontend's job.
   { method: 'GET', pattern: /^\/api\/jobs$/, target: () => '/jobs', sse: false },
-  // `?session_id=` and nothing else (the artefacts contract's wave-2 amendment): naming the run's
-  // origin session is what keeps a report's `exhibit_id` in the answer, and a 32-hex value is the
-  // whole set of session ids, so the query is held to it here rather than forwarded open.
+  // Only `?session_id=` with a valid session id, which lets a report's `exhibit_id` come back.
   {
     method: 'GET',
     pattern: new RegExp(`^/api/jobs/${JOB}$`),
@@ -478,12 +317,8 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
-  // What is waiting on a person to decide about the agent's own behaviour, and the two stored
-  // skills tiers that decision writes into.
-  //
-  // The write half of `/skills/org` is role-gated upstream and is whitelisted here anyway, for the
-  // reason the jobs block above gives: hiding a control the caller is entitled to use is the
-  // frontend's job, and refusing to proxy it would break the caller who *is* entitled.
+  // Behaviour proposals and the two stored skill tiers. `/skills/org` writes are role-gated
+  // upstream; whitelisted for entitled callers.
   { method: 'GET', pattern: /^\/api\/proposals$/, target: () => '/proposals', sse: false },
   {
     method: 'POST',
@@ -535,15 +370,9 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
-  // Experiment protocols — the one document in this system a human edits rather than reads.
-  //
-  // Five routes and no more. There is deliberately no DELETE: a design is retired by moving its
-  // status to `abandoned`, which is a recorded act with an author and a reason, where a delete
-  // would take the revision history of a document somebody may have run with it.
-  //
-  // A new revision is POSTed to a *collection* rather than PUT to the design, because that is what
-  // it is: revisions accumulate, and the body names the `parent_revision` it was written against
-  // so the service can refuse a write built on a revision that is no longer the head.
+  // Experiment protocols — the one document a human edits. No DELETE: a design is retired by moving
+  // its status to `abandoned`. A new revision is POSTed with the `parent_revision` it was written
+  // against.
   { method: 'GET', pattern: /^\/api\/protocols$/, target: () => '/protocols', sse: false },
   {
     method: 'GET',
@@ -570,21 +399,15 @@ export const ROUTES: readonly Route[] = [
     sse: false,
   },
 
-  // Artefacts (`D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect` upstream) — the
-  // agent's working documents, shown beside the chat. Every route is session-scoped through the
-  // service's `resolve_owned_session`, owner or member, and a stranger gets the session gate's
-  // 404, so the ownership the turn stream already passed covers these too.
-  //
-  // There is deliberately no DELETE, for the protocols block's reason: revisions accumulate, and
-  // a new one is POSTed to the collection naming the `parent_revision` it was written against, so
-  // the service can refuse an edit built on a revision that is no longer the head.
+  // Artefacts: session-scoped upstream (owner or member). No DELETE; revisions are POSTed against a
+  // `parent_revision`.
   {
     method: 'GET',
     pattern: new RegExp(`^/api/sessions/${SID}/exhibits$`),
     target: (m) => `/sessions/${m[1]}/exhibits`,
     sse: false,
   },
-  // A chemist's own create — used to pin a tool result from the answer as a `result` artefact.
+  // A chemist's own create, e.g. pinning a tool result.
   {
     method: 'POST',
     pattern: new RegExp(`^/api/sessions/${SID}/exhibits$`),
@@ -619,10 +442,8 @@ export const ROUTES: readonly Route[] = [
     labels: ['{id}', '{xid}'],
     sse: false,
   },
-  // A file, not JSON: the service answers with its own `Content-Type` and a
-  // `Content-Disposition: attachment`, and both pass through `proxy.ts` untouched because neither
-  // is hop-by-hop nor one this process owns. Not `upload` — that flag widens the *request* body cap,
-  // and this request has no body.
+  // A file download: the service's `Content-Type` and `Content-Disposition` pass through. No
+  // request body, so not `upload`.
   {
     method: 'GET',
     pattern: new RegExp(`^/api/sessions/${SID}/exhibits/${XID}/export\\.${FMT}$`),
@@ -630,14 +451,10 @@ export const ROUTES: readonly Route[] = [
     labels: ['{id}', '{xid}', '{fmt}'],
     sse: false,
   },
-  // Every artefact of the caller's, across sessions (phase 3's "My artefacts"). Not session-scoped
-  // because it is what answers "which session" — the same argument `/plans/pending` makes — and
-  // the service scopes it to sessions the caller owns or is a member of.
+  // Every artefact of the caller's, across sessions they own or belong to.
   { method: 'GET', pattern: /^\/api\/exhibits$/, target: () => '/exhibits', sse: false },
-  // A calculation by-product's bytes (artefacts wave 2; the C4 story's byte route) — a geometry
-  // artefact that cites a calculation reads its XYZ here, and a `list_artifacts` row downloads
-  // through it. Any authenticated caller, as with notes and jobs: the calc cache is shared, not
-  // session-owned. A file, like the export above, so its type and disposition pass through.
+  // A calculation by-product's bytes (calc cache is shared, not session-owned); a file like the
+  // export above.
   {
     method: 'GET',
     pattern: /^\/api\/calc-artifacts\/content$/,
@@ -652,48 +469,24 @@ export interface ResolvedRoute {
   sse: boolean;
   upload: boolean;
   /**
-   * The route's SHAPE — `/sessions/{id}/messages` — rather than the path that matched it.
-   *
-   * What the access log and the metrics label a request with. The path itself carries a session
-   * id, a note id or a job id, so labelling with it would mint a fresh time series per
-   * conversation and turn a scrape into a memory leak; and a log grouped by path cannot answer
-   * "how many messages did we serve", which is the question being asked.
+   * The route's shape (`/sessions/{id}/messages`), used as the log/metrics label so ids never
+   * become series.
    */
   template: string;
 }
 
 /**
- * Placeholders standing in for a match's capture groups.
- *
- * The template is derived by calling the route's own `target` with these rather than being
- * declared a second time per route, because a second declaration is a thing that drifts: `target`
- * IS the route's shape, so a route that changes shape changes its label in the same edit. A route
- * that captures more than once says what each capture is (`Route.labels`) — positional defaults
- * labelled a proposal's kind and name as `{id}` and `{ref}`, a shape the service does not have.
+ * Placeholders for a match's capture groups, so the template is derived from the route's own
+ * `target` and cannot drift. Multi-capture routes name their groups (`Route.labels`).
  */
 function templateGroups(route: Route): RegExpMatchArray {
   return ['', ...(route.labels ?? ['{id}'])] as unknown as RegExpMatchArray;
 }
 
 /**
- * Whether a matched segment would traverse if the next hop decoded it — in which case this
- * resolver refuses it, whatever route matched.
- *
- * `NOTE`, `JOB`, `PENDING`, `SKILL` and `ACTOR` admit `.` and `%` deliberately — their ids embed a
- * model-written slug, a Temporal workflow id or a name a person chose — so `..%2F..%2Fmetrics` and `%2e%2e%2f%2e%2e%2fmetrics` both
- * match. Neither is a legitimate id, and neither costs anything to refuse. Decoding *once* is
- * what the next hop does, so it is what this asks about: a value that becomes a path separator or
- * a parent reference when decoded once is refused, and a malformed escape — which
- * `encodeURIComponent` cannot emit, so no client of this app produces one — is refused with it,
- * because what a normalising proxy does with `%zz` is its own business.
- *
- * A bare `.` (or `%2e`) is refused beside `..`: a normalising hop removes a current-directory
- * segment, so `/skills/org/./revert` would reach `/skills/org/revert` and `DELETE /skills/mine/.`
- * would reach `DELETE /skills/mine/` — routes other than the one the whitelist matched. No
- * legitimate id is a lone dot; the service refuses a leading `.` in a skill name outright.
- *
- * The narrow segments (`SID`, `RESULT_REF`, `DESIGN`, `XID`, `FMT`) cannot fail this and are checked anyway: a
- * rule applied to every capture is one nobody has to remember to apply to the next route.
+ * Whether a captured segment would traverse if the next hop decoded it once: a decoded `/` or `\`,
+ * `..`, a lone `.`, or a malformed escape. Applied to every capture, including narrow ones that
+ * cannot fail it.
  */
 function isTraversal(segment: string): boolean {
   let decoded: string;
@@ -706,10 +499,8 @@ function isTraversal(segment: string): boolean {
 }
 
 /**
- * Resolve a request to an upstream path, or `null` if it is not whitelisted.
- *
- * `search` is the raw query string (with or without its `?`), consulted only by a route that
- * declares `query`; every other route forwards it untouched, as before.
+ * Resolve a request to an upstream path, or `null` if not whitelisted. `search` is the raw query,
+ * checked only by routes that declare `query`.
  */
 export function resolveRoute(method: string, path: string, search = ''): ResolvedRoute | null {
   for (const route of ROUTES) {

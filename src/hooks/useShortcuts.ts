@@ -1,24 +1,9 @@
 /**
- * The keys a chemist who is here all day learns.
- *
- * There were two `onKeyDown` handlers in the whole app — Cmd/Ctrl+Enter to send, and Enter to
- * accept a structure — both bound to the control they act on. Nothing was bound at the app level,
- * so every navigation was a pointer trip: new conversation, find an old one, stop a turn that is
- * going the wrong way.
- *
- * Four rules this follows, and each of them is why some of the obvious bindings are missing:
- *
- *  - **Nothing fires while the reader is typing.** A chemist writing "N-Boc" would otherwise open
- *    a new conversation on the `n`. So every binding here carries a modifier, and every one is
- *    additionally suppressed inside a text control — belt and braces, because a browser or an
- *    extension can swallow a modifier and leave the bare key.
- *  - **Nothing shadows a browser binding a chemist relies on.** Ctrl/Cmd+F is find-in-page, and a
- *    lab notebook page is exactly where somebody uses it. The search box gets `/`-with-modifier
- *    rather than taking it.
- *  - **Escape is not bound here.** Radix owns it for every open sheet, dialog and menu, and a
- *    global handler would race them — the composer's Stop is a visible control and stays one.
- *  - **The list is discoverable or it does not exist.** `?` opens the sheet that names them, which
- *    is the only reason to believe anybody will find the rest.
+ * App-level keyboard shortcuts. Rules:
+ * - Every binding has a modifier and is suppressed inside text controls.
+ * - No browser binding a chemist relies on is shadowed (Ctrl/Cmd+F stays find-in-page).
+ * - Escape is not bound; Radix owns it for sheets, dialogs and menus.
+ * - `?` opens the sheet listing them all.
  */
 
 import { useEffect } from 'react';
@@ -60,15 +45,9 @@ export function useShortcuts(shortcuts: Shortcut[]): void {
       // letter and cannot be produced by ordinary prose keystrokes outside a text control — which
       // this still refuses to fire inside.
       if (inTextEntry(e.target)) return;
-      // **A window listener is not stopped by a focus trap**, so every one of these fired while a
-      // Radix Sheet or AlertDialog was open. Measured: with the protocol editor open and edits
-      // pending, Cmd+K created a conversation and navigated — unmounting the editor, taking the
-      // draft with it, and bypassing the unsaved-edit guard entirely, because an SPA navigation
-      // fires no `beforeunload` either.
-      //
-      // Radix sets `data-scroll-locked` on `<body>` for exactly the span a modal owns the screen,
-      // which is the cheapest reliable signal available here and the one that stays correct for a
-      // dialog this hook has never heard of.
+      // Skip while a modal is open: window listeners ignore focus traps, so a shortcut could
+      // navigate away and lose an editor's unsaved draft (SPA navigation fires no `beforeunload`).
+      // Radix sets `data-scroll-locked` on `<body>` exactly while a modal owns the screen.
       if (document.body.hasAttribute('data-scroll-locked')) return;
       const mod = e.metaKey || e.ctrlKey;
       for (const shortcut of shortcuts) {

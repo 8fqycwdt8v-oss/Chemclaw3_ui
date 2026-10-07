@@ -1,16 +1,8 @@
 /**
- * One conversation's artefacts, as every eager surface reads them.
+ * One conversation's artefacts, as every eager surface reads them (shell layout, top-bar toggle,
+ * cards rebuilt from a reloaded transcript), under one key (`keys.exhibits`).
  *
- * Eager rather than inside the lazy pane chunk, because three things outside the pane need the
- * list before anybody opens it: the shell decides whether the right column is the rail or the
- * pane, the top bar decides whether to offer the toggle, and an answer's card reads its title off
- * the list when it was rebuilt from a reloaded transcript. One key (`keys.exhibits`) is what makes
- * those three one request.
- *
- * Keyed on the conversation's *session*, which is what the service scopes artefacts to. A
- * conversation with no session yet has none, and nothing is asked — `warmSession` gives a fresh
- * conversation a session before its first message, and a list read for it would be a request that
- * can only answer "empty".
+ * Keyed on the session, which scopes artefacts upstream. No session means nothing is fetched.
  */
 
 import { useEffect, useState } from 'react';
@@ -27,11 +19,8 @@ export interface SessionExhibits {
   /** The deployment's switch. `false` until the list has answered, so nothing flashes on. */
   enabled: boolean;
   /**
-   * Whether there is a pane to show: artefacts on, **or** off with some already written (the
-   * contract's hardening item 6). Off is a switch on *making* artefacts — the agent's tools are
-   * unbound and a pin is refused — not a reason to hide what a conversation already holds, and
-   * "My artefacts" lists those and opens the pane on them, so a pane that refused to exist would
-   * make every such row a click that lands nowhere.
+   * Whether there is a pane to show: artefacts on, or off with some already written. Off stops
+   * making artefacts, not showing existing ones ("My artefacts" opens the pane on them).
    */
   visible: boolean;
   /** Off with artefacts in hand: the pane shows them, with no way to make, edit or hand one on. */
@@ -68,12 +57,8 @@ const wideNow = (): boolean =>
     : window.matchMedia(WIDE).matches;
 
 /**
- * Whether the screen holds the right column, followed live.
- *
- * The pane is a column at `lg` and a sheet below it, and — unlike the rail, which hides one copy
- * with CSS — those are two *different behaviours* (`useExhibitPane.sheetOpen`), so the decision
- * has to be one a component can read. An environment with no `matchMedia` (a test, an old WebView)
- * reads as wide, which is the layout every unit test of the pane was written against.
+ * Whether the screen holds the right column (`lg`), followed live. The pane is a column when wide
+ * and a sheet below, two behaviours, so a component must read it. No `matchMedia` reads as wide.
  */
 export function useWideScreen(): boolean {
   const [wide, setWide] = useState(wideNow);

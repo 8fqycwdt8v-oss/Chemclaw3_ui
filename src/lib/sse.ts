@@ -1,32 +1,14 @@
 /**
- * Decode a fetch `Response` body as Server-Sent Events, tolerating the three things that are not
- * actually errors: a frame with no `data`, a single malformed JSON frame, and an event type this
- * build does not know about.
+ * Decode a fetch `Response` body as SSE for both consumers (`streamTurn`, `useJobStreams`),
+ * tolerating frames with no `data`, malformed JSON and unknown event types. `eventsource-parser`
+ * handles framing; this adds decoding, JSON parsing and `normalizeEvent`.
  *
- * `eventsource-parser` already handles multi-line `data:`, comment frames, CRLF, and frames split
- * across TCP chunk boundaries — this only adds the decode pipe, the JSON parse, and the
- * `normalizeEvent` step on top, because both of this app's SSE consumers (`streamTurn`,
- * `useJobStreams`) needed exactly that sequence and had drifted into maintaining it twice.
- *
- * Every frame is yielded, including the ones that carried nothing actionable, because both callers
- * need to know that *a frame arrived at all*: `useJobStreams` resets its reconnect backoff on any
- * live frame, not only ones it acts on, and `streamTurn` re-arms its stall timer on one and counts
- * the unusable ones — one malformed frame is a blip, every frame malformed is a version skew, and
- * without the count those were the same observation. `frame.drop` says why there is no event and
- * `frame.raw` is the parsed payload, which `streamTurn` reads a `correlation_id` out of whether or
- * not this build knows the frame's type. A caller that only cares about real events does
- * `if (!frame.event) continue`.
- *
- * The BFF's heartbeat (`: hb`) is an SSE *comment* and never reaches this parser at all —
- * `EventSourceParserStream` surfaces comments only through an `onComment` callback, which is
- * deliberately not passed. So a heartbeat is not a frame here, which is what lets `streamTurn`
- * treat every frame it does see as evidence the service itself is still producing, rather than
- * evidence that this app's own proxy is.
- *
- * Retry policy, terminal-event handling and what counts as "done" are deliberately NOT here: they
- * differ enough between the two callers (one never retries and stops at the first `answer`; the
- * other retries forever and never stops on its own) that folding them in here would just move the
- * duplication rather than remove it.
+ * Every frame is yielded, even unusable ones, because callers need to know a frame arrived:
+ * `useJobStreams` resets backoff, and `streamTurn` re-arms its stall timer and counts malformed
+ * frames. `frame.drop` says why there is no event; `frame.raw` is the parsed payload. Callers
+ * wanting only events do `if (!frame.event) continue`. The BFF heartbeat (`: hb`) is an SSE comment
+ * and never surfaces here (no `onComment`), so any frame is evidence the service itself is
+ * producing. Retry and termination policy stay with the callers, which differ.
  */
 
 import { EventSourceParserStream } from 'eventsource-parser/stream';
@@ -40,8 +22,10 @@ export interface SseFrame {
   drop?: 'empty' | 'malformed' | 'unknown';
   /** The frame's JSON payload, when it parsed. Absent for an empty or malformed frame. */
   raw?: unknown;
-  /** The frame's name: the payload's own `type` when it has one, else the SSE `event:` field,
-   *  else `''`. Reported rather than guessed at, so a drop can be logged with what was dropped. */
+  /**
+   * The frame's name: the payload's `type`, else the SSE `event:` field, else `''`; kept so a drop
+   * can be logged.
+   */
   type: string;
 }
 

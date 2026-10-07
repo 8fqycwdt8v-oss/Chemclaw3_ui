@@ -1,23 +1,10 @@
 /**
- * Durable jobs that finished *outside* a turn.
+ * Durable jobs that finished outside a turn, pushed back over `GET /sessions/{id}/events`.
  *
- * A conformer search takes minutes to hours. It is launched inside one conversation turn, which ends long
- * before the cluster does, and the backend pushes the completion back over
- * `GET /sessions/{id}/events` whenever it lands.
- *
- * Which means the completion almost never arrives while the chemist is looking at the conversation
- * that launched it. So the feed is not scoped to the open conversation: cards from elsewhere say
- * where they came from and link back. `useJobStreams` watches several sessions to make that
- * possible.
- *
- * Rendered as its own band rather than as chat messages, deliberately. The transcript is what the
- * backend persisted for the conversation; these completions are not part of it, and injecting them
- * would make the visible history disagree with the durable one — the same reason the backend keeps
- * `session_events` and `session_messages` apart.
- *
- * Dismissal sets a flag rather than deleting. The feed survives a reload now, so an unguarded
- * click on a small control would otherwise permanently destroy the only copy — the backend's is
- * consumed by the time the card arrives.
+ * Not scoped to the open conversation: completions usually land elsewhere, so cards name their
+ * conversation and link back (`useJobStreams` watches several sessions). A separate band rather
+ * than chat messages, since these are not part of the persisted transcript. Dismissal sets a flag
+ * rather than deleting: the feed persists and this is the only copy.
  */
 
 import { useShallow } from 'zustand/react/shallow';
@@ -32,19 +19,9 @@ import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 /**
- * One title per conversation, which is all a card needs to name where its job came from.
- *
- * Exported, and that is the whole point of it being a named function rather than an inline arrow:
- * `tests/renderStorm.test.tsx` pins that a token flush does not change what this returns, and the
- * arm that used to retype the projection would have gone on passing over a selector widened back
- * to the whole map. Its two siblings there — `visibleConversationIds` and `watchedSessionKey` —
- * are imported for that reason; this one was the copy. The same file also scans this module for a
- * second whole-map read, which is what stops the extraction from being defeated by the component
- * simply not using it.
- *
- * Selecting the conversation map whole put this panel on the per-token render path, because
- * `updateAssistant` replaces that map on every animation-frame flush. A record of titles changes
- * when a conversation is named, which is once.
+ * One title per conversation, all a card needs. A narrow selector: the whole conversation map
+ * changes on every token flush, titles change once. Exported so `tests/renderStorm.test.tsx` can
+ * pin that.
  */
 export const jobFeedTitles = (s: {
   conversations: Record<string, { title: string }>;

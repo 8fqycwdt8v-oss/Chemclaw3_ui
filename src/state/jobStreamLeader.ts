@@ -1,178 +1,45 @@
 /**
  * One tab holds the job-completion streams; the others read what it saw.
  *
- * ## The problem this solves, and the one it must not create
+ * The backend caps live event streams per user per process and cannot see tabs, so two windows each
+ * holding their own streams exceed the cap. Rule: someone must always hold the streams — a lost
+ * notification is worse than watching fewer conversations.
  *
- * `service_max_event_streams_per_user` is **5**, enforced per principal per process, and it has no
- * idea what a tab is. `useJobStreams` budgets 3, which fits one tab and not two: a chemist with two
- * windows asks for six, the sixth 429s, and the contained degradation drops a tab to a single
- * stream for the life of the page. Nothing client-side could see the other tab's usage, because the
- * count lives in the pod's memory.
+ * **Election.** Every tab requests the same exclusive Web Lock (`LOCK`); the holder leads. The
+ * browser releases it when a tab closes, crashes or is killed, so takeover is immediate. A frozen
+ * or bfcached tab still holds it, so `pagehide`/`freeze` release and `pageshow`/`resume`
+ * re-request. A wedged-but-alive leader keeps the lock (accepted). Without `BroadcastChannel` or
+ * `navigator.locks` every tab leads, which is safe (429s are handled).
  *
- * `ISSUES.md` #6 filed this rather than half-building it, for a reason worth repeating at the top
- * of the file that finally builds it: **a botched election loses notifications, which is strictly
- * worse than watching fewer conversations.** A durable job runs for minutes to hours; its
- * completion arrives once, on a stream that must be open. So every decision below is made in favour
- * of *someone* holding the streams rather than in favour of never having two.
+ * **What is watched.** Each tab `declare`s its own priority list; the leader watches the
+ * round-robin merge (`mergeWatchSets`), capped at the account budget and rotated when starved. A
+ * follower's periodic message is its interest, expiring after `INTEREST_LEASE_MS`.
  *
- * ## What is elected, and how
- *
- * **A lock the browser holds, not a campaign this file runs.** Every tab asks for the same
- * `navigator.locks.request(LOCK, { mode: 'exclusive' }, …)` at startup; exactly one callback runs
- * and the rest sit in the browser's own queue. Leadership *is* holding that lock, so there is no
- * claim, no heartbeat, no lease, no id comparison and no watchdog for any of it.
- *
- * This file used to run all of that by hand — ~150 lines of `ELECTION_MS`/`HEARTBEAT_MS`/`LEASE_MS`
- * timers, a `claim`/`heartbeat`/`resign` protocol, and a convergence rule for the two leaders it
- * could not prevent. What replaced it costs **zero bytes** (Web Locks is baseline in every browser
- * this app targets) and is *stronger* rather than merely smaller, because the one thing a
- * lease-and-heartbeat design cannot do is notice that a tab has stopped existing:
- *
- *  - **Closed, crashed, or killed by the OS.** The lock is released by the browser when the
- *    context goes away, and the next tab in the queue is running before anything on this side
- *    could have measured a missed heartbeat. Takeover is immediate in all three, where the crash
- *    and kill cases used to cost a full `LEASE_MS` of silence — `beforeunload` is not a guarantee,
- *    which is exactly why the old design needed a lease *as well as* a `resign`.
- *  - **Frozen, or in the back/forward cache.** The one case the kernel does *not* cover: a frozen
- *    tab is alive and still holds its lock while reading nothing. So `pagehide` *and* `freeze`
- *    release it, and `pageshow` and `resume` ask again — two pairs rather than one, because they
- *    are different events for different states and neither implies the other: `pagehide` fires on
- *    unload and on the way into the back/forward cache, `freeze` fires on a tab the browser froze
- *    in place and does not fire `pagehide` for. Asking again re-queues the restored tab behind
- *    whoever took over meanwhile, which is the same handover as any other.
- *  - **Merely backgrounded.** Nothing happens, and that is the improvement. A throttled tab's
- *    timers are clamped but its streams are not, so the old lease expired against a leader that
- *    was still working and cost the account a takeover — a close and a reopen of every stream —
- *    for nothing. There is no lease to expire now.
- *
- * **Two leaders cannot happen**, which is a thing this file used to have to reason about rather
- * than assert: the old invariant was "two leaders converge to one within a heartbeat", because a
- * suspended tab waking up produced a second one by itself. Exclusivity is now the browser's, held
- * across tabs of the origin, so the convergence rule and the case it existed for are both gone.
- *
- * **No `BroadcastChannel`, or no `navigator.locks`** — an old browser, or a context that exposes
- * neither — makes every tab a leader. That is exactly the behaviour this app had before there was
- * an election at all, and it is safe: the 429 path handles it. A feature that degraded to "nobody
- * watches" would be the one unacceptable outcome, so "cannot coordinate" resolves to "watch my
- * own", never to "watch nothing". One branch covers both missing APIs, because a tab that cannot
- * take the lock and a tab that cannot hear its peers are the same tab as far as this file's one
- * safety rule is concerned.
- *
- * **What this gives up, stated rather than implied.** A heartbeat is evidence that a tab is
- * *running*; a held lock is only evidence that its context still exists. So a leader whose main
- * thread is wedged — an infinite loop, a pathological synchronous parse — keeps the lock and reads
- * nothing, where the old lease would have deposed it within 3 s. Every other way a tab stops
- * running ends in a released lock or in one of the two lifecycle events above. The trade was taken
- * knowing that, because the lease's own false positives were the commoner fault by a long way: it
- * could not tell a wedged tab from a merely throttled one either, and it deposed both.
- *
- * ## What is watched, which is not what the leader wants
- *
- * Electing a leader is only half a design, and the missing half loses notifications quietly enough
- * that it would have shipped. `watchedSessionKey` reads *this* tab's `conversations` and *this*
- * tab's `activeId`; neither is shared, because the store is hydrated per tab and an active
- * conversation is by definition per window. So a leader that simply held its own three streams
- * would leave the other window's conversation watched by nobody in the account — the exact loss
- * this file exists to prevent, arriving from the direction the election does not look in. Driven
- * before this existed: the account held one stream, for the leader's own session, and the
- * follower's conversation was watched by nothing.
- *
- * So every tab `declare`s what it wants and the leader watches the **merge**, round-robin by rank
- * (`mergeWatchSets`), capped at the account's budget rather than at any tab's — and rotated over
- * time once there are more interested tabs than the budget has room for, because rank 0 alone
- * leaves the tabs past position `budget - 1` watched by nobody in the account, deterministically
- * and for ever. A follower's periodic message *is* its interest — one message per second per role
- * — and an interest expires on `INTEREST_LEASE_MS`, which is deliberately far longer than the
- * leadership lease, so that a backgrounded window whose timers the browser has clamped to once a
- * minute keeps the slot it is the whole point of this feature to give it.
- *
- * ## What is relayed
- *
- * The leader `publish`es what its streams saw and the followers apply it. Two properties make that
- * sound rather than hopeful: the store's own handlers are idempotent (`pushJobFinished` keeps the
- * original item for a repeated `job_id`, `noteAwaiting` is keyed on `request_id`), so a note
- * delivered twice is not a second card; and the stream health goes over the same channel, because a
- * follower holds no streams and would otherwise show a chemist no warning while notifications were
- * in fact failing. A tab that joins later gets that health replayed in answer to its `hello`.
- *
- * **The gap during a takeover is a delay for every row nobody has claimed, and a loss for the one
- * already in flight.** The service writes job endings into `session_events` and a reader claims
- * them, so a row nobody has claimed is still there when the next stream opens: that is what makes a
- * takeover — and the rotation above — cost seconds rather than a notification.
- *
- * The claim is destructive, though, and it bounds the promise rather than fulfilling it. Upstream's
- * `claim_unconsumed` is one `UPDATE … FOR UPDATE SKIP LOCKED … RETURNING`, at-most-once by design,
- * with `restore_unconsumed` un-claiming only a row whose *yield* never completed — so a row already
- * written to the departing tab's socket is gone from the mailbox. A tab that dies between reading
- * that frame and `publish`ing it loses it for every window on the account, and no reconnect brings
- * it back from the stream. What a new leader *can* do is ask the run registry, which knows how a
- * run ended whether or not anyone was told: `src/state/jobReconcile.ts` does that on every takeover,
- * so the loss is of the frame, not of the fact — a chemist is told late rather than never. Only an
- * acknowledgement upstream would make the frame itself survive, and `ISSUES.md` Issue 12 records
- * both halves. This paragraph read "a delay, not a loss" flatly, which made the one case this file
- * could not cover the one case it claimed to.
+ * **What is relayed.** The leader `publish`es notes and stream health; store handlers are
+ * idempotent. A row nobody has claimed survives a takeover, but the service's claim is destructive,
+ * so a frame read by a tab that dies before relaying it is lost; `src/state/jobReconcile.ts`
+ * recovers the fact from the run registry on takeover (`ISSUES.md` Issue 12).
  */
 
 import type { AwaitingAnswerEvent, JobTerminalEvent } from '../../shared/events.ts';
 
-/**
- * The channel name. One per origin; the browser scopes it for us.
- *
- * Exported so `tests/jobStreamElection.test.ts` can script a peer tab on the same channel. It is
- * not an assertion target — nothing is checked against it — it is the address two tabs of this app
- * have to agree on, and a rename that moved both is a rename that changed nothing.
- */
+/** The channel name, one per origin. Exported so tests can script a peer tab. */
 export const CHANNEL = 'chemclaw.job-streams';
 
 /**
- * The Web Lock whose holder is the leader.
- *
- * A separate string from `CHANNEL` even though the two could share one: lock names and channel
- * names are different namespaces, and a reader who saw one constant used for both would have to
- * work out whether that was load-bearing. It is not, and this says so by not doing it.
- *
- * Exported so `tests/jobStreamElection.test.ts`'s lock stand-in can be driven on the same name
- * the shipped code asks for.
+ * The Web Lock whose holder leads. Separate from `CHANNEL` (different namespaces). Exported for
+ * tests.
  */
 export const LOCK = 'chemclaw.job-streams.leader';
 
-/**
- * How often a follower re-states what it wants watched.
- *
- * This is now the module's **only** timer, and it belongs entirely to the interest protocol — the
- * leadership half used to own three more (`ELECTION_MS`, `HEARTBEAT_MS`, `LEASE_MS`) and the
- * browser owns that now. A follower's periodic message *is* its interest, so one message per
- * second per tab carries both the keepalive and the thing the leader needs.
- */
+/** How often a follower re-states what it wants watched; the message is also its keepalive. */
 const ANNOUNCE_MS = 1_000;
 
 /**
- * Silence that means a tab has stopped wanting what it asked for.
- *
- * **This is the only lease left, and it survived the change that deleted the other one for a
- * reason worth keeping written down: the two expired against different clocks.** Leadership had to
- * expire when a tab's timers stopped, and that is exactly what made it the wrong tool — a merely
- * throttled leader is still reading its streams, so the lease was as likely to depose a working tab
- * as a dead one. The browser answers that question directly now. An interest is the opposite, and
- * cannot be delegated to anything: nothing but the tab itself knows what it wants. A backgrounded
- * window is precisely the one whose job notifications matter, and a browser clamps a hidden tab's
- * timers hard: ≥1 s everywhere, and Chrome's *intensive throttling* drops a hidden tab to **one
- * timer callback a minute** after about five minutes. A follower re-announces from the 1 Hz
- * watchdog, so at that clamp a three-second expiry means its interest is dead for 57 seconds of
- * every 60. Driven before this constant existed, with a peer announcing once a minute and the
- * leader sampled every 500 ms over three minutes: **342 of 360 samples had the follower's
- * conversation watched by nobody**, and every recovery cost a fresh connect, spent against the very
- * cap this file exists to respect.
- *
- * Five minutes, which is four missed announcements at the clamped rate and 300 at the unclamped
- * one. What it costs is a tab that died holding a slot for up to five minutes, and two things pay
- * for that: a tab that leaves *politely* says so on the way out (see
- * `onHide` and `close`, which announce an empty interest), and a stale slot no longer starves
- * anybody outright now that `mergeWatchSets` rotates — it wastes one of the account's streams for
- * one lease rather than making a live window dark for ever.
- *
- * Exported for the same reason as `ROTATION_MS`: a test that advances its own transcription of
- * this number goes green if the number changes underneath it.
+ * How long a tab's interest lasts without being restated. Long, because Chrome throttles hidden
+ * tabs to one timer a minute and a backgrounded window is exactly the one whose notifications
+ * matter. A tab leaving politely announces an empty interest; a dead tab's stale slot only wastes
+ * one stream until it expires (rotation prevents starvation). Exported for tests.
  */
 export const INTEREST_LEASE_MS = 5 * 60 * 1_000;
 
@@ -180,23 +47,13 @@ export const INTEREST_LEASE_MS = 5 * 60 * 1_000;
 export type Note =
   | { kind: 'job'; event: JobTerminalEvent; sessionId: string }
   | { kind: 'awaiting'; event: AwaitingAnswerEvent }
-  /** An artefact moved in a session this account watches — a colleague's revision or pin. Only the
-   *  session travels: the receiving tab refetches that session's list, and the header on the frame
-   *  is not something a follower needs to hold. */
+  /** An artefact moved in a watched session; the receiver refetches that session's list. */
   | { kind: 'exhibit'; sessionId: string }
   | { kind: 'health'; failing: readonly string[]; throttled: boolean };
 
 /**
- * What tabs say to each other. Three of the five members were the election and are gone;
- * `hello` is what took their one *other* job.
- *
- * A `claim` used to do two unrelated things — start a campaign, and make every other tab restate
- * itself so that a takeover inherited the account's whole watch set rather than rebuilding it a
- * tick at a time. The campaign is the browser's now; the restating still has to happen, and it has
- * to happen at both of the moments the old `claim` covered: a tab arriving (which needs the
- * current stream health, which only the leader has) and a tab *becoming* leader (which needs every
- * other tab's interest, which it has never heard — a leader announces nothing). `hello` is one
- * message for both, because both are the same request: tell me the picture I was not here for.
+ * What tabs say to each other. `hello` asks for the picture a tab missed: on arrival (the leader
+ * answers with stream health) and on becoming leader (followers answer with their interests).
  */
 type Message =
   | { type: 'hello'; from: string }
@@ -204,62 +61,18 @@ type Message =
   | { type: 'note'; from: string; note: Note };
 
 /**
- * How long one arrangement of the account's watch set stands before the merge rotates it.
- *
- * Only reached when there are more interested tabs than the budget has room for — see
- * `mergeWatchSets` — so in the ordinary one- and two-window case this constant changes nothing and
- * costs no connect. Past that it is the period at which a dark window becomes a watched one.
- *
- * A minute, from the two costs it sits between. Rotating faster spends connects against the very
- * per-principal cap this whole file exists to respect (each step closes one stream and opens
- * another). Rotating slower leaves a window dark for longer — and that wait is the *whole* cost,
- * because it is a delay rather than a loss: the service writes job endings into `session_events`
- * and a reader claims them, so the rows a window missed while it was dark are still there when its
- * turn comes round. That is the same property the takeover paragraph above rests on, used here for
- * the same reason. Against a durable run that takes minutes to hours, a minute of latency on its
- * completion card is not a failure a chemist can measure; being dark for ever is.
- *
- * Exported so `tests/jobStreamElection.test.ts` can advance a clock by it rather than transcribe
- * it — a test that hardcoded 60_000 would go quietly green if this were raised to an hour.
+ * How long one arrangement stands before the merge rotates, only when interested tabs outnumber the
+ * budget. Each step costs a connect; a dark window only waits, since unclaimed rows persist.
+ * Exported for tests.
  */
 export const ROTATION_MS = 60_000;
 
 /**
- * The account's watch set, out of what each tab asked for.
- *
- * **Round-robin by rank, not concatenation**, and that is most of it. Every tab's list arrives
- * already in its own priority order (its active conversation first — see `watchedSessionKey`), so
- * taking rank 0 from every tab before rank 1 from any of them gives each window the conversation
- * it is actually looking at, for as many windows as the budget has room for. Concatenating would
- * spend the entire budget on the leader's own list and leave every other window watching nothing,
- * which is the failure this whole file exists to prevent, arriving from the other direction.
- *
- * **And rank 0 is not enough on its own, which is what `turn` is for.** Round-robin by rank is
- * round-robin *within one merge*; with more interested tabs than the budget, the tabs past
- * rank-0 position `budget - 1` appear at no rank at all, and since the peer order is a sort on a
- * stable random id, it is the *same* tabs every time, for the life of the page. Driven at budget 3
- * with six interested tabs, the same three sessions came back at t=0.5 s and at t=6 min and the
- * other three were watched by nobody in the account — which is precisely the "nobody watches"
- * outcome the module docstring names as the one unacceptable one, and it is worse than what this
- * file replaced (a fourth window used to 429 and still watch its own conversation). So when the
- * interested tabs outnumber the budget the whole order is rotated by `turn`, and every window's
- * first choice is watched for its share of the time instead of never.
- *
- * **Only then.** Where everybody's first choice fits, `turn` changes nothing: rotating a set that
- * is not starved would move sessions in and out of the watch set — a connect and a disconnect per
- * step — to fix a starvation that is not happening. Two windows at a budget of three keep exactly
- * the set they had before this parameter existed.
- *
- * `mine` goes first at each rank (at `turn` 0, and at every `turn` while nothing is starved) so the
- * tab holding the streams breaks its own ties, which makes the result a function of the inputs
- * rather than of message arrival order.
- *
- * An empty list is a tab that wants nothing — a window with no conversation yet, or one that said
- * so on its way out. It contributes at no rank, so it is dropped before the rotation rather than
- * being given a step of its own.
- *
- * Exported for `tests/jobStreamElection.test.ts`, which drives the ordering directly: the wiring
- * tests can only see the first three of a six-way merge.
+ * The account's watch set from each tab's priority list. Round-robin by rank, so every window's
+ * first choice is watched before anyone's second. When tabs' first choices outnumber the budget,
+ * the order rotates by `turn` so each is watched for a share of the time; otherwise `turn` changes
+ * nothing. `mine` goes first at each rank for determinism; empty lists are dropped. Exported for
+ * tests.
  */
 export function mergeWatchSets(
   mine: readonly string[],
@@ -292,16 +105,11 @@ export interface StreamLeader {
   /** Does this tab hold the streams? */
   isLeader(): boolean;
   /**
-   * What this tab wants watched, in its own priority order, and how many the account may hold.
-   *
-   * Told to every tab rather than only to the leader, because the leader can change without any
-   * tab's interest changing, and a takeover that had to ask would watch nothing until it did.
+   * What this tab wants watched, in priority order, and the account budget. Told to every tab, so a
+   * takeover already knows.
    */
   declare(sessions: readonly string[], budget: number): void;
-  /**
-   * What this tab must actually open. Empty for a follower; for a leader, the merge of every live
-   * tab's `declare`, capped at the leader's own budget.
-   */
+  /** What this tab must open: empty for a follower; the capped merge for the leader. */
   watched(): readonly string[];
   /** Called whenever either answer changes, so a React hook can re-render. Returns an
    *  unsubscribe. */
@@ -309,25 +117,14 @@ export interface StreamLeader {
   /** Apply a note here and send it to the other tabs. Only the leader has anything to publish. */
   publish(note: Note): void;
   /**
-   * Leave.
-   *
-   * `announce: false` is how a tab that **died** is driven — nothing said on the channel, nothing
-   * cleaned up on the other side, which is the case `pagehide` cannot cover. The Web Lock is still
-   * released, because that is the browser's doing rather than the tab's and a crash releases it:
-   * withholding it would model a crash no browser produces. It is not a production path and says
-   * so; `close()` with no argument is.
+   * Leave. `announce: false` simulates a crash for tests (nothing sent, lock still released by the
+   * "browser"); production calls `close()`.
    */
   close(options?: { announce?: boolean }): void;
 }
 
 /**
- * A short, unguessable id for this tab.
- *
- * It no longer decides anything — id comparison was how the old campaign broke a tie and how two
- * leaders picked which one stepped down, and the browser does both now. What is left is identity:
- * it keys this tab's row in the leader's interest map, it is how a tab ignores its own broadcasts,
- * and it breaks ties in `mergeWatchSets` so the merged set is a function of its inputs rather than
- * of message arrival order.
+ * A short random id for this tab: keys its interest, filters its own broadcasts, breaks merge ties.
  */
 function mintId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -342,9 +139,8 @@ function isMessage(data: unknown): data is Message {
   const { type, from } = data as { type?: unknown; from?: unknown };
   if (typeof from !== 'string') return false;
   if (type === 'interest') {
-    // The one payload a tab acts on structurally — it decides which streams get opened — so the
-    // array is checked rather than trusted. A note is handed to the caller as-is, because the only
-    // sender is another copy of this app and the store's own handlers already normalise.
+    // `sessions` decides which streams open, so it is validated; notes are passed as-is (sender is
+    // this app, handlers normalise).
     const { sessions } = data as { sessions?: unknown };
     return Array.isArray(sessions) && sessions.every((s) => typeof s === 'string');
   }
@@ -352,12 +148,8 @@ function isMessage(data: unknown): data is Message {
 }
 
 /**
- * Join the election.
- *
- * `deliver` is what a note *means*, and it is the caller's because this module owns the election
- * and the channel and nothing about the store. It is called for the leader's own notes too, so
- * there is exactly one path from "a frame arrived" to "the store changed" and a follower cannot
- * diverge from a leader by construction.
+ * Join the election. `deliver` applies a note to the store; it runs for the leader's own notes too,
+ * so leader and followers share one path.
  */
 export function createStreamLeader(deliver: (note: Note) => void): StreamLeader {
   const id = mintId();
@@ -375,17 +167,9 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
 
   const channel = openChannel();
   const locks = lockManager();
-  // No channel or no lock manager, no election: every tab leads, which is what this app did before
-  // there was an election at all. Said in the module docstring and worth the explicit branch here,
-  // because the alternative — treating "cannot coordinate" as "must not watch" — would turn a
-  // missing browser API into silence about a job a chemist is waiting on.
-  //
-  // One branch for both, rather than a half-coordinated third mode: a tab that can hear its peers
-  // but cannot take the lock would have to *agree* with them about who leads, which is the hand-run
-  // election this change deletes. And the third mode would be worse than useless — every tab
-  // leading while also merging every other tab's interest means every tab opens the same set, which
-  // spends the account's whole budget several times over against the very cap this file exists to
-  // respect.
+  // No channel or no lock manager: every tab leads and watches only its own (never "watch
+  // nothing"). One branch for both, since a half-coordinated mode would either need a hand-run
+  // election or open the same streams in every tab.
   if (!channel || !locks) {
     return {
       id,
@@ -395,9 +179,7 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
         budget = nextBudget;
         notify();
       },
-      // Its own, capped by its own budget. There are no peers to merge, which is the same answer
-      // `mergeWatchSets` gives for an empty peer list — written through it anyway, so a tab with no
-      // `BroadcastChannel` and a tab that is simply alone cannot drift apart.
+      // Through `mergeWatchSets` so a lone tab and one without a channel cannot drift apart.
       watched: () => mergeWatchSets(mine, [], budget),
       subscribe: (listener) => {
         listeners.add(listener);
@@ -409,30 +191,16 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   }
 
   /**
-   * How this tab gives the lock back, or `null` when it does not hold it.
-   *
-   * Resolving the promise the lock callback returned is the *only* way to release a Web Lock —
-   * there is no handle to call `release()` on — so the resolver is kept here and calling it is
-   * what standing down means. The browser calls it for us when the context dies, which is the
-   * whole reason the lease is gone.
+   * Releases the lock (resolving the promise the lock callback returned is the only way), or `null`
+   * when not held.
    */
   let release: (() => void) | null = null;
   /** Is a `locks.request` queued or running? Stops `pageshow` queueing a second one behind the
    *  first, which would leave this tab holding the lock twice and releasing it once. */
   let requested = false;
   /**
-   * What the other tabs asked for, and when they last said so.
-   *
-   * Expiry is `INTEREST_LEASE_MS` — see that constant for the measurement, and for why it did not
-   * go the way the leadership lease did. Without any expiry a crashed tab's interest would outlive
-   * the tab: the leader holding a stream for a window nobody is looking at, inside a budget of
-   * three.
-   *
-   * A follower that *closes* does not wait it out. There is still no `leave` message, because the
-   * message that says a tab wants nothing is the one that already says what a tab wants: an
-   * `interest` carrying no sessions, which replaces what that tab asked for before and so frees
-   * its slot on the next rebuild. That is what makes a five-minute expiry affordable — the expiry
-   * now covers only the tab that *cannot* speak, which is the case it was always for.
+   * Other tabs' interests and when they last said so; expired after `INTEREST_LEASE_MS`. A closing
+   * follower sends an empty interest, freeing its slot at once.
    */
   const asked = new Map<string, { sessions: readonly string[]; at: number }>();
   let watched: readonly string[] = [];
@@ -448,9 +216,8 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
       const peers = [...asked.entries()]
         .sort(([a], [b]) => (a < b ? -1 : 1))
         .map(([, interest]) => interest.sessions);
-      // The rotation step comes off the clock rather than off a counter, so it advances once a
-      // minute however often `rebuild` runs — it runs on every watchdog tick and on every interest
-      // message, and a per-call counter would rotate the account's streams several times a second.
+      // Rotation step from the clock, so it advances once per `ROTATION_MS` however often `rebuild`
+      // runs.
       next = mergeWatchSets(mine, peers, budget, Math.floor(now() / ROTATION_MS));
     }
     if (next.length === watched.length && next.every((s, i) => s === watched[i])) return false;
@@ -477,12 +244,8 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
   };
 
   /**
-   * Queue for the streams, and hold them until this tab gives them back.
-   *
-   * The callback runs when the lock is granted and the lock is held for as long as the promise it
-   * returns is pending — so the promise is one this tab resolves, and resolving it is the handover.
-   * Every tab calls this once at startup; the followers are simply the ones whose callback has not
-   * run yet, which is why there is nothing here that looks like waiting.
+   * Queue for the lock and hold it until this tab resolves the returned promise. Followers are tabs
+   * whose callback has not run yet.
    */
   const takeTheStreams = (): void => {
     if (closed || requested) return;
@@ -496,17 +259,12 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
           }
           release = resolve;
           setLeader(true);
-          // A leader announces nothing, so this tab has never heard what the others want. Ask, at
-          // once rather than on the next tick: a takeover that waited would watch only its own
-          // conversation for a second, which for the window that just lost its leader is the exact
-          // gap this file exists to close.
+          // A new leader has never heard the others' interests: ask now, not on the next tick.
           send({ type: 'hello', from: id });
         });
       })
       .catch(() => {
-        // The request itself failed — a partitioned context, a manager going away under us. Lead
-        // anyway, on the module's one safety rule: someone holding the streams beats nobody, and
-        // the 429 path contains the cost of being one of two.
+        // The lock request failed: lead anyway (someone holding the streams beats nobody).
         if (!closed) setLeader(true);
       })
       .finally(() => {
@@ -528,9 +286,8 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
 
     switch (message.type) {
       case 'hello':
-        // Symmetric by role, because the two things a tab can be missing are held by different
-        // tabs: the leader has the stream health nobody else can observe, and the followers have
-        // the interests the leader has never been told. Each answers with the half it owns.
+        // Each role answers with the half it owns: the leader with stream health, followers with
+        // interests.
         if (leader) {
           if (health) send({ type: 'note', from: id, note: health });
         } else {
@@ -538,12 +295,8 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
         }
         break;
       case 'interest':
-        // An interest carrying nothing is a tab saying it wants nothing — a window with no
-        // conversation yet, or one on its way out — and it is stored as one rather than special-
-        // cased, because what makes it free the slot is that it *replaces* what that tab asked for
-        // before. `mergeWatchSets` drops an empty list, so a deletion here would be a second
-        // mechanism for an effect that already has one, indistinguishable from this in every
-        // observable way: driven both ways, the same tests pass.
+        // An empty interest replaces the tab's previous one, which frees its slot (`mergeWatchSets`
+        // drops empty lists).
         asked.set(message.from, { sessions: message.sessions, at: now() });
         if (leader && rebuild()) notify();
         break;
@@ -553,8 +306,7 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
     }
   });
 
-  // One timer for the life of the tab. It used to carry the lease check as well; what is left is
-  // only the interest protocol, on each side of it.
+  // The module's one timer: the interest protocol.
   const watchdog = setInterval(() => {
     if (closed) return;
     if (leader) {
@@ -568,40 +320,27 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
     announce();
   }, ANNOUNCE_MS);
 
-  // `pagehide` rather than `beforeunload`: it fires on mobile Safari's app switch and on the way
-  // into the back/forward cache, both of which are exactly the "this tab is going away" this needs
-  // — and `beforeunload` is documented as unreliable on all of them.
-  //
-  // A leader **must** release here, and this is the one case the browser does not cover for us. A
-  // frozen or bfcached tab has not gone away: it is alive, it still holds the lock, and it is
-  // reading nothing. Left alone it would be a leader nobody can depose, which is the failure the
-  // old lease existed to prevent — so the lease is not gone so much as narrowed to the single
-  // event that actually signals it.
+  // `pagehide` rather than `beforeunload` (fires on mobile app switch and bfcache entry). A leader
+  // must release here: a frozen tab keeps the lock while reading nothing.
   const onHide = (): void => {
     if (leader) standDown();
     // A follower has nothing to release and, since `INTEREST_LEASE_MS` is five minutes, everything
     // to say: without this its slot is held for a window that is gone.
     else send({ type: 'interest', from: id, sessions: [] });
   };
-  // And the other half: a tab restored from the cache asks again, joining the back of whatever
-  // queue formed while it was frozen. Without this, releasing on `pagehide` would mean a restored
-  // tab could never lead again — strictly worse than the lease it replaces.
+  // A tab restored from the cache re-joins the lock queue.
   const onShow = (): void => {
     if (!closed && !leader) takeTheStreams();
   };
   if (typeof addEventListener === 'function') {
-    // Two pairs, because they are different states: `pagehide`/`pageshow` is unload and the
-    // back/forward cache, `freeze`/`resume` is a tab the browser froze in place — which does not
-    // fire `pagehide`, and which is therefore the case a one-pair version would leave holding a
-    // lock nobody can take.
+    // Two pairs: `pagehide`/`pageshow` (unload, bfcache) and `freeze`/`resume` (frozen in place, no
+    // `pagehide`).
     for (const event of ['pagehide', 'freeze']) addEventListener(event, onHide);
     for (const event of ['pageshow', 'resume']) addEventListener(event, onShow);
   }
 
   takeTheStreams();
-  // Pull whatever this tab was not here for. A leader answers with the stream health it is the
-  // only tab able to observe; if this tab is itself about to win the lock, its own `hello` on the
-  // way in is a no-op that costs one same-origin message.
+  // Ask for what this tab missed; the leader answers with stream health.
   send({ type: 'hello', from: id });
 
   return {
@@ -635,9 +374,7 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
       if (closed) return;
       closed = true;
       if (options?.announce !== false) {
-        // A follower says its slot is free; a leader has nothing to *say*, because giving the lock
-        // back is the message. That asymmetry is new: `resign` used to exist only because a
-        // departure had to be announced or waited out, and the browser announces this one.
+        // A follower frees its slot; a leader's release is the announcement.
         if (!leader) send({ type: 'interest', from: id, sessions: [] });
       }
       clearInterval(watchdog);
@@ -645,14 +382,9 @@ export function createStreamLeader(deliver: (note: Note) => void): StreamLeader 
         for (const event of ['pagehide', 'freeze']) removeEventListener(event, onHide);
         for (const event of ['pageshow', 'resume']) removeEventListener(event, onShow);
       }
-      // A crashed tab is modelled by leaving the channel *open* and silent, because that is what a
-      // crash looks like from the other side: the port is gone with the process, and nothing is
-      // ever sent again. Closing it here would be tidier and would model nothing.
+      // A simulated crash leaves the channel open and silent.
       if (options?.announce !== false) channel.close();
-      // The lock is released either way, and that is not the announcement half leaking into the
-      // silent one — it is the browser's job, and the browser does it for a tab that crashes. A
-      // `close({ announce: false })` that kept the lock would model a crash no browser produces:
-      // one where the dead tab's lock outlives it and no other tab can ever lead.
+      // The lock is released either way, as the browser does for a crashed tab.
       standDown();
     },
   };
@@ -669,14 +401,7 @@ function openChannel(): BroadcastChannel | null {
   }
 }
 
-/**
- * `navigator.locks`, or `null` where there is none.
- *
- * Read through `typeof` and a null check rather than `'locks' in navigator`, because the property
- * exists and is `null` in at least one environment this repository runs in (happy-dom), and `in`
- * would hand a `null` to `.request` at the first handover instead of taking the fallback the module
- * docstring promises.
- */
+/** `navigator.locks`, or `null`. Checked by value, not `in`: happy-dom defines it as `null`. */
 function lockManager(): LockManager | null {
   if (typeof navigator === 'undefined') return null;
   const manager = (navigator as Navigator & { locks?: LockManager | null }).locks;

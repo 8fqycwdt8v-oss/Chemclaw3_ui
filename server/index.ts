@@ -1,10 +1,7 @@
 /**
- * The BFF's entry point: validate the configuration, then serve.
- *
- * Everything this process actually *does* lives in `app.ts`, which builds the server without
- * starting it — that is what makes the request handling and its socket limits testable against
- * real sockets instead of only measurable by hand. What is left here is the process lifecycle:
- * refusing to start, starting, saying so, and stopping in a way a load balancer can follow.
+ * The BFF's entry point: validate the configuration, then serve. Request handling lives in
+ * `app.ts`; this is the process lifecycle — refuse to start, start, log, and shut down so a load
+ * balancer can follow.
  */
 
 import { cfg, isLoopbackHost, validateConfig } from './config.ts';
@@ -12,32 +9,15 @@ import { createBffServer, createSandboxServer } from './app.ts';
 import { log } from './log.ts';
 import { beginDraining } from './ready.ts';
 
-/**
- * Report a fatal condition in the shape everything else here writes, then stop.
- *
- * Every one of the three callers below existed as an *unhandled* condition first, and each printed
- * a raw V8 stack to stderr — twenty-odd lines a JSON log stack parses as twenty-odd unstructured
- * records, so `logger=chemclaw3-ui level=ERROR` found nothing at all about the one event that
- * stopped the pod from serving. The exit code is 1 in every case, which is what Node already did:
- * the record is the change, not the lifecycle.
- */
+/** Log a fatal condition as a structured JSON line, then exit 1. */
 function die(message: string, fields: Record<string, unknown>): never {
   log.error(message, fields);
   process.exit(1);
 }
 
 /**
- * A rejected promise nobody caught, and an exception nobody caught.
- *
- * Installed before anything can throw. Node 22 already treats both as fatal, so these handlers do
- * not keep a process alive that has lost an invariant — resuming after `uncaughtException` is
- * unsafe and the documentation says so. What they add is the record: the same JSON line as every
- * other error this process writes, carrying the message and the stack as *fields* rather than as
- * loose text, so the failure is findable by the same query that finds an upstream error.
- *
- * The two `void`ed promises in the request listener used to be the realistic producer of the first
- * one; they have `.catch()` handlers now (`app.ts::failRequest`), so this is a net rather than the
- * plan.
+ * Log uncaught rejections and exceptions as structured lines. Node 22 already treats both as fatal;
+ * these add the record, not survival.
  */
 process.on('unhandledRejection', (reason: unknown) => {
   die('unhandled promise rejection', {
@@ -59,19 +39,9 @@ if (problems.length > 0) {
 const server = createBffServer();
 
 /**
- * A server that cannot listen, reported like everything else this process reports.
- *
- * `listen` fails asynchronously, on the server's `error` event, and with no listener Node rethrows
- * it as an uncaught exception. Measured: a second instance on a held port printed
- * `Error: listen EADDRINUSE` plus a stack and exited 1, with the two startup lines above it in
- * JSON and nothing structured about the failure itself — so the deployment that keeps restarting
- * is the one whose logs say least about why.
- *
- * **This does not cover file-descriptor exhaustion, and the finding that asked for it said it
- * did.** Measured with the server process at `ulimit -n 96` while 300 connections arrived from
- * another process: no `error` event, no exception, the process still listening. Node drops what it
- * cannot accept, silently. `server.maxConnections` is what turns that into a ceiling this process
- * picked; it is not a crash being caught here.
+ * A listen failure (`EADDRINUSE`, …) arrives as an `error` event; report it as a structured line
+ * and exit. File-descriptor exhaustion does not surface here (Node drops what it cannot accept; see
+ * `maxConnections`).
  */
 server.on('error', (error: NodeJS.ErrnoException) => {
   die('server error', {
@@ -92,10 +62,7 @@ server.listen(cfg.port, cfg.bindHost, () => {
   });
 
   if (cfg.authMode === 'dev' && !isLoopbackHost(cfg.bindHost)) {
-    // Reaching this line now means ALLOW_INSECURE_AUTH=true — `validateConfig` refuses to start
-    // otherwise. So this is no longer the guard; it is the receipt for a deliberate choice, and it
-    // names the flag so the next reader of these logs knows the exposure was configured rather
-    // than stumbled into.
+    // Only reachable with `ALLOW_INSECURE_AUTH=true`; logged as a deliberate choice.
     log.warn(
       `SECURITY: AUTH_MODE=dev on a non-loopback bind (${cfg.bindHost}) with ` +
         'ALLOW_INSECURE_AUTH=true. No sign-in is required and the backend is almost certainly ' +
@@ -105,10 +72,8 @@ server.listen(cfg.port, cfg.bindHost, () => {
   }
 
   if (cfg.authMode === 'msal' && cfg.rawEntraAuthority) {
-    // Not refused — a sovereign cloud and the mock tenant are both legitimate — but a sign-in that
-    // goes somewhere other than Entra's public cloud is a decision, so it is stated where the next
-    // reader of these logs will look. The service validates the issuer and keys on its own, so a
-    // wrong authority here fails every request there rather than letting anyone in.
+    // A non-default authority is legitimate but logged; the service still validates issuer and
+    // keys.
     log.warn(
       `ENTRA_AUTHORITY=${cfg.entraAuthority}: sign-in goes to this authority, not to ` +
         'login.microsoftonline.com, and the CSP opens its origin instead. Chemclaw3 must trust ' +
@@ -124,25 +89,12 @@ server.listen(cfg.port, cfg.bindHost, () => {
   }
 });
 
-/**
- * The HTML sandbox's listener (wave 3), when this deployment has a sandbox origin.
- *
- * Started beside the app listener and failing the same way: a sandbox port that cannot be bound is
- * a process that cannot do what it was configured to, and `die` says so in the shape everything
- * else here does. Not started at all without `SANDBOX_ORIGIN` — the app then shows `html`
- * artefacts as source, and there is no second port to secure.
- */
+/** The HTML sandbox listener, when configured; a bind failure is fatal like the app's. */
 const sandbox = cfg.sandboxEnabled ? createSandboxServer() : null;
 
 /**
- * The one line that says whether HTML artefacts run in the sandbox, and why (hardening, 2026-10-03).
- *
- * Every shipped launcher now turns the sandbox on, and the two ways it ends up off — no
- * `SANDBOX_ORIGIN` (the hosted `start.sh`, deliberately) and `ALLOW_FRAMING` — both look like a
- * working app until somebody opens an HTML artefact and gets its source. So the state is stated at
- * boot, once, in one record a log query finds: `on` after the listener is bound (a sandbox that
- * cannot bind dies instead), `off` at once with the reason. Off because of `ALLOW_FRAMING` is a
- * warning — configured, and overridden — and off because nothing was configured is not.
+ * One startup line says whether the sandbox is on and why: `on` once bound, `off` with its reason
+ * (a warning when `ALLOW_FRAMING` overrode it).
  */
 if (!sandbox) {
   const record = cfg.allowFraming && cfg.rawSandboxOrigin ? log.warn : log.info;
@@ -167,9 +119,8 @@ if (sandbox) {
       app_origin: cfg.appOrigin,
       html_scripts_default: cfg.htmlScriptsDefault ? 'on' : 'off',
     });
-    // Different ports on one hostname are different origins — which is what the frame needs — but
-    // the same *site*, so a cookie scoped to the host is sent to both. The app sets none and the
-    // shell reads none; a deployment is still told, because the documented shape is a hostname.
+    // Different ports on one hostname are different origins but the same site; warn, since the
+    // documented shape is a separate hostname.
     if (
       new URL(cfg.sandboxOrigin).hostname === new URL(cfg.appOrigin).hostname &&
       !isLoopbackHost(new URL(cfg.appOrigin).hostname)
@@ -183,37 +134,16 @@ if (sandbox) {
 }
 
 /**
- * How long to keep answering after `server.close()` before giving up on what is still open.
- *
- * Unchanged from when this was the whole shutdown: an SSE stream holds the server open for as long
- * as its turn runs, which is up to the backend's 600 s wall clock, so waiting for `close` to call
- * back is waiting for ever. What moved is *when* it starts — after the drain, not instead of it.
+ * How long to wait after `server.close()` before exiting: open SSE streams would otherwise hold it
+ * for up to 600 s.
  */
 const CLOSE_GRACE_MS = 5_000;
 
 /**
- * Stop taking new work before stopping.
- *
- * `server.close()` used to run synchronously in this handler, and the listening socket goes with
- * it. Measured end to end against a running BFF: SIGTERM at t=301 ms, `/readyz` answering 200 at
- * t=204 ms, `UND_ERR_SOCKET` at t=306 ms, `ECONNREFUSED` from t=403 ms, process exited 0 at
- * t=314 ms. `/readyz` never returned a single 503 — it went from serving to refusing in about a
- * tenth of a second, so nothing ever told a load balancer to stop sending, and everything it sent
- * in the meantime was a connection error a chemist reads as the app being broken.
- *
- * The fix is the ordinary one and its whole content is the wait: fail readiness, keep serving,
- * and only then close. `cfg.shutdownDrainMs` defaults to one Kubernetes readiness period so at
- * least one probe observes the 503. `/healthz` stays 200 throughout — a draining pod is still
- * serving what it already has, and a liveness failure would restart it out from under those
- * requests.
- *
- * **SIGTERM only.** SIGINT is a human at a terminal pressing ctrl-C, with no load balancer to tell
- * anything to; making them wait ten seconds for a drain nobody is watching would be a worse dev
- * loop bought with no availability.
- *
- * The whole sequence is bounded by `shutdownDrainMs + CLOSE_GRACE_MS` — 15 s on the defaults —
- * which has to stay under the deployment's own `terminationGracePeriodSeconds` (Kubernetes
- * defaults to 30 s) or the orchestrator's SIGKILL lands mid-drain.
+ * On SIGTERM, fail readiness first and keep serving for `cfg.shutdownDrainMs` (one readiness
+ * period), then close, so a load balancer stops sending before connections are refused. `/healthz`
+ * stays 200. SIGINT (a developer's ctrl-C) closes at once. Total `shutdownDrainMs + CLOSE_GRACE_MS`
+ * must stay under `terminationGracePeriodSeconds`.
  */
 const closeAndExit = (signal: string): void => {
   log.info('closing listener', { signal });

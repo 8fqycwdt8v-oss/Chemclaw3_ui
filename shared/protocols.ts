@@ -1,32 +1,15 @@
 /**
- * The experiment-protocol contract — a mirror of the service's protocol schemas.
+ * The experiment-protocol contract — a hand-written mirror of the service's protocol schemas. A
+ * protocol is the one thing a human edits: the agent drafts, a chemist corrects, and each
+ * correction is an attributed revision (parent, change note, checks, diff).
  *
- * A protocol is the one thing in this system that a human *edits*. Everything else the service
- * produces is a reading (a hazard screen, a pKa, a Pareto front) that a chemist consults and does
- * not change; a design is a document the agent drafts and a chemist then corrects, and every
- * correction is a new revision attributable to whoever wrote it. That is why the types below carry
- * so much apparatus that a plain "result" shape would not: a parent revision, a change note, a
- * check list, a diff.
+ * - `FieldBasis`: a request field is `stated` (with the chemist's `quote`), `inferred` or `absent`;
+ *   never render an inference as an instruction.
+ * - A failed check is not a blocking one: `ProtocolCheck.passed` is per check;
+ *   `ProtocolReceipt.blocking` is the subset that stops execution.
  *
- * Two properties of this contract decide how the UI is built on it, and both are easy to lose:
- *
- * **`FieldBasis` is the honesty story, not a decoration.** A request field is `stated` (the chemist
- * said it, and `quote` is the words they used), `inferred` (the agent filled it in from context) or
- * `absent`. Rendering an inferred scale the same as a stated one turns the agent's guess into the
- * chemist's instruction, which is the single most consequential thing this document can get wrong —
- * a scale nobody stated is a vessel charge nobody agreed to.
- *
- * **A check that failed is not the same as a check that blocks.** `ProtocolCheck.passed` is per
- * check; `ProtocolReceipt.blocking` is the subset that stops the design being executed. A surface
- * that collapsed the two would either alarm on a note or stay quiet on a blocker.
- *
- * Kept in `shared/` beside `events.ts` for the same reason that file is: it is a contract owned by
- * another repository, mirrored here by hand, and imported by both the SPA (bundled by Vite) and the
- * e2e fixture service (run under Node's type stripping). Keep it dependency-free.
- *
- * Nothing here streams. These types describe REST bodies (`/protocols…`) and one *tool result*
- * payload (`ProtocolReceipt`), so `shared/events.ts` is deliberately untouched — an event type
- * added without a branch in `normalizeEvent` is deleted in transit, and there is no event to add.
+ * REST bodies and one tool-result payload only (nothing streams). Imported by the SPA and the e2e
+ * fixture service; dependency-free.
  */
 
 /** Single experiment, a screen of arms, or a multi-round campaign. */
@@ -36,12 +19,8 @@ export type DesignMode = 'single' | 'screen' | 'campaign';
 export type DesignStatus = 'requested' | 'draft' | 'approved' | 'executed' | 'abandoned';
 
 /**
- * What a revision holds: the structured ask alone, or a procedure.
- *
- * Not decoration on a badge. The service derives this column from `has_protocol` at the instant the
- * revision is written, and `require_movable` reads it to decide whether a design has a procedure to
- * approve — so it is half of the answer to "which sign-off buttons can succeed". See
- * `legalStatusMoves` at the foot of this file.
+ * What a revision holds: the ask alone, or a procedure. Derived by the service from `has_protocol`;
+ * decides which sign-offs can succeed (`legalStatusMoves`).
  */
 export type RevisionKind = 'request' | 'protocol';
 
@@ -75,10 +54,8 @@ export type ProtocolStepKind =
   | 'custom';
 
 /**
- * One field of the structured request, with where it came from.
- *
- * `quote` is the chemist's own words and is only meaningful when `basis` is `stated` — it is what
- * lets a reader check the transcription rather than trust it.
+ * One request field with its provenance; `quote` (the chemist's words) is meaningful only when
+ * `basis` is `stated`.
  */
 export interface RequestField {
   value: string;
@@ -174,11 +151,8 @@ export interface Analytic {
 }
 
 /**
- * What the design is expected to produce, and on what grounds.
- *
- * `basis` is the load-bearing field: a `precedent` yield is a number from a record, a `predicted`
- * one came from a model, and an `assumed` one is somebody's expectation. They read identically as
- * a percentage.
+ * The expected outcome and its basis: `precedent` (from a record), `predicted` (from a model) or
+ * `assumed`.
  */
 export interface ExpectedOutcome {
   yield_percent: number | null;
@@ -210,10 +184,8 @@ export interface ProtocolBody {
 }
 
 /**
- * One arm of a screen — a point in the factor space, plus whatever it overrides.
- *
- * `setpoints: null` means "the base conditions", not "no conditions". `control` distinguishes the
- * runs that exist to calibrate the others from the runs being screened.
+ * One arm of a screen. `setpoints: null` means the base conditions; `control` marks calibration
+ * runs.
  */
 export interface ProtocolArm {
   arm_id: string;
@@ -221,10 +193,8 @@ export interface ProtocolArm {
   levels: Record<string, string>;
   setpoints: Setpoints | null;
   /**
-   * There is deliberately no per-arm charge override. An arm that varies an *amount* declares that
-   * amount as a continuous factor, which says the same thing in the vocabulary the design already
-   * has; the field existed, had no producer, and inlined the whole `ChargeLine` model into every
-   * tool schema. A control that genuinely differs says so in `note`.
+   * No per-arm charge override: an arm varying an amount declares it as a continuous factor; other
+   * differences go in `note`.
    */
   control: '' | 'positive' | 'negative' | 'blank';
   /** The `arm_id` this is a replicate of, or empty. */
@@ -240,12 +210,7 @@ export interface Well {
   run_order: number;
 }
 
-/**
- * The plate, and whether its run order was randomised.
- *
- * `randomized` with a `seed` is what makes a layout reproducible; a randomised layout with no seed
- * cannot be reproduced and the map says so rather than implying it can.
- */
+/** The plate and whether its run order was randomised; reproducible only with a `seed`. */
 export interface PlateLayout {
   plate_format: number;
   rows: number;
@@ -285,12 +250,8 @@ export interface RevisionSummary {
 }
 
 /**
- * One recorded lifecycle move: which revision somebody signed off on, and why.
- *
- * The header's `status` describes the HEAD and moves with it — a revision landing on an approved
- * design demotes it back to `draft`, because an approval is a statement about a document and the
- * document changed. So the badge can never say which document a chemist actually approved, and
- * this is the only thing that can.
+ * One recorded lifecycle move: which revision was signed off, and why. The header `status` follows
+ * the head (a new revision demotes an approval), so this is the only record of what was approved.
  */
 export interface StatusEvent {
   status: DesignStatus;
@@ -302,20 +263,8 @@ export interface StatusEvent {
 }
 
 /**
- * What `GET /protocols/{id}` returns: one revision, FLAT, with the design's header and history
- * beside it.
- *
- * Transcribed from the service rather than shaped for the screen, which is the whole point.
- * `client.ts` used to declare this as `{ revision: DesignRevision; history: RevisionSummary[] }`,
- * and every fixture and stub in this repository emitted that nested shape — so `revision.design`
- * was `undefined` against the real service and the document page threw on its first field, under a
- * green unit suite and a green end-to-end run. A fixture is only evidence when it is the service's
- * shape.
- *
- * `DesignRevision` below is *derived* from this rather than declared beside it, for the same
- * reason: it used to be a hand-written interface carrying a `parent_revision` the service never
- * sends on any read, and every fixture spread it into a `DesignOut` — where TypeScript's
- * excess-property check does not fire on a spread, so the invented field rode along silently.
+ * What `GET /protocols/{id}` returns: one revision, flat, with the design's header and history
+ * beside it — the service's exact shape. `DesignRevision` is derived from it.
  */
 export interface DesignOut {
   design_id: string;
@@ -334,13 +283,7 @@ export interface DesignOut {
   status_history: StatusEvent[];
 }
 
-/**
- * The per-revision half of `DesignOut` — what differs from one revision to the next.
- *
- * An alias rather than an interface so it cannot drift from what the service actually returns:
- * `summary`, `history` and `status_history` are facts about the *design*, and a fixture that
- * builds one revision does not want to restate them.
- */
+/** The per-revision half of `DesignOut`, derived so it cannot drift. */
 export type DesignRevision = Omit<DesignOut, 'summary' | 'history' | 'status_history'>;
 
 export interface DesignSummary {
@@ -371,12 +314,7 @@ export interface DesignDiff {
   changes: FieldChange[];
 }
 
-/**
- * One arm flattened for a run sheet — the row a chemist works from at the bench.
- *
- * Deliberately not `ProtocolArm`: it resolves the arm's conditions against the base, so `solvent`
- * and `temperature_c` here are what that arm actually runs at rather than what it overrides.
- */
+/** One arm flattened for a run sheet, with its conditions resolved against the base. */
 export interface ArmRow {
   arm_id: string;
   well: string;
@@ -391,10 +329,8 @@ export interface ArmRow {
 }
 
 /**
- * What the protocol tools return into the conversation.
- *
- * `arms` is capped and `arms_omitted` says by how much, so a card built from this can never be
- * mistaken for the whole run sheet — the full design is behind `/protocols/{design_id}`.
+ * What the protocol tools return into the conversation. `arms` is capped (`arms_omitted` says by
+ * how much); the full design is at `/protocols/{design_id}`.
  */
 export interface ProtocolReceipt {
   design_id: string;
@@ -403,15 +339,8 @@ export interface ProtocolReceipt {
   mode: string;
   status: DesignStatus;
   /**
-   * Whether the checks below were graded against a *procedure*.
-   *
-   * At the request stage the service reports every protocol-only check as a **passing** note
-   * reading "not checked yet — this design holds only the ask", precisely so a UI would not look
-   * like it had skipped them. So a reader that counts passes has to know which stage it is reading,
-   * and `status` is only a proxy for that: `advanced()` decides the status and `has_protocol`
-   * decides the stage, independently. A `draft` or `approved` design edited back down to the bare
-   * ask keeps its status, and the receipt card then showed a green "15 checks passed" over a design
-   * with no charge table, no procedure and no evidence.
+   * Whether the checks were graded against a procedure. At the request stage unrun checks come back
+   * as passing notes, and `status` is only a proxy for the stage, so read this.
    */
   has_protocol: boolean;
   summary: string;
@@ -437,17 +366,9 @@ export interface ProtocolRead {
 }
 
 /**
- * An arm's own setpoints over the shared body's, **field by field**.
- *
- * The one authority on this is the service's `ExperimentDesign.setpoints_for`, and this is a
- * transcription of it rather than a second opinion. `arm.setpoints ?? design.base.setpoints` — what
- * this replaced — falls back only when the arm states *nothing*, so an arm overriding one field
- * lost every other: an arm setting `temperature_c: 60` rendered a run-sheet row with no reaction
- * time and no solvent, beside rows that had both. That is the bug the service measured, fixed and
- * documented, reimplemented on the surface a chemist actually reads.
- *
- * A field counts as stated when it is not the model's default: `null` for the numbers, `''` for the
- * two strings.
+ * An arm's setpoints over the body's, field by field — a transcription of the service's
+ * `ExperimentDesign.setpoints_for`. A field counts as stated when not the default (`null` for
+ * numbers, `''` for strings).
  */
 export function setpointsFor(base: Setpoints, arm: ProtocolArm): Setpoints {
   if (arm.setpoints === null) return base;
@@ -458,19 +379,9 @@ export function setpointsFor(base: Setpoints, arm: ProtocolArm): Setpoints {
 }
 
 /**
- * The conditions **every arm agrees on**, each arm resolved against the shared body first.
- *
- * A transcription of the service's `render.shared_setpoints`, and the same argument holds on this
- * surface: `Conditions` rendered `design.base.setpoints` — what the body happens to hold, which is
- * not what anybody runs the moment an arm overrides it — while the run sheet carries a column only
- * where the arms *disagree*. So a field every arm overrode to the same value fell through both.
- * Measured on the service with three arms all set to `N2` over a body reading `air`: the page said
- * "Atmosphere: air", there was no atmosphere column, and the atmosphere the design is run under
- * appeared nowhere on a document a chemist runs from.
- *
- * A field the arms disagree about comes back at its default, so the caller drops it and the run
- * sheet shows it per row. That is what makes the two sections complements rather than two lists
- * somebody keeps in step by hand.
+ * The conditions every arm agrees on, each arm resolved first — a transcription of the service's
+ * `render.shared_setpoints`. Fields the arms disagree on come back at their default, so
+ * `Conditions` and the run sheet complement each other.
  */
 export function sharedSetpoints(design: ExperimentDesign): Setpoints {
   if (design.arms.length === 0) return design.base.setpoints;
@@ -495,12 +406,7 @@ const EMPTY_SETPOINTS: Setpoints = {
   ph: null,
 };
 
-/**
- * Every `DesignStatus`, in lifecycle order.
- *
- * The order is the lifecycle's, not the alphabet's, because it is what the sign-off panel renders
- * in: a chemist reading three buttons left to right is reading the design's remaining path.
- */
+/** Every `DesignStatus` in lifecycle order (the order buttons render in). */
 export const DESIGN_STATUSES: readonly DesignStatus[] = [
   'requested',
   'draft',
@@ -510,23 +416,10 @@ export const DESIGN_STATUSES: readonly DesignStatus[] = [
 ];
 
 /**
- * Which lifecycle move each status permits — a **transcription of `_LEGAL_MOVES`** in the service's
- * `src/chemclaw/protocols/store.py`, read by `require_movable` and enforced nowhere else.
- *
- * This is the second definition of something another repository owns, and it is here for the same
- * reason `setpointsFor` is: the surface a chemist acts on cannot ask the service what it would
- * accept before drawing a button. Before it existed, `ProtocolDocument` rendered a *Mark X* button
- * for all five statuses whatever the design was, so a draft protocol offered *Mark requested* and
- * *Mark executed* — two clicks that can only ever be refused, on the one screen where a refusal
- * reads as "your sign-off did not happen".
- *
- * The drift this creates is real and is why `tests/protocolStatusTransitions.test.ts` exists: it
- * reads the service's own module out of a sibling checkout and fails on any difference, and says
- * out loud when there is no checkout to read rather than passing on a check it did not perform.
- *
- * Two edges are worth knowing without opening the service: `draft -> executed` is **absent**
- * because it is running an experiment nobody signed off, and `abandoned -> draft` is **present**
- * because reviving a design somebody retired is a thing a person does.
+ * Which move each status permits — a transcription of the service's `_LEGAL_MOVES`
+ * (`src/chemclaw/protocols/store.py`), so only moves that can succeed are offered.
+ * `tests/protocolStatusTransitions.test.ts` compares it with a sibling checkout. `draft ->
+ * executed` is absent; `abandoned -> draft` is present.
  */
 export const LEGAL_STATUS_MOVES: Record<DesignStatus, readonly DesignStatus[]> = {
   requested: ['draft', 'abandoned'],
@@ -537,42 +430,22 @@ export const LEGAL_STATUS_MOVES: Record<DesignStatus, readonly DesignStatus[]> =
 };
 
 /**
- * The statuses that assert something about a *procedure* — the service's `_NEEDS_A_PROTOCOL`.
- *
- * A design holding only the structured ask has no procedure, so neither word can be true of it and
- * the service refuses both with a 422 whatever the table above says.
+ * Statuses that assert something about a procedure (the service's `_NEEDS_A_PROTOCOL`); refused for
+ * a design holding only the ask.
  */
 export const STATUSES_NEEDING_A_PROTOCOL: readonly DesignStatus[] = ['approved', 'executed'];
 
 /**
- * The moves this design can actually be given, from where it is and from what its head holds.
- *
- * A transcription of the service's `require_movable`, read as a filter rather than as a refusal:
- * the three rules it enforces are the transition table, `_NEEDS_A_PROTOCOL` (a status about a
- * procedure needs a procedure), and its mirror image (`requested` means the ask *alone*, so a
- * protocol head contradicts it).
- *
- * **`headKind` is the head revision's, not the one on screen.** They are the same whenever a move
- * can succeed at all — a sign-off names the revision it was made on and the service refuses
- * anything but the head — so a reader looking at an older revision is offered the head's moves and
- * gets a `revision_conflict` if they take one, which is the honest refusal for what they did.
- *
- * **Every `X -> X` repeat is deliberately absent**, and that is this repository's decision rather
- * than the service's: `require_movable` exempts a self-transition from the table so that pressing
- * a button twice is a 204 rather than a 422. A button reading *Mark draft* on a design that is
- * already draft is not a move a chemist is choosing between, though, so the panel does not carry
- * one. What is left is a page that has not caught up — where the client sends the status it was
- * showing, and `require_unmoved` refuses it as a `status_conflict` rather than taking it as a
- * repeat — and `ProtocolDocument` answers that by re-reading the design, so the chemist sees the
- * move that already landed instead of being offered the chance to make it twice.
+ * The moves this design can be given — the service's `require_movable` as a filter: the transition
+ * table, `_NEEDS_A_PROTOCOL`, and `requested` meaning the ask alone. `headKind` is the head
+ * revision's. Self-transitions are omitted deliberately; a stale page gets a `status_conflict` and
+ * re-reads.
  */
 export function legalStatusMoves(
   current: DesignStatus,
   headKind: RevisionKind,
 ): readonly DesignStatus[] {
-  // `?? []` for the reason `STATUS_TONE` carries one: `DesignStatus` is closed here and open on
-  // the wire, and a status this build has never heard of must cost a chemist an empty button row
-  // rather than the document page they were reading.
+  // `?? []`: a status this build does not know yields no buttons rather than a crash.
   return (LEGAL_STATUS_MOVES[current] ?? []).filter((target) => {
     if (STATUSES_NEEDING_A_PROTOCOL.includes(target)) return headKind === 'protocol';
     if (target === 'requested') return headKind !== 'protocol';

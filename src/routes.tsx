@@ -1,51 +1,15 @@
 /**
- * Routing.
+ * Routing, by path (MSAL's redirect response uses the fragment).
  *
- * Paths, never a hash. MSAL's redirect response *is* a URL fragment (`src/auth/msalAuth.ts`), so a
- * hash router would be fighting it for the same characters.
- *
- * The URL carries the LOCAL conversation id, not the server session id. `src/state/types.ts`
- * explains why the two exist: the session handle is disposable — evictable from a backend LRU,
- * replaced on `session_not_found` and on reset — while the local id owns the transcript and never
- * changes. A URL keyed on the session id would go dead when the backend rotates it, and would
- * change under the person who shared it, mid-conversation.
- *
- * `/open/:sessionId` exists anyway, as a resolver rather than a destination: it adopts a server
- * session into a local conversation and redirects to `/c/<local>`. That makes a link portable
- * between devices right up until the backend rotates the session, which is the honest limit of
- * what this data model can back.
- *
- * **It is `/open/` and not `/s/`, and the copy around it does not say "shared", because it is not
- * a shared link.** Every session-scoped route upstream resolves through `_refuse_unless_owner`,
- * which 404s a non-owner indistinguishably from an unknown id — deliberately — so a link handed to
- * a colleague does not degrade, it simply shows them a conversation that does not exist. This app
- * called it a "Shared conversation" in the sidebar, promised "A shared link ends in a 32-character
- * session id" when one was mistyped, and said "Opening the shared conversation…" while it worked:
- * three user-visible claims of a capability the service refuses by design. `ISSUES.md` Issue 5 has
- * the decision and what cross-person sharing would actually take. `/s/:sessionId` still has a
- * route, because the alternative turned out not to be the 404 the decision assumed: without one
- * it fell through the catch-all to `/`, and an old bookmark opened a brand-new empty
- * conversation. It explains and goes nowhere — a redirect is what the decision refused.
- *
- * **Since Chemclaw3 #483 that has one exception, and it is an explicit grant rather than a link.**
- * An owner can add somebody to a session (`PUT /sessions/{id}/members/{actor}`), and the session
- * gate then admits them — so `/open/<id>` does work for a member. It still is not a *share link*:
- * the link grants nothing, the membership does, and a member finds the conversation under "Shared
- * with me" in the sidebar (`GET /sessions/shared`) without being handed any link at all.
- *
- * `/auth/callback` is reserved by MSAL's `redirectUri` and is already SPA-fallbacked by `sirv`
- * (`server/index.ts`). Its element writes no URL — and the URL-sync effects live INSIDE the
- * `/c/:id` element rather than being guarded by a pathname check, so they structurally cannot run
- * while a redirect fragment is still on the address bar.
- *
- * **No route element writes the URL on mount until auth has settled** (`useAuth().settled`). That
- * is the callback's rule applied to every page a sign-in can *return* to, because MSAL comes back
- * from `/auth/callback` to the start page and redeems the code there only if the address bar still
- * names it — otherwise it navigates back and tries again (`src/auth/AuthContext.tsx` has the
- * mechanism). `Bootstrap` at `/` broke it once #126 made `/` a start page: it pushed `/c/<new id>`
- * before `handleRedirectPromise()` settled, and sign-in looped forever. `Bootstrap`,
- * `SessionResolver` and the catch-all are the three elements that navigate on mount; each waits.
- * `e2e/oidc-mock.spec.ts` counts the navigations of a real sign-in, from `/` and from deep links.
+ * - URLs carry the local conversation id (`/c/:id`), not the disposable server session id (see
+ *   `src/state/types.ts`).
+ * - `/open/:sessionId` adopts a server session into a local conversation and redirects. It is not a
+ *   share link: the service 404s non-owners, and members find shared conversations under "Shared
+ *   with me". `/s/:sessionId` (old links) renders an explanation and goes nowhere.
+ * - `/auth/callback` is MSAL's `redirectUri`; it writes no URL.
+ * - No element writes the URL on mount until auth has settled (`useAuth().settled`): MSAL redeems
+ *   the code only if the address bar still names the page sign-in started from
+ *   (`src/auth/AuthContext.tsx`). `e2e/oidc-mock.spec.ts` counts the navigations.
  */
 
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
@@ -59,35 +23,9 @@ import { Loading } from '@/components/chem/Feedback';
 import { Button } from '@/components/ui/button';
 
 /**
- * The four panels that are not the conversation, each behind its own chunk.
- *
- * They were static imports, so every chemist paid for the review queue, the jobs list, the
- * protocol list and the protocol document in the entry bundle — on the first paint of a fresh
- * conversation, before anything is on screen — and most chemists open none of them. The pattern is
- * `LazyMarkdown.tsx`'s, for the same reason and with the same two halves: a named `loader` so the
- * chunk can be warmed deliberately, and a Suspense fallback honest enough that the wait reads as a
- * wait rather than as a broken page.
- *
- * **Measured on 2026-09-05 with `npm run build:client`, on one tree with only this file's imports
- * changed** — the two builds are minutes apart, so nothing else moved between them. Read the pair,
- * not the absolutes: the same figures moved by ~5 kB later the same afternoon on other people's
- * merges, which is why `chem/rdkit.ts` no longer publishes one at all.
- *
- *  - What a browser fetches to run the app (the entry module plus every chunk `index.html` tells
- *    it to preload) went **653.72 kB → 596.79 kB** raw, **199.40 kB → 189.42 kB** gzip.
- *  - The four panels left as **60.52 kB** of route chunks — ReviewQueue 10.48, JobsPanel 6.40,
- *    ProtocolsPanel 4.44, ProtocolDocument 39.20 — fetched when they are wanted.
- *
- * The entry chunk alone reads 643.70 kB → 505.90 kB, and quoting *that* would overstate the win by
- * more than double: 80.9 kB of it is shared code Rolldown moved into new chunks (`chatStore`,
- * `Feedback`, `clsx`, `tslib`) that `index.html` still preloads. The set is the number; the entry
- * chunk is one member of it.
- *
- * The saving is also smaller than the 60.52 kB the panels weigh, and the reason is worth writing
- * down rather than rounding away: everything they *share* with the chat — the api client, the
- * stores, the shadcn primitives, the chem components — stays on the critical path because the
- * conversation route needs it too. Splitting moves what is exclusive to a route, not what a route
- * merely uses.
+ * The panels that are not the conversation, each lazily loaded in its own chunk with a named
+ * `loader` for prefetching (the `LazyMarkdown.tsx` pattern), so they are off the first-paint path.
+ * Code they share with the chat stays in the main bundle.
  */
 const loadReviewQueue = () =>
   import('./components/ReviewQueue.tsx').then((m) => ({ default: m.ReviewQueue }));
@@ -111,15 +49,7 @@ const MyExhibits = lazy(loadMyExhibits);
 
 let prefetched = false;
 
-/**
- * Warm all four chunks. Safe to call repeatedly; only the first call fetches.
- *
- * Called from an idle callback once the app is up, which is the honest version of what a static
- * import was doing: the bytes still arrive on a normal session, they simply stop being on the
- * critical path to the first paint. A nav link cannot warm them on hover — the sidebar and the top
- * bar own those controls and this module has no business reaching into them — so idle is where the
- * warming goes, and it is what keeps the Suspense fallbacks below almost always unrendered.
- */
+/** Warm the panel chunks; idempotent. Called from an idle callback once the app is up. */
 export function prefetchPanels(): void {
   if (prefetched) return;
   prefetched = true;
@@ -136,11 +66,8 @@ export function prefetchPanels(): void {
 }
 
 /**
- * A lazily-loaded panel, with a fallback that says which one.
- *
- * Inside `AppShell` rather than around it, so the sidebar, the top bar and the banner stay exactly
- * where they are while a route chunk arrives — the reader sees the same page with one region
- * loading, which is what navigating between panels already looks like.
+ * A lazily loaded panel with a named fallback, inside `AppShell` so the chrome stays put while it
+ * loads.
  */
 function Panel({ what, children }: { what: string; children: React.ReactNode }): React.JSX.Element {
   return (
@@ -150,10 +77,7 @@ function Panel({ what, children }: { what: string; children: React.ReactNode }):
   );
 }
 
-/**
- * Hold a URL-writing route element until auth has settled. See the module docstring: MSAL may
- * still be comparing the address bar with the page a sign-in started on.
- */
+/** Hold a URL-writing element until auth has settled (see the module docstring). */
 function AfterAuth({ children }: { children: React.ReactNode }): React.JSX.Element {
   const { settled } = useAuth();
   if (!settled) return <Loading className="justify-center p-8">Signing in…</Loading>;
@@ -165,23 +89,15 @@ function Bootstrap(): React.JSX.Element {
   const navigate = useNavigate();
   const { settled } = useAuth();
 
-  // The only place a conversation is created for want of one. It used to live in `App`, where
-  // under a router it would fire behind the not-found panel and rewrite the URL out from under
-  // the reader before they could read it.
-  //
-  // Not before auth has settled, for two reasons. The URL: `/` is where a first sign-in returns to
-  // (`signInStartPage`), and navigating away from it before MSAL has redeemed the code sends MSAL
-  // back to `/` to try again — for ever. And the store: until the account is known it holds the
-  // anonymous slot (`hydrateChatForAccount`), so the conversation picked or minted here would be
-  // one the signed-in person does not have, which is the "isn't on this device" #126 removed.
+  // The only place a conversation is created for want of one. Not before auth settles: navigating
+  // away from `/` before MSAL redeems the code loops the sign-in, and before then the store holds
+  // the anonymous slot.
   useEffect(() => {
     if (!settled) return;
     const state = useChatStore.getState();
     const [first] = state.order;
     const target = first && state.conversations[first] ? first : state.createConversation();
-    // `void`: react-router's `navigate` returns a promise that settles when the transition
-    // does, and nothing here waits for it. Marked rather than left floating so the lint rule
-    // that now exists can tell this from a promise somebody forgot.
+    // `void`: nothing waits on the navigation promise.
     void navigate(`/c/${target}`, { replace: true });
   }, [settled, navigate]);
 
@@ -189,11 +105,8 @@ function Bootstrap(): React.JSX.Element {
 }
 
 /**
- * Adopt a server session id into a local conversation, then hand off to `/c/:id`.
- *
- * Reuses the shape `useServerSessions` already uses for a session it did not know about: a local
- * conversation carrying the session id, with `sessionOrigin: 'server'` so the transcript rehydrate
- * in `App` knows to pull its messages.
+ * Adopt a server session id into a local conversation (`sessionOrigin: 'server'`), then go to
+ * `/c/:id`.
  */
 function SessionResolver(): React.JSX.Element {
   const { sessionId = '' } = useParams();
@@ -202,16 +115,11 @@ function SessionResolver(): React.JSX.Element {
   // The backend's session ids are 32 lowercase hex characters (`shared/events.ts`), so anything
   // else is a mistyped or truncated link rather than a session we have not seen.
   const valid = /^[0-9a-f]{32}$/.test(sessionId);
-  // Somebody signed out under Entra, on a link that only means something once they are signed in
-  // (#132). Adopting it now would put it in the anonymous slot and send them off to `/c/<id>`,
-  // and the sign-in that the first `/api` call then starts returns them to `/` — an unrelated
-  // conversation, with the link silently dropped. So sign in *from here*: `signInStartPage` keeps
-  // an `/open/` path, MSAL returns to it, and the adoption below runs in their own slot.
+  // Signed out under Entra on an `/open/` link: sign in from here, so the adoption runs in the
+  // user's own slot after the redirect returns to this path.
   const mustSignIn = valid && ready && auth.mode === 'msal' && !auth.account;
   const signingIn = useRef(false);
-  // A sign-in that could not *start* — the authority unreachable, a stale `interaction_in_progress`
-  // left by an abandoned attempt — rejects here rather than navigating. Swallowing it left the
-  // reader on "Signing in…" for ever with nothing to act on, so it is shown with a way to try again.
+  // A sign-in that could not start is shown with a way to retry, not left on "Signing in…".
   const [failure, setFailure] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
 
@@ -236,10 +144,8 @@ function SessionResolver(): React.JSX.Element {
       void navigate(`/c/${existing.id}`, { replace: true });
       return;
     }
-    // A session somebody else let this person into opens as theirs to *join*, not to own — the
-    // plan inbox links here for a member's own plan in such a session (Chemclaw3 #499). Read from
-    // the shared listing already in the cache; a link that arrives before the listing does is
-    // marked when the sidebar's adoption runs, as before.
+    // A session somebody else let this person into opens as shared (from the cached shared
+    // listing).
     const shared = queryClient
       .getQueryData<SharedSessionSummary[]>(keys.sharedSessions)
       ?.find((row) => row.session_id === sessionId);
@@ -306,12 +212,8 @@ function SessionResolver(): React.JSX.Element {
 }
 
 /**
- * The MSAL landing path.
- *
- * `handleRedirectPromise()` consumes the fragment during `createAuthProvider()`, which is already
- * in flight from module scope. This waits for that to settle and then leaves. It must not touch
- * the URL before then. Settled either way: a sign-in that failed leaves for `/`, where the shell
- * shows the banner saying so, rather than spinning here with the banner nowhere on screen.
+ * The MSAL landing path: waits for `handleRedirectPromise()` (already in flight) to settle, then
+ * leaves for `/`. Must not touch the URL before then.
  */
 function AuthCallback(): React.JSX.Element {
   const { settled } = useAuth();
@@ -357,9 +259,7 @@ export function NotFound({
 function ConversationRoute(): React.JSX.Element {
   const { conversationId = '' } = useParams();
   const navigate = useNavigate();
-  // Deliberately not subscribed to `activeId`: this route follows the URL, and reading the store's
-  // idea of "active" for rendering is what invites the two to disagree. The reconciler below reads
-  // it fresh, at the one moment it matters.
+  // Not subscribed to `activeId`: this route follows the URL.
   const known = useChatStore((s) => Boolean(s.conversations[conversationId]));
 
   // The URL is the source of truth for *which* conversation, and this is the one place that
@@ -370,20 +270,10 @@ function ConversationRoute(): React.JSX.Element {
     useChatStore.getState().selectConversation(conversationId);
   }, [conversationId, known]);
 
-  // The URL only ever moves back the other way when the conversation it names has *disappeared* —
-  // the reader deleted the one they were looking at, or reset the app. Every deliberate move
-  // (a sidebar row, New conversation, the panel's buttons) navigates from its own handler, so
-  // this is a reconciler of last resort, not a mirror.
-  //
-  // Writing it as a general `activeId !== conversationId → navigate` mirror is the obvious shape
-  // and it deadlocks the Back button: the browser rewinds the URL, the effect above selects the
-  // older conversation, and this effect runs in the same pass still closed over the *newer*
-  // `activeId`, so it navigates forward again — then the same thing happens in reverse, forever.
-  // An e2e run caught exactly that, alternating between two conversations until the test gave up.
-  //
-  // `displayed` separates the two ways a conversation can be missing. Gone-while-open should
-  // follow the store; a link to an id this device never had must stay on the panel that says so,
-  // rather than being bounced to whatever else happens to be open.
+  // Navigate away only when the displayed conversation disappears (deleted or reset); deliberate
+  // moves navigate from their own handlers. A general store→URL mirror would fight Back.
+  // `displayed` distinguishes "gone while open" (follow the store) from "never on this device"
+  // (stay and say so).
   const displayed = useRef<string | null>(null);
   useEffect(() => {
     if (known) displayed.current = conversationId;
@@ -402,10 +292,7 @@ function ConversationRoute(): React.JSX.Element {
 }
 
 export function AppRoutes(): React.JSX.Element {
-  // After the first paint, never before it: `requestIdleCallback` runs when the browser has
-  // nothing better to do, which is precisely the budget these four chunks are allowed to spend.
-  // The `setTimeout` is for Safari, which still ships no idle callback; two seconds is well past
-  // any first paint and nothing is waiting on it.
+  // Prefetch panel chunks when idle after first paint (`setTimeout` fallback for Safari).
   useEffect(() => {
     const idle = window.requestIdleCallback;
     if (idle) {
@@ -421,20 +308,8 @@ export function AppRoutes(): React.JSX.Element {
       <Route path="/" element={<Bootstrap />} />
       <Route path="/c/:conversationId" element={<ConversationRoute />} />
       <Route path="/open/:sessionId" element={<SessionResolver />} />
-      {/* None of these is a conversation, so they render inside the shell with no conversation:
-          the sidebar, the top bar and the banner stay where they are, and Back returns to the
-          thread the reader came from. */}
-      {/* `/jobs/:jobId` opens the jobs panel with one row already open. It was reachable only by
-          clicking, so an operator could not be *sent* to a run — the same argument the protocol
-          document's own comment below makes about a design id, and that id appears in an answer
-          too. The panel reads the parameter itself rather than being handed a prop, so the URL
-          stays the one thing that says what is open.
-
-          `/review/:proposalId` stood beside it and is gone. Chemclaw3 deleted the PR-gate and its
-          `/proposals` routes (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so there
-          is no proposal to be sent to. `/review` itself stays: that page's other two sections —
-          plans and questions — are live, and it is still where a chemist finds what is waiting on
-          them. */}
+      {/* Non-conversation screens render inside the shell, so Back returns to the conversation. */}
+      {/* `/jobs/:jobId` opens the jobs panel with one run expanded, so an operator can be sent to a run. The panel reads the parameter itself. */}
       <Route
         path="/review"
         element={
@@ -445,10 +320,7 @@ export function AppRoutes(): React.JSX.Element {
           </AppShell>
         }
       />
-      {/* The half of a bargain the service has been claiming: `D-2026-09-05` grants the two stored
-          skills tiers their exemption from per-use review *on the condition* that the people they
-          act on can see what they say and remove them, and until this route existed the only thing
-          that could exercise it was `curl`. */}
+      {/* Stored skills, so the people they act on can see and remove them. */}
       <Route
         path="/skills"
         element={
@@ -479,11 +351,7 @@ export function AppRoutes(): React.JSX.Element {
           </AppShell>
         }
       />
-      {/* The list and one document. The document reads its own `:designId` rather than being
-          handed one, exactly as `ConversationRoute` does: the URL is what says which design is
-          open, so a link and a reload land on the same one. A design id is minted by the
-          service and appears in an answer, so it is genuinely worth being in a URL — unlike a
-          session id, which `/open/:sessionId` exists to work around. */}
+      {/* The protocol list and one document; the document reads its own `:designId` so links and reloads land on it. */}
       <Route
         path="/protocols"
         element={
@@ -517,22 +385,7 @@ export function AppRoutes(): React.JSX.Element {
         }
       />
       <Route path="/auth/callback" element={<AuthCallback />} />
-      {/* The path this app used to mint, kept as an explanation and nothing else.
-
-          Not preserving it as a *redirect* is the decision (`ISSUES.md` Issue 5): `/s/` reads as
-          "share", and this link cannot be shared — every session-scoped route upstream resolves
-          through `_refuse_unless_owner`, which 404s a non-owner indistinguishably from an unknown
-          id. But that decision was argued on the claim that a stale `/s/` link "lands on this
-          app's own 'That conversation isn't on this device', which is the honest message anyway",
-          and it did not: it fell through to the catch-all below, which redirects to `/`, which
-          mints a **fresh empty conversation**. Driven through the real router, an old bookmark
-          ended at `/c/<new id>` with no error, nothing adopted, and no mention of the link — which
-          reads as "my conversation was lost", and is worse than a 404 rather than better. It also
-          contradicts the rule the rest of this file follows and `e2e/routing.spec.ts` asserts by
-          name: an unknown conversation says so rather than redirecting.
-
-          So the argument is made true here rather than restated. This route renders the
-          explanation and goes nowhere. */}
+      {/* Old `/s/` links: explain and go nowhere. Not a redirect (this was never a share link), and not the catch-all, which would mint an empty conversation. */}
       <Route
         path="/s/:sessionId"
         element={

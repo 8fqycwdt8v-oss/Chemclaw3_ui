@@ -1,32 +1,13 @@
 /**
- * The agent's work, as a rail rather than a list.
+ * The agent's work as a rail: one line per step — a state dot, label, tool, outcome and duration —
+ * with what it returned one disclosure in.
  *
- * The panel this replaces was an honest flat `<ol>`: five kinds of event at one visual weight,
- * every payload expanded in place, and no duration anywhere. Opening it to answer "what did it
- * actually do" meant reading all of it, and the two rows that most deserved to be found — a gate
- * refusal and a broken retriever — looked exactly like the three that did not.
+ * Tool rows have four states, none guessed: running, returned, failed, and (reloaded transcripts
+ * only) outcome not recorded. Durations come from our own clock, so a reloaded transcript shows
+ * none rather than zero.
  *
- * So each step is one line: a dot carrying its state, a label, its tool, an outcome, and how long
- * it took. What a step *returned* is one disclosure in, where the reader who came to check a
- * number will go and the reader who came to see the shape of the turn will not.
- *
- * ## Four states per tool row, and none of them may be guessed
- *
- * running, returned, failed, and — reachable only from a reloaded transcript — outcome not
- * recorded. The last exists because the service's stored transcript pairs calls with results by
- * `call_id` and returns `result: null` for a turn that died mid-call *or a result row that was
- * pruned*; rendering that as "running" inside a transcript that finished days ago would be false,
- * and rendering it as "failed" would name an outcome nobody reported.
- *
- * ## Durations are ours, and the rail says so by omission
- *
- * Nothing on the wire carries a tool duration, so `TraceEntry.at` and the `endedAt` the store
- * stamps when the ending arrives are the only clock available. That makes a *reloaded* transcript
- * durationless, which the rail renders as nothing at all rather than as zero.
- *
- * The disclosure is a Radix Collapsible so the trigger reports `aria-expanded` and `aria-controls`;
- * the trigger stays the ONLY button in the collapsed state, because the panel's tests select it by
- * role and a second collapsed control would make that selection ambiguous.
+ * The disclosure is a Radix Collapsible; its trigger is the only button while collapsed (tests
+ * select it by role).
  */
 
 import { memo, useState } from 'react';
@@ -48,13 +29,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/misc';
 
-/**
- * `tabIndex={0}` is load-bearing, not decoration.
- *
- * The block scrolls horizontally, and a scrollable region that nothing inside it can focus is
- * unreachable by keyboard — the content past the right edge simply does not exist for anyone not
- * using a pointer.
- */
+/** `tabIndex={0}` makes the horizontally scrolling block reachable by keyboard. */
 function Pre({ children, label }: { children: React.ReactNode; label: string }): React.JSX.Element {
   return (
     <pre
@@ -69,13 +44,8 @@ function Pre({ children, label }: { children: React.ReactNode; label: string }):
 }
 
 /**
- * The control that lifts the 200-character ceiling on one row.
- *
- * Rendered only when the service stored the result — an empty `resultRef` means "not stored", and
- * the service guarantees that is its only meaning, so there is exactly one condition to check and
- * no state in which this button leads nowhere. It needs the session id, which is why the panel
- * takes one: the fetch route is session-scoped so the ownership check the turn already passed
- * covers the result too.
+ * Lifts the 200-character preview on one row. Rendered only when the service stored the result
+ * (non-empty `resultRef`); the fetch is session-scoped.
  */
 function FullResult({
   sessionId,
@@ -115,15 +85,8 @@ function FullResult({
 }
 
 /**
- * What the method its authors say it does NOT establish.
- *
- * The method's *name* is on the row itself — a chemist should never have to open anything to learn
- * whether a number came from a cited table or a semiempirical estimate. The caveat is two to four
- * lines and stays in here, because five of them stacked on the rail is the annotation clutter that
- * trains a reader to stop reading annotations.
- *
- * Every word is the backend's own (`src/chem/provenance.ts`). A tool this frontend has no sourced
- * method for renders nothing at all — a confidently wrong caveat would be worse than the silence.
+ * What the method's authors say it does not establish (wording from `src/chem/provenance.ts`). The
+ * method name is on the row; this caveat stays in the disclosure. Unknown tools render nothing.
  */
 function MethodCaveat({ tool }: { tool: string }): React.JSX.Element | null {
   const caveat = methodFor(tool)?.caveat;
@@ -132,12 +95,8 @@ function MethodCaveat({ tool }: { tool: string }): React.JSX.Element | null {
 }
 
 /**
- * The numbers this call returned, in full.
- *
- * From `tool_result.numbers`, never from the preview beside it — the preview is cut at an
- * arbitrary byte and this list is not, which is the entire reason the service sends both. It is
- * also what the figure marks in the answer above were checked against, so a reader who distrusts a
- * mark can see the evidence rather than take it on faith.
+ * The numbers this call returned, in full (`tool_result.numbers`, never the truncated preview) —
+ * the evidence the answer's figure marks were checked against.
  */
 function ReturnedNumbers({
   numbers,
@@ -148,9 +107,7 @@ function ReturnedNumbers({
   values?: { label: string; value: number; unit: string }[];
 }): React.JSX.Element | null {
   if (numbers.length === 0 && !values?.length) return null;
-  // Named where the service could name them, bare where it could not. The bare form is not a
-  // degradation to hide: a result that was not JSON has no names, and printing a guessed one would
-  // be the invention both fields exist on opposite sides of.
+  // Named where the service named them, bare otherwise; never a guessed name.
   const named = values ?? [];
   const count = named.length || numbers.length;
   return (
@@ -168,13 +125,8 @@ function ReturnedNumbers({
 }
 
 /**
- * The structures a call was actually made on.
- *
- * **Only from `arguments`, and only when it parses as whole JSON.** That is the exact boundary the
- * service announces a call on, so a complete document is the normal case and a truncated one is
- * visibly not JSON. The preview beside it is cut at an arbitrary byte and is off limits: a SMILES
- * cut short very often stays valid as a smaller, different molecule, and nothing downstream can
- * catch that.
+ * The structures a call was made on, only from `arguments` parsed as whole JSON. Never from the
+ * preview: a truncated SMILES can still be a valid, different molecule.
  */
 function CalledOn({ argumentsJson }: { argumentsJson: string }): React.JSX.Element | null {
   const structures = smilesFromArguments(argumentsJson);
@@ -206,12 +158,7 @@ const DOT_CLASS: Record<DotTone, string> = {
   running: 'bg-brand animate-pulse',
 };
 
-/**
- * One step: a dot in the gutter, a line, and optionally something to open.
- *
- * The gutter draws its own connector rather than the list drawing a border, so a row can sit at
- * any height and the line still joins the dots either side of it.
- */
+/** One step: a gutter dot that draws its own connector, a line, and optionally a disclosure. */
 function Step({
   tone,
   children,
@@ -225,12 +172,8 @@ function Step({
   detail?: React.ReactNode;
   detailLabel?: string;
   /**
-   * Whether the disclosure starts open — what "expand all" sets.
-   *
-   * A *default*, not a controlled value: the panel re-keys its rows when the control is used, so
-   * this is applied at mount and the reader's own toggling afterwards is left alone. Holding every
-   * row's open state in the parent would mean a click on one row re-rendering all of them, and a
-   * reader who opened two rows losing both the next time anything above changed.
+   * Whether the disclosure starts open (set by "expand all"). A default, not controlled: rows are
+   * re-keyed when expand-all is used, so the reader's own toggles survive other updates.
    */
   open?: boolean;
 }): React.JSX.Element {
@@ -298,12 +241,8 @@ const durationOf = (at: number, endedAt: number | undefined): string | undefined
   typeof endedAt === 'number' && endedAt >= at ? formatDuration(endedAt - at) : undefined;
 
 /**
- * What changed in this plan revision, rather than the plan again.
- *
- * The strip above the answer already renders the current plan; repeating all of it here on every
- * revision is what made the old panel's first rows pure duplication. What a reader wants from a
- * revision row is the delta, so that is what it says — and when there is no previous revision to
- * compare against, it says how many steps the plan opened with.
+ * What changed in this plan revision (the strip above shows the whole plan), or how many steps it
+ * opened with.
  */
 function planDelta(todos: string[], previous: string[] | null): string {
   const bare = (lines: string[]): string[] => lines.map((l) => parsePlanItem(l).text);
@@ -388,9 +327,7 @@ function Row({
                   <p className="mt-1.5 text-2xs text-ink-subtle">returned</p>
                   <Pre label={`Result preview from ${call.tool}`}>{call.result}</Pre>
                   <ReturnedNumbers numbers={call.numbers ?? []} values={call.values} />
-                  {/* A cut result gets its own control: the assistant read less than this, and
-                      the ref opens what the tool actually returned, as plain text. The typed
-                      "see the full result" would open the same ref, so only one is offered. */}
+                  {/* A cut result gets its own control, opening what the tool actually returned; only one control is offered. */}
                   {call.resultCut ? (
                     <CutResultNotice
                       className="mt-1"
@@ -418,10 +355,8 @@ function Row({
             mono={call.tool}
             badge={
               running && call.queue?.state === 'queued' ? (
-                // Waiting for a compute slot, which is not the same claim as running: the call
-                // has not started. The count is the broker's approximate backlog, this call
-                // included, so "in queue", never "position" — and a 0 the approximation can
-                // report while this call is still in it reads as no count at all.
+                // Waiting for a compute slot (not running). The count is the broker's approximate
+                // backlog, so "in queue", never a position; 0 shows no count.
                 <span className="text-2xs text-ink-muted">
                   {call.queue.waiting === null || call.queue.waiting <= 0
                     ? 'queued…'
@@ -438,10 +373,7 @@ function Row({
             }
             duration={durationOf(entry.at, call.endedAt)}
           />
-          {/* What the call was made ON and what method answers it, on the line rather than one
-              disclosure in: "did it compute the pKa of the compound I meant" and "was that a
-              cited table or an estimate" are the two questions a reader opens this panel with,
-              and both were behind a caret. The drawings stay inside, where there is room. */}
+          {/* What the call was made on and which method answers it, on the line itself: the two questions a reader opens the panel with. */}
           {(structures.length > 0 || method) && (
             <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-2xs text-ink-muted">
               {structures.length > 0 && (
@@ -458,15 +390,8 @@ function Row({
     }
 
     case 'tool_failed': {
-      // A gate refusal is not a fault, and rendering it in the failure red says it is. The service
-      // classifies it for exactly this reason: a correctly-gated turn read as a broken one is the
-      // mistake its own live evaluation made before the field existed.
-      //
-      // Five kinds, not one. This asked `reason === 'plan_gate'` while the other four gates — a
-      // dry run the reader themselves switched on, a role denial, a tool this agent never had, a
-      // repeat the guard stopped — all fell through to the failure red, which told a chemist their
-      // own dry run was a broken pod. `refusalCopy` is the one table; `null` from it still means
-      // an ordinary failure.
+      // A deliberate refusal is not a fault: `refusalCopy` maps each of the five refusal kinds to
+      // copy; `null` means an ordinary failure (red).
       const refusal = refusalCopy(entry.toolFailure?.reason);
       return (
         <Step tone={refusal ? 'warn' : 'danger'}>
@@ -485,10 +410,7 @@ function Row({
               <Badge tone={refusal ? 'warn' : 'danger'}>{refusal ? refusal.badge : 'failed'}</Badge>
             }
           />
-          {/* The service's own sentence explains what the gate did; the remedy says what the
-              reader does about it. Both, because neither is the other: "record_knowledge_note
-              changes stored data and the plan has not been approved" does not tell a chemist to go
-              and approve it, and a remedy alone would hide which call was refused. */}
+          {/* Both the service's sentence (what was refused) and the remedy (what to do). */}
           {entry.toolFailure?.message && (
             <p className={cn('mt-0.5 text-2xs', refusal ? 'text-warn-ink' : 'text-danger-ink')}>
               {entry.toolFailure.message}
@@ -500,9 +422,7 @@ function Row({
     }
 
     case 'evidence_source': {
-      // One row for the whole sweep. `gather_evidence` asks every source at once and reports each
-      // separately, so five sources arrive as five events — and the question a reader has is not
-      // "did lexical answer" but "who was asked, and what did each contribute", which is one line.
+      // One row for the whole evidence sweep: who was asked and what each contributed.
       const sources = entry.evidenceSweep ?? (entry.evidenceSource ? [entry.evidenceSource] : []);
       const down = sources.filter((s) => s.failed);
       return (
@@ -519,9 +439,7 @@ function Row({
                 {sources.map((source) => (
                   <span key={source.source} className={source.failed ? 'text-danger-ink' : ''}>
                     <span className="font-medium">{source.source}</span>{' '}
-                    {/* "failed" and "0" are different answers and the whole reason the event
-                        carries a flag: a dark source is a question about the corpus, a broken one
-                        is a page for whoever owns the index. */}
+                    {/* "failed" and "0" differ: a broken source vs a source with nothing. */}
                     {source.failed ? 'failed' : source.chunks}
                   </span>
                 ))}
@@ -558,11 +476,8 @@ function Row({
           />
           {entry.job?.planStep &&
             (() => {
-              // The step's position, when the plan still holds it: "for step 3 · Estimate the pKa"
-              // is a reader's own index into the checklist above, where the bare text is a string
-              // they have to go and find. The service stamps the text, not the number, because a
-              // plan can be revised between the launch and the render — so a step that has since
-              // been dropped says its text and no number rather than a number that has moved.
+              // The step number when the current plan still holds the step's text; otherwise the
+              // text alone (the plan may have been revised).
               const index = (plan ?? []).findIndex(
                 (line) => parsePlanItem(line).text === entry.job?.planStep,
               );
@@ -602,9 +517,8 @@ function Row({
       );
 
     case 'handoff':
-      // The boundary rather than the speaker. What a reader needs from this row is that the prose
-      // after it comes from an agent with a different surface and a different brief; `reason` is
-      // the handing model's own account, which is the only record of the decision there is.
+      // A handoff boundary: the prose after it comes from another agent; `reason` is the handing
+      // model's own account.
       return (
         <Step tone="idle">
           <Line
@@ -623,11 +537,8 @@ function Row({
         </Step>
       );
 
-    // The wire name is `note_proposed` and the event is not a proposal: nothing reviews a note
-    // since Chemclaw3's `D-2026-09-05-the-gate-follows-behaviour-not-knowledge`. It is readable by
-    // everyone the moment it is written, so telling a chemist it is "for review" promises them a
-    // reviewer who does not exist. The literal stays because it is the SSE contract; the label a
-    // person reads is the half that was making the false claim.
+    // The wire name is `note_proposed`, but nothing reviews notes: label it as recorded, not "for
+    // review".
     case 'note_proposed':
       return (
         <Step tone="idle">
@@ -657,16 +568,8 @@ function Row({
 }
 
 /**
- * Pair each row with the plan as the revision before it left it.
- *
- * A plain function outside the component rather than a fold inside the render: a plan row states
- * its *delta*, so it needs the revision before it, and carrying that in a variable through a
- * `.map()` during render is the mutation-after-render pattern the React compiler refuses — for
- * good reason, since it is only correct if the map runs once, in order, exactly as written.
- *
- * There is no sweep fold here. The store does it as the events arrive (`foldIntoSweep`), because a
- * row per source spends the trace's bounded budget on retrieval; by the time the rail sees a sweep
- * it is already one entry carrying every source's report.
+ * Pair each row with the plan as it stood before it (plan rows show a delta), computed outside
+ * render. Sweeps are already folded by the store.
  */
 function withPreviousPlan(
   entries: readonly TraceEntry[],
@@ -680,34 +583,23 @@ function withPreviousPlan(
   return out;
 }
 
-/**
- * The summary the disclosure is labelled with.
- *
- * "Show the agent's work (6 steps)" said how much there was to read and nothing about whether it
- * was worth reading. This says what the work *was*, and — because a problem is the one thing a
- * reader would open the panel for — whether anything in it went wrong.
- */
+/** The disclosure's label: what the work was, and whether anything went wrong. */
 export function summaryLabel(trace: readonly TraceEntry[], durationMs: number | null): string {
   const { steps, toolCalls, jobs, problems, sourcesDown, held } = summarizeTurn(trace);
   const parts = [`${steps} step${steps === 1 ? '' : 's'}`];
   if (toolCalls > 0) parts.push(`${toolCalls} tool${toolCalls === 1 ? '' : 's'}`);
   if (jobs > 0) parts.push(`${jobs} job${jobs === 1 ? '' : 's'}`);
   if (durationMs !== null && durationMs > 0) parts.push(formatDuration(durationMs));
-  // WHAT kind of trouble is named in the panel's own header, where there is room for the three
-  // different next moves it implies. A count of it rides on the collapsed trigger anyway, because
-  // a panel that has to be opened before a broken retriever is visible is exactly the depth
-  // problem this surface exists to fix.
+  // The panel header names the kind of trouble; the collapsed trigger carries the count so problems
+  // are visible without opening.
   const trouble = problems + sourcesDown + held;
   if (trouble > 0) parts.push(`${trouble} to look at`);
   return parts.join(' · ');
 }
 
 /**
- * What went differently, named rather than totalled.
- *
- * Three kinds, and they are three because the reader's next move differs for each: a refusal wants
- * an approval, a dead source wants whoever owns the index, a failure wants somebody to look at the
- * turn. Rolling them into "3 problems" reports a correctly-gated turn as a broken one.
+ * What went differently, named rather than totalled: a refusal wants an approval, a dead source the
+ * index owner, a failure someone to look.
  */
 export function troubleLabel(trace: readonly TraceEntry[]): string {
   const { problems, sourcesDown, held } = summarizeTurn(trace);
@@ -718,11 +610,7 @@ export function troubleLabel(trace: readonly TraceEntry[]): string {
   return parts.join(' · ');
 }
 
-/**
- * Memoised on `trace` identity, which is the point: `appendTokens` spreads the message but leaves
- * the trace array alone, so during a stream this subtree would otherwise re-render once per
- * animation frame to produce exactly the same output.
- */
+/** Memoised on `trace` identity: token appends leave the trace array unchanged. */
 export const TracePanel = memo(function TracePanel({
   trace,
   /** Null for a transcript read back from the server, which has calls but nothing to fetch
@@ -755,10 +643,7 @@ export const TracePanel = memo(function TracePanel({
   if (shown.length === 0) return null;
 
   const { steps, problems } = summarizeTurn(shown);
-  // A turn where tools failed used to read exactly like one where they did not, and the fix for
-  // that was a `, N failed` suffix on the step count. `troubleLabel` is that same argument carried
-  // further: a refusal wants an approval, a dead source wants whoever owns the index, and a
-  // failure wants somebody to look at the turn, so the three are named rather than totalled.
+  // Trouble is named, not totalled (see `troubleLabel`).
   const trouble = troubleLabel(shown);
 
   const rows = withPreviousPlan(shown);
@@ -769,9 +654,7 @@ export const TracePanel = memo(function TracePanel({
         <Button
           variant="link"
           size="xs"
-          // Tinted on a *failure* only, not on any trouble: a plan-gate refusal is the gate doing
-          // its job and a dark source is a question about the corpus, and colouring the control red
-          // for either teaches a reader that the red means nothing.
+          // Red only for a failure; a refusal or a dark source is not.
           className={cn(
             '-ml-2 px-2 no-underline hover:underline',
             problems > 0 && 'text-danger-ink',
@@ -781,13 +664,9 @@ export const TracePanel = memo(function TracePanel({
             aria-hidden
             className="size-3.5 transition-transform group-data-[state=open]/trace:rotate-90"
           />
-          {/* The visible label is the summary — what the work WAS, rather than how much of it
-              there is to read. The name is prefixed for anyone who meets this button without the
-              answer above it: "6 steps · 2 tools" alone says nothing about what it opens. */}
+          {/* The summary as the visible label, prefixed for readers who meet the button without the answer above it. */}
           <span className="sr-only-live">The agent’s work: </span>
-          {/* The same dot the live row carried, in its settled colour: the trigger is where that
-              row ends up, and a turn that went cleanly should be readable as such without the
-              sentence being parsed. */}
+          {/* The settled dot, so a clean turn reads as such at a glance. */}
           <span
             aria-hidden
             className={cn('size-1.5 shrink-0 rounded-full', trouble ? 'bg-warn' : 'bg-ok')}
@@ -836,10 +715,7 @@ export const TracePanel = memo(function TracePanel({
                 open={expanded.all}
               />
             ))}
-            {/* The answer itself is a step of the turn and the only one the service does not
-                announce: without it the rail stops at the last tool call, and the reader cannot see
-                that most of the wait was the model writing. Words, never tokens — nothing here
-                knows how the service tokenised anything. */}
+            {/* The answer as the final step (the service does not announce it), in words. */}
             {answer && (
               <Step tone="ok">
                 <Line
@@ -855,10 +731,7 @@ export const TracePanel = memo(function TracePanel({
             )}
           </ol>
 
-          {/* The reference a support conversation is built on, where the reader can select it.
-              Every line the service logged for this turn carries the same string, so this is what
-              turns "it went wrong at 14:32" into one query — including on a turn that SUCCEEDED,
-              which is the case that had no reference of any kind. */}
+          {/* The turn's reference, selectable, for joining to the service's logs — shown on successful turns too. */}
           {correlationId && (
             <p className="mt-3 border-t border-border-subtle pt-2 font-mono text-2xs text-ink-subtle">
               Reference {correlationId}

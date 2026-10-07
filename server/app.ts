@@ -26,7 +26,9 @@ import { SANDBOX_FRAME_PATH } from '../shared/sandbox.ts';
 
 /**
  * Security headers for every response, including `/api/*` and `/config.js` (a proxied response is a
- * same-origin document).
+ * same-origin document). The SPA's `script-src 'self'` is what keeps the RDKit SVG injected via
+ * `dangerouslySetInnerHTML` (`src/components/Molecule.tsx`) from executing script, and a proxied
+ * HTML-typed body must not run script on the origin that holds the bearer token.
  */
 export function setSecurityHeaders(res: http.ServerResponse, path = ''): void {
   // The RDKit worker script gets `RDKIT_WORKER_CSP`, keyed on the request path (not `sirv`'s hook,

@@ -1,8 +1,9 @@
 /**
  * Run one turn and consume its Server-Sent Event stream. SSE over POST, so `EventSource` (GET-only,
  * no headers) is unusable: `fetch` plus `eventsource-parser`, which handles multi-line data,
- * comments, CRLF and frames split across chunks. No auto-retrying SSE library: re-sending a POST
- * could double-spend or hit the session's turn lock; retry policy is the caller's.
+ * comments, CRLF and frames split across chunks. Not `@microsoft/fetch-event-source`: it is
+ * unmaintained and auto-retries a failed stream, and re-sending this POST would double-spend the
+ * turn budget or hit the session's turn lock (409). Retry policy is the caller's.
  */
 
 import type { ExhibitRef } from '../../shared/exhibitConstants.ts';

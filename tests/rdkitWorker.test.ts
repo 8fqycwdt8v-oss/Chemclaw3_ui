@@ -293,7 +293,7 @@ describe('a worker that stops answering', () => {
 
 describe('an escalation the page cannot take', () => {
   /**
-   * `ISSUES.md` Issue 10's fix makes this the production case, not a corner. The worker rethrows a
+   * The worker-only CSP (`RDKIT_WORKER_CSP` in `server/config.ts`) makes this the production case, not a corner. The worker rethrows a
    * stack exhaustion so the page — bigger stack — can re-run the call; but `'unsafe-eval'` is
    * granted only to the worker's own script, so under the production CSP the page's copy of RDKit
    * never loads. Re-running there answered `unreadable`, the worker then said the toolkit was

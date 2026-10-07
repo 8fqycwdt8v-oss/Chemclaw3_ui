@@ -123,7 +123,7 @@ describe('URL ↔ store', () => {
 });
 
 /**
- * W30.6 — `ISSUES.md` Issue 5. The second-device link says what it is.
+ * W30.6 — the second-device link says what it is.
  *
  * Every session-scoped route upstream resolves through `_refuse_unless_owner`, which 404s a
  * non-owner indistinguishably from an unknown id. So this link cannot be handed to a colleague,

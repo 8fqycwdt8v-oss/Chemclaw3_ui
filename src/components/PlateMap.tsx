@@ -1,28 +1,10 @@
 /**
- * The plate, drawn as a plate.
+ * The plate, drawn as a grid, because the questions about a layout are spatial.
  *
- * A `PlateLayout` is a list of wells with a row, a column and an arm, and read as a table it is
- * unusable: the question a chemist asks of a layout is *spatial* — is the positive control on the
- * edge, did the randomiser put both replicates of an arm in the same column, is the top-left
- * quadrant all one level — and none of those is answerable from a sorted list of 96 rows. So this
- * draws the grid.
- *
- * Three things here are less obvious than they look.
- *
- * **The layout's own row/column origin is not assumed.** Nothing on the wire says whether `row` is
- * 0-based or 1-based, and both conventions exist in plate tooling. The span is therefore derived
- * from the wells present rather than declared: the origin is whichever of 0 or 1 the smallest
- * observed index is consistent with, and the drawn extent is widened past `rows`/`columns`
- * whenever a well sits outside them. A well the declared size does not cover is a defect in the
- * layout, and drawing it where it says it is beats dropping it silently.
- *
- * **A control is not a colour.** Controls are marked by a ring, a dot and their own text, so the
- * distinction survives greyscale, both themes and a reader who cannot tell the tones apart. Colour
- * alone would be the only signal for the one thing on this grid that is not being screened.
- *
- * **It scrolls itself.** A 1536-well plate is 48 columns wide and no viewport holds that, so the
- * grid owns an `overflow-x-auto` region with a real focusable role — a scroller nothing inside can
- * focus is a set of columns no keyboard can reach — and the page around it never scrolls sideways.
+ * - The row/column origin is not assumed: the span comes from the wells present (0- or 1-based),
+ *   widened past the declared size if a well sits outside it.
+ * - Controls are marked by ring, dot and text, not colour alone.
+ * - The grid scrolls itself in a focusable region, so wide plates stay keyboard-reachable.
  */
 
 import type { PlateLayout, ProtocolArm, Well } from '../../shared/protocols.ts';
@@ -40,10 +22,8 @@ export function rowLabel(index: number): string {
 }
 
 /**
- * The range of indices to draw on one axis.
- *
- * `declared` is what the layout says; `observed` is every index a well actually claims. The result
- * covers both, because the two disagreeing is exactly the case a reader needs to see.
+ * The range of indices to draw on one axis, covering both the declared size and every observed
+ * index.
  */
 export function axisSpan(declared: number, observed: number[]): { origin: number; count: number } {
   if (observed.length === 0) return { origin: 1, count: Math.max(declared, 0) };
@@ -81,17 +61,8 @@ function WellCell({
     );
   }
   return (
-    // **One string, and it has to carry everything the cell shows.** `title` on the inner
-    // non-interactive `<div>` contributes nothing to the cell's accessible name, so the well id —
-    // what a chemist reads off the plate itself — was announced by neither: measured, the name was
-    // "arm-1 run 1" and `getByRole('cell', { name: /A1/ })` found nothing.
-    //
-    // **`aria-label` on a `role=cell` *replaces* name-from-content, and the first fix forgot that.**
-    // Measured again with `dom-accessibility-api`: the names went from "arm-1 run 2" and
-    // "arm-2 negative" to "A1 · arm-1" and "A2 · arm-2" — the well id bought at the price of the run
-    // order **and of the control marking**, so a screen-reader user could no longer tell a control
-    // well from an ordinary one (`●` is `aria-hidden` and `negative` had left the name). Trading one
-    // fact for two is not a fix. This names all of them.
+    // `aria-label` on a cell replaces its content as the accessible name, so `describeWell` must
+    // carry everything the cell shows plus the well id.
     <td className="p-0.5" aria-label={describeWell(well, control)}>
       <div
         // The same string for the sighted hover, because two spellings of one cell is how they
@@ -122,12 +93,8 @@ function WellCell({
 }
 
 /**
- * One well as a sentence — the cell's accessible name and its hover title, from one place.
- *
- * Everything the cell shows plus the thing it does not: the well id. `aria-label` on a `role=cell`
- * replaces name-from-content outright, so anything left out of this string is not merely
- * un-emphasised to a screen reader, it is *gone* — which is how an earlier version traded the run
- * order and the control marking for the well id.
+ * One well as a sentence — the cell's accessible name and hover title: well id, arm, run order and
+ * control marking.
  */
 function describeWell(well: Well, control: string): string {
   const parts = [well.label, well.arm_id];
@@ -168,9 +135,7 @@ export function PlateMap({
         {layout.plate_format}-well plate · {rowSpan.count} × {columnSpan.count} · {wells.length}{' '}
         occupied
         {controlCount > 0 && ` · ${controlCount} control${controlCount === 1 ? '' : 's'}`}
-        {/* Whether the order can be reproduced, not just whether it was shuffled. A randomised
-            layout with no seed is one nobody can lay out again, and that is a fact about the
-            experiment rather than about this drawing. */}
+        {/* Whether the order can be reproduced (a seed), not just whether it was shuffled. */}
         {layout.randomized
           ? layout.seed === null
             ? ' · run order randomised, no seed recorded — this layout cannot be reproduced'
@@ -198,15 +163,7 @@ export function PlateMap({
                   scope="col"
                   className="px-1 py-1 text-center text-2xs font-medium text-ink-subtle"
                 >
-                  {/* The header is the cell's **position in the drawn grid**, not its index, which
-                      is the same rule the row letters have always used (`rowLabel(rowIndex)`).
-                      `place()` emits a 0-based index and writes the label as
-                      `row_label(row) + str(column + 1)`, so drawing the raw index put well `A1`
-                      under a header reading `0` and left a 24-well plate with no column 6 —
-                      invisible because every fixture here declared a 1-based origin the producer
-                      cannot emit. Position rather than `column + 1` because `axisSpan` returns an
-                      origin of 0 *or* 1, and the value rule is right for only one of them: a
-                      1-based layout numbered its columns 2..7 while its rows still read A..D. */}
+                  {/* The header is the column's position in the drawn grid (like the row letters), not its raw index, so 0- and 1-based layouts both read from 1. */}
                   {columnIndex + 1}
                 </th>
               ))}

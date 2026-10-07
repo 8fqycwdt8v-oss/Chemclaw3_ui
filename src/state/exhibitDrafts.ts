@@ -1,24 +1,13 @@
 /**
- * Documents the agent is still writing — the `exhibit_draft` frames of the turns in flight.
+ * Documents the agent is still writing: `exhibit_draft` frames of in-flight turns.
  *
- * **A draft is not an artefact**, and this store exists so the two never share a home. Artefacts
- * are React Query's (`keys.exhibits`), fetched from the service and versioned there; a draft is a
- * few seconds of one turn's stream, never persisted upstream and not persisted here either. Putting
- * it in the query cache as a pretend revision would leave a body on screen that no `GET` could ever
- * return, and putting it in `chatStore` would write it to `localStorage` on every frame.
- *
- * ## The lifecycle, which is the contract's
- *
- *  1. **Arrives** — `exhibit_draft` frames, each carrying the whole text so far, keyed by the
- *     provider's `call_id`. A later frame replaces an earlier one; a frame whose text is no longer
- *     than what is held (a reordered or repeated frame) is ignored, so the text on screen only grows.
- *  2. **Settles** — the turn's `exhibit` frame names the artefact the call became, and the
- *     `call_id` of the call (`settleDraft`); an older service's frame without one falls back to
- *     order, for documents only. A settled draft stays on screen until the session's list has
- *     been refetched, so the swap from draft to artefact has nothing in between to flash.
- *  3. **Is dropped** — once settled and refetched; at once when its tool call raises
- *     (`failDraft`, by the failed call's `call_id` when the service sends one); or, unsettled, when the turn ends: the turn failed, and the text the reader
- *     watched being written is not a document anybody has.
+ * A draft is not an artefact. Artefacts live in React Query (`keys.exhibits`); drafts live only
+ * here, unpersisted. Lifecycle:
+ * 1. **Arrives**: frames keyed by `call_id`, each carrying the whole text so far; a frame no longer
+ * than what is held is ignored, so text only grows. 2. **Settles**: the turn's `exhibit` frame
+ * names the artefact (`settleDraft`); a settled draft stays until the session list refetches, so
+ * the swap does not flash. 3. **Is dropped**: once settled and refetched; at once when its call
+ * raises (`failDraft`); or, unsettled, when the turn ends.
  */
 
 import { create } from 'zustand';
@@ -72,11 +61,8 @@ const update = (sessionId: string, next: (drafts: ExhibitDraft[]) => ExhibitDraf
 };
 
 /**
- * Take one frame. Returns whether it *began* a create draft — the moment the pane may open.
- *
- * A frame for a kind other than `document` is ignored: the contract streams documents only, and a
- * draft of anything else would be text this surface does not know how to show as what it will be.
- * An empty kind is kept — the partial spec may not have reached its `kind` key yet.
+ * Take one frame; returns whether it began a create draft (when the pane may open). Only `document`
+ * drafts are kept; an empty kind is kept because the partial spec may not have reached `kind` yet.
  */
 export function applyDraft(sessionId: string, event: ExhibitDraftEvent): boolean {
   if (event.kind !== '' && event.kind !== 'document') return false;
@@ -107,19 +93,12 @@ export function applyDraft(sessionId: string, event: ExhibitDraftEvent): boolean
 }
 
 /**
- * The turn's `exhibit` frame arrived: mark the draft it replaces. Returns that draft's call id, or
- * `null` when no draft was waiting for this frame (a table, or a revise that streamed nothing).
+ * The turn's `exhibit` frame arrived: mark the draft it replaces and return its call id, or `null`
+ * when none was waiting.
  *
- * **By identity first.** The frame carries the `call_id` of the tool call that wrote it (the
- * contract's wave-2 amendment), and when it does, only the draft of that call is settled — or
- * none, if that call streamed nothing. Settling by position instead was wrong twice over: a refused
- * document create followed by its retry let the retry's artefact settle the *stale* draft, leaving
- * the pane on the retry's text until the turn ended; and a table created while a document streamed
- * settled the document's draft with the table's id.
- *
- * Only an empty `call_id` — a service older than the field — falls back to the old rule, narrowed
- * to what can have streamed: a `created` frame settles the oldest unsettled create draft only when
- * the frame is a `document`, and a `revised` one the revise draft naming the same artefact.
+ * Matches by `call_id` when present, so a retry or a concurrent table cannot settle the wrong
+ * draft. An empty `call_id` (older service) falls back to: `created` documents settle the oldest
+ * unsettled create draft; `revised` settles the revise draft naming the same artefact.
  */
 export function settleDraft(
   sessionId: string,
@@ -144,16 +123,11 @@ export function settleDraft(
 }
 
 /**
- * A `create_exhibit` / `revise_exhibit` call raised (`tool_failed`): its draft is not a document
- * anybody will have, so it leaves now rather than at the turn's end — where it would sit in front
- * of the pane while the agent retries, and could be mistaken for the retry's text.
+ * A `create_exhibit`/`revise_exhibit` call raised (`tool_failed`): drop its draft now so it is not
+ * mistaken for the retry's text.
  *
- * **By identity first**, `settleDraft`'s rule: `tool_failed` carries the `call_id` of the call that
- * raised (the contract's hardening item 2), and when it does, only that call's draft is dropped —
- * or none, if that call streamed nothing. Only an empty id — a service older than the field — falls
- * back to the old rule, the **oldest unsettled draft of that op**: calls fail in the order they were
- * made, and the drafts are held in arrival order. That fallback was wrong exactly when two drafts of
- * one op were in flight and the later one failed, which is the case the id exists for.
+ * Matches by `call_id` when present; an empty id (older service) falls back to the oldest unsettled
+ * draft of that op, since calls fail in order.
  */
 export function failDraft(sessionId: string, op: 'create' | 'revise', callId = ''): void {
   const failed = draftsOf(useExhibitDrafts.getState(), sessionId).find(
@@ -167,10 +141,7 @@ export function dropDraft(sessionId: string, callId: string): void {
   update(sessionId, (drafts) => drafts.filter((d) => d.callId !== callId));
 }
 
-/**
- * The turn ended. Every draft that never became an artefact is discarded; a settled one is left to
- * its refetch, which removes it once the artefact can be shown in its place.
- */
+/** The turn ended: discard unsettled drafts; settled ones are removed by their refetch. */
 export function discardUnsettled(sessionId: string): void {
   update(sessionId, (drafts) => drafts.filter((d) => d.settledAs !== null));
 }

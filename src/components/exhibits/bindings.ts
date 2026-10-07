@@ -1,22 +1,11 @@
 /**
- * Bound values (wave 3): where a stored spec is bound, what that binding says, and how to detach it.
+ * Bound values: where a stored spec is bound, what the binding says, and how to detach it.
+ * `raw_spec` decides whether a position is bound (a `$bind` value sits there); `bindings[]` adds
+ * the tool and status, matched by path and then by result and pointer.
  *
- * ## Read from `raw_spec`, enriched from `bindings[]`
- *
- * The stored spec is what decides *whether* a position is bound — a `$bind` value sits exactly
- * there, so no path string has to be parsed back into a position. `bindings[]` then supplies what
- * the stored value cannot: the tool that produced the result, and whether the result is still there.
- * It is matched by the service's path first (`rows[3].yield`) and, failing that, by the same result
- * and pointer — so a path spelled differently from this guess still finds its tool, and a binding
- * the list omits still draws a marker, with no status rather than an invented one.
- *
- * ## Detach is a literal copy of what is on screen
- *
- * Detaching replaces the binding in the *stored* spec with the *resolved* value at the same
- * position — the number the chemist is looking at — and leaves every other binding verbatim. After
- * it the value is ordinary content: editable, and no longer claimed by a tool. A binding whose
- * source is gone resolved to `null`, which is a legal literal only in a table cell; anywhere else
- * there is nothing to keep, so it is not offered (`canDetach`).
+ * Detach replaces the binding in the stored spec with the resolved value on screen, leaving every
+ * other binding verbatim. A binding whose source is gone resolved to `null`, which is a legal
+ * literal only in a table cell (`canDetach`).
  */
 
 import {
@@ -90,10 +79,7 @@ export function storedBinding(raw: RawExhibitSpec | null, target: BoundTarget): 
 const sameRef = (stored: string, listed: string): boolean =>
   stored === listed || (stored.startsWith('r:') && listed.startsWith(stored.slice(2)));
 
-/**
- * `bindings[]` by path, built once per body. A table of 2,000 bound rows asks this per cell, and a
- * linear search per cell would make drawing it quadratic.
- */
+/** `bindings[]` indexed by path once per body, so large bound tables are not quadratic. */
 const indexes = new WeakMap<readonly Binding[], Map<string, Binding>>();
 function byPath(bindings: readonly Binding[]): Map<string, Binding> {
   let index = indexes.get(bindings);
@@ -105,9 +91,8 @@ function byPath(bindings: readonly Binding[]): Map<string, Binding> {
 }
 
 /**
- * The provenance of a position, or `null` when it holds a literal.
- *
- * Keyed on the stored spec, as the module header argues; the `bindings` row is what names the tool.
+ * The provenance of a position, or `null` for a literal. Keyed on the stored spec; the `bindings`
+ * row names the tool.
  */
 export function provenanceAt(view: ExhibitView, target: BoundTarget): Provenance | null {
   const stored = storedBinding(view.raw_spec, target);
@@ -132,9 +117,8 @@ export const shortRef = (ref: string): string =>
   ref.startsWith('r:') ? ref : `r:${ref.slice(0, 12)}`;
 
 /**
- * A `bindings[]` row that is not a tool result at all but a geometry's stored structure (hardening
- * item 1): `{path: "xyz", result_ref: "", tool: "structure", pointer: <structure_id>}`. The strip
- * says it in its own words — "the tool result has been removed" would be false of it.
+ * A `bindings[]` row for a geometry's stored structure (`tool: "structure"`), not a tool result;
+ * the strip words it differently.
  */
 export const isStructureCitation = (b: Binding): boolean =>
   b.tool === 'structure' && b.result_ref === '';
@@ -143,8 +127,8 @@ export const isStructureCitation = (b: Binding): boolean =>
 export const goneBindings = (view: ExhibitView): Binding[] => view.bindings.filter((b) => !b.ok);
 
 /**
- * Whether a binding can be detached at all: only when there is a value to keep, or when `null` is
- * itself a legal literal at that position (a table cell, which the service types `str|number|null`).
+ * Whether a binding can be detached: there is a value to keep, or `null` is legal there (a table
+ * cell).
  */
 export const canDetach = (target: BoundTarget, provenance: Provenance): boolean =>
   provenance.ok !== false || target.at === 'cell';
@@ -153,11 +137,8 @@ export const canDetach = (target: BoundTarget, provenance: Provenance): boolean 
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 /**
- * The stored spec with the binding at `target` replaced by the resolved value there.
- *
- * Everything else is copied verbatim, bindings included. `null` when the two specs do not describe
- * the same artefact (different kinds), which only a caller bug produces — the caller then says so
- * rather than posting something nobody wrote.
+ * The stored spec with the binding at `target` replaced by its resolved value; everything else
+ * verbatim. `null` if the specs describe different kinds (a caller bug).
  */
 export function detach(
   raw: RawExhibitSpec,
@@ -221,19 +202,11 @@ function seriesLinked(
 }
 
 /**
- * The series of a chart whose plotted values are the agent's own transcription — decided per
- * series from the stored specs, never from who wrote the revision on screen.
- *
- * A series is linked when its `y` is bound and its `x` is too — or is only category names, which
- * are labels rather than figures anybody could have mistyped. A literal series is transcribed when
- * the agent wrote it literally; the one other way a chart series becomes literal is a person
- * detaching it (a chart has no point editor), and a detached series holds the tool's values
- * verbatim, so calling it transcribed would be false.
- *
- * `agentRaw` is the stored spec of the most recent **agent-authored** revision at or before this
- * one: a series literal here and linked there was detached since. `undefined` while that revision
- * is not known yet, which reads every literal series as transcribed — the cautious answer, and the
- * one this function gave before it knew.
+ * Chart series whose plotted values are the agent's own transcription, decided per series from the
+ * stored specs. Linked when `y` is bound and `x` is bound or only category names. A literal series
+ * is transcribed unless it was bound in `agentRaw` (the latest agent revision at or before this
+ * one), i.e. detached by a person. `undefined` `agentRaw` treats every literal series as
+ * transcribed.
  */
 export function transcribedSeries(
   raw: RawExhibitSpec | null,
@@ -254,8 +227,8 @@ export function transcribedSeries(
 }
 
 /**
- * A revision's stored spec, when it is the kind the view draws — what a write starts from. `null`
- * only when the service sent none it could read, and then the view offers no edit.
+ * A revision's stored spec when it is the kind the view draws (the base of a write); `null` when
+ * unreadable, and then no edit is offered.
  */
 export function rawOf<K extends RawExhibitSpec['kind']>(
   view: ExhibitView,

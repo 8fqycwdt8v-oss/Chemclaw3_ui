@@ -1,20 +1,12 @@
 /**
- * Entra ID (Azure AD) authentication via MSAL, auth-code + PKCE.
+ * Entra ID authentication via MSAL (auth code + PKCE), imported dynamically so dev-auth mode never
+ * downloads MSAL.
  *
- * This module is imported dynamically so that in dev-auth mode the ~100 KB of MSAL is never
- * downloaded at all.
+ * Common causes of a valid-looking token being rejected:
  *
- * Three configuration facts that account for most "valid-looking token is rejected" incidents,
- * all verified against the backend's service/auth.py:
- *
- *  1. The scope must be the API's own scope (`api://<api-client-id>/<name>`). Requesting only
- *     openid/profile yields an ID token whose `aud` is the SPA's client id, and the backend
- *     checks `aud == CHEMCLAW_ENTRA_AUDIENCE`. Microsoft Graph's `.default` is equally wrong.
- *  2. The backend pins the issuer to `https://login.microsoftonline.com/{tenant}/v2.0`, so the
- *     API app registration needs `accessTokenAcceptedVersion: 2` in its manifest. With the
- *     default (v1) every token is issued by the `sts.windows.net` issuer and 401s.
- *  3. There is no `CHEMCLAW_ENTRA_CLIENT_ID` setting on the backend — its Settings model is
- *     `extra="forbid"`, so exporting one aborts its startup. The SPA client id lives only here.
+ * 1. The scope must be the API's (`api://<api-client-id>/<name>`); an ID token's `aud` is the SPA.
+ * 2. The API registration needs `accessTokenAcceptedVersion: 2` (the backend pins the v2 issuer).
+ * 3. The backend has no `CHEMCLAW_ENTRA_CLIENT_ID`; the SPA client id lives only here.
  */
 
 import type { AccountInfo, Configuration, IPublicClientApplication } from '@azure/msal-browser';
@@ -23,12 +15,8 @@ import { forgetLocalHistory } from '../state/chatStore.ts';
 import type { AuthAccount, AuthProvider } from './types.ts';
 
 /**
- * The authority MSAL signs in against: the configured one, or Entra's public cloud for the tenant.
- *
- * The fallback is the exact string this module hardcoded before the authority was configurable,
- * so a deployment that sets nothing — and a BFF old enough not to send `entraAuthority` — behaves
- * as it always did. `ENTRA_AUTHORITY` exists for an authority that is not Entra's public cloud: a
- * sovereign cloud, or the Chemclaw3_mock tenant `e2e/oidc-mock.spec.ts` signs in against.
+ * The authority MSAL signs in against: the configured one (`ENTRA_AUTHORITY`: sovereign cloud,
+ * Chemclaw3_mock's tenant) or Entra's public cloud for the tenant.
  */
 export const msalAuthority = (): string =>
   config.entraAuthority || `https://login.microsoftonline.com/${config.entraTenantId}`;
@@ -40,20 +28,14 @@ export function buildMsalConfig(): Configuration {
       // The SPA's app registration — not the API's.
       clientId: config.entraClientId,
       authority,
-      // The authority's own host (with its port, which is what MSAL compares). Listing it is what
-      // tells MSAL to trust the host's discovery document rather than first asking
-      // login.microsoftonline.com whether the host is a known Entra instance — a question about
-      // a mock tenant on 127.0.0.1 that Microsoft can only answer "no". For the default authority
-      // this is `login.microsoftonline.com`, as it always was. The protocol mode stays MSAL's
-      // default (`AAD`), so the mock exercises the code path production runs.
+      // Trust the authority's own host (with port) for discovery, rather than asking Microsoft
+      // whether it is a known Entra instance. Protocol mode stays `AAD`.
       knownAuthorities: [new URL(authority).host],
       redirectUri: `${window.location.origin}/auth/callback`,
       postLogoutRedirectUri: window.location.origin,
     },
     cache: {
-      // sessionStorage rather than localStorage: the token dies with the tab, which removes a
-      // persistent cross-tab exfiltration target. The cost is a silent re-auth per new tab,
-      // which is invisible to the user when the Entra session cookie is still valid.
+      // `sessionStorage`: the token dies with the tab. A new tab re-authenticates silently.
       cacheLocation: 'sessionStorage',
     },
   };
@@ -63,29 +45,10 @@ export function buildMsalConfig(): Configuration {
 export const apiScopes = (): string[] => [config.apiScope];
 
 /**
- * Where a sign-in started by somebody *not yet signed in* comes back to.
- *
- * MSAL returns to the page the redirect started on (`navigateToLoginRequestUrl`, on by default).
- * For a signed-out visitor that page is almost always `/c/<id>`: `Bootstrap` in `src/routes.tsx`
- * mints a conversation and navigates to it on first paint, and the first `/api` call — which is
- * what starts the sign-in — comes after. That conversation was created in the anonymous history
- * slot (`chatStorageKey(undefined)`), and once the account is known the store reads *the
- * account's* slot instead, so returning to it lands every first sign-in on "That conversation
- * isn't on this device". Measured on the kind cluster against the mock tenant: most sign-ins from
- * `/` ended on that panel.
- *
- * So a conversation path is dropped in favour of `/`, where `Bootstrap` picks the signed-in
- * person's most recent conversation or makes one in their own slot — **once auth has settled, and
- * not a moment before.** MSAL redeems the code on the start page only while the address bar still
- * names it; as first merged, `Bootstrap` pushed `/c/<new id>` while `handleRedirectPromise()` was
- * still running, MSAL went back to `/`, and sign-in looped for ever (`src/routes.tsx`, and
- * `e2e/oidc-mock.spec.ts`, which counts the navigations). Every other path is kept —
- * `/open/<session>`, `/jobs/<id>`, `/review` are addresses that mean the same thing to whoever
- * signs in, and a deep link that survived the sign-in is the point of returning at all. (`/open/`
- * starts the sign-in itself, before it adopts anything, so that it is still the address bar when
- * the sign-in starts — #132.) A
- * re-authentication of somebody already signed in (`acquireTokenRedirect`) is not routed through
- * this: their `/c/<id>` *is* in their slot, and returning to it is right.
+ * Where a sign-in started by someone not yet signed in returns to. A `/c/<id>` path is replaced by
+ * `/` (that conversation was created in the anonymous slot); `Bootstrap` then picks or creates one
+ * in the user's slot once auth has settled. Other paths (`/open/…`, `/jobs/…`, `/review`) are kept.
+ * Re-authentication of a signed-in user does not go through this.
  */
 export function signInStartPage(location: Pick<Location, 'origin' | 'pathname' | 'href'>): string {
   return /^\/c\/[^/]+\/?$/.test(location.pathname) ? `${location.origin}/` : location.href;
@@ -156,27 +119,22 @@ export async function createMsalAuth(): Promise<AuthProvider> {
     },
 
     async login() {
-      // Redirect rather than popup: popups are blocked by default in several enterprise browser
-      // configurations, and Conditional Access / MFA / device-compliance flows render badly
-      // inside one. The usual objection — that a redirect destroys unsaved UI state — does not
-      // apply here because the transcript is persisted before we ever navigate.
+      // Redirect, not popup: popups are often blocked and handle Conditional Access poorly; the
+      // transcript is already persisted.
       await pca.loginRedirect(signInRequest());
     },
 
     async logout() {
-      // The transcripts are not MSAL's to clear: its cache holds the credential, in
-      // `sessionStorage`, and every conversation is persisted separately to `localStorage`. A
-      // sign-out that removes only the first leaves the second for whoever signs in next on the
-      // same browser profile — which on a shared lab workstation is a different chemist.
+      // Also forget the persisted conversations (`localStorage`), not just MSAL's cache, for shared
+      // workstations.
       forgetLocalHistory();
       sessionStorage.removeItem(REAUTH_KEY);
       await pca.logoutRedirect();
     },
 
     async handleUnauthorized() {
-      // Loop guard. A misconfigured audience or scope produces a 401 on every request, and
-      // without this the app would redirect-loop — which is indistinguishable from a hang and
-      // hides the actual error. At most one forced re-auth per minute.
+      // Loop guard: at most one forced re-auth per minute, so a misconfigured scope shows its error
+      // instead of looping.
       const last = Number(sessionStorage.getItem(REAUTH_KEY) ?? 0);
       if (Date.now() - last < REAUTH_COOLDOWN_MS) return false;
       sessionStorage.setItem(REAUTH_KEY, String(Date.now()));

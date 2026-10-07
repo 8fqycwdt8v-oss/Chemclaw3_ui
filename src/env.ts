@@ -1,22 +1,7 @@
 /**
- * Runtime configuration for the SPA.
- *
- * Resolution order: `window.__CHEMCLAW_CONFIG__` (injected by the BFF's `/config.js`, the
- * production path) -> `import.meta.env.VITE_*` (so a bare `vite dev` without the BFF still
- * boots) -> safe defaults.
- *
- * Validation is hand-rolled: this is a dozen string checks, and a schema library would be more
- * bytes than the rest of this module.
- *
- * **That stands, and it stood while `shared/events.ts` took one.** This module imports that one,
- * so `valibot` is already in the graph and the byte argument no longer bites — which is exactly
- * why it is worth saying that the byte argument was never the whole of it. What a schema buys
- * there is that the TypeScript type is *derived* from the decoder, so a field cannot exist in one
- * and be missing from the other; that file's header is a nine-incident changelog of precisely that
- * happening. Here there is no second declaration to drift from: the keys are read once at boot,
- * `RuntimeConfig` is the only shape, and a missing one is a default rather than a dropped field a
- * surface renders around. Nothing has gone wrong in this module for a schema to prevent. See
- * `docs/dependencies.md`.
+ * Runtime configuration for the SPA: `window.__CHEMCLAW_CONFIG__` (from the BFF's `/config.js`),
+ * else `import.meta.env.VITE_*` (bare `vite dev`), else defaults. Hand-validated: `RuntimeConfig`
+ * is the only declaration, read once at boot (see `docs/dependencies.md`).
  */
 
 import type { LogLevel } from './lib/logger.ts';
@@ -30,9 +15,8 @@ export interface RuntimeConfig {
   authMode: AuthMode;
   entraTenantId: string;
   /**
-   * The MSAL authority URL. Empty means Entra's public cloud for `entraTenantId` — what every
-   * deployment used before this was configurable, and what a BFF that predates the field implies.
-   * Set by the BFF from `ENTRA_AUTHORITY`; see `msalAuthority` in `src/auth/msalAuth.ts`.
+   * The MSAL authority URL; empty means Entra's public cloud for `entraTenantId` (`msalAuthority`
+   * in `src/auth/msalAuth.ts`).
    */
   entraAuthority: string;
   entraClientId: string;
@@ -40,91 +24,42 @@ export interface RuntimeConfig {
   apiBase: string;
   appVersion: string;
   /**
-   * Create the backend session while the user is still typing, so their first message costs one
-   * round-trip instead of two.
-   *
-   * Runtime-switchable because it changes a backend resource pattern: every conversation someone
-   * types into occupies a slot in the service's live-session LRU, sent or not. If that turns out
-   * to matter, this can be turned off without a client rebuild.
+   * Create the backend session while the user types (one round trip on send). Runtime-switchable
+   * because each typed-into conversation holds a live-session slot.
    */
   warmSessions: boolean;
   /**
-   * App roles whose holders may cancel a durable job or take another privileged action.
-   *
-   * Configured rather than hardcoded because the names are a deployment's own — they mirror the
-   * service's `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`. Used to hide affordances, never to enforce
-   * anything: the service is the only party that decides, and it will 403 regardless of what
-   * this list says.
-   *
-   * Empty under MSAL means nobody is offered a decision, which is exactly the service's own
-   * fail-closed posture. Irrelevant in dev auth, where the service opens the gate for everyone
-   * and so does `useIsReviewer`.
+   * App roles that may take privileged actions (the backend's `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`),
+   * used only to hide controls; the service enforces. Empty under MSAL offers them to nobody;
+   * irrelevant under dev auth.
    */
   reviewerRoles: string[];
-  /**
-   * How much this browser records through `src/lib/logger.ts`.
-   *
-   * Runtime rather than build-time for the same reason everything else here is: one image, any
-   * tenant. A deployment that wants its UI quiet sets `silent`; the usual posture is `info`, and
-   * `?debug=1` raises one chemist's browser to `debug` without a redeploy — which is the case
-   * support is actually in when a single user is the one seeing the fault.
-   */
+  /** How much this browser logs (`src/lib/logger.ts`); `?debug=1` raises one browser. */
   logLevel: LogLevel;
   /**
-   * The longest message the service will accept, in characters.
-   *
-   * Runtime rather than compile-time for the same reason `reviewerRoles` is: the value belongs to
-   * the deployment, not to this bundle. `CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS` is explicitly
-   * tunable, and a hardcoded copy is wrong in both directions — refusing what the service accepts,
-   * or inviting a message it rejects with a 422 once the whole body has crossed the wire.
-   *
-   * Falls back to `MAX_MESSAGE_CHARS`, the backend's own default, when nothing supplies it: an
-   * older BFF that predates the field, or a `vite dev` with no server behind it.
+   * The service's message cap in characters (deployment-tuned); falls back to `MAX_MESSAGE_CHARS`.
    */
   maxMessageChars: number;
   /**
-   * How often an open shared conversation reads its session's line (`GET /sessions/{id}/queue`)
-   * to notice somebody else's running turn, in milliseconds (`src/state/sharedSync.ts`).
-   *
-   * Runtime because it is a trade-off a deployment owns — how soon a colleague's turn appears
-   * here, against one small GET per open shared conversation per tick — and because the browser
-   * suite needs a page that follows a turn *when it starts*, not up to five seconds later: a test
-   * that waits through the production cadence is a test racing it. Set by the BFF from
-   * `SHARED_POLL_MS`; anything that is not a usable interval (`isUsablePollInterval`) keeps the
-   * default, `SHARED_POLL_MS` in `shared/sharedPoll.ts`.
+   * Polling interval for an open shared conversation's line (`src/state/sharedSync.ts`), in ms;
+   * invalid values keep the default from `shared/sharedPoll.ts`.
    */
   sharedPollMs: number;
   /**
-   * The origin of the HTML sandbox (wave 3) — `SANDBOX_ORIGIN`, served by the BFF's second
-   * listener — or `''` when this deployment has none.
-   *
-   * An `html` artefact runs only in a frame from this origin, never on the app's own: the frame's
-   * document is opaque-origin (`sandbox="allow-scripts"`, no `allow-same-origin`), and the origin
-   * being a *different* one is the second wall, so that even a sandbox attribute lost in some
-   * future edit would not hand agent-written script the origin holding the bearer token. Empty, or
-   * equal to the page's own origin, and the artefact is shown as escaped source instead
-   * (`HtmlView`), never inline.
+   * The HTML sandbox origin, or `''`. Artefact HTML runs only in an opaque-origin frame from this
+   * different origin; empty or equal to the page's origin shows escaped source (`HtmlView`).
    */
   sandboxOrigin: string;
   /**
-   * The origin this app is meant to be reached at (`APP_ORIGIN`), or `''` when the BFF was told
-   * none. The sandbox shell takes content only from this origin, so a page opened at another
-   * address (a second hostname, `localhost` for `127.0.0.1`) would frame a shell that ignores it;
-   * `HtmlView` compares it with `window.location.origin` and shows the source, naming both,
-   * instead of a blank frame.
+   * The origin the app is meant to be reached at, or `''`; `HtmlView` compares it with
+   * `window.location.origin` and shows the source when they differ.
    */
   appOrigin: string;
   /**
-   * Whether an `html` artefact's own script runs as soon as it is shown (`HTML_SCRIPTS_DEFAULT`).
-   * On by the owner's decision of 2026-10-03, with the per-view control "Disable scripts"; off is
-   * the kill switch that restores "Run scripts". Absent — a `vite dev` with no BFF — reads as off:
-   * a security default nobody stated is the closed one.
+   * Whether artefact scripts run when shown (`HTML_SCRIPTS_DEFAULT`). Absent (no BFF) reads as off.
    */
   htmlScriptsDefault: boolean;
-  /**
-   * Where the README is read from (`DOCS_BASE_URL`; `DEFAULT_DOCS_BASE_URL` when absent): an
-   * internal mirror in an air-gapped deployment, where github.com is a dead link.
-   */
+  /** Where the README is read from (`DOCS_BASE_URL`), e.g. an internal mirror. */
   docsBaseUrl: string;
 }
 
@@ -174,13 +109,7 @@ function resolve(): RuntimeConfig {
     warmSessions: w.warmSessions !== false,
     reviewerRoles: Array.isArray(w.reviewerRoles) ? w.reviewerRoles.map(String) : [],
     logLevel: asLevel(w.logLevel) ?? 'info',
-    // A cap of zero, a negative one or a non-number is not a stricter limit — it is a composer
-    // that refuses every message, including the one the chemist is typing when the bad value
-    // ships. Only a usable number displaces the default.
-    //
-    // The predicate is shared with the BFF rather than restated here, because the two disagreeing
-    // is what made this guard unreachable: the BFF clamped a bad value up to 1 before it crossed
-    // `/config.js`, and 1 passes any test for "usable" that only asks about the sign.
+    // Only a usable cap (shared predicate with the BFF) displaces the default.
     maxMessageChars: isUsableMessageCap(w.maxMessageChars) ? w.maxMessageChars : MAX_MESSAGE_CHARS,
     sharedPollMs: isUsablePollInterval(w.sharedPollMs) ? w.sharedPollMs : SHARED_POLL_MS,
     sandboxOrigin: pick(w.sandboxOrigin),
@@ -193,9 +122,8 @@ function resolve(): RuntimeConfig {
 export const config: RuntimeConfig = resolve();
 
 /**
- * Problems that make the app unusable, surfaced as a hard configuration screen rather than a
- * half-working login. An MSAL build missing its tenant fails in a way that looks like a network
- * error, which is a genuinely miserable thing to debug from a screenshot.
+ * Problems that make the app unusable, shown as a configuration screen rather than a half-working
+ * login.
  */
 export function configProblems(c: RuntimeConfig = config): string[] {
   const problems: string[] = [];

@@ -1,15 +1,8 @@
 /**
- * Run one turn and consume its Server-Sent Event stream.
- *
- * The chat endpoint is SSE *over POST*, so the native `EventSource` is unusable — it is GET-only
- * and cannot set an `Authorization` header. We use `fetch` plus `eventsource-parser`, which
- * correctly handles multi-line `data:`, comment frames, CRLF, and — the one that actually bites —
- * frames split across TCP chunk boundaries.
- *
- * Deliberately NOT `@microsoft/fetch-event-source`: it was last published in April 2021, and its
- * default behaviour is to auto-retry a failed stream. Retrying a non-idempotent POST here either
- * double-spends the turn budget or collides with the backend's per-session turn lock and comes
- * back 409. Retry policy belongs to the caller, which knows whether a retry is safe.
+ * Run one turn and consume its Server-Sent Event stream. SSE over POST, so `EventSource` (GET-only,
+ * no headers) is unusable: `fetch` plus `eventsource-parser`, which handles multi-line data,
+ * comments, CRLF and frames split across chunks. No auto-retrying SSE library: re-sending a POST
+ * could double-spend or hit the session's turn lock; retry policy is the caller's.
  */
 
 import type { ExhibitRef } from '../../shared/exhibitConstants.ts';
@@ -26,15 +19,9 @@ import { config } from '../env.ts';
 import { readEventStream } from '../lib/sse.ts';
 
 /**
- * How long a turn may produce nothing before the reader is told the chain may be broken.
- *
- * Not an abort. `server/proxy.ts` disables every socket and body timeout on purpose — a 600 s turn
- * is legitimate — and `fetch` has no timeout of its own, so a backend that accepts the POST,
- * flushes headers and then dies is indistinguishable from a model that is thinking hard: the
- * reader sees "Thinking…" and a counter, for up to ten and a half minutes, with nothing recorded
- * anywhere. Ninety seconds is well past any gap a healthy turn produces (tokens, tool calls and
- * plan revisions all arrive as frames) and well short of the wall clock, so it separates the two
- * without ever cutting a turn short.
+ * How long a turn may produce no frame before the reader is told the chain may be broken. Not an
+ * abort: the proxy has no timeouts (a 600 s turn is legitimate), and a healthy turn never goes this
+ * long without a frame.
  */
 export const TURN_STALL_MS = 90_000;
 
@@ -42,24 +29,9 @@ export const TURN_STALL_MS = 90_000;
 export const TURN_CORRELATION_HEADER = 'x-chemclaw-turn-correlation-id';
 
 /**
- * Error codes that qualify the answer still to come, rather than replacing it.
- *
- * The backend documents two codes as sharing their turn with an answer — `loop_cap_reached` and
- * `spend_cap_reached`: a runaway guard, of iterations or of spend, stops a turn that has been
- * streaming text all along, so the event arrives after those tokens and BEFORE the `AnswerEvent`
- * they add up to — the same "mark it partial while it is still arriving" ordering
- * `capability_degraded` uses. (`budget_exhausted` is not one of them despite naming a budget: it
- * refuses a turn *before* it starts, so there is no partial answer to keep.)
- *
- * Treating it as terminal cost more than the badge. Throwing here runs the `finally` below, whose
- * `reader.cancel()` the BFF turns into a destroyed upstream request and FastAPI into a client
- * disconnect — so the backend's turn was cancelled at that yield, before `_record_transcript`. The
- * partial answer was lost from the live view AND from the durable transcript, on a turn that had
- * done all the work and was three events from delivering it.
- *
- * A set rather than an equality check because the shape is the backend's, not this code's: any
- * future code the backend orders before an answer belongs here, and one place is where that stays
- * true.
+ * Error codes that qualify an answer still to come rather than ending the turn (`loop_cap_reached`,
+ * `spend_cap_reached`): they arrive after the tokens and before the `AnswerEvent`. Throwing on them
+ * would cancel the stream before the service records the transcript, losing the partial answer.
  */
 const PARTIAL_ANSWER_CODES: ReadonlySet<ErrorCode> = new Set<ErrorCode>([
   'loop_cap_reached',
@@ -72,34 +44,21 @@ export interface StreamTurnOptions {
   /** Plan the turn without launching anything expensive (the backend's `dry_run`). */
   dryRun?: boolean;
   /**
-   * Artefacts the chemist handed to the agent with this message (`exhibit_refs`, phase 2 of the
-   * artefact contract) — at most five, each `{exhibit_id, revision}` with `0` meaning the head.
-   * The service resolves each within the session (an unknown one is a 422) and puts a framed copy
-   * of that revision in front of the model *as data*, which is what typing the id into the text
-   * could not do.
+   * Artefacts the chemist attached (`exhibit_refs`, at most five, `{exhibit_id, revision}` with `0`
+   * = head). The service puts a framed copy of each in front of the model as data; an unknown one
+   * is a 422.
    */
   exhibitRefs?: readonly ExhibitRef[];
   /**
-   * Follow the session's running turn instead of starting one: `GET /sessions/{id}/turn/stream`
-   * (Chemclaw3 #499) in place of the POST, with no body, and `message`/`dryRun` unused.
-   *
-   * What `sendMessage` reattaches with after `stream_lagged` — the service cut this browser's view
-   * off for falling behind, and the turn ran on. A watcher sees events from the moment it attaches,
-   * so whatever streamed in the gap is not replayed; the `answer` event at the end is the whole
-   * answer, which is what makes the gap survivable. A 404 means no turn is running here: it ended
-   * in the gap, or runs on another replica — either way the transcript has it.
-   *
-   * And what an open shared conversation follows somebody else's running turn with
-   * (`followSharedConversation`, Chemclaw3_ui #130): the same route admits any participant.
+   * Follow the session's running turn (`GET /sessions/{id}/turn/stream`) instead of starting one:
+   * after `stream_lagged`, or to watch another member's turn. Events from the gap are not replayed,
+   * but the final `answer` is the whole text. A 404 means no turn runs on that replica; the
+   * transcript has it.
    */
   watch?: boolean;
   /**
-   * With `watch`: which turn the service says this is a view of, `''` when it does not say.
-   *
-   * Read off `X-Chemclaw-Turn-Correlation-Id` (Chemclaw3 `D-2026-10-03-an-unload-stop-waits-for-a-reload`),
-   * which is the id the turn's sender's own POST carried. Not `onCorrelationId`: a watch response's
-   * `X-Chemclaw-Correlation-Id` names the *watch request*. Called before the first frame, so a
-   * caller that finds another participant's turn there can abort before rendering any of it.
+   * With `watch`: which turn this is a view of (`X-Chemclaw-Turn-Correlation-Id`, the sender's id),
+   * `''` if not said. Called before the first frame so a caller can abort on someone else's turn.
    */
   onWatching?: (turnCorrelationId: string) => void;
   signal: AbortSignal;
@@ -107,64 +66,37 @@ export interface StreamTurnOptions {
   getToken: () => Promise<string | null>;
   onEvent: (event: ChemclawEvent) => void;
   /**
-   * The service's id for this turn, the moment it is known.
-   *
-   * Read back from the response's `X-Chemclaw-Correlation-Id` and from any frame that carries a
-   * `correlation_id` — the `error` event has always had one, and a `turn_started` frame would be
-   * picked up here without a contract change on either side. It is reported even on a turn that
-   * SUCCEEDS, which is the case that had no reference at all: "the answer at 14:32 cited the wrong
-   * note" was unjoinable to anything the service logged.
+   * The service's id for this turn, from `X-Chemclaw-Correlation-Id` or any frame carrying
+   * `correlation_id`; reported on successful turns too.
    */
   onCorrelationId?: (correlationId: string) => void;
   /**
-   * The service has taken this turn: the POST was answered `2xx`.
-   *
-   * Called at most once, and the caller needs it because *nothing else here distinguishes a turn
-   * that is running on the server from one that never started*. `token_unavailable` above names
-   * the one pre-flight failure that has its own kind; everything else that can go wrong before
-   * this line — and everything `sendMessage` itself can throw while setting the turn up — reaches
-   * its outer catch as a bare error and is wrapped as `stream`, which is the kind that means "the
-   * turn may still be running, poll for it". This is the fact that tells those apart, and
-   * `sendMessage` gates detach recovery on it rather than on the kind; see the comment there.
+   * The service took this turn (POST answered 2xx). Called at most once; `sendMessage` gates detach
+   * recovery on it, since a failure before this point never reached the service.
    */
   onAccepted?: () => void;
-  /**
-   * The stream went quiet for `stallAfterMs`, and later (with `false`) that it came back.
-   *
-   * Reported rather than acted on: this function deliberately does not abort, because a long turn
-   * that is genuinely working looks the same from here and cutting it off would destroy the answer.
-   */
+  /** The stream went quiet for `stallAfterMs` (and later `false`). Reported, never acted on. */
   onStall?: (stalled: boolean) => void;
   /** Overrides `TURN_STALL_MS`; `0` switches the detector off. Tests use it; nothing else does. */
   stallAfterMs?: number;
   /**
-   * A frame this build could not use, as it happened.
-   *
-   * Both drops are correct — one bad frame must not kill a good turn, and an unknown event type is
-   * how an older frontend survives a newer service — and both are pinned by tests. What was
-   * missing is that "one malformed frame" and "every frame is malformed" were the same
-   * observation, so a version skew against a newer backend was silent by construction.
+   * A frame this build could not use (malformed or unknown type), so a version skew is visible
+   * rather than silent.
    */
   onFrameDropped?: (drop: { reason: 'malformed' | 'unknown'; type: string }) => void;
 }
 
 /**
  * Runs exactly one turn. Resolves with the terminal `AnswerEvent`; throws `ApiError` otherwise.
- *
- * Never retries internally — see the module docstring.
+ * Never retries.
  */
 export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> {
   let token: string | null;
   try {
     token = await opts.getToken();
   } catch (err) {
-    // The provider itself failed before any request was opened — `msalAuth.getAccessToken`
-    // deliberately rethrows a silent-refresh failure that is not `InteractionRequiredAuthError`
-    // rather than resolving it, precisely so a network blip does not force a sign-in redirect.
-    // Left uncaught, this used to escape as a bare, non-`ApiError` rejection that `sendMessage`'s
-    // outer catch could only wrap as `kind: 'stream'` — the same kind a mid-turn disconnect gets
-    // — which sent a turn that never reached the network into the ten-minute "the turn may still
-    // be running server-side" recovery poll. It cannot be: `fetch` below has not been called yet.
+    // Token acquisition failures are thrown as `ApiError` before any request, so they are never
+    // mistaken for a dropped stream.
     if (opts.signal.aborted) throw new ApiError('aborted', 'Stopped.');
     throw new ApiError(
       'token_unavailable',
@@ -210,12 +142,8 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
 
   if (!res.ok) {
     const failure = await readFailure(res);
-    // A 422 about the attached artefacts is its own refusal; `errorFromStatus` alone would call
-    // every turn-route 422 a message that is too long.
-    //
-    // Keyed on the service's code (`detail.code = "invalid_exhibit_ref"`, artefacts wave 2) — a code
-    // is the service naming which refusal this is, which a sentence only implies. The wording test
-    // stays as the fallback for a service older than the code, and only where references were sent.
+    // A 422 about attached artefacts has its own kind: by the service's `invalid_exhibit_ref` code,
+    // else (older services) by wording when references were sent.
     if (
       res.status === 422 &&
       (failure.code === 'invalid_exhibit_ref' ||
@@ -239,11 +167,9 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
     );
   }
 
-  // The service answered 2xx: it has this turn, and it will run it to completion and write it to
-  // the session transcript whether or not this socket survives. Announced HERE rather than after
-  // the content-type check below, because a 200 that is not an event stream means something
-  // between us and the service swallowed the stream — the turn is still the service's, and
-  // recovery is still the right answer for it.
+  // 2xx: the service has the turn and will finish and record it even if this socket drops.
+  // Announced before the content-type check, since a 2xx that is not an event stream still means
+  // the turn is running.
   opts.onAccepted?.();
   if (opts.watch) opts.onWatching?.(res.headers.get(TURN_CORRELATION_HEADER)?.trim() ?? '');
 
@@ -285,8 +211,8 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
     if (stallAfterMs <= 0 || !opts.onStall) return;
     stallTimer = setTimeout(() => {
       const idle = Date.now() - lastFrameAt;
-      // Re-arm for the remainder rather than firing early: `setTimeout` may run late, and a frame
-      // that arrived while it was pending must reset the clock rather than be overruled by it.
+      // Re-arm for the remainder: a frame that arrived while the timer was pending resets the
+      // clock.
       if (idle < stallAfterMs) {
         armStall(stallAfterMs - idle);
         return;
@@ -309,16 +235,11 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
   markFrame();
 
   try {
-    // `readEventStream`'s own `finally` cancels the reader on the way out — including when this
-    // loop `break`s below, since breaking a `for await` calls the generator's `return()`. That
-    // cancel is what turns a client Stop into a disconnect the BFF and FastAPI can act on to
-    // release the session's turn lock; without it, Stop would leave the next message 409-ing.
+    // `readEventStream`'s `finally` cancels the reader on exit (including `break`), which
+    // propagates a Stop as a disconnect.
     for await (const frame of readEventStream(res.body)) {
-      // The BFF's heartbeat is an SSE *comment* and never becomes a frame at all (`lib/sse.ts`
-      // says why), and that is what makes the watch honest: the heartbeat is injected by this
-      // app's proxy whether or not the service is still alive, so counting one as activity would
-      // report a dead backend as a healthy one. A frame with no payload is no more evidence of a
-      // live turn than a heartbeat is, so it is skipped on the same grounds.
+      // Heartbeats are SSE comments and never become frames; an empty frame is no evidence of a
+      // live turn either, so neither resets the stall clock.
       if (frame.drop === 'empty') continue;
       markFrame();
 
@@ -329,9 +250,7 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
         continue;
       }
 
-      // Any frame may carry the turn's id, whether or not this build knows the frame. That is what
-      // makes a `turn_started` the service may start sending backwards-compatible in both
-      // directions: it is used when present and nothing waits for it.
+      // Any frame may carry the turn id, known type or not.
       let carriedCorrelation = false;
       if (typeof frame.raw === 'object' && frame.raw !== null) {
         const carried = (frame.raw as { correlation_id?: unknown }).correlation_id;
@@ -341,21 +260,16 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
         }
       }
 
-      // Unknown event type: ignore it. The backend's union is explicitly designed to grow, and
-      // an older frontend must degrade rather than break. Counted for the same reason a malformed
-      // frame is — one is forward compatibility, every one is a version skew nobody was told about.
+      // Unknown event type: ignore (the union is designed to grow), but count it.
       if (!frame.event) {
-        // A frame we took the turn's id out of is not a frame we failed to understand — counting
-        // it as a version skew would report one on every turn the moment the service starts
-        // sending a `turn_started`, which is precisely the change this path exists to absorb.
+        // A frame we took the turn id from is not a version skew.
         if (carriedCorrelation) continue;
         opts.onFrameDropped?.({ reason: 'unknown', type: frame.type });
         continue;
       }
       const event = frame.event;
 
-      // An `error` event ends the turn — with exactly one exception, which the backend names and
-      // this client used to ignore. See `PARTIAL_ANSWER_CODES`.
+      // An `error` event ends the turn, except `PARTIAL_ANSWER_CODES`.
       if (event.type === 'error' && !PARTIAL_ANSWER_CODES.has(event.code)) {
         const failure = errorFromEvent(event);
         // The event's own id wins; ours is the fallback for a service that stopped sending it on
@@ -386,8 +300,7 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       withReference(),
     );
   } finally {
-    // The socket is closed by `readEventStream`'s own `finally`; what is left to undo here is the
-    // idle timer, which must not outlive the turn it was watching.
+    // The reader is closed by `readEventStream`; clear the stall timer here.
     if (stallTimer) clearTimeout(stallTimer);
   }
 

@@ -1,79 +1,19 @@
 /**
- * The conversation's subjects.
+ * The conversation's subjects — the molecules, reactions, jobs and notes it is about — as an index
+ * beside the transcript.
  *
- * A chat transcript is a list of things that were *said*. A chemistry conversation is also about a
- * small set of things that *exist* — this molecule, that reaction, the job you started twenty
- * minutes ago, the note you cited — and the transcript is a terrible index for them: to answer
- * "what did we decide about the bromoanisole" you scroll. This store is that index.
+ * **Promotion rule.** An entity is admitted only from a structured source: tool-call arguments that
+ * parse as whole JSON, a job summary, a `note_id` the service listed, or a structure the chemist
+ * supplied and confirmed (`ingestUserStructure`: no inference involved). Never from prose or the
+ * truncated `tool_result.preview`, which would fill the rail with near-misses.
  *
- * ## The promotion rule
+ * **Identity.** Molecules are keyed by RDKit-canonical SMILES (async), so two spellings collapse;
+ * anything RDKit refuses is dropped.
  *
- * An entity is admitted **only from a structured source**: a tool call's arguments that parsed as
- * whole JSON, a job summary, a `note_id` the service listed. Never from loose prose alone.
- *
- * That is not fastidiousness. A rail fed by scanning answer text fills with near-misses, and a rail
- * full of noise is worse than no rail — a chemist stops reading it, and then the one entry that
- * mattered is missed too. Prose can still *link* to an entity this store already holds (that is
- * what the citation chips do); it cannot mint one.
- *
- * And it is the same rule that keeps `tool_result.preview` out: the service truncates it at an
- * arbitrary byte, and a SMILES cut short often stays valid as a smaller, wrong molecule.
- *
- * ### The structure a chemist supplied (`ingestUserStructure`)
- *
- * A molecule pasted, dropped as a MOL file, or drawn in the sketcher is admitted, and it satisfies
- * the rule rather than bending it. Read the rule for what it is defending against: *inference*. The
- * things it excludes — prose scanning, a truncated preview — are all cases where the UI guessed
- * that a run of characters was a molecule and could be wrong. Here there is no guess. A human
- * pointed at this structure, saw it drawn back to them, and pressed a button; the source is as
- * structured as a tool argument and considerably better attested than a job summary, because the
- * person who will read the rail is the person who put it there.
- *
- * It clears the two mechanical conditions as well: it round-trips through RDKit exactly like every
- * other admitted structure, and nothing about it is truncated. What it does *not* have is a turn
- * behind it — see `Mention.messageId` below.
- *
- * ## Identity
- *
- * Molecules are keyed by **canonical** SMILES, resolved through RDKit. Two spellings of one
- * compound must collapse or the rail shows it twice and can never join a computed value to the
- * structure it was computed for. Canonicalisation is asynchronous — it is a WASM call — so
- * ingestion is too, and the store is written after the await rather than before.
- *
- * Anything RDKit refuses is dropped rather than admitted under its raw string. A rail entry that is
- * not a molecule cannot be drawn, cannot be compared, and cannot be searched for; it is a row that
- * only takes up space.
- *
- * ## One index per conversation
- *
- * The store holds a slice per conversation id, and **every reader and every writer names the
- * conversation it means**. There is no "active conversation" pointer in here to keep in step with
- * `chatStore.activeId`, because the invariant this shape exists to guarantee — the rail and the
- * transcript always describe the same conversation — is exactly the kind that a second copy of the
- * current id quietly breaks. `MessageList` and `EntityRail` both render the slice of the
- * conversation id they were handed, and both take it from the same route parameter, so they cannot
- * disagree.
- *
- * It was one global bag before, scoped to nothing. Switching conversations left the previous one's
- * molecules, jobs and notes in the rail, and left `selected` pointing at them — so the transcript
- * filter matched the new conversation's message ids against the old conversation's mentions,
- * matched nothing, and rendered "no turn mentions that" over a conversation full of turns. Under a
- * router, where Back switches conversation in a keypress, that is not an edge case.
- *
- * **Keyed rather than cleared on switch**, and the reason is that entities are only ever minted by
- * a *live* stream: a reloaded transcript re-hydrates messages but re-ingests nothing. Clearing on
- * switch would therefore not lose an index that could be rebuilt on the way back — it would leave
- * every conversation but the current one permanently railless until someone sent a new turn into
- * it. Keying is also what a chemist expects of something titled "what this conversation is about".
- *
- * **Not persisted**, unlike `chatStore`. Two reasons, and the first is sufficient: everything here
- * is derived, and a persisted derivation is a second copy that drifts from the transcript it was
- * derived from — including across the trim `chatStore.partialize` performs on the transcript
- * itself, after which a persisted rail would name turns that no longer exist. The second is size:
- * this holds canonical SMILES, mention lists and job rows per conversation, with no bound of its
- * own. So a reload starts each rail empty, exactly as it does today. That understates the
- * conversation rather than misstating it, and the rail renders nothing at all when empty, so it
- * never claims a conversation was about nothing.
+ * **One index per conversation.** Every reader and writer names its conversation id, so the rail
+ * and transcript (both from the route parameter) cannot disagree. Keyed rather than cleared on
+ * switch, since entities are minted only by a live stream. Not persisted: it is derived, and a
+ * reload starts each rail empty.
  */
 
 import { create } from 'zustand';
@@ -90,42 +30,15 @@ export interface Mention {
   messageId: string;
   /** The tool that produced or consumed it, when it came from a tool. */
   tool?: string;
-  /** How the user supplied it, when no tool did. Kept separate from `tool` rather than folded into
-   *  it: the rail's provenance line answers "which tools touched this", and writing `sketch` there
-   *  would be a tool name that does not exist. */
+  /** How the user supplied it when no tool did (kept apart from `tool`, which names real tools). */
   source?: UserStructureSource;
   /**
-   * The figures the tool returned in this turn — `tool_result.numbers`, untruncated.
-   *
-   * This is the join `src/chem/rdkit.ts` names as the first of three reasons for shipping a 6.9 MB
-   * toolkit: canonical identity exists so the rail can "join a computed value to the structure it
-   * was computed for". The key collapsed the spellings; nothing was ever attached to it.
-   *
-   * ## What this can honestly claim, and what it cannot
-   *
-   * The wire carries no call id, so the join is by `(messageId, tool)`: the numbers a tool returned
-   * in a turn are attached to the structures that tool was *called on* in that turn. When a call
-   * named one structure — which is the shape of `predict_pka`, `predict_solubility`, `predict_logd`
-   * and every other property tool — that is exact. When it named several, the same values attach
-   * to each, and the rail says so rather than implying a per-structure result.
-   *
-   * ## The names, when the service could give them
-   *
-   * `numbers` carries no labels and no units, and for a long time "predict_pka returned 4.76, 1.6"
-   * was the most that could truthfully be said here. `tool_result.values` is the service answering
-   * that (`D-2026-08-27-a-number-with-no-name-is-not-a-measurement`): the same figures under the
-   * key path the tool filed each one under, with the unit the payload states beside it.
-   *
-   * What has NOT changed is the rule underneath: the surface still must not dress two values up as
-   * "pKa = 4.76 ± 1.6". `pka 4.76` and `sd 1.6` is what the wire says, printed as the wire says it;
-   * that the second is an uncertainty on the first is a relationship no tool has stated yet.
-   *
-   * Bare numbers when the result was not JSON, because a label guessed out of prose would be the
-   * same invention one paragraph up.
+   * The figures the tool returned in this turn (`tool_result.numbers`), joined to the structures it
+   * was called on by `(messageId, tool)` — exact for single-structure tools; with several, each
+   * gets the same values and the rail says so. Never combined into derived claims such as "± sd".
    */
   values?: number[];
-  /** The same figures under the tool's own keys, when the result was structured enough to have
-   *  them. Empty for a prose result, where `values` above is all there is. */
+  /** The same figures under the tool's own keys, when structured; empty for prose results. */
   named?: { label: string; value: number; unit: string }[];
   /** True when the call this mention belongs to named more than one structure, so `values` cannot
    *  be attributed to this one alone. */
@@ -137,12 +50,9 @@ export interface Mention {
 export type UserStructureSource = 'paste' | 'file' | 'sketch';
 
 /**
- * The `messageId` a composer-supplied structure is filed under.
- *
- * It matches no message, deliberately — there is no turn behind it yet. Selecting such an entity
- * therefore filters the transcript to nothing, which reads as "no turn has discussed this", and
- * that is exactly true. Once the message is sent, the turn's own `tool_call` events attach real
- * mentions to the same canonical key and the rail entry joins the conversation.
+ * The `messageId` a composer-supplied structure is filed under; it matches no message (no turn
+ * yet), so selecting it filters the transcript to nothing. Real mentions attach once the message is
+ * sent.
  */
 export const COMPOSER_MENTION = 'composer';
 
@@ -181,8 +91,7 @@ export interface JobEntity extends EntityBase {
 export interface NoteEntity extends EntityBase {
   kind: 'note';
   noteId: string;
-  /** The commit the note was recorded in, when it came from a `note_proposed` event rather than
-   *  a citation. (That event name predates the write path: nothing proposes a note any more.) */
+  /** The reference the note was recorded under, when it came from a `note_proposed` event. */
   reference?: string;
 }
 
@@ -197,9 +106,10 @@ export interface ConversationEntities {
   selected: string | null;
 }
 
-/** The slice a conversation with no entities has. A shared frozen constant rather than a fresh
- *  object, because it is what selectors return for such a conversation and Zustand compares
- *  selector results by reference — a new `{}` per render is an infinite render loop. */
+/**
+ * The slice for a conversation with no entities: one frozen constant, since a fresh `{}` per
+ * selector call would loop renders.
+ */
 export const NO_ENTITIES: ConversationEntities = Object.freeze({
   entities: {},
   order: [],
@@ -211,9 +121,10 @@ export interface EntityState {
   byConversation: Record<string, ConversationEntities>;
 
   ingest: (conversationId: string, messageId: string, event: ChemclawEvent) => Promise<void>;
-  /** Admit a structure the user pasted, dropped or drew. See the promotion rule above for why this
-   *  belongs. Returns the canonical key, or `null` if RDKit refused — the caller has already shown
-   *  the chemist a drawing, so a refusal here means something changed under it. */
+  /**
+   * Admit a structure the user pasted, dropped or drew (see the promotion rule). Returns the
+   * canonical key, or `null` if RDKit refused.
+   */
   ingestUserStructure: (
     conversationId: string,
     raw: string,
@@ -301,20 +212,14 @@ export const useEntityStore = create<EntityState>()(() => ({
 
     switch (event.type) {
       case 'tool_call': {
-        // `arguments` only, and only when it parses as a whole JSON document. That is the exact
-        // boundary the service announces a call on, so a complete document is the normal case and
-        // a truncated one is visibly not JSON.
+        // `arguments` only, and only when they parse as whole JSON.
         const named = smilesFromArguments(event.arguments);
-        // Whether this call can attribute its result to one structure. Recorded here, at the only
-        // moment it is knowable: the result event that follows carries the tool and the numbers
-        // and says nothing about how many structures went in.
+        // Whether this call can attribute its result to one structure — knowable only here.
         const shared = named.length > 1;
         for (const raw of named) {
           if (looksLikeReactionSmiles(raw)) {
-            // Not canonicalised: RDKit's minimal build has no reaction object, and canonicalising
-            // each component separately would produce a key that is not a reaction SMILES. The
-            // recogniser has already checked every component on both sides looks like a molecule,
-            // which is as far as this can honestly go.
+            // Reactions are not canonicalised (no reaction object in RDKit's minimal build); every
+            // component was already checked.
             add(
               {
                 kind: 'reaction',
@@ -357,9 +262,7 @@ export const useEntityStore = create<EntityState>()(() => ({
             event.tool,
           );
         }
-        // And the figures it returned, joined to the structures it was called on. See
-        // `Mention.values` for what that join can and cannot claim; `numbers` and not `preview`,
-        // because the preview is cut at an arbitrary byte and this list is not.
+        // Attach the returned figures (`numbers`, never `preview`); see `Mention.values`.
         if (event.numbers.length > 0 || event.values?.length) {
           write(conversationId, (slice) =>
             attachValues(slice, messageId, event.tool, event.numbers, event.values ?? []),
@@ -449,9 +352,7 @@ export const useEntityStore = create<EntityState>()(() => ({
 
   async ingestUserStructure(conversationId, raw, source) {
     const at = Date.now();
-    // Canonicalised here rather than trusted from the caller, even though the composer has already
-    // canonicalised it to draw the preview. The key is the identity of the entity; deriving it in
-    // one place is what stops a second caller one day admitting a molecule under a raw spelling.
+    // Canonicalised here, the one place the key is derived, rather than trusted from the caller.
     const canonical = await canonicalSmiles(raw);
     if (!canonical) return null;
 
@@ -494,16 +395,8 @@ export const useEntityStore = create<EntityState>()(() => ({
 }));
 
 /**
- * Attach a call's returned figures to the structures it was called on in that turn.
- *
- * Matched on `(messageId, tool)`, because the wire carries no call id — see `Mention.values`. Only
- * mentions of a *structure* are touched: a note the same call cited is not a thing a number was
- * computed for, and attaching to it would put a pKa beside a knowledge note.
- *
- * Written last-wins rather than accumulating. A tool called twice on one structure in one turn is
- * two results and the store keeps one mention for the pair (that dedup is deliberate — it is what
- * stops "seen in 4 turns" being a lie), so accumulating would concatenate two calls' figures into
- * a list attributed to neither.
+ * Attach a call's figures to the structure mentions of `(messageId, tool)` (not to notes).
+ * Last-wins: one mention per pair, so accumulating would mix two calls' figures.
  */
 function attachValues(
   slice: ConversationEntities,
@@ -533,8 +426,7 @@ function attachValues(
   return touched ? { ...slice, entities } : slice;
 }
 
-/** The kind an already-known job was started as. A completion and a failure both carry no `kind`,
- *  and losing it would relabel a conformer search as a generic job when it most needs naming. */
+/** The kind an existing job was started as; endings carry no `kind`. */
 function existingJobKind(conversationId: string, jobId: string): string {
   const existing = entitiesOf(useEntityStore.getState(), conversationId).entities[`job:${jobId}`];
   return existing?.kind === 'job' ? existing.jobKind : 'job';

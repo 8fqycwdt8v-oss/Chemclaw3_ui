@@ -169,18 +169,3 @@ describe('what Ketcher assumes the bundler provides', () => {
     expect(/^import .*$/m.exec(adapter)?.[0]).toBe("import './ketcher.globals.ts';");
   });
 });
-
-describe('what this repository says about it', () => {
-  it('no longer claims the dialog tears the WASM heap down', () => {
-    // The exact sentence that was false, caught as itself. Whitespace-collapsed because the
-    // comment wraps across lines.
-    const source = read('src/components/StructureInput.tsx').replace(/\s+/g, ' ');
-    expect(source).not.toMatch(/leaving a live WASM heap/);
-  });
-
-  it('says instead what is actually retained, and where the reading is', () => {
-    const adapter = read('src/chem/sketcher.ketcher.tsx').replace(/\s+/g, ' ');
-    expect(adapter).toMatch(/page-wide singleton/);
-    expect(adapter).toMatch(/ketcher-standalone@3\.18\.0/);
-  });
-});

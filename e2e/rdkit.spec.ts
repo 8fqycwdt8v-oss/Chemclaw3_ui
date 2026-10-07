@@ -1,7 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 
 /**
- * `ISSUES.md` Issue 10, closed: a structure is drawn behind the real BFF, under the policy it
+ * The worker-only CSP (`RDKIT_WORKER_CSP` in `server/config.ts`; README, "Enabling Entra SSO"):
+ * a structure is drawn behind the real BFF, under the policy it
  * really sends, and the document's policy still refuses `eval`.
  *
  * This suite's `webServer` is `node dist/server.js` — the production BFF, sending the production

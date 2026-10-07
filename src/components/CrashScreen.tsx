@@ -1,19 +1,9 @@
 /**
- * The screen a chemist screenshots.
+ * The screen a chemist screenshots: error, build version, correlation id, time, and a way to copy
+ * the browser's log ring buffer (`src/lib/logger.ts`).
  *
- * It printed `error.message` and nothing else, which made the screenshot — the one artefact that
- * reliably reaches whoever has to fix it — almost useless: no build, so nobody could tell which
- * version broke; no reference, so nothing joined it to the service's logs; no timestamp, so "this
- * morning" was the whole time window; and no way to hand over what the browser had recorded.
- *
- * All four are already in the process. The build version is in `config` (and already shown in the
- * account dropdown), the correlation id is whatever turn was last running, the time is the time,
- * and `src/lib/logger.ts` keeps a ring buffer for exactly this moment. This component is the
- * five lines that put them where the camera is pointing.
- *
- * Deliberately dependency-light and context-free: it renders ABOVE the router, the auth gate and
- * the tooltip provider, so anything it used from those would throw inside the fallback for a
- * throw — the one failure with nowhere left to be caught.
+ * Dependency-light and context-free: it renders above the router, auth gate and tooltip provider,
+ * any of which could be what threw.
  */
 
 import { useState } from 'react';
@@ -34,25 +24,12 @@ export function CrashScreen({ error }: { error: Error }): React.JSX.Element {
   const reference = logger.correlationId();
 
   /**
-   * Clear this browser's stored state and reload — the escape hatch this screen used to point at
-   * and could not reach.
+   * Clear this browser's stored state and reload: the recovery from persisted state that parses but
+   * crashes a renderer (e.g. after a version rollback). The sidebar's reset is unreachable here,
+   * since this screen replaces the app.
    *
-   * The text here said *"use 'Reset app' in the sidebar"*, and that control lives inside the tree
-   * this component has just replaced: the root boundary swaps the whole app, sidebar included, for
-   * this screen. So the one documented recovery from a poisoned persisted state was reachable only
-   * by reloading — which, when the poisoned state is what throws, renders this screen again. A
-   * boot loop with its own way out printed on it and no way to take it. `chatStorage.getItem`
-   * closes the *unparseable* half (a corrupt JSON read is a clean first run); what reaches here is
-   * state that parses into a shape a renderer chokes on, which a version rollback produces on its
-   * own.
-   *
-   * Written against `localStorage` directly rather than through `forgetLocalHistory`, deliberately
-   * and for this file's stated reason: it renders above the router, the auth gate and the tooltip
-   * provider, because anything it depends on could be the thing that threw. A reset that imports
-   * the store cannot clear a store that failed to load.
-   *
-   * `sessionStorage` is left alone: MSAL's tokens live there, and signing the chemist out is not
-   * what "my conversation list is broken" asks for.
+   * Uses `localStorage` directly rather than the store, which may be what failed. `sessionStorage`
+   * (MSAL tokens) is left alone so the chemist stays signed in.
    */
   const forget = (): void => {
     try {

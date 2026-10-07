@@ -1,50 +1,8 @@
 /**
- * SMILES rendering.
- *
- * **RDKit-WASM, not smiles-drawer — and that reverses a decision this file used to argue for.**
- * The old docstring said a 2D depiction was all this ever needed and RDKit's payload was two
- * orders of magnitude larger than the rest of the bundle. Both halves were true and the conclusion
- * was right for the UI that wrote it: the only structures on screen came from a job summary and an
- * opt-in toggle on inline code spans, and depiction was genuinely the whole job.
- *
- * It is not the whole job any more, and the three things that changed have no smiles-drawer answer:
- *
- *  - **Canonical identity.** `src/chem/entities.ts` indexes what a conversation is *about*, keyed
- *    on the compound. `COc1ccc(Br)cc1` and `BrC1=CC=C(OC)C=C1` have to collapse to one row or the
- *    rail shows one bromoanisole twice and can never join a computed value to the structure it was
- *    computed for. smiles-drawer parses a SMILES; it cannot canonicalise one, and no string
- *    handling gets there.
- *  - **Validation.** `src/chem/recognise.ts` is now deliberately looser than the rule it replaced,
- *    because that rule rejected `CCO`. A looser recogniser is only safe if something else can say
- *    "that is not a molecule" before it is drawn. smiles-drawer cannot be that arbiter: the object
- *    that refuses a string is the same object that draws it, so a refusal is indistinguishable
- *    from a rendering failure, and `entities.ts` needs the answer with no renderer in the room.
- *  - **Molblock parsing.** `StructureInput`'s file drop reads `.mol`/`.sdf`. smiles-drawer speaks
- *    SMILES and nothing else.
- *
- * The bundle argument survives intact and is answered structurally: `src/chem/rdkit.ts` is behind a
- * dynamic `import()`, so the WASM is its own chunk and index.html preloads none of it. Measured
- * across the swap alone, the entry chunk went 485.86 kB → 485.78 kB — the 6.9 MB binary and its
- * 74 kB loader are separate emitted assets, fetched the first time a structure appears. That
- * *delta* is what the argument rests on and it is still true; the 485 kB absolute this used to
- * carry is not, and `chem/rdkit.ts` published 509 kB for the same chunk in the same breath. No
- * current size replaces them — measured twice in one afternoon the entry moved by 4 kB with
- * nothing here touched, so `chem/rdkit.ts` records why that number does not belong in prose. The
- * invariant to read is the structural one: no chemistry in the entry but the dynamic import that
- * reaches it, which `tests/entryChunk.test.ts` asserts.
- *
- * Keeping smiles-drawer alongside for depiction was considered and dropped — any page with a rail
- * has already fetched RDKit, so it would be 190 kB of duplicate capability and, worse, a second
- * opinion about what is drawable.
- *
- * What is kept from the version this replaces, because none of it was about the drawing library:
- *
- *  - the reaction split, so `similar_reactions` hits and `reaction` notes are drawn as reactions
- *    rather than falling through to a raw string;
- *  - a `viewBox`-scaled drawing inside an `aspect-ratio` wrapper, so a structure scales instead of
- *    squashing on a narrow screen and the space is reserved before it draws;
- *  - the theme read from the app's own `data-theme` rather than from `prefers-color-scheme`, so a
- *    structure re-draws when the in-app toggle flips.
+ * SMILES rendering with RDKit-WASM (see `src/chem/rdkit.ts` for why RDKit and how it stays out of
+ * the entry chunk). Reactions are split here and drawn component by component; drawings are
+ * `viewBox`-scaled in an `aspect-ratio` wrapper so space is reserved; the theme comes from the
+ * app's `data-theme` so the in-app toggle redraws.
  */
 
 import { useEffect, useId, useState } from 'react';
@@ -72,22 +30,13 @@ export interface MoleculeProps {
 }
 
 /**
- * A reaction SMILES — `reactants>agents>products`, or the two-part `A>>B`.
- *
- * A molecule toolkit parses molecules, so every reaction reaching this component fell through to
- * the raw-string fallback. That is most of what `similar_reactions` returns and every `reaction`
- * note's structure, so the one search built around reactions was the one search whose hits could
- * not be drawn. RDKit's *minimal* build ships no reaction object either, which is why the split
- * stays here rather than moving down into `rdkit.ts`.
- *
- * Each component is drawn as the molecule it is and the arrow is laid out here. `>` cannot occur
- * inside a molecule SMILES, so the split is unambiguous.
+ * A reaction SMILES (`reactants>agents>products`, or `A>>B`): each component is drawn as a molecule
+ * with the arrows laid out here (RDKit's minimal build has no reaction object). `>` cannot occur in
+ * a molecule SMILES, so the split is exact.
  */
 function Reaction({ smiles, className, maxWidth }: Required<MoleculeProps>): React.JSX.Element {
   const [reactants = '', agents = '', products = ''] = smiles.split('>');
-  // A plain function, not a nested component: a component declared in a render body is a new type
-  // on every render, so React unmounts and remounts its whole subtree — here, re-running every
-  // structure's async draw on each parent render.
+  // A plain function, not a nested component, so the subtree is not remounted every render.
   const side = (part: string): React.ReactNode =>
     part
       .split('.')
@@ -126,10 +75,10 @@ function Reaction({ smiles, className, maxWidth }: Required<MoleculeProps>): Rea
 
 function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): React.JSX.Element {
   const [svg, setSvg] = useState<string | null>(null);
-  /** Why there is no drawing, when there is none. The three are different facts and only one of
-   *  them is about the structure: `unavailable` is about the page, `too-large` is about this
-   *  module's own refusal to hand RDKit a string long enough to trap it, and only `unreadable` is
-   *  a claim about the chemistry. */
+  /**
+   * Why nothing was drawn: `unavailable` (the page), `too-large` (our parse cap) or `unreadable`
+   * (the only claim about the chemistry).
+   */
   const [problem, setProblem] = useState<'unreadable' | 'unavailable' | 'too-large' | null>(null);
   // Subscribing to the app's resolved theme, so a structure re-draws when the user flips the
   // toggle — not only when the OS preference changes.
@@ -153,11 +102,8 @@ function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): R
         setSvg(drawn);
         return;
       }
-      // Nothing was drawn — but "this string is not a molecule" is a claim, and it is the wrong
-      // one to make about every structure on the page when the toolkit simply never loaded. It is
-      // equally wrong about a string this module declined to parse: measured, RDKit reads a
-      // 1,000-character chain fine and `MAX_PARSED_SMILES_CHARS` stops at 600 to stay clear of the
-      // trap at ~1,100, so everything between is a real molecule we chose not to draw.
+      // "Not a molecule" is only said when the toolkit loaded and the string was within the parse
+      // cap.
       if (tooLongToParse(smiles)) {
         setProblem('too-large');
         setSvg(null);
@@ -179,8 +125,7 @@ function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): R
       <div
         className={cn('rounded-lg border border-border-subtle bg-surface-sunken p-3', className)}
       >
-        {/* Shown, not swallowed: the string is the evidence for why nothing was drawn, and a
-            chemist can still read and copy it. */}
+        {/* The string is shown, not swallowed: it explains why nothing was drawn. */}
         <code className="block font-mono text-xs break-all">{smiles}</code>
         <p className="mt-1.5 text-xs text-ink-muted">
           {problem === 'unavailable'
@@ -201,24 +146,16 @@ function SingleMolecule({ smiles, className, maxWidth = 320 }: MoleculeProps): R
       style={{ maxWidth: `${maxWidth}px`, aspectRatio: `${CANVAS_WIDTH} / ${CANVAS_HEIGHT}` }}
       role="img"
       aria-label={`Chemical structure for SMILES ${smiles}`}
-      // RDKit's SVG is generated from the molecule it just parsed, not from anything a user typed
-      // into a page — and it is markup, so it has to be injected as markup.
-      //
-      // The empty string is the loading state, and it has to be expressed THIS way: React throws
-      // at commit — not at build — on an element carrying both `children` and
-      // `dangerouslySetInnerHTML`, so a placeholder child beside this prop is not an option.
+      // RDKit's SVG is generated from the parsed molecule, so it is injected as markup. `''` is the
+      // loading state: React forbids `children` beside `dangerouslySetInnerHTML`.
       dangerouslySetInnerHTML={{ __html: svg ?? '' }}
     />
   );
 }
 
 /**
- * A structure: one molecule, or a reaction.
- *
- * The dispatch lives here rather than at each call site because every existing caller — the job
- * card, the note panel, the hazard screen's `screened` list — can be handed either, and none of
- * them has any reason to know the difference. `>` is not a character a molecule SMILES can
- * contain, so the test is exact rather than heuristic.
+ * A structure: one molecule or a reaction, so callers need not know which (`>` makes the test
+ * exact).
  */
 export function Molecule(props: MoleculeProps): React.JSX.Element {
   if (props.smiles.includes('>')) {
@@ -226,9 +163,7 @@ export function Molecule(props: MoleculeProps): React.JSX.Element {
       <Reaction
         smiles={props.smiles}
         className={props.className ?? ''}
-        // Reaction components share the row, so each is drawn smaller than a lone structure would
-        // be. Halved rather than divided by the number of components: a five-component reaction
-        // should scroll, not shrink to nothing.
+        // Reaction components share a row: each at half width, scrolling rather than shrinking.
         maxWidth={Math.round((props.maxWidth ?? 320) / 2)}
       />
     );
@@ -237,39 +172,11 @@ export function Molecule(props: MoleculeProps): React.JSX.Element {
 }
 
 /**
- * An inline code span that might be a structure — in an answer, or in the chemist's own message.
- *
- * Two gates, and the second is what RDKit adds. It has always been *opt-in* — chemistry prose is
- * full of tokens that superficially resemble SMILES, so a structure was never drawn without a
- * click. The affordance itself is withheld until RDKit confirms the string is a structure, so a
- * token that merely looks like one no longer even offers a button. The syntactic recogniser
- * proposes; RDKit disposes.
- *
- * The check is asynchronous and the code span renders immediately, so the control appears a beat
- * later on the first structure of a page (the WASM is loading) and instantly thereafter. That is
- * the right way round: text a chemist can read and copy is never blocked on a 6.9 MB download.
- *
- * ## What changed, and what deliberately did not
- *
- * The per-instance `useState(false)` is gone. It made an answer naming six compounds six clicks,
- * and reset all six on a reload or a re-parse — asking the same chemist the same question over and
- * over, and never remembering the answer. `usePrefsStore.drawStructures` is that question asked
- * once (`src/components/chem/DrawStructuresToggle.tsx`); when it is on, the per-token button is not
- * merely pre-pressed, it is *gone*, because a control that can only be in one state is furniture.
- *
- * The gate itself did not change. Nothing is drawn from a recogniser's guess in either setting.
- *
- * ## Reactions reach this now
- *
- * `isMolecule` refuses a reaction — a molecule toolkit parses molecules — so gating on it alone
- * meant every reaction SMILES in every answer fell through to plain text, while `Molecule` has
- * been able to draw them all along. `readStructure` asks the right question of each kind.
- *
- * ## And the structure is an input
- *
- * `UseStructure` is what stops a drawing being terminal. Every structure this app rendered used to
- * be a picture: the agent would give a chemist the SMILES they asked for, the UI would draw it and
- * RDKit would confirm it, and the only way to ask a follow-up was to select the text with a mouse.
+ * An inline code span that might be a structure. The recogniser proposes and RDKit confirms
+ * (`readStructure`, molecules and reactions) before any control appears; nothing is drawn from a
+ * guess. With the "draw structures" preference on (`usePrefsStore.drawStructures`) confirmed
+ * structures draw directly; otherwise a per-token button. `UseStructure` lets a drawn structure be
+ * inserted into the composer.
  */
 export function InlineSmiles({ smiles }: { smiles: string }): React.JSX.Element {
   const always = usePrefsStore((s) => s.drawStructures);
@@ -287,11 +194,7 @@ export function InlineSmiles({ smiles }: { smiles: string }): React.JSX.Element 
     };
   }, [smiles]);
 
-  // `too-complex` renders exactly like "not a structure" here, and that is deliberate: this
-  // surface makes no claim in either case. It shows the code span the answer already contained and
-  // offers no ⌬ button, which says "nothing to draw" without saying anything about the string. The
-  // two surfaces that *do* make a claim — the structure panel and the composer's paste strip — are
-  // where the distinction is worth a sentence, and they have one.
+  // `too-complex` renders like "not a structure": this surface makes no claim either way.
   if (!read || read.kind === 'too-complex') return <code className="font-mono">{smiles}</code>;
 
   const shown = always || open;
@@ -339,19 +242,9 @@ export function InlineSmiles({ smiles }: { smiles: string }): React.JSX.Element 
 }
 
 /**
- * Plain text with its structures made legible — the chemist's own message.
- *
- * A user message was a bare `<p>`: no markdown, no structure rendering, nothing. Assistant text got
- * the whole chemistry pipeline and the human's got none, which had a slightly perverse consequence.
- * The drawing `StructureInput` shows in order to satisfy "a chemist must never send a structure
- * they have not seen" was discarded at the moment of sending, and the durable record they scroll
- * back through three weeks later showed `COc1ccc(Br)cc1` as a bare string.
- *
- * This is deliberately **not** markdown. A chemist typed this text; running it through a parser
- * would turn their asterisks into emphasis and their underscores into italics in the middle of a
- * compound name. So the only transformation is the one that is safe on plain text: split on
- * whitespace, and hand each token that could be a structure to the same renderer the answers use.
- * Everything else, including the whitespace, is preserved exactly.
+ * Plain text with its structures drawable — the chemist's own message. Not markdown (asterisks in a
+ * compound name are not emphasis): split on whitespace and hand structure-like tokens to the same
+ * renderer the answers use; everything else is preserved exactly.
  */
 export function StructureText({ text }: { text: string }): React.JSX.Element {
   // Split *keeping* the separators, so the original spacing and line breaks survive verbatim.

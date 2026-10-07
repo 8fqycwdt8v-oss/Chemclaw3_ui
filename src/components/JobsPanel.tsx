@@ -1,18 +1,8 @@
 /**
- * Every durable run the lab has done, and the one control that stops one.
- *
- * Two questions this answers that nothing else in the app could.
- *
- * **"What did we already compute for this, and why?"** — `job_records` keeps the *rationale* the
- * run was launched with, which is what makes the search worth having: a job id tells you nothing
- * six weeks later, and "we ran this to decide whether the nitration was electronically favoured"
- * tells you whether to run it again. The registry is deliberately not scoped to the caller
- * upstream, because a finished calculation is a fact about the lab rather than about a person.
- *
- * **"Can I stop it?"** — until now the only escape from a mis-launched durable job was the banner's
- * "Start a fresh session", which abandons the job rather than stopping it. Cancellation is a
- * *request*: the service answers 202 and a workflow already past its last cancellation point will
- * finish regardless, so the wording never claims the job stopped.
+ * Every durable run the lab has done, and the control that stops one. The registry is searchable by
+ * the recorded rationale and not scoped to the caller (a finished calculation is a lab fact).
+ * Cancellation is a request (202); a workflow past its last cancellation point finishes anyway, so
+ * the wording never claims it stopped.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -36,33 +26,19 @@ const STATUS_TONE: Record<string, 'ok' | 'danger' | 'warn' | 'brand'> = {
   failed: 'danger',
   cancelled: 'warn',
   running: 'brand',
-  // Open too, and not yet started (Chemclaw3 #514): a queued tool call waiting for a slot, or a
-  // run on a queue nothing polls. The service's reason arrives as `summary` and renders below.
+  // Open and not yet started: waiting for a slot, or on a queue nothing polls. The reason arrives
+  // as `summary`.
   queued: 'brand',
 };
 
 /**
- * The one durable job whose *shape* a reader has to know before reading the row.
- *
- * Every run in this list is a Temporal job, so "durable" separates none of them. What separates this
- * one is that it is a **loop**: it proposes, evaluates against a registered objective, and repeats
- * for as many rounds as its spec asked for — so it runs for hours or days where a conformer search
- * runs for minutes, and it is the only kind here that ends by opening a recommendation for human
- * review. A campaign and an xTB job rendered identically, and the difference decides whether a
- * reader waits for it or goes home.
- *
- * Keyed on `JobRecordSummary.job`, which is the launch job's own name (`JobSpec.name` upstream) —
- * `job_started.kind` is a turn-stream field and does not reach this registry.
+ * The optimisation campaign: a loop that runs for hours or days and ends by opening a
+ * recommendation for review, so it gets a badge. Keyed on `JobRecordSummary.job` (the launch job's
+ * name).
  */
 const CAMPAIGN_JOB = 'start_optimization_campaign';
 
-/**
- * What the campaign kind is, in the words of the manifest that declares it.
- *
- * Quoted from the `bo` bundle's `connector.yaml` (`jobs[].description`) rather than written here:
- * a sentence this frontend invented about how an optimisation behaves would be indistinguishable,
- * to a reader, from one the job's authors wrote.
- */
+/** The campaign description, quoted from the `bo` bundle's `connector.yaml`. */
 const CAMPAIGN_DESCRIPTION =
   'A multi-round optimisation campaign: it proposes candidates, evaluates them through the named ' +
   'objective, and records its recommendation as an agent-authored note. It runs for as ' +
@@ -70,26 +46,12 @@ const CAMPAIGN_DESCRIPTION =
   'takes.';
 
 /**
- * How long to wait before each re-read of a run the sheet has just asked to cancel — about 30 s in
- * all, then it stops.
- *
- * One immediate re-read was the rule, and it lost the race every time it mattered: Temporal had
- * the cancellation within a second, but the read went out first, came back `running`, and nothing
- * asked again — so the sheet said `running` for as long as it stayed open while `GET /jobs/{id}`
- * had long since said `cancelled`. Backing off rather than polling at a fixed rate because the
- * first second is when the answer usually changes, and bounded because a run past its last
- * cancellation point may legitimately keep going for hours; past this the sheet's own "Try again"
- * is the way to ask.
- *
- * Exported so the test can advance through it.
+ * Backoff for re-reading a run just asked to cancel (~30 s in all): the first read often lands
+ * before Temporal records the cancellation. Bounded; after it, "Try again". Exported for the test.
  */
 export const CANCEL_REREAD_DELAYS_MS: readonly number[] = [500, 1000, 2000, 4000, 8000, 8000, 8000];
 
-/**
- * A wait that unmounting cuts short. `wakers` is the sheet's set of pending waits: the effect's
- * cleanup ends every one of them at once, so a follow-up asleep when the panel goes away stops
- * *then* — and does its `finally` then — rather than whenever its timer happened to come due.
- */
+/** A wait that unmounting cuts short: the cleanup wakes every pending wait at once. */
 const sleep = (ms: number, wakers: Set<() => void>): Promise<void> =>
   new Promise((resolve) => {
     const wake = (): void => {
@@ -112,8 +74,7 @@ function JobSheet({
   onOpenChange,
 }: {
   jobId: string;
-  /** `JobRecordSummary.job` — the launch job's own name. Empty when the row it was opened from is
-   *  no longer in the list, which costs the kind badge and nothing else. */
+  /** The launch job's name; empty if its row left the list (only the kind badge is lost). */
   jobName: string;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -122,20 +83,15 @@ function JobSheet({
   const isReviewer = useIsReviewer();
   const [status, setStatus] = useState<DurableJobStatus | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // Tracked separately from `notice`, which a *successful* cancellation also writes. Without it
-  // the spinner's `!status` guard stayed true for the life of the sheet, so a failed read showed
-  // an error string with a spinner turning under it — permanently, and with no way to retry.
+  // Separate from `notice`, so a failed read shows an error without a spinner.
   const [failed, setFailed] = useState(false);
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
 
   const claim = useNewestRead();
   const load = useCallback(
     (id: string) => {
-      // Claimed before the request, so a read this one supersedes cannot land afterwards. It is
-      // not only the displayed state that would be another job's: Cancel is offered on
-      // `status.status === 'running'` and posts to `jobId`, so a stale status decides whether a
-      // state-changing control appears for a job it does not describe. The same-id case is real
-      // here too — `cancel` follows the job it just asked to stop. See `useNewestRead`.
+      // Claimed before the request so a superseded read cannot land: a stale status would decide
+      // whether Cancel is offered for the wrong job. See `useNewestRead`.
       const isNewest = claim();
       setStatus(null);
       setFailed(false);
@@ -151,16 +107,8 @@ function JobSheet({
     [auth, claim],
   );
 
-  // A follow-up still sleeping when the panel unmounts stops there rather than reading on for half
-  // a minute. A flag set in the effect body, not a `claim()` in the cleanup: StrictMode's
-  // mount-unmount-mount would make that cleanup retire the first read issued during render, and
-  // the sheet would spin for ever in development.
-  //
-  // **And it stops at the unmount, not at the end of its current wait.** It used to sleep on and
-  // find the flag down up to 8 s later, then invalidate the app-wide `['jobs']` list from its
-  // `finally` — against whatever list was on screen by then. Measured in this suite: a sheet
-  // closed in one case refetched every page of the paginated list another case had open, 5 runs
-  // in 50. Waking the sleepers here makes that invalidation happen while the sheet goes away.
+  // Set in the effect body (StrictMode-safe). On unmount, sleeping follow-ups are woken and stop at
+  // once, so their list invalidation happens now, not seconds later.
   const mounted = useRef(true);
   const wakers = useRef(new Set<() => void>());
   useEffect(() => {
@@ -173,13 +121,8 @@ function JobSheet({
   }, []);
 
   /**
-   * Re-read a run just asked to cancel until the registry says it ended, or the backoff runs out.
-   *
-   * Unlike `load`, the status already shown stays on screen between reads — blanking it to a
-   * spinner every few seconds would read as the sheet losing the job. Each read is behind the same
-   * newest-read guard, so opening another job, pressing "Try again" or closing the sheet stops it.
-   * A failed read in between is not reported: the request was accepted, the status on screen is
-   * still the last true one, and the next read may well answer.
+   * Re-read a run asked to cancel until it ends or the backoff runs out, keeping the shown status
+   * between reads. Guarded by the newest-read check; intermediate failures are not reported.
    */
   const follow = async (id: string): Promise<void> => {
     const isNewest = claim();
@@ -199,9 +142,7 @@ function JobSheet({
         if (isTerminalJobStatus(next.status)) return;
       }
     } finally {
-      // On every way out, including a superseded or unmounted follow-up: the list's row carries
-      // the state too, and the cache is the app's rather than this sheet's, so it would otherwise
-      // keep saying the run was open until something else happened to refetch it.
+      // Always invalidate the shared job list on the way out, since its row carries the state too.
       void invalidateJobList();
     }
   };
@@ -332,15 +273,8 @@ function JobSheet({
 }
 
 /**
- * One row per run, however the pages that brought them in overlap.
- *
- * They can overlap in the real registry, not only in a fixture. The cursor is the last row's
- * `job_id` and the next page is everything older than *that row's* `(completed_at, job_id)` — read
- * at the time the next page is asked for. `job_record_store`'s upsert sets `completed_at = now()`,
- * so a run that is re-recorded (a rejoined workflow, a cancelled run reaching its end) between the
- * two reads moves to the top, and if it was the anchor every row of the first page is "older" than
- * it again. Each would then render twice, under one React key, which React says may duplicate or
- * drop rows. The first sighting wins: it is where the reader already saw the row.
+ * One row per run across overlapping pages: re-recorded runs move to the top and can reappear on
+ * the next page. The first sighting wins.
  */
 function uniqueRuns(jobs: JobRecordSummary[]): JobRecordSummary[] {
   const seen = new Set<string>();
@@ -353,23 +287,13 @@ function uniqueRuns(jobs: JobRecordSummary[]): JobRecordSummary[] {
 
 export function JobsPanel(): React.JSX.Element {
   const { auth, ready } = useAuth();
-  // `/jobs/:jobId` opens this panel with that run's sheet already up, so a run can be *sent* to
-  // somebody rather than only clicked to. The parameter is read here rather than passed in, for
-  // the reason `ProtocolDocument` gives about its own design id: the URL is the one thing that
-  // says what is open, so a shared link and a reload land in the same place.
-  //
-  // **And it is the only thing that says so.** This used to seed a `useState` from the parameter,
-  // which made the URL an *entry point* rather than the state: React Router keeps this component
-  // mounted across `/jobs/a` → `/jobs/b`, so a second link — followed from another tab, from Back
-  // or Forward, or from anywhere in the app — changed the address bar and left the first run's
-  // sheet on screen. Clicking a row navigates instead, so the two directions cannot disagree.
+  // `/jobs/:jobId` opens that run's sheet. The URL is the only state for what is open (rows
+  // navigate), so links, Back and Forward all agree.
   const { jobId: openId = null } = useParams();
   const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [submitted, setSubmitted] = useState('');
-  // The search text is the key, which is what the `loaded.query === submitted` derivation this
-  // replaces was for: a stale list is never shown under a new search, and there is no second
-  // render clearing the old one on the way in.
+  // The search text is the key, so a stale list never shows under a new search.
   const {
     data,
     isError,
@@ -382,12 +306,8 @@ export function JobsPanel(): React.JSX.Element {
     ...jobsQuery(submitted, auth),
     enabled: ready,
   });
-  // **Three states, never two.** `null` is "still reading", `[]` is "nothing matched", and a failed
-  // first read is neither. It used to render as the empty list, on the argument that a search over
-  // an archive finding nothing misleads nobody — but `pageJobs` already folds the one benign case
-  // (a service without the route, 404) into an empty page, so every error that reaches here is a
-  // real failure, and a chemist searching during a rollout was told no run matched. Before that it
-  // was a spinner for ever, which is "failed" and "still loading" being one screen instead.
+  // Three states: `null` loading, `[]` nothing matched, and a failed first read (shown as a
+  // failure; the benign 404 is already an empty page).
   const failed = isError && !data;
   const jobs = data ? uniqueRuns(data.pages.flatMap((page) => page.jobs)) : null;
 
@@ -425,9 +345,7 @@ export function JobsPanel(): React.JSX.Element {
           </Button>
         </form>
 
-        {/* The control is what makes "try again" possible: the client never retries on its own
-            (`retry: false`, no refetch on focus or reconnect), and resubmitting the same text
-            leaves the query key unchanged, so no request would go out. */}
+        {/* An explicit retry: the client never retries on its own, and resubmitting the same text would not change the key. */}
         {failed && (
           <div className="flex flex-col items-start gap-2">
             <p role="alert" className="text-sm text-danger-ink">
@@ -467,13 +385,9 @@ export function JobsPanel(): React.JSX.Element {
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-medium">{job.job}</span>
                     <Badge tone="neutral">{job.connector}</Badge>
-                    {/* A badge and nothing more in the list: the sentence explaining what a
-                        campaign is belongs in the sheet, where it is read once rather than
-                        repeated down every row of a search result. */}
+                    {/* A badge in the list; the explanation is in the sheet. */}
                     {job.job === CAMPAIGN_JOB && <Badge tone="brand">campaign</Badge>}
-                    {/* Only when the run did not complete. Every row in a registry of finished
-                        work would otherwise wear the same word, which is how the one that
-                        matters stops being read. */}
+                    {/* State only when not completed, so it stands out. */}
                     {job.state && job.state !== 'completed' && (
                       <Badge tone={STATUS_TONE[job.state] ?? 'danger'}>{job.state}</Badge>
                     )}
@@ -501,10 +415,7 @@ export function JobsPanel(): React.JSX.Element {
           </ul>
         )}
 
-        {/* Only when the service said there is a further row — it asks the store for one beyond the
-            page to know, so this is evidence rather than "a full page might mean more". Before it,
-            the cap was invisible: run 21 was not below a fold, it was never fetched, and a chemist
-            searching for a run they had done read "No run matches that". */}
+        {/* Only when the service said a further row exists. */}
         {hasNextPage && (
           <Button
             variant="outline"
@@ -515,9 +426,7 @@ export function JobsPanel(): React.JSX.Element {
             {isFetchingNextPage ? 'Loading…' : 'Load older runs'}
           </Button>
         )}
-        {/* A failed older page used to leave the button as it was, so the click read as having
-            done nothing. The rows above are still true; what is missing is said beside the control
-            that fetches it, as `Sidebar` does for the same pattern. */}
+        {/* A failed older page is said beside the control, as in `Sidebar`. */}
         {isFetchNextPageError && !isFetchingNextPage && (
           <p role="alert" className="text-xs text-danger-ink">
             Could not load older runs — try again.

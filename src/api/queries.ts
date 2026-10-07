@@ -1,28 +1,8 @@
 /**
- * What each read *is*: its key, its fetcher and how long its answer is worth.
- *
- * One factory per read, rather than the options written inline at each `useApiQuery` call. Three
- * things follow from that and each is a property this app used to have to hold by hand:
- *
- *  - **Two components asking the same question ask it with the same key.** That is the whole of
- *    the in-flight join `client.ts` used to keep as a `Map<string, Promise>`: the answer's result
- *    block and the trace panel behind it cite one `result_ref`, and each component's own
- *    `requested` ref could only ever see inside that component.
- *  - **The staleness policy is stated next to the read it belongs to**, so `IMMUTABLE` on a
- *    content-addressed URL and `PENDING_PLANS_STALE_MS` on the most expensive route in the app are
- *    decisions a reader meets together rather than hunting for.
- *  - **A test can drive the read this app actually performs.** `tests/requestEconomy.test.ts` used
- *    to call `api.listPendingPlans` twice and assert one request, because the interval lived in
- *    `client.ts`. The economy is not the transport's any more, so the test drives these — which is
- *    the same assertion about the same behaviour, aimed at where it now lives.
- *
- * The fetchers are `client.ts`'s `api`, unchanged and deliberately so: the 401-recover-once retry
- * inside `request` is app-specific — it knows what a refresh is, and that a second attempt after a
- * failed one is a redirect loop — and react-query's own `retry` is off for that reason
- * (`queryClient.ts`). `orEmpty`'s 404-to-`[]` fold **with its log line** stays there too, as does
- * `listPendingPlans` deliberately *not* swallowing: "we could not ask" and "nothing is waiting" are
- * opposite things to tell somebody whose work is blocked, and a `queryFn` that folded the error
- * into an empty list would take that distinction away one layer up.
+ * What each read is: its key, fetcher and staleness, one factory per read so the same question
+ * always uses the same key, staleness sits beside the read, and tests drive the real read. Fetchers
+ * are `client.ts`'s `api` (with its 401-recover-once, `orEmpty` folding and `listPendingPlans`
+ * letting failures through).
  */
 
 import { api } from './client.ts';
@@ -44,11 +24,7 @@ export const noteQuery = (noteId: string, auth: TokenGetter) => ({
   ...IMMUTABLE,
 });
 
-/**
- * The conversations other people have let this person into (`GET /sessions/shared`). One factory
- * because two places ask: the sidebar adopts them, and the plan inbox needs to know which of its
- * rows are somebody else's conversation (Chemclaw3 #499).
- */
+/** Conversations others let this person into; read by the sidebar and the plan inbox. */
 export const sharedSessionsQuery = (auth: TokenGetter) => ({
   queryKey: keys.sharedSessions,
   queryFn: () => api.listSharedSessions(auth),
@@ -70,13 +46,8 @@ export const profilesQuery = (auth: TokenGetter) => ({
 });
 
 /**
- * Durable runs matching a search, one page at a time.
- *
- * The search text is the key, so a stale list is never shown under a new query — which is what
- * `JobsPanel`'s `loaded.query === submitted` derivation did. Paged because the service caps the
- * search at `job_record_search_limit` and advertises `X-Next-Cursor` when it saw a further row:
- * unpaged, a chemist with more finished runs than the cap could not reach the older ones from any
- * client, and the listing looked complete.
+ * Durable runs matching a search, paged by `X-Next-Cursor` (the search is capped by
+ * `job_record_search_limit`). The search text is the key.
  */
 export const jobsQuery = (text: string, auth: TokenGetter) => ({
   queryKey: keys.jobs(text),
@@ -103,14 +74,8 @@ export const protocolQuery = (designId: string, at: number | undefined, auth: To
 });
 
 /**
- * One session's artefacts, and whether the deployment has them at all.
- *
- * **The one read in this app that refetches on window focus**, and it asks by name, the way the
- * health probe does (`queryClient.ts`'s default is off, deliberately). A human revision in a shared
- * session is pushed on `/events` best-effort; a colleague's edit made while this tab was in the
- * background is exactly the case a best-effort push misses, and coming back to the tab is exactly
- * when the reader looks. The route is one indexed query on the service, nothing like the plan
- * inbox's scan, so the focus refetch costs what it should.
+ * One session's artefacts. Refetches on window focus (asked for by name), since a colleague's edit
+ * made while this tab was hidden may have missed the best-effort push.
  */
 export const exhibitsQuery = (sessionId: string, auth: TokenGetter) => ({
   queryKey: keys.exhibits(sessionId),
@@ -119,8 +84,7 @@ export const exhibitsQuery = (sessionId: string, auth: TokenGetter) => ({
 });
 
 /**
- * One artefact at one revision. A *numbered* revision is immutable — the table is append-only —
- * so it is cached like a content-addressed read; the head (`0`) moves, and is left to the list's
+ * One artefact at one revision: numbered revisions are immutable; the head (`0`) follows list
  * invalidation.
  */
 export const exhibitQuery = (
@@ -160,11 +124,8 @@ export const myExhibitsQuery = (auth: TokenGetter) => ({
 });
 
 /**
- * A calculation by-product as text — what a geometry artefact that cites a calculation draws.
- *
- * Immutable, as a content-addressed read is: the bytes under one `<calc_key>#<name>` are what that
- * calculation produced, and a calc key names its inputs, so the same ref can never mean other
- * bytes. Eviction can make it *gone* (a 404), never *different*.
+ * A calc by-product as text; immutable (a calc key names its inputs; eviction gives a 404, never
+ * different bytes).
  */
 export const calcArtifactTextQuery = (ref: string, auth: TokenGetter) => ({
   queryKey: keys.calcArtifact(ref),

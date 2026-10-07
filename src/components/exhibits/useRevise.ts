@@ -1,21 +1,12 @@
 /**
- * Saving a chemist's revision, and what happens when the artefact moved underneath it.
+ * Saving a chemist's revision, and handling a 409 when the artefact moved underneath it (agent or
+ * colleague revisions are ordinary). Shared by every editable view.
  *
- * Shared by every editable view (a document's text, a table's cells), because the hard part is not
- * the editor — it is the 409. The agent revises artefacts as part of its answers, and in a shared
- * session so do colleagues, so "the head moved while I was typing" is an ordinary state rather than
- * a race worth ignoring. The service answers it with `{code: "stale_revision", head_revision: N}`
- * (`StaleRevisionError`), and this hook turns that into a state the view can render:
- *
- *  - **`stale`** holds the edit the chemist made, the base it was written against, and the head the
- *    service named. `RebasePrompt` shows the diff *head against base* — what somebody else changed
- *    — so the decision to apply the edit on top is made having seen what it lands on.
- *  - **`retryOnHead`** re-sends the same spec with `parent_revision` = that head. Never automatic:
- *    a silent rebase is exactly the overwrite the 409 exists to prevent, moved one step later.
- *
- * A successful save invalidates the session's artefact prefix (`keys.exhibits`), which reaches the
- * list, the head body and the history in one call, and puts the pane back on the head — which is
- * now the chemist's own revision.
+ * - **`stale`** holds the edit, its base and the head the service named (`StaleRevisionError`);
+ *   `RebasePrompt` diffs head against base so the chemist sees what changed.
+ * - **`retryOnHead`** re-sends with `parent_revision` = head. Never automatic: a silent rebase is
+ *   the overwrite the 409 prevents. Success invalidates `keys.exhibits` and puts the pane back on
+ *   the head, now the chemist's revision.
  */
 
 import { useState } from 'react';
@@ -43,16 +34,11 @@ export type ReviseState =
 export interface Revise {
   state: ReviseState;
   /**
-   * Save `spec` as a new revision on top of `base` — the revision the edit was *started* on.
-   * Resolves `true` on success.
+   * Save `spec` as a revision on top of `base`; resolves `true` on success.
    *
-   * `base` is the caller's, recorded when the editor opened, and never the revision on screen at
-   * the moment of saving: the head refetches while a chemist types (an `exhibit` frame, a focus
-   * refetch), and a save that read `view.revision` then would post its edit as the child of a
-   * revision it never saw — accepted, with no 409, and that revision's changes silently gone.
-   *
-   * `spec` is a **stored** spec (wave 3): built from `raw_spec`, so the bindings an edit did not
-   * touch go back verbatim rather than as the literals they resolved to.
+   * `base` is the revision the edit started on, never the one on screen at save time: the head can
+   * refetch while typing, and posting against an unseen revision would drop its changes without a
+   * 409. `spec` is a stored spec built from `raw_spec`, so untouched bindings go back verbatim.
    */
   save: (spec: RawExhibitSpec, changeNote: string, base: number) => Promise<boolean>;
   /** Apply the stale edit on top of the head the service named. */

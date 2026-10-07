@@ -4,7 +4,8 @@
 // property under test is which header each response carries.
 
 /**
- * `ISSUES.md` Issue 10: `'unsafe-eval'` for the RDKit worker, and for nothing else.
+ * `'unsafe-eval'` for the RDKit worker, and for nothing else (`RDKIT_WORKER_CSP` in
+ * `server/config.ts`; README, "Enabling Entra SSO").
  *
  * A dedicated worker loaded from a network URL runs under its own response's CSP, not the
  * document's — measured in Chromium before this was built, and proved end to end by

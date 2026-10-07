@@ -1,35 +1,14 @@
 /**
- * What judgment is acting on your answers, and who put it there.
+ * The stored skills that shape the agent's answers, and who put them there — the condition on which
+ * these tiers skip per-use review is that the people they act on can see and remove them.
  *
- * Three tiers shape every reply the agent gives, and until this screen existed a chemist could see
- * none of them. `D-2026-09-05-the-gate-follows-behaviour-not-knowledge` grants the two *stored*
- * tiers their exemption from per-use review on a stated condition — that the people a skill acts on
- * can see what it says and get rid of it — and the only thing that could exercise that condition was
- * `curl`. So this page is not a convenience: it is the half of a bargain the service has been
- * claiming for both tiers.
+ * - **Yours** reaches only your turns; you can delete it.
+ * - **The organisation's** reaches everyone's turns; everyone can read it, only the privileged role
+ *   can change it.
  *
- * **Two tiers, two different bargains, and the screen says which is which.**
- *
- *  - **Yours** reaches your turns and nobody else's. You wrote it or accepted it, so you can delete
- *    it, and that is the whole of the review it gets.
- *  - **The organisation's** reaches every turn every chemist here takes. You can read all of it —
- *    deliberately, because it acts on people who did not approve it — and only the privileged role
- *    can change it (`D-2026-09-20-a-behaviour-change-is-gated-by-its-blast-radius`).
- *
- * The shared `skills/` tree is not listed, and its absence is a decision rather than an omission:
- * it changes only by a reviewed commit to the repository, so there is nothing here anybody could do
- * about it and a read-only list of it would be documentation pretending to be a control.
- *
- * **Nothing on this page writes a skill on the agent's behalf.** `SkillsReadOnlyRefusal` refuses
- * every write a turn could attempt, on every tier; what reaches these routes is a person clicking.
- *
- * **The admin half is hidden by `useIsReviewer` and refused by the service, and it needs both.**
- * Hiding is this app's established posture for a role-gated control (`JobsPanel.tsx` offers
- * cancellation the same way), and it is the right one: a publish box somebody can fill in and then
- * be refused wastes the writing. But the hook reads `config.reviewerRoles`, which is the
- * *deployment's* copy of the service's `entra_privileged_roles` — two settings that can drift —
- * so the refusal is handled as well. When they disagree the service wins, and the copy says which
- * setting to look at rather than leaving a reader to guess that the button lied.
+ * The repository's `skills/` tree is not listed (it changes only by reviewed commit). Nothing here
+ * writes a skill for the agent. Admin controls are hidden by `useIsReviewer` and the service's
+ * refusal is still handled, since the deployment's role list can drift from the service's.
  */
 
 import { useState } from 'react';
@@ -50,41 +29,21 @@ function when(value: string): string {
   return Number.isNaN(at) ? value : relativeTime(at);
 }
 
-/**
- * The one message an unavailable tier gets, and it names the setting.
- *
- * Both tiers ride the same store, so both answer 503 on the same misconfiguration — and an operator
- * reading over somebody's shoulder is the person who can fix it, which is why the copy is the
- * setting's name rather than "unavailable".
- */
+/** The message for an unavailable tier (503), naming the setting an operator must fix. */
 function unavailableCopy(error: unknown): string | null {
   return error instanceof ApiError && error.status === 503
     ? 'This deployment keeps no stored skills: it needs the durable memory store (CHEMCLAW_AGENT_MEMORY_ENABLED with a Postgres session store).'
     : null;
 }
 
-/**
- * Re-read everything this screen holds about one tier after a write to it.
- *
- * The list, every open body and every open history share the tier's key prefix, so one
- * invalidation reaches all of them. Refetching only the list is what left an open body showing the
- * text a revert or a save-over had just replaced — a page describing a skill that no longer acts.
- */
+/** After a write to a tier, invalidate its whole key prefix: list, open bodies and histories. */
 function invalidateTier(tier: 'mine' | 'org'): void {
   void queryClient.invalidateQueries({
     queryKey: tier === 'mine' ? keys.mySkills : keys.orgSkills,
   });
 }
 
-/**
- * A `<details>` whose children are mounted only once it is open.
- *
- * **`<details>` renders its children whether or not it is open**, so a query inside one fires on
- * page load — and the version history carries every held *body*, so a deployment with a dozen org
- * skills fetched a dozen full histories to show nobody anything. Driven: the versions query ran
- * for every skill on first paint, which is what the "Query data cannot be undefined" warning in
- * the test output was pointing at.
- */
+/** A `<details>` whose children mount only when open, so closed histories fetch nothing. */
 function Disclosure({
   summary,
   children,
@@ -125,9 +84,8 @@ function SkillBody({ tier, name }: { tier: 'mine' | 'org'; name: string }): Reac
 
 /** The chemist's own tier: read and remove, which is the whole of the bargain. */
 function MySkills(): React.JSX.Element {
-  // Gated on `ready`, as every other authenticated read here is: on a cold load under MSAL these
-  // mounted before the token existed, failed `token_unavailable`, and — with `retry: false` and a
-  // key that does not change when auth resolves — stayed failed until the page was left.
+  // Gated on `ready`: before a token exists the read would fail and, with `retry: false`, stay
+  // failed.
   const { auth, ready } = useAuth();
   const { data, error, isPending } = useApiQuery({
     queryKey: keys.mySkills,
@@ -157,11 +115,7 @@ function MySkills(): React.JSX.Element {
           When a turn works out a procedure worth keeping, it can propose one — you decide on the
           review screen, and what you accept appears here.
         </EmptyState>
-        {/* Keyed, and keyed the same in the branch below: keeping the *first* skill moves this
-            tier from this branch to that one, and an unkeyed `WriteMine` sat at a different
-            position in each — so React mounted a new one and the "Kept …" sentence, which lives
-            in its state, vanished the instant it was written. Measured on the kind cluster: the
-            skill was kept and listed, and the only confirmation of it was gone. */}
+        {/* Same key in both branches, so the "Kept …" confirmation survives the first save moving the tier between them. */}
         <WriteMine key="write-mine" onSaved={() => invalidateTier('mine')} />
       </>
     );
@@ -210,13 +164,9 @@ function MySkills(): React.JSX.Element {
 }
 
 /**
- * Write one for yourself — the path a declined proposal's dialog points at, which until this
- * existed pointed at nothing.
- *
- * Its refusals are the service's sentences, shown as they arrive: a name a skill this deployment
- * ships already uses and the row cap are both 409s, a document that is not a `SKILL.md` or is too
- * long is a 422, and each detail says what to change. A saved name that already exists is
- * replaced, which the button says rather than the reader discovering it.
+ * Write a skill for yourself. The service's 409 (reserved name, row cap) and 422 (not a valid
+ * `SKILL.md`) sentences are shown as they arrive. An existing name is replaced, and the button says
+ * so.
  */
 function WriteMine({ onSaved }: { onSaved: () => void }): React.JSX.Element {
   const { auth } = useAuth();
@@ -270,12 +220,8 @@ function WriteMine({ onSaved }: { onSaved: () => void }): React.JSX.Element {
 }
 
 /**
- * One organisation skill's history — the blame half, open to everybody it acts on.
- *
- * `retired` is for a name the tier no longer publishes: the newest held version is then *not*
- * active — `DELETE /skills/org/{name}` removes the active body and keeps every version — so no
- * row is badged as acting and every row may be put back. Badging the newest one "Active" there
- * would tell a reviewer the skill still acts on everybody's turns when it acts on nobody's.
+ * One organisation skill's version history. `retired`: no version is active (retiring keeps every
+ * version), so none is badged and any can be restored.
  */
 function OrgHistory({
   name,
@@ -362,18 +308,8 @@ function OrgHistory({
 }
 
 /**
- * Bring back a skill somebody retired, by name.
- *
- * A retire removes the active body and keeps every version (`retire_org_skill` in the service),
- * and `POST /skills/org/{name}/revert` activates any held body whether or not the name is still
- * published — so a retire was always reversible on the service, and only unreachable here: a
- * retired skill leaves the list, and the list was the only way to open a history. This is that
- * way, keyed by the one thing a reviewer still has, the name.
- *
- * Reviewer-only for the reason the publish box is: every button it could reveal is a write the
- * service refuses without the privileged role. A name that is still published is sent back to its
- * own row rather than opened here, because this history treats every version as inactive and the
- * row's history knows which one acts.
+ * Restore a retired skill by name (`POST /skills/org/{name}/revert` activates any held body).
+ * Reviewer-only. A still-published name is sent back to its own row.
  */
 function RestoreRetired({ published }: { published: readonly string[] }): React.JSX.Element {
   const [draft, setDraft] = useState('');
@@ -523,9 +459,7 @@ function OrgSkills(): React.JSX.Element {
         </ul>
       )}
 
-      {/* Hidden rather than disabled for a non-reviewer: a textarea somebody can fill in and then
-          be refused wastes the writing, which is the reason `JobsPanel.tsx` hides its cancel
-          control the same way. The refusal below is still handled — see the file docstring. */}
+      {/* Hidden for non-reviewers (as `JobsPanel` hides cancel); the service's refusal is still handled. */}
       {isReviewer && (
         <div className="mt-6 rounded-lg border border-line p-4">
           <h3 className="font-medium">Publish one to everyone</h3>

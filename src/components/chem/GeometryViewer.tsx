@@ -1,30 +1,14 @@
 /**
- * A 3D structure, drawn ball-and-stick, turned by hand — with a table under it that says the same.
+ * A 3D structure, ball-and-stick, turned by hand, with an atom table that says the same. Numbers
+ * come from `src/chem/geometry.ts`; loaded lazily by `GeometryView` to keep the first load in
+ * budget.
  *
- * The drawing half of `src/chem/geometry.ts`, which holds every number this component draws. It is
- * loaded lazily (`GeometryView` imports it with `lazy()`), because only a `geometry` artefact needs
- * it and `check:bundle` budgets the first load.
- *
- * ## SVG, not `<canvas>`
- *
- * Both were open. SVG is chosen because the things this viewer must *also* be are things a canvas
- * cannot: every mark is in the DOM, so the drawing prints with the pane's print stylesheet, scales
- * without a resize listener, and is a node a test can count under happy-dom (which has no 2D
- * context). The usual cost — DOM work per frame — is bounded here by the service's own atom cap
- * (`exhibit_max_atoms`, 500), and above `DRAWN_ATOM_LIMIT` the viewer stops drawing and keeps the
- * table rather than freezing the pane.
- *
- * ## Operable without a pointer, readable without sight
- *
- * - The frame is one focusable `application` — the role that tells a screen reader to hand the
- *   arrow keys to the page rather than read by line with them — and arrow keys turn it (Shift for
- *   a larger step), `+`/`-` zoom, `0` resets. The same three actions are buttons beside it, so nothing depends on knowing a key.
- * - The drawing is an `img` whose name is the summary — the formula, the atom count, the energy —
- *   and the **atom table** under it lists every atom with its element and coordinates, highlighted
- *   ones marked in words. A screen-reader user gets the structure; a sighted user can check one
- *   coordinate against the calculation it came from.
- * - `prefers-reduced-motion`: a key press turns the view in a short eased step by default, and in
- *   one jump when the reader asked for less motion. Nothing ever moves on its own.
+ * SVG rather than canvas: it prints, scales without listeners, and is testable under happy-dom.
+ * Per-frame DOM cost is bounded by `DRAWN_ATOM_LIMIT`, above which only the table shows.
+ * Accessibility: the frame is one focusable `application` (arrows turn, Shift for larger steps,
+ * `+`/`-` zoom, `0` resets; the same actions are buttons). The drawing is an `img` named by its
+ * summary, the table lists every atom, and `prefers-reduced-motion` makes turns jump instead of
+ * ease. Nothing moves on its own.
  */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
@@ -59,11 +43,8 @@ const ZOOM_MAX = 8;
 const EASE_FRAMES = 8;
 
 /**
- * Above this many atoms the drawing is not made and the table carries the structure alone.
- *
- * Four times the service's inline cap, because a *cited* calc artifact has no cap of its own;
- * past it, per-frame DOM work makes the pane stutter on a laptop, and a frozen pane is worse than
- * a table.
+ * Above this many atoms only the table is shown. Four times the service's inline cap, since a cited
+ * calc artifact has none; beyond it the pane stutters.
  */
 export const DRAWN_ATOM_LIMIT = 2000;
 

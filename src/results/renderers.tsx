@@ -1,31 +1,12 @@
 /**
- * What a tool returned, rendered as the thing it is.
+ * What a tool returned, rendered as the thing it is: a registry where each renderer states what it
+ * matches and draws itself compact (in the answer) or full (in the sheet), so both views describe a
+ * result the same way.
  *
- * These used to live inside `ResultSheet`, which meant they could only be seen by a reader who had
- * already opened the trace, found the row and asked for the full result — three actions and a
- * full-height overlay to reach a hazard table the answer above was written from. They are now a
- * registry: each renderer states what it matches, and draws itself **compact** for the message
- * body or **full** for the sheet, from one component, so the card in the answer and the panel
- * behind it cannot describe the same result differently.
- *
- * Two rules shape every one of them, and both come from the service rather than from taste.
- *
- * **`text` is not promised to be JSON.** Upstream types it as text on purpose, so every renderer
- * parses defensively and the fallback is the raw text, never an error.
- *
- * **A `verdict` or `summary` renders before the data it qualifies.** Several of these results carry
- * one and it is load-bearing in a way that is easy to lose: an empty `flags` list means "no rule
- * matched", which is explicitly *not* a clearance; an empty fingerprint hit list can mean "the
- * index is empty" rather than "no analogue exists". A table with nothing in it reads as "nothing
- * found" unless the sentence above it says otherwise — so `Verdict` is rendered by the registry,
- * above whatever the renderer draws, and never re-worded here.
- *
- * ## Compact is a smaller view of the same data, never a different claim
- *
- * A compact renderer may show fewer rows. It may never drop the caveat, the verdict, the "index is
- * empty" banner or the "not resolved to a structure" alert: those are the sentences that decide
- * how the numbers are read, and a card that omits them to save two lines is a card that says
- * something the full view does not.
+ * - `text` is not promised to be JSON: parse defensively, fall back to the raw text.
+ * - A `verdict` or `summary` renders above the data it qualifies (an empty `flags` list is not a
+ *   clearance); the registry draws it, never re-worded.
+ * - Compact may show fewer rows but never drops a caveat, verdict or alert.
  */
 
 import { lazy, Suspense, useState } from 'react';
@@ -65,12 +46,8 @@ export interface ResultViewProps {
 /* ── Shared furniture ─────────────────────────────────────────────────────── */
 
 /**
- * A figure for a table cell, or an em dash where there is none.
- *
- * Through `formatScientificNumber` rather than `toLocaleString`, and the reason is not cosmetic: a
- * bare `toLocaleString` follows the browser, so the same pKa reads `1,234.5` to one chemist and
- * `1.234,5` to the next — two forms that disagree by three orders of magnitude and one decimal
- * place, with nothing on screen saying which convention is in force.
+ * A figure for a table cell, or an em dash. Uses `formatScientificNumber`, not `toLocaleString`, so
+ * the decimal separator does not depend on the browser locale.
  */
 const numeric = (value: number | null): string =>
   value === null ? '—' : formatScientificNumber(value);
@@ -85,18 +62,9 @@ const SEVERITY_TONE: Record<string, 'danger' | 'warn' | 'neutral'> = {
 };
 
 /**
- * Does this cell start with something a spreadsheet will read as a formula?
- *
- * Excel, LibreOffice and Sheets all evaluate a cell beginning `=`, `+`, `-` or `@` — and a
- * leading tab or carriage return only moves the decision one character along. The payload here is
- * a tool result: `props` names a solvent the corpus was asked about, a run sheet names a reagent,
- * and every one of those strings came from outside this browser. A cell reading
- * `=HYPERLINK("http://…"&A1)` is the classic form, and it runs when the chemist opens the file,
- * not when anyone reviews it.
- *
- * `-` is the awkward one, because `-40` is a temperature and every table here has some. The test
- * that works is whether the WHOLE cell is a number, not whether it starts like one: `-1+1e1*A1`
- * opens with a digit after the minus and is a formula all the same.
+ * Whether a cell would be evaluated as a spreadsheet formula (`=`, `+`, `-`, `@`, or after a
+ * leading tab/CR). Tool results come from outside the browser, so this is an injection guard. A
+ * cell that is entirely a number (e.g. `-40`) is not a formula.
  */
 function isFormula(text: string): boolean {
   if (text === '') return false;
@@ -106,16 +74,8 @@ function isFormula(text: string): boolean {
 }
 
 /**
- * Turn records into a CSV a spreadsheet will open without argument.
- *
- * RFC 4180 quoting, which is three rules and worth doing properly: a field containing a comma, a
- * quote or a newline is quoted, and an embedded quote is doubled. A run sheet retyped into Excel by
- * hand is where the transcription error enters a campaign, and a chemist handed a markdown table
- * has no other option.
- *
- * Plus one rule RFC 4180 does not have, because the spreadsheets do: a cell that would be read as
- * a formula is prefixed with a single quote, which every one of them treats as "this is text" and
- * strips on display. Quoting alone does not help — `"=cmd|…"` evaluates exactly the same.
+ * Records to CSV: RFC 4180 quoting, plus a leading `'` on any cell a spreadsheet would read as a
+ * formula (quoting alone does not stop evaluation).
  */
 export function toCsv(headers: string[], records: Json[]): string {
   const cell = (value: unknown): string => {
@@ -203,55 +163,21 @@ function Cell({
 }
 
 /**
- * How many rows the **full** view draws before it stops and offers the rest.
- *
- * `take` below is the identity when not compact, which was the whole of the full view's row
- * policy: every record the service sent became a `<tr>`, and every numeric cell in it a formatted
- * string. Measured under vitest + happy-dom (which inflates DOM work, so read the ratios rather
- * than the absolutes) against a ten-column result: 50 rows ~52 ms, 500 rows ~277 ms, 2,000 rows
- * ~1,133 ms for 20,000 cells — linear in rows, which is what makes a cap a bound rather than a
- * hope. At 100 the same measurement is 45-93 ms across runs — the twentieth the linearity predicts,
- * plus the noise happy-dom adds to a number that small.
- *
- * **What it costs is a click on the results that exceed it**, and the click draws the next hundred
- * — or all of them, at the price above, which is the reader's to spend once they have been told
- * what they are asking for.
- *
- * **What a cap must never do here is subtract.** The CSV is built from the whole record set and
- * stays that way (its docstring is explicit that a run sheet retyped by hand is where a
- * transcription error enters a campaign), and so does the header union. Both were named in the
- * review as part of the cost and neither is: measured over 2,000 records, `flatMap(Object.keys)`
- * plus the `Set` is 1.0 ms and `toCsv` 2.6 ms, together ~0.3% of that render. The union is over
- * every record on purpose — a column that appears only in row 1,500 is still a column.
+ * Rows the full view draws before offering the rest (rendering cost is linear in rows). A cap never
+ * subtracts: the CSV and the header union always cover the whole record set.
  */
 const FULL_ROW_LIMIT = 100;
 
 /**
- * The same, for a grid of drawn structures, and the number is far smaller because a structure is
- * not a row.
- *
- * Each `<Molecule>` awaits an already-resolved loader, so N draws are N microtasks in one task with
- * no paint between them: the grid does not appear progressively, it appears at the end. Measured in
- * bare node against the real RDKit WASM (`@rdkit/rdkit` 2025.3.4-1.0.0) over drug-like SMILES:
- * **5.2 ms and 10.3 kB of SVG per structure** — so the uncapped 50-hit grid was 258 ms blocked and
- * 516 kB in the DOM, and a 200-hit similarity result 1.03 s and 2.0 MB.
- *
- * 24 is the largest count that stays near a 100 ms interaction budget while filling the grid
- * evenly: `minmax(9.5rem,1fr)` gives two to six columns depending on where the result is drawn, and
- * 24 divides by all of them, so no row is ragged. **It costs 124 ms and 0.25 MB** — a quarter over
- * that budget, which is the price of not making a reader page through a 3-column grid four hits at
- * a time.
+ * The cap for a grid of drawn structures (~5 ms and ~10 kB of SVG each, drawn in one task). 24
+ * divides evenly by every column count the grid uses.
  */
 const FULL_STRUCTURE_LIMIT = 24;
 
 /**
- * A cap on a long list, and the state that lifts it.
- *
- * Compact is unchanged: a fixed slice, with `Trimmed` pointing at the full result. The full view is
- * what gained a cap — see the two constants above for the measurements the numbers come from — and
- * it is a *cap*, never a truncation, which is the distinction the whole of this file is arranged
- * around. Something on screen always says how many were drawn out of how many, and the control that
- * draws the rest is beside that sentence.
+ * A cap on a long list and the state that lifts it. Compact is a fixed slice pointing at the full
+ * result; the full view is capped, never truncated — it always says how many were drawn and offers
+ * the rest.
  */
 interface Cap {
   /** How many items to draw. */
@@ -273,13 +199,8 @@ function useCap(total: number, compact: boolean, compactLimit: number, fullLimit
 }
 
 /**
- * "3 of 11 shown" — said whenever a view is not the whole list, so neither a card nor a capped full
- * view can be mistaken for the result.
- *
- * Two sentences, because the two views offer different things: a compact card cannot show more
- * without becoming the panel, so it names the panel; the full view can, so it offers the control.
- * `csv` is set where the download beside the list covers the whole set, which is the answer to "so
- * where are the other 1,900" that does not involve clicking anything.
+ * "3 of 11 shown", whenever a view is not the whole list. Compact names the panel; full offers the
+ * control. `csv` is set when the adjacent download covers the whole set.
  */
 function Trimmed({
   shown,
@@ -334,21 +255,15 @@ const take = <T,>(items: T[], compact: boolean, limit: number): T[] =>
 /* ── The renderers ────────────────────────────────────────────────────────── */
 
 /**
- * `screen_hazards` and `screen_genotoxic_alerts` — a severity table with its citations.
- *
- * The caveat is pinned above the table and rendered whether or not anything matched, because the
- * dangerous reading of this result is the empty one. The service says it in the payload for the
- * same reason; repeating it here is not redundancy, it is the sentence the chemist acts on — and
- * it is why the compact card keeps it while dropping rows.
+ * `screen_hazards` and `screen_genotoxic_alerts`: a severity table with citations. The caveat is
+ * always shown, even with no matches, because the empty result is the dangerous reading.
  */
 function HazardScreen({ data, compact, onUsed }: ResultViewProps): React.JSX.Element {
   const flags = rows(data.flags);
   const screened = strings(data.screened);
   const shownFlags = take(flags, compact, 3);
-  // The screened list draws one structure per entry, so it is the structure grid again under
-  // another name and it takes the same cap. The flag table above is not capped: its rows come from
-  // a rule table rather than from a corpus, they are the finding itself, and holding one back to
-  // save a millisecond would be this file dropping a hazard row.
+  // The screened structure list takes the structure cap; the flag table is never capped (its rows
+  // are the finding).
   const screenedCap = useCap(screened.length, compact, 3, FULL_STRUCTURE_LIMIT);
   const shownScreened = screened.slice(0, screenedCap.limit);
 
@@ -420,12 +335,8 @@ function HazardScreen({ data, compact, onUsed }: ResultViewProps): React.JSX.Ele
 }
 
 /**
- * `ich_impurity_limit` — the number, and the guideline it is a number *from*.
- *
- * The provenance is the whole point of this renderer. This table was added to the service to end a
- * measured failure where a palladium PDE was recited from training as though it were the record; a
- * limit shown without its guideline, revision and table is that failure again with an extra step.
- * A miss is shown as a miss for the same reason.
+ * `ich_impurity_limit`: the number and the guideline, revision and table it comes from. A limit
+ * without its source is not shown; a miss is shown as a miss.
  */
 function ImpurityLimit({ data, compact }: ResultViewProps): React.JSX.Element {
   const limit = isObject(data.limit) ? data.limit : null;
@@ -468,11 +379,8 @@ function ImpurityLimit({ data, compact }: ResultViewProps): React.JSX.Element {
 }
 
 /**
- * `stoichiometry_table` — the charge table, with what it could not resolve stated.
- *
- * **Each row draws its species.** This is the table a chemist reads at the bench while charging a
- * vessel, and it is the one where confusing two species has a physical consequence — a name is
- * what a reagent is called, a structure is what it is.
+ * `stoichiometry_table`: the charge table, drawing each row's species and stating what could not be
+ * resolved.
  */
 function ChargeTable({ data, tool, compact }: ResultViewProps): React.JSX.Element {
   const unresolved = strings(data.unresolved);
@@ -535,15 +443,8 @@ function ChargeTable({ data, tool, compact }: ResultViewProps): React.JSX.Elemen
 }
 
 /**
- * A run sheet — `generate_screening_design`, and anything else whose rows are meant to be worked
- * through in the order given.
- *
- * Two things separate it from the generic table it used to fall through to. The **order is the
- * data**: a screening design randomises its run order deliberately, and a table that invites
- * sorting invites destroying that, so the rows are numbered as they arrive. And the **CSV is not
- * an extra**: this is the one result that leaves the screen and goes to a bench, and a run sheet
- * retyped into Excel is where the transcription error enters a campaign — so the download is on
- * the compact card too, not only in the panel behind it.
+ * A run sheet (`generate_screening_design` and similar). Rows are numbered in the given order and
+ * not sortable (the order is randomised on purpose), and the CSV is on the compact card too.
  */
 function RunSheet({ data, tool, compact }: ResultViewProps): React.JSX.Element {
   const key = firstRecordList(data) ?? 'rows';
@@ -591,25 +492,14 @@ function RunSheet({ data, tool, compact }: ResultViewProps): React.JSX.Element {
 }
 
 /**
- * A search whose answer *is* structures — `similar_molecules`, `substructure_matches`,
- * `similar_reactions`.
- *
- * ## The empty result is the dangerous one, and it is not this component's to interpret
- *
- * A live run answered `{"result": []}` off an unbackfilled index and it was read as "we have never
- * made anything like this". The payload carries `verdict` as a computed field for exactly that
- * reason, and the registry renders it verbatim above this. So this renders the *flags* rather than
- * re-deriving a sentence from them: writing our own "no analogue found" here would be the same
- * failure with a nicer typeface.
+ * A search whose answer is structures (`similar_molecules`, `substructure_matches`,
+ * `similar_reactions`). An empty result may mean an unbackfilled index; the registry renders the
+ * payload's `verdict` above, and this renders flags without deriving its own sentence.
  */
 function StructureHits({ data, tool, compact, onUsed }: ResultViewProps): React.JSX.Element {
   const hits = rows(data.hits);
   const subject = str(data.subject) || 'record';
-  // Capped in the full view too, which it was not: every hit drew a `<Molecule>`, each awaiting an
-  // already-resolved loader, so the draws run as microtasks inside one task and the browser paints
-  // nothing until the last one is done. See `FULL_STRUCTURE_LIMIT` for the 5.2 ms and 10.3 kB per
-  // structure this is derived from — a 200-hit similarity result was a second of frozen tab and
-  // 2 MB of SVG, arriving all at once with no sign that anything was happening.
+  // Capped in the full view: see `FULL_STRUCTURE_LIMIT`.
   const cap = useCap(hits.length, compact, 6, FULL_STRUCTURE_LIMIT);
   const shown = hits.slice(0, cap.limit);
   const structureOf = (hit: Json): string => str(hit.smiles) || str(hit.label);
@@ -699,36 +589,18 @@ function StructureHits({ data, tool, compact, onUsed }: ResultViewProps): React.
   );
 }
 
-/* ── The experiment protocol ──────────────────────────────────────────────────
- *
- * `draft_experiment_protocol`, `structure_experiment_request` and `read_experiment_protocol` all
- * return a `ProtocolReceipt` (`shared/protocols.ts`). It is the only tool result in this app that
- * is a *pointer at a document a human will edit* rather than a reading to consult, which changes
- * two things about how it is drawn.
- *
- * **The card is never the protocol.** `arms` is capped by the service and `arms_omitted` says by
- * how much; the whole design lives at `/protocols/{design_id}`, and the link is part of the result
- * rather than a nicety, because a chemist who acts on the four arms a compact card shows when the
- * design has ninety-six has been misled by it.
- *
- * **A check list read as "clean" is the dangerous reading**, exactly as an empty hazard table is.
- * Checks are structural — they know the document, not the chemistry — so the caveat saying so is
- * pinned whether or not anything failed, and the compact card keeps it while dropping rows.
+/*
+ * ── The experiment protocol ── `draft_experiment_protocol`, `structure_experiment_request` and
+ * `read_experiment_protocol` return a `ProtocolReceipt` (`shared/protocols.ts`): a pointer at a
+ * document a human edits. The card is never the protocol (`arms` is capped; the link to
+ * `/protocols/{design_id}` is part of the result), and the structural-checks caveat is always
+ * shown.
  */
 
 /**
- * What the receipt says about itself, as a count and a state.
- *
- * One function, read by the registry's header chip and by the card's own strip, so the two cannot
- * word the same fact differently. Deliberately a count rather than a judgement: `blocking` is the
- * service's own subset of failed checks that stop execution, and `passed === false` is a check that
- * failed without necessarily blocking — collapsing them would either alarm on a note or stay quiet
- * on a blocker.
- *
- * The fourth state is the one the three-way rule does not name and this document can reach: a
- * receipt with **no checks at all** — an older service, or a design checked by nothing. "All checks
- * passed" over zero checks is a clearance nobody issued, so it is neutral and says what it is. Same
- * argument as the campaign renderer's withheld plateau verdict.
+ * What the receipt says about itself, as a count and a state, shared by the header chip and the
+ * card. `blocking` is the service's subset of failed checks that stop execution. No checks at all
+ * is neutral, not "all passed".
  */
 function protocolVerdict(data: Json): {
   text: string;
@@ -744,21 +616,9 @@ function protocolVerdict(data: Json): {
     return { text: `${failed.length} of ${checks.length} failed`, tone: 'warn' };
   }
   if (checks.length === 0) return { text: 'no checks recorded', tone: 'neutral' };
-  // **Most of these did not run.** At the request stage the service reports every protocol-only
-  // check as a *passing* `note` reading "not checked yet — this design holds only the ask",
-  // precisely so a UI would not look like it had skipped them. Counting those as passes turned the
-  // opposite claim into a green "N checks passed" badge on a design with no charge table, no
-  // procedure and no evidence. The document view guards this; this card is the surface a chemist
-  // meets first, and it did not.
-  //
-  // **`status === 'requested'` was the first guard and it is a proxy, not the predicate.** The
-  // service picks the check stage from `has_protocol` and decides the status separately in
-  // `advanced()`, so the two come apart exactly where it matters: a `draft` or `approved` design
-  // edited back down to the bare ask keeps its status while every check returns a passing note, and
-  // the badge went green again on the same document the guard was written for. The receipt carries
-  // `has_protocol` now — the value the stage was actually chosen by — and this reads that. The
-  // `!== false` is for a receipt from a service too old to send it: an unknown stage falls back to
-  // the status proxy rather than claiming either answer.
+  // At the request stage, unrun checks come back as passing notes, so they are not counted as
+  // passes. Decided by `has_protocol` (what the service chose the stage by); `!== false` falls back
+  // to the status for older services.
   if (
     data.has_protocol === false ||
     (data.has_protocol === undefined && str(data.status) === 'requested')
@@ -768,13 +628,7 @@ function protocolVerdict(data: Json): {
   return { text: `${checks.length} checks passed`, tone: 'ok' };
 }
 
-/**
- * Check severity is an ordered vocabulary upstream, and the tone has to preserve the order.
- *
- * Exported because the document view draws the same checks in the same three tones, and a second
- * copy of this map is a second answer to "how serious is a warning" — the shape `SEVERITY_TONE`
- * above already has one caller too many for comfort.
- */
+/** Check severity tones, in upstream order. Shared with the document view. */
 export const CHECK_TONE: Record<string, 'danger' | 'warn' | 'neutral'> = {
   blocker: 'danger',
   warning: 'warn',
@@ -834,9 +688,7 @@ function ProtocolResult({ data, tool, compact }: ResultViewProps): React.JSX.Ele
         </span>
       </div>
 
-      {/* Kept on the compact card, always. These checks read the document — that every factor level
-          is charged, that a plate has room for its arms — and none of them read the chemistry. A
-          card that dropped this to save a line would let "no blockers" be read as "safe to run". */}
+      {/* Always on the compact card: these checks read the document, not the chemistry. */}
       <p
         role="note"
         className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
@@ -904,9 +756,7 @@ function ProtocolResult({ data, tool, compact }: ResultViewProps): React.JSX.Ele
             <h3 className="text-2xs font-medium tracking-wide text-ink-subtle uppercase">
               Arms, in run order
             </h3>
-            {/* On the compact card too, for the reason the run sheet's is: this is the table that
-                leaves the screen and goes to a bench, and a retyped run sheet is where the
-                transcription error enters a campaign. */}
+            {/* The CSV is on the compact card too (the run sheet goes to the bench). */}
             <DownloadCsv headers={headers} records={records} name={`${tool}-${designId}`} />
           </div>
           <Table
@@ -931,9 +781,7 @@ function ProtocolResult({ data, tool, compact }: ResultViewProps): React.JSX.Ele
         </div>
       )}
 
-      {/* Said whether or not the card trimmed anything: `Trimmed` above reports what THIS view
-          dropped, and this reports what the service dropped before the card ever saw it. Two
-          different subtractions, and a reader who only knew about the first would still be short. */}
+      {/* What the service dropped before the card saw it, separate from what `Trimmed` reports. */}
       {omitted > 0 && (
         <p className="text-2xs text-ink-subtle">
           The service sent {records.length} of {armCount} arms with this result; {omitted} more are
@@ -942,10 +790,8 @@ function ProtocolResult({ data, tool, compact }: ResultViewProps): React.JSX.Ele
       )}
 
       {designId && (
-        // A plain anchor rather than a router `Link`. This registry is a view over a payload and
-        // imports no router — which is what lets a renderer be drawn in the answer, in a portalled
-        // sheet, and in a test, without a `Routes` in the room. The target is a different top-level
-        // view, so the navigation it costs is one a reader would pay anyway.
+        // A plain anchor, not a router `Link`: this registry imports no router so it renders
+        // anywhere.
         <p className="text-sm">
           <a
             href={`/protocols/${designId}`}
@@ -961,12 +807,8 @@ function ProtocolResult({ data, tool, compact }: ResultViewProps): React.JSX.Ele
 }
 
 /**
- * A run of numbers whose shape is the reading — a campaign's running best, a scan profile.
- *
- * The series is labelled with the key the service filed it under and nothing else. There is no
- * unit on the wire, so there is no axis: a chart that invents "%" or "kcal/mol" is the same
- * fabrication as a value strip that invents "± 1.6", and it is harder to catch because it looks
- * like a measurement.
+ * A run of numbers whose shape is the reading (running best, scan profile). Labelled with the
+ * service's key only; no unit is on the wire, so there is no axis unit.
  */
 function SeriesResult({ data, compact }: ResultViewProps): React.JSX.Element {
   const series = numericSeries(data)!;
@@ -1009,11 +851,8 @@ function SeriesResult({ data, compact }: ResultViewProps): React.JSX.Element {
 }
 
 /**
- * A result whose payload is a handful of named numbers — a pKa, a logD, an electronic profile.
- *
- * **No units and no derived quantities.** The keys are the service's own, printed as it wrote
- * them, because the alternative is a table that reads `pKa 4.76 ± 1.6` over a payload that said
- * `{"pka": 4.76, "sd": 1.6}` and never claimed the second was an uncertainty on the first.
+ * A handful of named numbers (pKa, logD, ...). Keys printed as the service wrote them; no units and
+ * no derived quantities (e.g. never `± sd`).
  */
 function ValueStrip({ data, compact }: ResultViewProps): React.JSX.Element {
   const all = scalarNumbers(data);
@@ -1036,21 +875,13 @@ function ValueStrip({ data, compact }: ResultViewProps): React.JSX.Element {
 }
 
 /**
- * Anything shaped like a list of flat records, whatever produced it.
- *
- * Deliberately generic. The alternative — a renderer per tool — means every new tool on the
- * service is invisible here until someone writes one, and there are roughly fifty-six. Columns
- * come from the union of the keys present, so a tool that adds a field shows it without a change
- * here. Nested values are not flattened: they are shown as JSON in the cell, which is worse than a
- * real renderer and much better than hiding them.
+ * Any list of flat records, so a new tool is legible without a renderer. Columns are the union of
+ * keys; nested values are shown as JSON.
  */
 function AutoTable({ data, tool, compact }: ResultViewProps): React.JSX.Element {
   const key = firstRecordList(data);
   const records = key ? rows(data[key]) : [];
-  // Over every record, not over the ones drawn: a column that first appears in row 1,500 is still a
-  // column, and it costs 1.0 ms at 2,000 records. The CSV below is the whole set for the same
-  // reason — it is the escape hatch, and an escape hatch that had been capped too would be a
-  // second, quieter truncation.
+  // Headers and CSV cover every record, not only those drawn.
   const headers = [...new Set(records.flatMap((r) => Object.keys(r)))];
   const cap = useCap(records.length, compact, 3, FULL_ROW_LIMIT);
   const shown = records.slice(0, cap.limit);
@@ -1119,10 +950,7 @@ export function Verdict({ data }: { data: Json }): React.JSX.Element | null {
   return <p className="text-sm font-medium">{line}</p>;
 }
 
-/**
- * The calc store's files, in a chunk of their own (`CalcArtifacts.tsx`): a download control and its
- * failure sentences are nothing the first load needs, and this registry is on it.
- */
+/** The calc store's files, in their own chunk (`CalcArtifacts.tsx`): not needed on first load. */
 const CalcArtifactsChunk = lazy(() =>
   import('./CalcArtifacts.tsx').then((m) => ({ default: m.CalcArtifactsResult })),
 );
@@ -1149,30 +977,20 @@ export interface ResultRenderer {
   /** Whether this result wants more width than the answer's reading measure. */
   wide: boolean;
   /**
-   * The one thing the block's header can say about the payload before it is read.
-   *
-   * Deliberately a count or a state and never a judgement: "1 high" is what the table says, and
-   * "looks fine" would be this component deciding something the service did not. Absent when the
-   * shape has nothing worth summarising, which is most of them.
+   * What the block header can say about the payload: a count or a state, never a judgement. Absent
+   * for most shapes.
    */
   summary?: (data: Json) => { text: string; tone: 'neutral' | 'ok' | 'warn' | 'danger' } | null;
   /**
-   * Whether this renderer models the payload or merely displays it.
-   *
-   * A generic renderer draws what it recognised and may have left the rest behind, so the sheet
-   * offers the raw text underneath it. A typed one has already rendered every field it cares
-   * about, and repeating the whole payload beside it is a second copy of the same result — which
-   * is how a reader ends up comparing a table with the JSON it was built from.
+   * Whether this renderer only displays the payload (generic; the sheet then also offers the raw
+   * text) or models it (typed; no raw copy beside it).
    */
   generic: boolean;
 }
 
 /**
- * Is this a fingerprint search — a `hits` list whose rows carry a structure?
- *
- * Shape, not tool name, so a fourth search tool renders without an edit here. What this must not do
- * is claim a `hits` list of something else — a job listing, a set of candidates — so an empty
- * `hits` array only counts when the payload also carries the fingerprint search's own flags.
+ * Whether this is a fingerprint search: a `hits` list of structures. By shape, not tool name; an
+ * empty `hits` counts only with the search's own flags.
  */
 function isStructureSearch(parsed: Json): boolean {
   if (!Array.isArray(parsed.hits)) return false;
@@ -1181,13 +999,10 @@ function isStructureSearch(parsed: Json): boolean {
   return hits.every((hit) => mightBeStructure(str(hit.smiles) || str(hit.label)));
 }
 
-/* ── The campaign renderers ───────────────────────────────────────────────────
- *
- * Keyed on tool name, deliberately, because the three shapes genuinely do not generalise: a
- * plateau reading, a batch of proposals with a Pareto front, and a prediction with an in-domain
- * flag share no field worth dispatching on. Each carries one fact that is lost when it is drawn
- * as a table and costs a wrong decision — an assay noise the gains have to be read against, a
- * front that has no single best point, and a number the model produced by extrapolating.
+/*
+ * ── The campaign renderers ── Keyed on tool name, because the three shapes share no field worth
+ * dispatching on. Each carries a fact a table would lose: assay noise, a front with no single best
+ * point, an extrapolation flag.
  */
 
 function Stat({
@@ -1209,12 +1024,7 @@ function Stat({
 }
 
 /**
- * The scalar entries of a parameter assignment, in one place.
- *
- * A candidate, an observation and a prediction all carry `params` as `{name: float | str}` upstream,
- * and a value of any other shape is not something this domain has — so anything else is dropped
- * rather than stringified, which is the one thing that would put `[object Object]` in front of a
- * chemist reading conditions off a screen.
+ * The scalar entries of a parameter assignment; other shapes are dropped rather than stringified.
  */
 function paramEntries(params: Json): [string, string | number][] {
   return Object.entries(params).filter(
@@ -1248,17 +1058,8 @@ function ParamList({ params }: { params: Json }): React.JSX.Element {
 }
 
 /**
- * A value and the surrogate's spread around it, as **one** figure rather than two.
- *
- * `predicted_sd` is not a second number about the same point; it is the qualification of the first,
- * and the backend's own `Candidate` docstring says why it matters: "a small sd is an exploit of a
- * region the model has learned, a large one is an excursion into a region it has not, and the
- * recommended value reads identically either way". Two numbers side by side in two columns is
- * exactly how the second one gets dropped when somebody reads the table.
- *
- * Units are the objective's own and are **not on the wire** — no model in `science/bo` carries one —
- * so the objective's name is what labels the figure. Inventing a unit here would be a claim about
- * chemistry this frontend has no source for.
+ * A value and the surrogate's spread around it, as one figure (`predicted_sd` qualifies the value).
+ * No units are on the wire; the objective's name labels it.
  */
 function ValueWithSd({
   value,
@@ -1286,12 +1087,8 @@ interface ObjectiveScale {
 }
 
 /**
- * The result's objective scales, lead first.
- *
- * `scales` is the list and `scale` is the lead one repeated; a payload may carry either, so both are
- * read and `scales` wins. **`spread` is deliberately recomputed here**: upstream it is a plain
- * `@property` rather than a `computed_field`, which means pydantic does not serialize it and it is
- * simply not on the wire — reading `data.scale.spread` would silently render nothing.
+ * The result's objective scales, lead first (`scales` wins over `scale`). `spread` is recomputed
+ * here: upstream it is a plain property, not serialized.
  */
 function scalesOf(data: Json): ObjectiveScale[] {
   const raw = rows(data.scales);
@@ -1310,10 +1107,8 @@ const spreadOf = (scale: ObjectiveScale): number | null =>
   scale.min === null || scale.max === null ? null : scale.max - scale.min;
 
 /**
- * One objective's value off an observation, whichever shape the observation was given in.
- *
- * Mirrors the backend's `observed_value`: a multi-objective run keys every objective in `values`,
- * and a single-objective one carries the lead objective in the scalar `value` with `values` empty.
+ * One objective's value from an observation: `values[objective]`, or the scalar `value` for the
+ * lead objective in single-objective runs (mirrors the backend's `observed_value`).
  */
 function observedValue(observation: Json, objective: string, lead: string): number | null {
   const values = isObject(observation.values) ? observation.values : {};
@@ -1347,18 +1142,9 @@ function predictedOf(
 }
 
 /**
- * `campaign_progress` — has this optimization stopped finding anything, or is there more in it?
- *
- * The plateau verdict is a **state**, rendered as one. Buried in a paragraph it is a sentence a
- * reader skims; as a labelled chip it is the answer to the question they asked, which is whether to
- * book another fortnight of lab time.
- *
- * **`enough_observations: false` is the case this renderer exists to get right.** The backend
- * computes `plateaued` as `enough and since >= window`, so on two runs it is `false` — and a UI that
- * mapped `false` onto a confident "still improving" chip would be answering a question the service
- * explicitly declined. The three states are therefore *withheld*, *plateaued* and *not plateaued*,
- * never two. The reason is restated in the backend's own terms rather than softened: `<Verdict>`
- * above already carries its sentence, and a second, friendlier one is the one a reader believes.
+ * `campaign_progress`: has the optimization stopped finding anything? The plateau verdict is a chip
+ * with three states — withheld (`enough_observations: false`), plateaued, not plateaued — never
+ * two.
  */
 function CampaignProgressReading({ data }: ResultViewProps): React.JSX.Element {
   const series = Array.isArray(data.best_so_far)
@@ -1381,15 +1167,7 @@ function CampaignProgressReading({ data }: ResultViewProps): React.JSX.Element {
   return (
     <>
       <div className="flex flex-wrap items-center gap-2">
-        {/*
-          "Not plateaued", not "Still improving" — the third state is the absence of a plateau
-          finding, not the presence of a progress one. Upstream computes
-          `plateaued = enough and since >= window`, so `since == window - 1` is `false` while its
-          own summary says only "the last gain was N evaluation(s) ago". Rendering that as a green
-          "Still improving" upgrades a negative into a positive, one notch along from the
-          over-claim the withheld state exists to prevent. The `since` count sits in the stats
-          below, which is where a chemist reads how the campaign is actually doing.
-        */}
+        {/* "Not plateaued", not "Still improving": the absence of a plateau finding is not a progress finding. The `since` count is in the stats below. */}
         {!enough ? (
           <Badge tone="neutral">Plateau verdict withheld</Badge>
         ) : plateaued ? (
@@ -1431,21 +1209,7 @@ function CampaignProgressReading({ data }: ResultViewProps): React.JSX.Element {
 
       <dl className="grid grid-cols-2 gap-2 sm:grid-cols-3">
         <Stat label="Evaluations" value={observations} />
-        {/*
-          Two counts, and the ratio uses the second. `n_distinct` is every condition performed;
-          `n_distinct_in_space` is how many of those occupy a cell of the *feasible* grid, which is
-          what `design_space` counts once an exclusion has removed some. Dividing the first by
-          `design_space` compares two different quantities and can render "7 / 6" — impossible on
-          its face — whenever the history holds a run an exclusion later forbade, which is the
-          ordinary case of a pairing excluded after being run once. The note says so when the two
-          counts disagree, rather than silently dropping the run from the headline.
-
-          The ratio is rendered only when `n_distinct_in_space` is actually present. Falling back
-          to `n_distinct` there would print the exact "4 / 3" this comment claims to prevent —
-          against an older service that predates the field, which is the one case where nobody
-          would be looking for it. The field is required on `CampaignProgress`, so the fallback
-          shows the bare count instead of a ratio it cannot compute honestly.
-        */}
+        {/* The ratio uses `n_distinct_in_space` (conditions in the feasible grid) over `design_space`; `n_distinct` can exceed it when an exclusion was added after a run. Without that field (older service) only the bare count is shown. */}
         <Stat
           label="Distinct conditions"
           value={
@@ -1485,27 +1249,13 @@ function CampaignProgressReading({ data }: ResultViewProps): React.JSX.Element {
 }
 
 /**
- * `suggest_next_experiment` — the proposed experiments, and the trade-off the runs already show.
+ * `suggest_next_experiment`: the proposed experiments and the trade-off.
  *
- * Three things this renders that the generic table could not.
- *
- * **`opened_new_campaign`.** It is the one field of this result that the service's own `summary`
- * does not mention, and the tool docstring says in the imperative: "If `opened_new_campaign` comes
- * back true, say so *before* presenting the candidates." It means runs were supplied against a
- * decision space this system has never been asked about — usually a bound the chemist moved — so the
- * history is now split across two campaigns and the suggestion is not the continuation it looks
- * like.
- *
- * **The front, drawn.** `front` is the non-dominated subset of the runs the caller supplied; on two
- * objectives it is a shape, and a table of it is a shape nobody can see. On **three or more** it is
- * not a shape at all: any 2-D scatter of it silently drops an axis, and a reader cannot tell that it
- * happened. So a scatter is offered for exactly two objectives, and for three or more the table is
- * the answer with a sentence saying why.
- *
- * **What the payload does not carry.** The dominated runs are not in this result — only the front
- * is. `scales[i].n` says how many runs were supplied, so the count that did *not* survive is stated
- * rather than drawn, and the axes are scaled to the full observed range so the front sits where it
- * actually sits inside it.
+ * - `opened_new_campaign` is shown first: the history is now split across two campaigns.
+ * - The front is drawn as a scatter only for exactly two objectives; for three or more the table is
+ *   the answer (a 2-D scatter would drop an axis).
+ * - Dominated runs are not in the payload; their count is stated, and axes span the full observed
+ *   range.
  */
 function SuggestionResult({ data }: ResultViewProps): React.JSX.Element {
   const candidates = rows(data.candidates);
@@ -1556,12 +1306,8 @@ function SuggestionResult({ data }: ResultViewProps): React.JSX.Element {
           <ul className="flex flex-col gap-2">
             {candidates.map((candidate, index) => {
               const predicted = predictedOf(candidate, scales);
-              // A seed is a candidate the surrogate had no *opinion* about — no predicted value.
-              // Keyed on `value`, not on `sd`, because upstream fills the two from independent
-              // column probes (`{name}_pred` and `{name}_sd` in `engine.py::_frame_to_candidates`),
-              // so a mean with no sd is representable. Keying on `sd` badged such a candidate
-              // "no surrogate opinion" *and* suppressed the `<dl>` below, dropping the very number
-              // the chemist is being asked to act on.
+              // A seed has no predicted value. Keyed on `value`, not `sd`, since upstream fills
+              // them independently.
               const isSeed = predicted.every((entry) => entry.value === null);
               return (
                 <li
@@ -1723,18 +1469,9 @@ function SuggestionResult({ data }: ResultViewProps): React.JSX.Element {
 }
 
 /**
- * `predict_outcome` — what the model expects at a point the chemist named.
- *
- * **`in_domain` is the half that must not be dropped.** The backend deliberately answers an
- * out-of-range point rather than refusing it, because the number is readable once you know which
- * side of the bound you are on — measured upstream, the posterior sd rises roughly sixfold there,
- * "and the widened sd is the only part of this prediction that is honest about that". A surface that
- * printed the mean and lost the flag would turn a deliberately-qualified answer into an unqualified
- * one, which is worse than not rendering it at all. So an extrapolation is an alert, not a subtitle.
- *
- * Each `Prediction.summary` is rendered with its own prediction rather than pooled: unlike the
- * `fit` summaries, which `<Verdict>` above already carries (the result's own `summary` is their
- * concatenation), a prediction's sentence is about that one point.
+ * `predict_outcome`: the model's expectation at a named point. `in_domain: false` is shown as an
+ * alert — an extrapolation reads like any other number. Each prediction's own summary is rendered
+ * with it.
  */
 function SurrogateAnswerResult({ data }: ResultViewProps): React.JSX.Element {
   const predictions = rows(data.predictions);
@@ -1825,12 +1562,8 @@ function SurrogateAnswerResult({ data }: ResultViewProps): React.JSX.Element {
 }
 
 /**
- * The table, in priority order.
- *
- * Order is the whole of the dispatch, so it is written as data rather than as a chain of ternaries
- * — which is what the sheet used to carry, and which made "what renders this payload" a question
- * you answered by reading an expression. The two name-keyed entries are first because their shapes
- * are genuinely ambiguous; everything below them keys on the payload alone.
+ * The registry, in priority order. The two name-keyed entries come first because their shapes are
+ * ambiguous; the rest key on the payload.
  */
 const RENDERERS: (ResultRenderer & { matches: (tool: string, data: Json) => boolean })[] = [
   {
@@ -1849,9 +1582,7 @@ const RENDERERS: (ResultRenderer & { matches: (tool: string, data: Json) => bool
     title: () => 'Campaign progress',
     wide: true,
     summary: (data) =>
-      // Three states and never two: the backend computes `plateaued` as `enough and since >=
-      // window`, so `false` on two runs means "not asked yet". A chip reading "still improving"
-      // there would answer a question the service explicitly declined.
+      // Three states, never two: `false` with too few observations means "not asked yet".
       data.enough_observations === false
         ? { text: 'too few runs to say', tone: 'neutral' }
         : data.plateaued === true
@@ -1879,8 +1610,7 @@ const RENDERERS: (ResultRenderer & { matches: (tool: string, data: Json) => bool
     generic: false,
     title: () => 'Predicted outcome',
     wide: true,
-    // The one fact the number cannot carry on its own: a prediction outside the space the
-    // surrogate was fitted on is an extrapolation, and it reads identically to one inside it.
+    // An extrapolation reads identically to an interpolation unless flagged.
     summary: (data) => (data.in_domain === false ? { text: 'extrapolated', tone: 'warn' } : null),
     matches: (tool) => tool === 'predict_outcome',
     View: SurrogateAnswerResult,
@@ -1954,9 +1684,7 @@ const RENDERERS: (ResultRenderer & { matches: (tool: string, data: Json) => bool
       const count = key ? rows(data[key]).length : 0;
       return { text: `${count} run${count === 1 ? '' : 's'}`, tone: 'neutral' };
     },
-    // Name-keyed, and it has to be: "a list of records in a meaningful order" and "a list of
-    // records" are the same shape. Getting it wrong costs a numbered column on a table that did
-    // not want one, which is why the fallback below is the generic table rather than this.
+    // Name-keyed: an ordered record list and a plain one have the same shape.
     matches: (tool, data) => tool === 'generate_screening_design' && !!firstRecordList(data),
     View: RunSheet,
   },
@@ -1966,15 +1694,8 @@ const RENDERERS: (ResultRenderer & { matches: (tool: string, data: Json) => bool
     title: () => 'Experiment protocol',
     wide: true,
     summary: protocolVerdict,
-    // Shape-keyed, so a fourth protocol tool renders on the day it ships. Three fields together,
-    // because each alone is common: `design_id` alone would claim any payload naming a design,
-    // `checks` alone would claim a validation result from anything, and `summary` is on half the
-    // payloads in this app. The three together are a receipt.
-    //
-    // Above `series`/`values`/`table` deliberately. Without this entry a receipt fell through to
-    // the generic table, which found `checks` first and drew the check list as though it were the
-    // result — a design's arms, its factors and the link to the document itself all absent, with
-    // nothing on screen saying anything had been left out.
+    // Shape-keyed (`design_id` + `checks` + `summary` together are a receipt), and above
+    // `series`/`values`/`table` so a receipt never falls through to the generic table.
     matches: (_tool, data) => 'design_id' in data && 'checks' in data && 'summary' in data,
     View: ProtocolResult,
   },
@@ -2016,11 +1737,8 @@ const BARE_LIST: ResultRenderer = {
 };
 
 /**
- * Which renderer draws this result, and the object it should be handed.
- *
- * Returns `null` when nothing structured applies, which is the caller's cue to show the raw text.
- * The `data` it returns is not always the parsed payload: a bare top-level array is wrapped so
- * every renderer can assume an object, rather than each one re-deriving that distinction.
+ * Which renderer draws this result, and the data to hand it; `null` means show the raw text. A bare
+ * top-level array is wrapped so every renderer gets an object.
  */
 export function rendererFor(
   tool: string,

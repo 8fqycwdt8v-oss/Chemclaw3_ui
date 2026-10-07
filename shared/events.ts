@@ -1,163 +1,35 @@
 /**
- * The Chemclaw turn-event contract — a mirror of `service/events.py` in the backend repo.
+ * The Chemclaw turn-event contract — a hand-written mirror of `src/chemclaw/api/events.py`.
  *
- * The backend streams these as Server-Sent Events, serialising each with `model_dump_json()`
- * and setting BOTH the SSE `event:` name and the JSON `type` field to the same discriminator.
- * We prefer the JSON field and fall back to the SSE name.
+ * The backend streams Server-Sent Events, setting both the SSE `event:` name and the JSON `type` to
+ * the same discriminator; the JSON field wins. Each member is a valibot schema and its type is
+ * `v.InferOutput` of it, so a field cannot exist in the type and be missing from the decoder.
+ * `EVENT_MEMBERS` is the gate: an event not listed there is dropped by `normalizeEvent`. A backend
+ * change to this contract is not finished until it lands here; `tests/eventContract.test.ts` and
+ * `tests/backendContract.test.ts` check it.
  *
- * Verified against 8fqycwdt8v-oss/Chemclaw3 (src/chemclaw/api/events.py). Eighteen members —
- * `question` and `note_proposed` are easy to miss, and `job_started` carries `kind`.
- *
- * It said ten for a while, and the two it was missing were the two that report trouble:
- * `capability_degraded` and `tool_failed`. Because `normalizeEvent` drops anything outside
- * `EVENT_TYPES`, an answer assembled without the ELN connector rendered as a confident, ordinary
- * answer. Forward-compatibility is the right default for an unknown event; it is the wrong
- * outcome for one that exists to qualify what the agent just said.
- *
- * Then it said fourteen, and the missing one was the same class of mistake with a longer fuse:
- * `job_failed`. A durable job that died rendered as "runs asynchronously" and stayed that way
- * forever, because the only event that would have corrected it was dropped in this file. The
- * lesson has now cost three events, so state it as a rule: **`EVENT_TYPES` is the gate.** Adding
- * an interface to the union without adding its discriminator here changes nothing at runtime.
- *
- * Then it said fifteen, and it was two short: `evidence_source` (backend M10) and `handoff`
- * (backend M9) had both shipped without reaching this file. Same rule, fifth and sixth time. The
- * pattern behind all six is worth naming, because it is not carelessness: this file mirrors a
- * contract that lives in another repository, and nothing mechanical connects them — the backend
- * can add a member and stay green, and so can this. Until something checks the two against each
- * other, the only defence is that a backend change is not finished until it lands here.
-
- *
- * Then it happened three more times on FIELDS rather than members, which the count above cannot
- * catch at all: `plan.plan_hash`, `tool_failed.reason` and `evidence_source.failed` were each added
- * upstream with an explicit note that this shape "is a contract two other repositories read", and
- * none of them arrived. Each was dropped silently by `normalizeEvent`, which rebuilds every event
- * field by field — so an unmirrored field is not merely untyped here, it is deleted in transit. The
- * cost was the specific thing each was added for: a plan answerable only after a second round trip
- * that races it, a correctly-gated refusal rendered as a fault, and a broken retriever rendered as
- * an empty one. `tests/eventContract.test.ts` now drives a fixture of every member carrying every
- * field through `normalizeEvent` and asserts nothing is lost, which is the closest thing to a
- * mechanical connection this side can have on its own.
- *
- * The same release added a field rather than a member: `agent` on `tool_call`, `tool_failed` and
- * `tool_result`, naming the specialist that raised the event. Empty means the main agent, so it is
- * additive by construction and an existing reader is unaffected.
- *
- * Then two more fields on `tool_result`, and this time the tripwire on the other side fired first:
- * `values` (the figures under the keys the tool filed them under) and `result_inline` (the whole
- * result when it is small enough to ride along). Both are additive with empty defaults, both are
- * mirrored in the interface AND in `normalizeEvent` below — which is the half that matters, since
- * this normaliser rebuilds every event field by field and an unmirrored field is *deleted in
- * transit* rather than merely untyped.
- *
- * The eighteenth member arrived the way the rule above says one should: the backend's own contract
- * tripwire fired inside the change that added it, and named this file and this normaliser in its
- * failure message. `awaiting_answer` (backend D-2026-09-05) is the notification that a workflow has
- * stopped and is waiting for a person. The row behind it had been written on every open, reminder
- * and expiry since the workflow was built and claimed by nothing, so it aged out undelivered —
- * which is the *sixth* form of the same failure this file keeps recording, one repository further
- * upstream: a producer with no consumer instead of a member with no mirror.
- *
- * **And then there were seventeen, because one of them was deleted.** `handoff` is the same seam
- * failing in the direction the paragraphs above never consider: not a member missing from this
- * mirror, but a member of this mirror that nothing upstream can send. The specialist team that
- * raised it was deleted, and the event model outlived its producer — measured rather than assumed,
- * a grep over the service finds the class and its union membership and nothing anywhere that
- * constructs one. That failure is not silent the way the six above were; it is a consumer chain
- * that reads as a live feature, and this repo carried the whole of one: the member, the branch in
- * `normalizeEvent`, a `TraceKind`, a step counted in the turn summary, and a "Handed to X" row in
- * the trace panel, none of which could ever render. It is gone, and
- * `tests/eventContract.test.ts` pins the absence — so mirroring it again means bringing the
- * producer with it. (The count in the paragraph above is left as it was written: it was true of
- * the commit that wrote it, and renumbering prose every time the union moves is how the numbers in
- * it stop being checkable at all.)
- *
- * **And then it came back, with the producer, which is what the pin asked for.** Chemclaw3's
- * `D-2026-09-19-a-handoff-redistributes-the-turns-authority-it-cannot-extend-it` builds a turn
- * graph whose nodes are several agents, and a `transfer_to_<peer>` tool moves the conversation
- * between them; `api/graph_stream.py` constructs `HandoffEvent` in the same commit that declares
- * it, which its own `tests/test_event_producers.py` now requires. The absence pins are deleted
- * rather than defeated: an absence is the right assertion for a claim nothing can write, and
- * keeping it once something can would forbid exactly the fix it was written to demand.
- *
- * **The shape is not the one that was deleted**, and that is worth knowing if you read the old
- * pin: it was `{to, reason}`, where an empty `to` meant "handed back", because the deleted design
- * bracketed a specialist's work with an enter/exit pair. A peer handoff has no exit — control does
- * not come back unless another handoff sends it — so there is no hand-back to encode, and both
- * agents are named. `from`/`to` would have been the obvious names; the service cannot serialise
- * `from` as itself (it is a Python keyword, and its dump omits aliases), so the wire carries
- * `from_agent`/`to_agent` and this mirror follows the wire.
- *
- * **`exhibit` arrived from a frozen contract rather than from a changelog**, which is the order
- * this file has been asking for: both repositories built the artefact feature against one written
- * shape (`shared/exhibits.ts` mirrors the REST half), so the member, its fields and the
- * `normalizeEvent` branch landed here in the same wave the service added the producer — not one
- * release after it, discovered by a dropped frame. Its wave-2 sibling `exhibit_draft` (a document
- * streamed while it is written) came the same way, from the contract's frozen wave-2 addendum.
- *
- * ## This file used to say "keep it dependency-free", and now takes one
- *
- * It is imported by the SPA (bundled by Vite), by the mock backend (bundled by esbuild) and by the
- * e2e fixture service (run under `node --experimental-strip-types`). All three resolve an ordinary
- * npm dependency, so that rule was policy rather than physics — and the policy has now been
- * reversed deliberately, on the record, for `valibot` and for nothing else. See
- * `docs/dependencies.md`.
- *
- * **The reason is the changelog above.** Six members and three fields shipped upstream and were
- * *deleted in transit*, because `normalizeEvent` rebuilt every event field by field: a field this
- * mirror did not know about was not merely untyped, it was silently dropped, and a well-formed
- * event arrived with its qualifying half removed. Every one of those was a hand-written switch
- * branch failing to keep up with a hand-written interface beside it.
- *
- * So the interface is no longer hand-written. Each member is a `valibot` schema and its exported
- * type is `v.InferOutput` of that schema, which makes the two the same object: **a field cannot
- * exist in the type and be absent from the decoder**, because there is nowhere for it to exist. The
- * class of defect this file has recorded nine times is now unrepresentable rather than tested for.
- *
- * What it costs, stated because it is a real loss in a file whose value is its prose: a field's
- * documentation now sits above its schema entry instead of above an interface member, so an editor
- * hovering `event.plan_hash` no longer shows it. The prose is in the same place in the file, one
- * construct over, and that is the trade.
- *
- * **`valibot` rather than `zod`**: this surface tree-shakes to ~2-4 kB gz where zod classic is
- * ~13 kB, and `shared/` is bundled into the SPA. `src/env.ts` declines a schema library for the
- * runtime config and that decision stands — a dozen string checks over a handful of keys is not a
- * 17-member discriminated union with per-field defaults, and the argument there ("more bytes than
- * the rest of this module") is about a module this one is fifty times the size of.
+ * Imported by the SPA, the BFF and the e2e fixture service; `valibot` is its one dependency
+ * (`docs/dependencies.md`).
  */
 
 import * as v from 'valibot';
 
 /**
- * Make some keys optional to *write* while leaving them present to read.
- *
- * Five fields on this wire are documented as "optional in the type, always populated by
- * `normalizeEvent`", and the argument is theirs rather than this helper's: the backend defaults
- * each one precisely so an existing consumer is unaffected, and a required mirror makes every
- * construction site — every test, every fixture, the mock, the e2e fixture service — name a field
- * that means "nothing". Measured: making the five required breaks 78 call sites.
- *
- * A schema cannot express that on its own — `v.optional(s, d)` produces a *required* output key,
- * which is the correct reading for a consumer and the wrong one for a writer. So the relaxation is
- * named here, per field, at the type alias. It is the only hand-written part of any event's shape,
- * and it can only ever remove a `?`, never add or drop a field.
+ * Make some keys optional to write while present to read. Several fields are always populated by
+ * `normalizeEvent` but defaulted by the backend, so constructors (tests, fixtures) need not name
+ * them. Can only remove a `?`.
  */
 type Loosen<T, K extends keyof T> = Omit<T, K> & { [P in K]?: T[P] };
 
-/* ── the coercion vocabulary ─────────────────────────────────────────────────
- *
- * Eight helpers, one per shape this wire actually carries, replacing the six hand-written coercers
- * this file used to run inside a 130-line switch. Each is a `v.fallback`, so a malformed field
- * costs that field and never the event: these values cross a process boundary, and a frame a
- * service got wrong must not take a conversation with it.
+/*
+ * ── the coercion vocabulary ── One helper per shape this wire carries. Each is a `v.fallback`, so
+ * a malformed field costs that field and never the event.
  */
 
 /** A string, or the stated fallback. The shape most of this wire has. */
 const text = (fallback = '') => v.fallback(v.string(), fallback);
 
-/** Every entry stringified; a non-array is empty. The wire's `[str]` fields, read exactly as they
- *  were — `['a', 1]` is `['a', '1']`, because one unexpected entry is not a reason to drop a list a
- *  surface is about to render. */
+/** Every entry stringified; a non-array is empty. */
 const textList = () =>
   v.fallback(
     v.pipe(
@@ -206,18 +78,20 @@ const countOrNull = () =>
     null,
   );
 
-/** A real boolean, never merely truthy. A `1` or a `'yes'` is a service getting it wrong, and
- *  every flag on this wire qualifies an answer — so the safe reading is the unqualified one. This
- *  is `o.field === true` written once: anything that is not a boolean falls back to `false`. */
+/**
+ * A real boolean, never merely truthy: anything else falls back to `false` (the unqualified
+ * reading).
+ */
 const isTrue = () => v.fallback(v.boolean(), false);
 
 /** One of a closed set, or the stated fallback. */
 const oneOf = <T extends string>(options: readonly T[], fallback: T) =>
   v.fallback(v.picklist(options), fallback);
 
-/** One of a closed set, or `null` — for a field whose absence is itself the information. An
- *  unrecognised value normalises to `null` rather than passing through, because "a value this
- *  build does not know" must read as nothing, never as the wrong something. */
+/**
+ * One of a closed set, or `null`; an unknown value reads as nothing rather than as the wrong
+ * something.
+ */
 const oneOfOrNull = <T extends string>(options: readonly T[]) =>
   v.fallback(v.nullable(v.picklist(options)), null);
 
@@ -242,13 +116,7 @@ const jobSummary = () =>
     {} as JobSummary,
   );
 
-/**
- * The labelled figures, dropping anything that is not one.
- *
- * A value with no label is not usable by the surfaces this field exists for — it is exactly the
- * unnamed number `numbers` already carries — and a non-finite one is a blank cell nobody can
- * explain, which is the same rule `numberList` takes one field up.
- */
+/** The labelled figures, dropping unlabelled or non-finite values. */
 const resultValues = () =>
   v.fallback(
     v.pipe(
@@ -272,9 +140,9 @@ const VERIFIED_BY = ['judge', 'citation-gate'] as const;
 
 /* ── the members ─────────────────────────────────────────────────────────── */
 
-/** A place in a session's line: a whole number of at least zero, or `null`. Not one of the shared
- *  helpers above because only this event carries one, and a negative or fractional place is a
- *  service getting it wrong — read as "no place", which is the admission wait's own reading. */
+/**
+ * A place in a session's line: a non-negative integer, or `null` (anything else reads as no place).
+ */
 const placeOrNull = () =>
   v.fallback(
     v.nullable(
@@ -288,16 +156,11 @@ const placeOrNull = () =>
 
 const queuedEvent = v.object({
   type: v.literal('queued'),
-  /* Two waits share this event, told apart by `ticket`
-   * (`D-2026-10-01-a-queued-message-waits-in-its-senders-request` upstream).
-   *
-   * - **The admission wait** — `ticket` and `position` are `null`. The process had no permit free,
-   *   and this is then the FIRST event of the turn. A turn that gets a permit immediately — the
-   *   normal case — never sends one, so seeing it at all is the information.
-   * - **A place in the session's line** — `ticket` is set. In a shared conversation another
-   *   participant's turn is running, so this message waits for it instead of being refused, and
-   *   the event repeats each time the place changes. */
-  /** What `DELETE /sessions/{id}/queue/{ticket}` takes to withdraw this message before it runs. */
+  /*
+   * Two waits share this event, told apart by `ticket`: `null` is the admission wait (no permit
+   * free; the first event of the turn), set is a place in a shared session's line (repeats as the
+   * place changes). `ticket` is what `DELETE /sessions/{id}/queue/{ticket}` takes.
+   */
   ticket: placeOrNull(),
   /** How many messages are ahead of this one: `0` is next, waiting only for the running turn. */
   position: placeOrNull(),
@@ -310,29 +173,14 @@ const planEvent = v.object({
    *  genuine revision rather than a repeat. Absent entirely unless harness mode is on. */
   todos: textList(),
   /**
-   * The identity of THIS plan, which is what `POST /sessions/{id}/plan/decision` requires.
-   *
-   * Without it the event cannot be acted on: answering the plan just rendered meant a second
-   * `GET /sessions/{id}/plan` round trip, which races the very change the hash exists to catch —
-   * between the render and the fetch the agent may revise the plan, and the client would post back
-   * a hash for a plan its user never saw.
-   *
-   * Empty means "this event predates the field", which a consumer must treat as "go and fetch it",
-   * never as a hash that will match. The backend defaults it for exactly that reason, so an older
-   * service degrades to the round trip rather than to a wrong answer.
+   * The identity of this plan, required by `POST /sessions/{id}/plan/decision`, so the decision
+   * binds to what was rendered. Empty (older service) means fetch the plan, never a hash that will
+   * match.
    */
   plan_hash: text(),
   /**
-   * The state-changing tools this plan's steps declare — what approving it actually authorizes.
-   *
-   * `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool` states the requirement: "a
-   * surface that rendered the steps alone would be collecting a yes to something it had not
-   * displayed". It was on `GET /sessions/{id}/plan` only, and since `plan_hash` is on *this* event
-   * precisely so a client need not fetch, the card returned early and the one path carrying the
-   * scope was never called — the field existed and nothing consumed it.
-   *
-   * Empty means "this event predates the field", exactly as `plan_hash` empty does, so a consumer
-   * falls back to the fetch rather than to "this plan authorizes nothing".
+   * The state-changing tools this plan's steps declare — what approving it authorizes. Empty (older
+   * service) means fetch it, not "authorizes nothing".
    */
   scope: textList(),
 });
@@ -344,16 +192,11 @@ const toolCallEvent = v.object({
   /** A RAW string truncated to 200 chars by the backend — NOT parsed JSON, and possibly cut
    *  mid-token. Never `JSON.parse` this unguarded. */
   arguments: text(),
-  /** The specialist that raised this event; **empty means the main agent**, which is what every
-   *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
-   *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
-   *  property of the turn, decided before any routing, so attributing it would invent a fact.
-   *
-   *  Optional in the type, always populated by `normalizeEvent`. Required would contradict the
-   *  claim the field is built on: the backend defaults it to `''` precisely so an existing
-   *  consumer is unaffected, and a required mirror makes every construction site — every test,
-   *  every fixture, the mock — name a field that means "no specialist". Absent and `''` both read
-   *  as the main agent, so a falsy check is the whole handling. */
+  /**
+   * The specialist that raised this event; empty means the main agent. Not carried by turn-level
+   * events (`queued`, `capability_degraded`). Absent and `''` read the same, so a falsy check is
+   * the whole handling.
+   */
   agent: text(),
 });
 export type ToolCallEvent = Loosen<v.InferOutput<typeof toolCallEvent>, 'agent'>;
@@ -361,12 +204,10 @@ export type ToolCallEvent = Loosen<v.InferOutput<typeof toolCallEvent>, 'agent'>
 const tokenEvent = v.object({
   type: v.literal('token'),
   text: text(),
-  /** The agent that produced this chunk; **empty means the main agent**. The backend emits it on
-   *  every token (`agent="subagent" if namespace else ""`) and its own docstring says a consumer
-   *  "concatenates only the unattributed ones", because an attributed chunk is another agent's
-   *  working notes rather than part of the answer. Same optionality rule as `ToolCallEvent.agent`:
-   *  optional in the type, always populated by `normalizeEvent`, and a falsy check is the whole
-   *  handling. */
+  /**
+   * The agent that produced this chunk; empty means the main agent. Only unattributed chunks are
+   * part of the answer.
+   */
   agent: text(),
 });
 export type TokenEvent = Loosen<v.InferOutput<typeof tokenEvent>, 'agent'>;
@@ -376,11 +217,7 @@ const jobStartedEvent = v.object({
   job_id: text(),
   /** "calc" | "report" | "campaign" | "job" — lets a surface label the job without parsing the id. */
   kind: text('job'),
-  /** The plan step this job was launched for — the todo's bare text, so the checklist item can be
-   *  matched without sharing a hash function with the service (backend D-2026-08-27). Empty means
-   *  the job was not launched from a plan step, which is every job outside the harness. Same
-   *  optionality rule as `TokenEvent.agent`: optional in the type, always populated by
-   *  `normalizeEvent`, and a falsy check is the whole handling. */
+  /** The plan step this job was launched for (the todo's text); empty outside the harness. */
   plan_step: text(),
 });
 export type JobStartedEvent = Loosen<v.InferOutput<typeof jobStartedEvent>, 'plan_step'>;
@@ -392,13 +229,11 @@ const toolQueuedEvent = v.object({
   tool: text('unknown'),
   /** The queued run's id; the same id a `job_started` carries if the wait outlasts the turn's. */
   job_id: text(),
-  /** `queued` while the call waits for a compute slot, `running` once a worker has picked it up.
-   *  An unknown value reads as `queued`: claiming a call runs when it may not is the falsehood the
-   *  event exists to remove. */
+  /**
+   * `queued` while waiting for a compute slot, `running` once picked up. Unknown reads as `queued`.
+   */
   state: oneOf(['queued', 'running'] as const, 'queued'),
-  /** Calls waiting on the connector's queue — the broker's approximate backlog, not a strict place
-   *  in line. `null` where the broker could not say. Same optionality rule as
-   *  `TokenEvent.agent`: optional in the type, always populated by `normalizeEvent`. */
+  /** Approximate broker backlog for the connector's queue, or `null`. */
   waiting: countOrNull(),
 });
 export type ToolQueuedEvent = Loosen<v.InferOutput<typeof toolQueuedEvent>, 'waiting'>;
@@ -413,10 +248,9 @@ export interface JobSummary {
   /** A development report's `report` note (`request_development_report`). */
   note_id?: string;
   /**
-   * The `document` artefact a development report also wrote into the session that asked for it
-   * (artefacts wave 2, G1) — `xb-` plus sixteen hex, deterministic per workflow so a retried
-   * activity names the same one. What the job card's **Open report** focuses. Unverified like every
-   * key here: `reportExhibitOf` holds it to `EXHIBIT_ID_RE` before anything opens on it.
+   * The `document` artefact a development report wrote into the asking session (`xb-` + 16 hex).
+   * The job card's Open report focuses it; `reportExhibitOf` validates it against `EXHIBIT_ID_RE`
+   * first.
    */
   exhibit_id?: string;
   [key: string]: unknown;
@@ -438,47 +272,36 @@ const jobFailedEvent = v.object({
 });
 export type JobFailedEvent = v.InferOutput<typeof jobFailedEvent>;
 
-/** The two terminal states of a durable job. Both arrive on the turn stream when the job finishes
- *  inside the turn, and on `GET /sessions/{id}/events` when it finishes after it. Anything that
- *  consumes one must consume the other, or a failure looks exactly like a job still running. */
+/**
+ * The two terminal states of a durable job, on the turn stream or `GET /sessions/{id}/events`.
+ * Consume both, or a failure looks like a running job.
+ */
 export type JobTerminalEvent = JobCompletedEvent | JobFailedEvent;
 
 /**
- * A workflow has stopped and is waiting for an answer only a person can give.
+ * A workflow has stopped and is waiting for an answer only a person can give. Not a `question`
+ * (mid-turn): it is durable, has a deadline, is answered via `POST /pending/{id}/answer`, and may
+ * be for someone else.
  *
- * **Not a `question`.** `QuestionEvent` is the agent asking mid-turn, with the turn held open and
- * the answer arriving as the next message. This one outlives its turn: the request is durable, it
- * has a deadline, it is answered through `POST /pending/{id}/answer`, and the person who has to
- * answer it may not be the person whose turn opened it. A surface that folds the two together
- * would put a days-long request in a chat bubble that scrolls away.
- *
- * **`state` is what tells the two pushes apart**, because the backend deliberately sends one event
- * type rather than two. The open — and every reminder — carries `kind`, `asked_of` and `due_at`
- * with `state: 'waiting'`; the expiry carries `subject` and `reminders` with `state: 'expired'`
- * and nothing else. Every field but `request_id` is therefore routinely empty, on one side or the
- * other, and an empty one is "this push does not carry it" rather than "this request has none".
- *
- * The `job_started` of `kind: 'awaiting'` recorded beside the wait names the same `request_id`.
- * That is the join: a surface that shows a wait as a running job can close it out on this event
- * instead of leaving it running until the tab is reloaded.
+ * `state` distinguishes the pushes: open and reminders carry `kind`, `asked_of`, `due_at` with
+ * `waiting`; expiry carries `subject` and `reminders` with `expired`. An empty field means "this
+ * push does not carry it". The matching `job_started` of `kind: 'awaiting'` shares `request_id`.
  */
 const awaitingAnswerEvent = v.object({
   type: v.literal('awaiting_answer'),
   /** What `GET /pending` and `POST /pending/{id}/answer` are keyed by. The only field that is
    *  always populated, and the only one worth branching on. */
   request_id: text(),
-  /** `'waiting'` on the open and on every reminder, `'expired'` when the deadline passed with no
-   *  answer. Open upstream — a string, not a union — because the backend types it as a bare `str`
-   *  defaulted to `'waiting'`, and narrowing it here would make a third state this build does not
-   *  know render as nothing at all. */
+  /**
+   * `'waiting'` (open, reminders) or `'expired'`. Left as a string because the backend types it as
+   * one.
+   */
   state: text('waiting'),
   /** What is being decided, in one line. Sent on the **expiry** push. */
   subject: text(),
   /** The category of request ('measurement', 'approval', …). Sent on the **open** push. */
   kind: text(),
-  /** Who was asked — a person or a role. Sent on the open push. Never a reason to hide the event
-   *  from anyone else: the deadline is the whole point, and a request nobody can see is exactly
-   *  the one that expires. */
+  /** Who was asked — a person or role. Never a reason to hide the event from others. */
   asked_of: text(),
   /** The deadline, ISO-8601. Sent on the open push. Empty means this push did not carry one, so a
    *  surface must render "no deadline shown" rather than "no deadline". */
@@ -498,35 +321,15 @@ const questionEvent = v.object({
 export type QuestionEvent = v.InferOutput<typeof questionEvent>;
 
 /**
- * A note was written into the knowledge graph.
- *
- * **The wire carries two names for this and the reader takes both.** The event is not a proposal:
- * nothing reviews a note any more (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`
- * upstream), so the accurate name is `note_recorded`. Renaming an SSE discriminator is a
- * two-repository deploy with a skew window, and the only ordering that has no broken state is
- * **reader first**: this client accepted both names, the service switched to the new one, and no
- * deployed frontend dropped an event in between. The reverse order — service first — silently
- * drops the event in every browser that has not been redeployed, which is the exact failure
- * `EVENT_TYPES` has cost six times.
- *
- * **The service has now shipped its half**, so `note_proposed` is the *old* name rather than the
- * current one: `src/chemclaw/api/events.py` declares `type: Literal["note_recorded"]` and no
- * longer declares the old spelling at all. This reader keeps it because every browser already
- * loaded speaks it; dropping it before that rollout is done is the same event loss with the
- * repositories swapped.
- *
- * `type` stays `'note_proposed'` inside this app on purpose: the internal name is a local rename
- * that can happen any day, and doing it in the same step would put a second change in the skew
- * window for no gain. Removing the old wire name is the third step, it is this repository's, and
- * it is recorded in `ISSUES.md` with what unblocks it. `tests/backendContract.test.ts` holds the
- * promise from the other end: `note_proposed` is in its `RETAINED_FOR_ROLLOUT` map with this
- * reason, an `ISSUES.md` row whose deletion expires the entry, and a date by which somebody
- * re-takes the decision.
+ * A note was written into the knowledge graph. The service now sends `note_recorded`; this reader
+ * also accepts the old `note_proposed` until every deployment has rolled forward (`ISSUES.md` Issue
+ * 13, `RETAINED_FOR_ROLLOUT` in `tests/backendContract.test.ts`). Internally the member is still
+ * `note_proposed`; that rename is a later step.
  */
 const noteProposedEvent = v.object({
   type: v.literal('note_proposed'),
   note_id: text(),
-  /** The branch/PR reference the note was opened on, for the PR-gated knowledge graph. */
+  /** A reference the note was written under. */
   reference: text(),
 });
 export type NoteProposedEvent = v.InferOutput<typeof noteProposedEvent>;
@@ -535,16 +338,8 @@ const approvalRequestEvent = v.object({
   type: v.literal('approval_request'),
   prompt: text('Approval requested.'),
   /**
-   * **Always `""`**, and mirrored only because that is what says so.
-   *
-   * It once carried the handle of a durable interaction hold, answerable via
-   * `POST /approvals/{id}/decision`. The service deleted that whole mechanism
-   * (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`) because nothing could ever open one,
-   * and its upstream model now documents this field as permanently empty: a non-empty value
-   * would name a hold that cannot exist. Nothing in this app branches on it.
-   *
-   * A plan approval — the only shape this event has — is answered on
-   * `POST /sessions/{id}/plan/decision` and bound by the hash on the `plan` event, never by this.
+   * Always `""`: the hold mechanism it named was deleted upstream. Plan approvals are answered on
+   * `POST /sessions/{id}/plan/decision`, bound by the `plan` event's hash.
    */
   approval_id: text(),
 });
@@ -560,74 +355,39 @@ const ANSWER_CHECKS: readonly AnswerCheck[] = ['verifier', 'answer-shape'];
 const answerEvent = v.object({
   type: v.literal('answer'),
   /**
-   * The FULL assembled answer — i.e. the concatenation of every preceding `token.text`.
-   *
-   * Rendering this *and* the accumulated tokens double-renders the whole answer. See
-   * `src/state/chatStore.ts`: the store keeps `streamedText` and `finalText` apart and the
-   * renderer picks one. There is deliberately no code path that concatenates them.
+   * The full assembled answer — the concatenation of every `token.text`. The store keeps
+   * `streamedText` and `finalText` apart and renders one; never both.
    */
   text: text(),
   /** Verifier citation-faithfulness score in [0,1]. `null` unless the verifier is enabled. */
   confidence: v.fallback(v.nullable(v.number()), null),
   unsupported_claims: textList(),
-  /** True exactly when `confidence < verifier_confidence_threshold`. The routing signal for a
-   *  "needs expert review" affordance. */
+  /** True when `confidence < verifier_confidence_threshold`: the "needs expert review" signal. */
   review_required: isTrue(),
   /**
-   * Which answer checks actually ran on this turn. **Empty means none did.**
-   *
-   * This is drift #12, and it is the one that makes the three fields above readable. Both honesty
-   * gates ship *off* (`verifier_enabled`, `answer_shape_gate_enabled`), and measured on the core
-   * side an ungated answer and a checked-and-clean one were **byte-identical on the wire**:
-   * `confidence: null`, `review_required: false`, `unsupported_claims: []` either way. So a
-   * surface that flags on `review_required` shows an unflagged answer in both cases, and cannot
-   * tell "we looked and it was fine" from "nobody looked".
-   *
-   * `runner_answer.build_answer_event`'s docstring claimed every field was either what a check
-   * found or the `null`/`false` that says the check did not run. That was true of the verifier
-   * (`confidence`/`verified_by` are null) and false of the shape gate, which had no field of its
-   * own — so this array is the shape gate's.
-   *
-   * A renderer should treat an empty array as *unverified*, not as *clean*. Anything else repeats
-   * the ambiguity on the screen after the wire stopped carrying it.
+   * Which answer checks ran on this turn; empty means none did. Both gates ship off upstream, and
+   * an unchecked answer looks identical to a clean one otherwise, so render an empty array as
+   * unverified, not clean.
    */
   checks_run: listOf(ANSWER_CHECKS),
   /**
-   * Whether a second pass challenged this answer, and the durable hold that pass opened.
-   *
-   * **Both are on the wire and both were being deleted in transit.** `runner_answer.py` passes
-   * `challenged=review.challenged, review_hold_id=review.hold_id` on *every* answer, and this
-   * mirror carried neither — so `normalizeEvent`, which rebuilds each event field by field, dropped
-   * them. That is drift #11 in the list this file keeps.
-   *
-   * They are both permanently at their defaults today (`agent/verifier.py` has assigned neither
-   * since D-2026-08-15), so nothing renders differently for mirroring them. That is exactly why it
-   * had to be done now rather than later: the backend's own comment says reviving them is a
-   * coordinated three-repo cut, and the cut is precisely the change a hand-written mirror cannot
-   * notice.
+   * Whether a second pass challenged this answer, and the hold it opened. Both are at their
+   * defaults upstream today; mirrored so they are not dropped when revived.
    */
   challenged: isTrue(),
   /** The hold id when `challenged`, `null` otherwise. See `challenged`. */
   review_hold_id: v.fallback(v.nullable(v.string()), null),
   /**
-   * Which verifier produced `confidence`, or `null` when none ran.
-   *
-   * Worth carrying rather than collapsing, because the same number means different things:
-   * `citation-gate` is deterministic and scores an answer against the turn's own tool results,
-   * and `judge` is an LLM scoring it against the claims. A surface that shows one score for both
-   * is averaging two different measurements.
+   * Which verifier produced `confidence` (`citation-gate` is deterministic, `judge` is an LLM), or
+   * `null`. The same number means different things per verifier.
    */
   verified_by: oneOfOrNull(VERIFIED_BY),
 });
 export type AnswerEvent = v.InferOutput<typeof answerEvent>;
 
 /**
- * The closed set of reasons a turn ends badly. Mirrors the backend's `ErrorCode` `Literal`.
- *
- * Kept as a union rather than `string` on purpose: each of these routes to different copy and a
- * different offer to the user, and the compiler should complain when the backend adds one.
- * `normalizeEvent` still accepts an unknown code and maps it to `internal`, so a newer service
- * degrades to a generic error rather than dropping the event.
+ * The closed set of reasons a turn ends badly (the backend's `ErrorCode`). A union so the compiler
+ * flags a new code; `normalizeEvent` maps an unknown code to `internal`.
  */
 export type ErrorCode =
   | 'internal'
@@ -636,46 +396,31 @@ export type ErrorCode =
   | 'turn_timeout'
   | 'budget_exhausted'
   /**
-   * Admission control shed this turn: the service had no permit free within its admission
-   * timeout, so nothing ran at all.
-   *
-   * Its own member rather than `budget_exhausted`, because the two are opposite instructions —
-   * this one is "we are busy, retry in a moment" (`retryable: true`) and that one is "the budget
-   * is spent, stop retrying" (`retryable: false`). They shared a code until the service split
-   * them, and this app is the surface that paid for it: `errorFromEvent` had to read `retryable`
-   * to work out which of the two had arrived, on a taxonomy whose whole contract is that the code
-   * says what to do next.
+   * Admission control shed the turn before it ran: "busy, retry" (`retryable: true`), unlike
+   * `budget_exhausted`.
    */
   | 'at_capacity'
   | 'loop_cap_reached'
   | 'spend_cap_reached'
   | 'bad_tool_arguments'
   /**
-   * The model endpoint refused the request because the conversation no longer fits its context
-   * window. Its own member rather than `internal`, because nothing is broken and the remedy is the
-   * chemist's: a fresh session, or a narrower question. The service reported it as `internal`
-   * until 2026-09-27, which told a chemist "internal error" about the one failure a shorter thread
-   * fixes. Never retryable as-is — the same thread overflows the same window.
+   * The conversation no longer fits the model's context window. Never retryable as-is; the remedy
+   * is a fresh session or a narrower question.
    */
   | 'context_length'
   /**
-   * The model gateway refused the service's own credential — HTTP 401 or 403 from the LLM
-   * endpoint. Nothing the chemist did and nothing transient: no turn can run until an operator
-   * fixes the deployment's key, so it is never retryable. The service reported it as `internal`
-   * until 2026-10-04, which hid a rotated key behind "internal
-   * error" from the chemist and from the operator they reported it to.
+   * The model gateway refused the service's own credential (401/403). An operator must fix the key;
+   * never retryable.
    */
   | 'llm_auth'
   /**
-   * A message that waited in a shared session's line and never ran: its sender withdrew it, the
-   * owner did, the sender was removed while it waited, or the session was deleted. Nothing failed
-   * and nothing was spent, so a surface must not render it as a failed turn.
+   * A queued message never ran (withdrawn, sender removed, session deleted). Nothing failed; do not
+   * render it as a failed turn.
    */
   | 'queue_cancelled'
   /**
-   * This *view* of a turn fell a full buffer behind and was cut off; the turn itself runs on.
-   * Retryable: reattach with `GET /sessions/{id}/turn/stream`, or read the answer from the
-   * transcript when it lands.
+   * This view of the turn fell a full buffer behind and was cut off; the turn runs on. Reattach via
+   * `GET /sessions/{id}/turn/stream` or read the transcript.
    */
   | 'stream_lagged'
   | 'empty_answer';
@@ -718,20 +463,17 @@ export type ErrorEvent = v.InferOutput<typeof errorEvent>;
 
 const capabilityDegradedEvent = v.object({
   type: v.literal('capability_degraded'),
-  /** Connectors that did not come up for this turn, so their tools were absent from it. Emitted
-   *  before the first token, so a surface can mark the answer as partial while it streams rather
-   *  than retroactively. The turn is NOT failed by this — it costs tools, not the conversation. */
+  /**
+   * Connectors that did not come up for this turn, so their tools were absent. Sent before the
+   * first token; the turn continues.
+   */
   connectors: textList(),
 });
 export type CapabilityDegradedEvent = v.InferOutput<typeof capabilityDegradedEvent>;
 
 /**
- * The kinds of deliberate refusal a `tool_failed` can carry.
- *
- * Mirrors the backend's `core/turn_signals.RefusalReason`, which is the single definition its
- * classification table and its wire model both import. `src/lib/refusals.ts` is what turns one of
- * these into something a chemist can act on; nothing else in this app should switch on the raw
- * string.
+ * Deliberate refusal kinds a `tool_failed` can carry (the backend's `RefusalReason`).
+ * `src/lib/refusals.ts` turns them into copy; nothing else should switch on the raw string.
  */
 export type RefusalReason = 'dry_run' | 'undeclared_write' | 'plan_gate' | 'repeat' | 'authz';
 
@@ -751,38 +493,17 @@ const toolFailedEvent = v.object({
   tool: text('unknown'),
   message: text('The tool call failed.'),
   /**
-   * What KIND of failure this is, where the kind is a decision somebody made rather than a fault.
-   *
-   * A refusal is the control working, and a surface that renders it beside a database outage
-   * reports a correctly-gated turn as a broken one — the mistake the backend's own `evals/live.py`
-   * made, by matching one phrase of the refusal sentence.
-   *
-   * **Five members, and this mirror said one for a release.** The backend's
-   * `agent/audit.refusal_reason` has classified five gates since it was written, but only
-   * `plan_gate` reached the wire — so a dry run the chemist themselves asked for, a role denial, a
-   * write a narrowed agent was never given, and a repeat the guard stopped all arrived here
-   * indistinguishable from an unreachable pod, and this UI rendered all four in the failure red.
-   *
-   * `null` is "an ordinary failure", which is every failure emitted before the field existed.
+   * What kind of deliberate refusal this is, or `null` for an ordinary failure. A refusal is the
+   * control working and must not render as a fault.
    */
   reason: oneOfOrNull(REFUSAL_REASONS),
-  /** The specialist that raised this event; **empty means the main agent**, which is what every
-   *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
-   *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
-   *  property of the turn, decided before any routing, so attributing it would invent a fact.
-   *
-   *  Optional in the type, always populated by `normalizeEvent`. Required would contradict the
-   *  claim the field is built on: the backend defaults it to `''` precisely so an existing
-   *  consumer is unaffected, and a required mirror makes every construction site — every test,
-   *  every fixture, the mock — name a field that means "no specialist". Absent and `''` both read
-   *  as the main agent, so a falsy check is the whole handling. */
+  /**
+   * The specialist that raised this event; empty means the main agent (see `ToolCallEvent.agent`).
+   */
   agent: text(),
   /**
-   * The provider tool-call id of the call that raised (the contract's hardening item 2) — the same
-   * id that call's `exhibit_draft` frames carried, so a failed `create_exhibit`/`revise_exhibit`
-   * drops *its own* draft rather than the oldest one of its op (`failDraft`). **Empty** from a
-   * service older than the field, which is when the old rule still applies. Optional in the type
-   * and always populated by `normalizeEvent`, for `agent`'s reason.
+   * The provider tool-call id of the failed call — the id its `exhibit_draft` frames carried — so
+   * it drops its own draft (`failDraft`). Empty from older services.
    */
   call_id: text(),
 });
@@ -792,17 +513,9 @@ export type ToolFailedEvent = Loosen<
 >;
 
 /**
- * One number a structured tool result returned, under the name the tool gave it.
- *
- * The service's own rule, mirrored because a consumer that softened it would undo the point: the
- * `label` is the payload's key path (`pka`, `limit.limits.0.value`) and nothing else, and `unit`
- * is only ever a `unit`/`units` string the payload put beside that number. Neither is prettified
- * and neither is inferred.
- *
- * So a surface may write `pKa 4.76` and, where the tool said so, `0.5 µg/day`. It may **not**
- * write `4.76 ± 1.6` from `[{pka: 4.76}, {sd: 1.6}]`: nothing on the wire says the second is an
- * uncertainty on the first, and inventing that relationship is the exact failure `numbers` and
- * this field exist on opposite sides of.
+ * One number a structured tool result returned, under the tool's own key path. `label` is never
+ * prettified and `unit` is only a `unit`/`units` string beside it in the payload. Never infer
+ * relationships between values (e.g. an uncertainty).
  */
 export interface ResultValue {
   label: string;
@@ -812,49 +525,27 @@ export interface ResultValue {
 
 const toolResultEvent = v.object({
   type: v.literal('tool_result'),
-  /** What a call returned, as data rather than as the model's paraphrase of it. Success only:
-   *  a call that raised arrives as `tool_failed` instead, and the two are exhaustive — which is
-   *  why there is no `ok` flag to check. */
+  /** What a call returned, as data. Success only: a call that raised arrives as `tool_failed`. */
   tool: text('unknown'),
   /** Truncated by the backend exactly as `tool_call.arguments` is — a preview of the value, not
    *  the whole return. Raw; never `JSON.parse` it unguarded. */
   preview: text(),
   /**
-   * The content address of the untruncated result, fetchable at
-   * `GET /sessions/{id}/tool-results/{ref}`. A SHA-256 hex digest of the result text.
-   *
-   * **Empty means "not stored"** — the store is off, the result was over the cap, or the write
-   * failed — and the backend guarantees that is the only reading. So an empty string is the
-   * check for whether to offer a "see the full result" affordance at all; there is no second
-   * absence to disambiguate.
-   *
-   * The split is the point: the stream keeps its 200-character budget and carries a *reference*,
-   * and a surface that decides to render one result pulls that one result, once.
+   * The content address (SHA-256) of the untruncated result, fetchable at `GET
+   * /sessions/{id}/tool-results/{ref}`. Empty means not stored, and is the only check for offering
+   * "see the full result".
    */
   result_ref: text(),
   /**
-   * The whole result, when it was small enough to ride along instead of costing a fetch.
-   *
-   * The preview/ref split is a rule about *large* results, and applying it to a 300-byte ICH limit
-   * bought a second round trip for a payload smaller than the preview's own budget. Under the
-   * service's `stream_inline_result_bytes` this carries the text; over it, the field is empty and
-   * the ref is the way to the result exactly as before — so a consumer treats this as an
-   * optimisation and never as the presence check. `result_ref` is still what says a result is
-   * stored.
+   * The whole result when small enough to ride along (under `stream_inline_result_bytes`). An
+   * optimisation only; `result_ref` is still the presence check.
    */
   result_inline: text(),
   /**
-   * Whether the model was shown **less** than the tool returned.
-   *
-   * A result over the model's share of the context is cut head-and-tail before the model reads
-   * it. When this is set, `result_ref` opens the *full* text the tool returned rather than the
-   * cut — kept for the chemist, never offered back to the model — while `preview`, `note_ids`,
-   * `numbers` and `values` stay on what the model read. One case keeps the ref on the cut: the
-   * full text was over the service's store cap, and then the fetched text is the model's own and
-   * carries the cut's notice in-band, so it never reads as whole.
-   *
-   * Optional in the type and always populated by `normalizeEvent`: the service defaults it to
-   * `false`, so an older one simply sends nothing and nothing was cut.
+   * Whether the model was shown less than the tool returned. When set, `result_ref` opens the full
+   * text (for the chemist), while `preview`, `note_ids`, `numbers` and `values` describe what the
+   * model read. If the full text exceeded the store cap, the ref holds the cut, with its notice
+   * in-band.
    */
   result_cut: isTrue(),
   /** Note ids the result cited, untruncated even when `preview` is not — so a citation survives
@@ -863,25 +554,13 @@ const toolResultEvent = v.object({
   /** Numeric values the result carried, untruncated for the same reason. */
   numbers: numberList(),
   /**
-   * The same figures, each under the key the tool filed it under — for a surface that *displays* a
-   * value rather than checking one.
-   *
-   * Empty for a result that is not JSON, which is the honest report rather than a gap: the service
-   * refuses to guess a name out of prose, so the figures arrive in `numbers` unnamed, which is
-   * what they are. Optional in the type and always populated by `normalizeEvent`, on the same
-   * grounds as `agent`: the service defaults it, so an older one simply sends nothing.
+   * The same figures under the tool's own keys, for display. Empty for non-JSON results (the
+   * service will not guess names).
    */
   values: resultValues(),
-  /** The specialist that raised this event; **empty means the main agent**, which is what every
-   *  event meant before teams existed — so ignoring this field reads exactly as before. Carried
-   *  only by the events a specialist can actually raise: a `queued` or `capability_degraded` is a
-   *  property of the turn, decided before any routing, so attributing it would invent a fact.
-   *
-   *  Optional in the type, always populated by `normalizeEvent`. Required would contradict the
-   *  claim the field is built on: the backend defaults it to `''` precisely so an existing
-   *  consumer is unaffected, and a required mirror makes every construction site — every test,
-   *  every fixture, the mock — name a field that means "no specialist". Absent and `''` both read
-   *  as the main agent, so a falsy check is the whole handling. */
+  /**
+   * The specialist that raised this event; empty means the main agent (see `ToolCallEvent.agent`).
+   */
   agent: text(),
 });
 export type ToolResultEvent = Loosen<
@@ -891,24 +570,16 @@ export type ToolResultEvent = Loosen<
 
 const evidenceSourceEvent = v.object({
   type: v.literal('evidence_source'),
-  /** One retrieval source's own report of what it contributed to a sweep, emitted while the sweep
-   *  runs. `gather_evidence` asks every source at once and merges the results, and in the merged
-   *  list a source that returned nothing is indistinguishable from a source nobody asked — which
-   *  is a real defect the backend has already paid for once. */
+  /**
+   * One retrieval source's report for a sweep, so a source that returned nothing is distinguishable
+   * from one nobody asked.
+   */
   source: text('unknown'),
-  /** What the source FOUND, before the cross-source cap. So "had nothing to say" and "was crowded
-   *  out of the budget" stay distinguishable; they are different problems with different fixes. */
+  /** What the source found before the cross-source cap: "nothing to say" vs "crowded out". */
   chunks: count(),
   /**
-   * Whether this source's retriever RAISED, rather than being asked and having nothing.
-   *
-   * The third case, and the one the other two collapse into without it: a branch that fails
-   * degrades to an empty list, so it reports `chunks: 0` and reads exactly like a source that was
-   * consulted and was silent. The remedies do not overlap — a dark source is a question about the
-   * corpus, a broken one is a page for whoever owns the index.
-   *
-   * Optional in the type and always populated by `normalizeEvent`, for the same reason `agent` is:
-   * the backend defaults it so an existing consumer is unaffected.
+   * Whether this source's retriever raised, rather than returning nothing. A broken source and a
+   * silent one need different fixes.
    */
   failed: isTrue(),
 });
@@ -916,36 +587,20 @@ export type EvidenceSourceEvent = Loosen<v.InferOutput<typeof evidenceSourceEven
 
 const handoffEvent = v.object({
   type: v.literal('handoff'),
-  /** The peer agent giving up control. Empty only if the backend could not name it — a peer is a
-   *  real node of the turn graph, so its name is on the stream, which is the difference between
-   *  this and a `task` helper (whose name is NOT in the namespace, the finding that deleted the
-   *  first version of this event). */
+  /** The peer agent giving up control. Empty only if the backend could not name it. */
   from_agent: text(),
   /** The peer receiving control, and from here on the author of what the chemist reads. */
   to_agent: text(),
-  /** The handing model's own stated reason, written to be read by the agent it hands to. Prose for
-   *  a human; nothing branches on it. It is the only account of the decision that exists —
-   *  inferring one from what the receiving agent then does would be a guess shown as a record. */
+  /** The handing model's stated reason, for display only. */
   reason: text(),
 });
 export type HandoffEvent = v.InferOutput<typeof handoffEvent>;
 
 /**
- * An artefact was created or revised — the header only; the body is fetched.
- *
- * `D-2026-10-02-an-artefact-is-part-of-the-answer-not-an-effect` upstream, and the frozen artefact
- * contract both repositories build against. The turn emits it after `create_exhibit` or
- * `revise_exhibit` returns (`tool_call` → `tool_result` → `exhibit`), and the push-back stream
- * carries a human's revision or pin so a second tab and a session member see it.
- *
- * **The header only, on purpose** — the service's `D-2026-08-09-a-preview-is-not-a-result` again:
- * a 2,000-row table or a report draft does not ride a stream frame, it is one
- * `GET /sessions/{id}/exhibits/{xid}?revision=N` when somebody opens it. So nothing renders a body
- * from this event; it invalidates the session's artefact list, may open the pane, and puts a card
- * in the answer.
- *
- * Code name `exhibit`, user-visible name "Artefact" — see `shared/exhibits.ts` for why the service
- * could not call it an artifact.
+ * An artefact was created or revised — the header only; the body is fetched with `GET
+ * /sessions/{id}/exhibits/{xid}?revision=N`. Emitted after `create_exhibit`/`revise_exhibit`, and
+ * on the push-back stream for human revisions. It invalidates the list, may open the pane and puts
+ * a card in the answer. Code name `exhibit` (see `shared/exhibits.ts`).
  */
 const exhibitEvent = v.object({
   type: v.literal('exhibit'),
@@ -958,9 +613,8 @@ const exhibitEvent = v.object({
   kind: text(),
   title: text(),
   /**
-   * `created` or `revised`. **Only `created` may open the pane**, and an unknown value reads as
-   * `revised` for that reason: a frame this build does not understand must not take a column of the
-   * screen from somebody who did not ask for it.
+   * `created` or `revised`. Only `created` may open the pane, so an unknown value reads as
+   * `revised`.
    */
   op: oneOf(['created', 'revised'] as const, 'revised'),
   /** Who wrote the revision. An unknown value reads as `agent`, which is the reading that captions
@@ -969,47 +623,25 @@ const exhibitEvent = v.object({
   /** The agent's name or the person's actor id, as the service records it. */
   author: text(),
   /**
-   * The provider tool-call id of the `create_exhibit`/`revise_exhibit` call that wrote this
-   * revision — the same id the `exhibit_draft` frames of that call carried (the frozen contract's
-   * wave-2 amendment). **Empty** for a human write, a report artefact and every push.
-   *
-   * It is what makes a draft's replacement a matter of identity rather than of order: settled by
-   * position, a refused create's stale draft took the retry's artefact, and a table created beside
-   * a streaming document took the document's place (`src/state/exhibitDrafts.ts`). Optional in the
-   * type and always populated by `normalizeEvent`, for `agent`'s reason — an older service sends
-   * nothing, and every construction site would otherwise have to name a field that means "none".
+   * The provider tool-call id that wrote this revision (as on that call's `exhibit_draft` frames),
+   * so a draft is replaced by identity, not order (`src/state/exhibitDrafts.ts`). Empty for human
+   * writes, reports and pushes.
    */
   call_id: text(),
 });
 export type ExhibitEvent = Loosen<v.InferOutput<typeof exhibitEvent>, 'call_id'>;
 
 /**
- * A document artefact **while the model is still writing it** (artefacts wave 2).
- *
- * The service derives it from the argument chunks of a `create_exhibit` / `revise_exhibit` call
- * whose partial spec is a `document`, so a long report appears as it is written instead of after a
- * silent minute. Turn stream only: never persisted, never on `/events`, never in the transcript — a
- * draft is not an artefact, and the `exhibit` frame that follows the tool's result is still the
- * only thing that says one exists.
- *
- * **`markdown` is the whole text so far, not a delta**, by the contract's choice: a dropped or
- * coalesced frame then costs nothing, and the reader here never has to reassemble anything. The
- * service throttles to one frame per `exhibit_draft_min_interval_ms` and sends one only when the
- * text grew, and stops past `exhibit_max_spec_bytes`.
- *
- * Replaced by the next `exhibit` frame of the turn (a create, matched in call order) or by the
- * `exhibit` frame naming the same `exhibit_id` (a revise); discarded when the turn ends without one
- * — the tool was refused, or the turn failed. `src/state/exhibitDrafts.ts` holds that rule.
+ * A document artefact while the model is still writing it. Turn stream only: never persisted or in
+ * the transcript. `markdown` is the whole text so far, not a delta, so a dropped frame costs
+ * nothing. Replaced by the next matching `exhibit` frame, or discarded when the turn ends without
+ * one (`src/state/exhibitDrafts.ts`).
  */
 const exhibitDraftEvent = v.object({
   type: v.literal('exhibit_draft'),
   /** The provider's tool-call id — what tells two drafts in one turn apart. */
   call_id: text(),
-  /**
-   * `create` or `revise`. An unknown value reads as `revise`, for the `exhibit` frame's reason:
-   * only a create may open the pane, and a frame this build does not understand must not take a
-   * column of the screen.
-   */
+  /** `create` or `revise`; unknown reads as `revise` (only a create may open the pane). */
   op: oneOf(['create', 'revise'] as const, 'revise'),
   /** Empty on a create (the service mints the id when the tool runs); the artefact on a revise. */
   exhibit_id: text(),
@@ -1050,13 +682,8 @@ export type ChemclawEvent =
 export type ChemclawEventType = ChemclawEvent['type'];
 
 /**
- * Every member, in the order the union declares them. The one place membership is written down.
- *
- * `v.variant` dispatches on `type`, so this array *is* the gate `EVENT_TYPES` used to be — and it
- * cannot drift from the decoder, because it is the decoder. That matters more here than anywhere
- * else in this file: the rule this header records as having cost six events is "`EVENT_TYPES` is
- * the gate, and an interface added to the union without its discriminator changes nothing at
- * runtime". There is no longer a second list for a discriminator to be missing from.
+ * Every member, in union order — the one place membership is written. `v.variant` dispatches on
+ * `type`, so this list is the gate and cannot drift from the decoder.
  */
 const EVENT_MEMBERS = [
   queuedEvent,
@@ -1083,44 +710,24 @@ const EVENT_MEMBERS = [
 ] as const;
 
 /**
- * A second wire spelling of a member this union already declares.
- *
- * The one thing a `v.variant` cannot express, and it is deliberately a map rather than a
- * transforming member: a rename in flight across two repositories is a *decision with a deadline*,
- * and one line naming both spellings is what a reader and a `grep` can find. Adding a second entry
- * is an argument to make in `NoteProposedEvent`'s docstring, in
- * `tests/backendContract.test.ts`'s `RETAINED_FOR_ROLLOUT`, and in the pinned list in
- * `tests/eventContract.test.ts` — not a line in a set literal nobody has to explain.
- *
- * `note_recorded` is the name the service sends **today**; `note_proposed` is the member this app
- * still calls it internally. See `NoteProposedEvent` for why the internal rename is a separate
- * step and why the reader had to go first.
+ * Second wire spellings of members already declared, resolved before dispatch. A rename in flight
+ * is a decision with a deadline; adding an entry also needs `RETAINED_FOR_ROLLOUT` and the pinned
+ * list in `tests/eventContract.test.ts`.
  */
 const WIRE_ALIASES: Readonly<Record<string, string>> = { note_recorded: 'note_proposed' };
 
 /** The decoder. One `v.variant` over the members above, dispatching on the discriminator. */
 const eventSchema = v.variant('type', EVENT_MEMBERS);
 
-/**
- * Every wire name this client admits — the gate, derived rather than transcribed.
- *
- * Exported because two test files need the list rather than a probe, and reading it off the
- * schemas is what makes it impossible for the gate to admit a name no member declares. That is the
- * defect the `handoff` mirror was: a consumer chain for an event nothing could send.
- */
+/** Every wire name this client admits, derived from the schemas. Exported for tests. */
 export const EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   ...EVENT_MEMBERS.map((member) => member.entries.type.literal),
   ...Object.keys(WIRE_ALIASES),
 ]);
 
 /**
- * What each member carries, as `discriminator -> field names`, excluding the discriminator itself.
- *
- * Exported for the contract tests, which used to answer this question by parsing this file with
- * the TypeScript compiler API — once to find the interfaces' properties, and once more to walk
- * every `o.<name>` inside `normalizeEvent`'s switch. Both existed because the declaration and the
- * decoder were different objects that could disagree. They are the same object now, so the
- * question has an answer at runtime and the two walks are gone.
+ * What each member carries (`discriminator -> field names`, excluding `type`). Exported for the
+ * contract tests.
  */
 export const EVENT_FIELDS: ReadonlyMap<string, readonly string[]> = new Map(
   EVENT_MEMBERS.map((member) => [
@@ -1130,22 +737,10 @@ export const EVENT_FIELDS: ReadonlyMap<string, readonly string[]> = new Map(
 );
 
 /**
- * Coerce one decoded SSE frame into a `ChemclawEvent`, or `null` if it is not one we know.
- *
- * Returning `null` rather than throwing is deliberate: the backend's event union is explicitly
- * designed to grow ("adding an event is a new class here plus one branch in the runner and the
- * UI"), so an older frontend must ignore a newer event rather than break the turn.
- *
- * **The only way this returns `null` is an unrecognised discriminator.** Every field of every
- * member has a fallback, so a malformed field costs that field and never the event — which is the
- * same rule the hand-written coercers held, now stated once per shape instead of once per field.
- * A frame whose `type` names no member fails `v.variant`'s dispatch, which is exactly the gate
- * `EVENT_TYPES` used to be and is now the same object as the decoder.
- *
- * The discriminator may arrive on the payload or on the SSE `event:` line, and the payload wins —
- * see the header. A second wire spelling of a member is resolved through `WIRE_ALIASES` *before*
- * dispatch rather than by a transforming member, so the parsed event is the member itself and no
- * consumer has to learn the second name.
+ * Coerce one decoded SSE frame into a `ChemclawEvent`, or `null` for an unknown discriminator (the
+ * union is designed to grow, so an older frontend ignores newer events). Every field has a
+ * fallback, so a malformed field never drops the event. The payload's `type` wins over the SSE
+ * name; `WIRE_ALIASES` is applied before dispatch.
  */
 export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEvent | null {
   if (typeof raw !== 'object' || raw === null) return null;
@@ -1164,31 +759,14 @@ export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEve
 export const SESSION_ID_RE = /^[0-9a-f]{32}$/;
 
 /**
- * The backend's *default* cap (`CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`, default 100_000); over it is
- * a 422.
- *
- * A fallback, not the limit. The setting is tuned per deployment, so a build-time copy of it is
- * only right for a site that never changed it: raise it upstream and this refuses messages the
- * service would accept; lower it and the composer invites a message the service will reject after
- * the whole body has been sent. The live value reaches the SPA through `/config.js`
- * (`config.maxMessageChars`), and this is what stands in when nothing supplied one — an older BFF,
- * or a static preview with no server behind it.
+ * The backend's default message cap (`CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS`); over it is a 422. A
+ * fallback only: the live value comes through `/config.js` (`config.maxMessageChars`).
  */
 export const MAX_MESSAGE_CHARS = 100_000;
 
 /**
- * Whether a configured cap is one anybody can serve — the *one* place that decision is taken.
- *
- * Both halves of `/config.js` need it and neither may disagree with the other: the BFF reads
- * `MAX_MESSAGE_CHARS` from the environment and refuses to boot on a value that is not a cap
- * (`server/config.ts`), and the SPA re-checks what crossed the bridge and keeps the default
- * instead (`src/env.ts`), because a browser has nowhere to refuse to. Two hand-written copies of
- * one predicate is how the first version of this went wrong in the opposite direction: the BFF
- * clamped a bad value up to `1` before the SPA's guard could see it, so `MAX_MESSAGE_CHARS=0`
- * shipped a one-character composer while the guard against exactly that stayed green.
- *
- * A positive integer, mirroring the backend's own `Field(default=100_000, gt=0)`. Zero is not
- * "unlimited" and a fraction is not a character count.
+ * Whether a configured cap is usable — a positive integer, as the backend requires. The one
+ * predicate both the BFF (refuses to boot) and the SPA (keeps the default) use.
  */
 export const isUsableMessageCap = (value: unknown): value is number =>
   typeof value === 'number' && Number.isInteger(value) && value > 0;

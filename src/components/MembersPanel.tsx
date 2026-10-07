@@ -1,22 +1,11 @@
 /**
- * Who is in a conversation, and the controls each of them holds.
+ * Who is in a conversation, and the controls each holds.
  *
- * Chemclaw3 #483 (`D-2026-09-27-in-a-shared-session-the-sender-governs`) lets a session's owner
- * admit other people. What a membership grants is **reach, not authority**: a member reads the
- * conversation and sends into it, and every message they send runs as *them* — their roles, their
- * memories, their spend caps — never as the owner. A plan is decided only by the person whose turn
- * wrote it, and deleting or branching the conversation stays the owner's.
- *
- * So this panel is two panels, chosen by the service's answer rather than by anything this browser
- * remembers:
- *
- *  - **The owner** sees everybody, admits somebody by their account id, and removes anybody.
- *  - **A member** sees the owner and the other members, and can leave. Leaving is not something
- *    anybody should have to ask the owner for, and the service agrees — a member may name
- *    themself on `DELETE /sessions/{id}/members/{actor}`.
- *
- * Every rule here is also enforced upstream; the panel's job is to not offer a control whose only
- * possible answer is a 403, and to say the service's own sentence when one comes back anyway.
+ * Membership grants reach, not authority: a member reads and sends, and each message runs as the
+ * sender. Plans are decided by the turn's author; delete and branch stay the owner's. The owner
+ * sees everyone, admits by account id and removes anyone; a member sees the roster and can leave.
+ * Rules are enforced upstream; this panel hides controls that could only 403 and shows the
+ * service's own message when one comes back.
  */
 
 import { useId, useState } from 'react';
@@ -42,15 +31,9 @@ import { Loading } from '@/components/chem/Feedback';
 const MEMBERS_STALE_MS = 5_000;
 
 /**
- * Leave a conversation somebody else owns — here, and then in this browser.
- *
- * Server first, for `deleteConversation`'s reason in `Sidebar.tsx`: dropping the local copy first
- * would leave nothing to retry with if the request failed, and a person who believes they left a
- * conversation they are still in is the one outcome this must not produce.
- *
- * A 404 is success: the service answers "not a member" for somebody the owner already removed, and
- * that person is exactly as out of the conversation as one who left. Returns whether the
- * conversation is gone.
+ * Leave a conversation somebody else owns, server first (as `deleteConversation` in `Sidebar.tsx`)
+ * so a failed request leaves something to retry. A 404 (already removed) counts as success. Returns
+ * whether the conversation is gone.
  */
 export async function leaveConversation(id: string, auth: AuthProvider): Promise<boolean> {
   const conversation = useChatStore.getState().conversations[id];
@@ -78,10 +61,8 @@ export async function leaveConversation(id: string, auth: AuthProvider): Promise
       return false;
     }
   }
-  // The cached listing first: it still names this session, and the sidebar re-adopts whatever it
-  // names on its next mount — which leaving itself causes, by navigating away. Dropping the row
-  // here is what keeps a conversation somebody just left from reappearing under "Shared with me"
-  // before the re-read below answers.
+  // Drop the cached listing row first: the sidebar re-adopts whatever it names on remount, which
+  // leaving triggers by navigating away.
   const left = conversation.sessionId;
   queryClient.setQueryData<SharedSessionSummary[]>(keys.sharedSessions, (rows) =>
     rows?.filter((row) => row.session_id !== left),
@@ -93,14 +74,9 @@ export async function leaveConversation(id: string, auth: AuthProvider): Promise
 }
 
 /**
- * The roster read, shared by the panel and anything else that wants to know who is here — the
- * shell reads it too, to learn whether a conversation this person owns has anybody else in it
- * (`useSharedConversationSync` in `App.tsx`).
- *
- * Reconciles `Conversation.membership` as a side effect of the answer, because this is the one
- * read that can say "you own this" — a conversation adopted from `GET /sessions/shared` whose
- * owner has since handed it over, or an owned one a stale store marked shared, is corrected the
- * first time somebody looks.
+ * The roster read, shared with the shell (`useSharedConversationSync` in `App.tsx`). Reconciles
+ * `Conversation.membership` as a side effect, since this is the one read that can say "you own
+ * this".
  */
 export function useMembers(
   conversationId: string,
@@ -195,9 +171,8 @@ export function MembersPanel({
       announceStatus(`Added ${actor} to this conversation.`);
       refresh();
     } catch (err) {
-      // The service's own sentence for every refusal — 403 (not the owner), 409 (the owner naming
-      // themself), 422 (a blank id) — because each names its reason and nothing here could say it
-      // better.
+      // Show the service's message for every refusal (403 not owner, 409 owner naming themself, 422
+      // blank id).
       setProblem(err instanceof Error ? err.message : 'Could not add them.');
     } finally {
       setBusy(false);
@@ -345,11 +320,8 @@ export function MembersPanel({
 }
 
 /**
- * The header control that opens the panel, for a conversation the service knows about.
- *
- * The roster is read when the sheet opens rather than when the header renders: every
- * conversation has a header, almost none has anybody else in it, and a read per switch would be a
- * request per click for an answer that is nearly always "just you".
+ * The header control that opens the panel. The roster is read when the sheet opens, not per header
+ * render, since most conversations have one member.
  */
 export function MembersTrigger({
   conversationId,

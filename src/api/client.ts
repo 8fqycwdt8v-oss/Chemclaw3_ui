@@ -1,20 +1,10 @@
 /**
  * Non-streaming calls to the Chemclaw service, through the BFF.
  *
- * Endpoints verified against 8fqycwdt8v-oss/Chemclaw3 (`src/chemclaw/api/routes/`).
- *
- * Two policies live here and are worth telling apart, because the difference is not stylistic.
- * The *list* routes — sessions, transcripts, jobs — swallow a 404 into an empty result, so
- * this UI runs against an older service with a smaller sidebar rather than a banner. **That policy
- * has a cost this client has now paid twice**, so it is stated beside the policy rather than
- * discovered again: a route the service *deleted* is indistinguishable from a route it never had,
- * so the screen renders an empty list where the honest answer is "this is gone". Both times
- * (durable interaction holds, then the PR gate's `/proposals`) the fix was to delete the caller,
- * and the signal that it was needed came from reading the service's changelog rather than from
- * anything here going red. The *fetch*
- * routes — one tool result, one note — do not, because nothing calls them speculatively: the
- * affordance only exists when the turn said the thing exists, so a 404 there is a real fault and
- * hiding it would leave a control that does nothing when clicked.
+ * List routes (sessions, transcripts, jobs) fold a 404 into an empty result so an older service
+ * yields a smaller app; note that a deleted route then looks like an empty list. Fetch routes (one
+ * tool result, one note) do not: they are only called when the turn said the thing exists, so a 404
+ * is a real fault.
  */
 
 import { config } from '../env.ts';
@@ -52,31 +42,15 @@ import { CALC_ARTIFACT_REF } from '../../shared/exhibitConstants.ts';
 import { SESSION_ID_RE } from '../../shared/events.ts';
 
 /**
- * The artefact decoders, fetched with the first artefact body rather than with the app.
- *
- * Every other read here is cast and trusted; the artefact bodies are *decoded* (`shared/exhibits.ts`
- * says why), and the decoder is the whole valibot schema of the contract. A static import put it in
- * the first load of every chemist, including every one whose deployment has artefacts turned off,
- * so it is imported on the first call that has a body to decode — by which time the shell has
- * already painted. Types above are `import type`, erased, and cost nothing.
+ * The artefact decoders (`shared/exhibits.ts`), loaded on the first artefact body rather than in
+ * the first load, so deployments without artefacts never pay for the valibot schema.
  */
 const exhibitDecoders = () => import('../../shared/exhibits.ts');
 
 /**
- * How a request authenticates.
- *
- * Two accepted shapes, and the second is the one every caller in this app actually has. A bare
- * `() => Promise<string | null>` can only produce a token; an auth provider can also *recover*
- * from a 401 — refresh silently, or start an interactive redirect — which is what turns an expired
- * session into a sign-in prompt instead of a dead-end error toast.
- *
- * Before this union, `handleUnauthorized` had exactly one caller in the whole app
- * (`state/sendMessage.ts`, the turn path). Every other route — the conversation list, the
- * transcript, the review queue, the jobs panel, plan decisions, attachment upload, and both
- * detail fetches — surfaced "Your session has expired. Please sign in again." with
- * no way to act on it. Widening the parameter rather than threading a second argument through
- * eighteen signatures is what makes the recovery uniform: `request` below asks once, and every
- * route inherits it.
+ * How a request authenticates: a bare token getter, or an auth provider that can also recover from
+ * a 401 (silent refresh or interactive redirect). `request` asks once, so every route gets the same
+ * recovery.
  */
 export type TokenGetter =
   (() => Promise<string | null>) | Pick<AuthProvider, 'getAccessToken' | 'handleUnauthorized'>;
@@ -86,11 +60,8 @@ export const tokenFrom = async (auth: TokenGetter): Promise<string | null> =>
   typeof auth === 'function' ? auth() : auth.getAccessToken();
 
 /**
- * Ask the provider to recover from a 401, or report that it cannot.
- *
- * `false` for a bare token getter — it has nothing to recover with — and for a provider that
- * started an interactive redirect (navigation is in flight, so this request is abandoned) or hit
- * its re-auth cooldown. Only `true` means "a fresh token is available now, retry once".
+ * Ask the provider to recover from a 401. Only `true` means "a fresh token is available, retry
+ * once"; a bare getter, a redirect in flight or a re-auth cooldown all give `false`.
  */
 export const recoverFrom = async (auth: TokenGetter): Promise<boolean> =>
   typeof auth === 'function' ? false : auth.handleUnauthorized();
@@ -100,13 +71,8 @@ async function send(path: string, auth: TokenGetter, init: RequestInit): Promise
   try {
     token = await tokenFrom(auth);
   } catch (err) {
-    // The provider failed before any request was opened — `msalAuth.getAccessToken` rethrows a
-    // silent-refresh failure that is not `InteractionRequiredAuthError` rather than resolving it,
-    // so a network blip does not force a sign-in redirect. Left uncaught, this reached every
-    // caller of `request` (session creation among them) as a bare, non-`ApiError` rejection —
-    // which `sendMessage`'s outer catch could only classify as `kind: 'stream'`, the same kind a
-    // genuinely detached turn gets, sending a request that was never sent into a ten-minute poll
-    // of a session transcript for an answer that can never land there.
+    // Token acquisition failed before any request was sent (e.g. a silent-refresh network error).
+    // Surface it as an `ApiError` so callers do not mistake it for a detached stream.
     logger.warn('auth.token_acquisition_failed', {
       message: err instanceof Error ? err.message : String(err),
     });
@@ -120,10 +86,8 @@ async function send(path: string, auth: TokenGetter, init: RequestInit): Promise
   try {
     return await fetch(`${config.apiBase}${path}`, {
       ...init,
-      // `no-store` unless the caller says otherwise, and almost nothing does: a session, a
-      // transcript, a job list and a review queue are all mutable and session-scoped, and a stale
-      // one is worse than a slow one. The exception is a content-addressed route, whose URL
-      // changes when its bytes do — see `contentAddressed` below.
+      // `no-store` by default: sessions, transcripts and lists are mutable and session-scoped.
+      // Content-addressed routes opt out (`contentAddressed`).
       cache: init.cache ?? 'no-store',
       headers: {
         accept: 'application/json',
@@ -141,12 +105,9 @@ async function send(path: string, auth: TokenGetter, init: RequestInit): Promise
 
 async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {}): Promise<T> {
   let res = await send(path, auth, init);
-  // One retry, only on 401, only when the caller passed something that can recover. Once: a
-  // second attempt after a refresh that did not help is a redirect loop, and the provider's own
-  // cooldown exists because that loop is indistinguishable from a hang.
-  //
-  // Every body this function sends is a string, so re-sending it is safe. `uploadAttachment` does
-  // not come through here — it is XHR, for upload progress — and carries its own copy of this.
+  // One retry, only on 401, only when the caller can recover; a second attempt would be a redirect
+  // loop. Bodies here are strings, so re-sending is safe. `uploadAttachment` (XHR) carries its own
+  // copy.
   if (res.status === 401 && (await recoverFrom(auth))) {
     res = await send(path, auth, init);
   }
@@ -177,20 +138,13 @@ async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {
 }
 
 /**
- * `request`, for a listing whose continuation is a header: the body as declared, plus
- * `X-Next-Cursor` (`''` when there is no next page).
- *
- * `pageSessions` and `pageJobs` each carried this inline, calling `send` directly to reach the
- * header — and so each carried its own copy of the 401 recovery (`pageSessions` once shipped
- * without it) and cast the body inside a function whose declared return is the page *it builds*.
- * That last part is why this exists: the contract check reads the wire shape where the body is
- * cast, and a cast buried in a reshaping function declared nothing it could read.
+ * `request` for a listing whose continuation is the `X-Next-Cursor` header (`''` on the last page).
+ * The body is cast here to the wire model so the contract check can read it.
  */
 async function requestPage<T>(path: string, auth: TokenGetter): Promise<{ body: T; next: string }> {
   let res = await send(path, auth, {});
-  // Under MSAL `recoverFrom` is what *fires the sign-in redirect* — it always resolves `false`, and
-  // the retry is a side effect rather than the point — so a listing that skipped it 401'd quietly
-  // where every other route on the page asked the user to sign in.
+  // Under MSAL `recoverFrom` triggers the sign-in redirect, so listings must call it like every
+  // other route.
   if (res.status === 401 && (await recoverFrom(auth))) {
     res = await send(path, auth, {});
   }
@@ -208,35 +162,18 @@ async function requestPage<T>(path: string, auth: TokenGetter): Promise<{ body: 
 }
 
 /**
- * `request`, for a route whose URL changes whenever its bytes do.
- *
- * All this does now is ask the browser to keep the answer: `send` sets `no-store` on everything by
- * default, which does not merely skip the HTTP cache, it forbids writing to it. **Sharing the read
- * between two components is no longer this function's job** — it was a `Map<string, Promise>`
- * deleted the moment each request settled, an in-flight join for the case where a result block and
- * the trace panel behind it cite one `result_ref` at the same instant. A `queryKey` is that join
- * and also the thing the join could never be, a cache: the old one held nothing once the answer
- * arrived, so "a remount refetched the whole payload every time" was its own docstring's admission.
- * See `queries.ts`'s `IMMUTABLE`.
- *
- * **What this still does not buy, said plainly**, because `ResultBlock`'s own docstring has claimed
- * for longer that "the browser and any cache in front of it can hold it forever": the service sets
- * no `Cache-Control` on either route, so `default` gets a revalidation at best rather than a hit.
- * This is the half that lives here; the backend half is a header on
- * `GET /sessions/{id}/tool-results/{ref}`.
+ * `request` for a route whose URL changes whenever its bytes do: lets the browser cache the answer
+ * (`default` instead of `no-store`). Sharing a read between components is react-query's job
+ * (`queries.ts`, `IMMUTABLE`). The service sets no `Cache-Control` on these routes, so this gets
+ * revalidation at best.
  */
 function contentAddressed<T>(path: string, auth: TokenGetter): Promise<T> {
   return request<T>(path, auth, { cache: 'default' });
 }
 
 /**
- * Swallow a 404 from a LIST route into an empty result, and say so somewhere.
- *
- * The degradation is deliberate and unchanged: an older service yields a smaller app rather than a
- * banner. What it never did was leave a trace — so "the sidebar is empty" and "this deployment's
- * service predates the listing route" were the same observation, and the second is a deployment
- * fault somebody should hear about. The record is a log entry rather than a banner precisely
- * because the UX decision here is right.
+ * Fold a 404 from a list route into `[]`, and log it: an empty sidebar and a service that predates
+ * the route should not be indistinguishable to an operator.
  */
 async function orEmpty<T>(route: string, load: () => Promise<T[]>): Promise<T[]> {
   try {
@@ -251,40 +188,20 @@ async function orEmpty<T>(route: string, load: () => Promise<T[]>): Promise<T[]>
 }
 
 /**
- * One of the caller's sessions, as `GET /sessions` lists them.
- *
- * There is deliberately no `title`. It was declared optional with a note that the service does not
- * send one and that whoever removed it should fix the sidebar's copy in the same commit — this is
- * that commit. The title is now recovered from the transcript when the conversation is opened
- * (`chatStore.hydrateTranscript`), so the placeholder is genuinely temporary rather than
- * permanent, and an optional field nobody can ever populate is gone.
- *
- * `created_at` is when the session was *started*, not its last activity. Sorting a conversation
- * list by it is wrong and the sidebar does not; see ISSUES.md.
+ * One of the caller's sessions, as `GET /sessions` lists them. `created_at` is when it started, not
+ * its last activity; sort by `updated_at`.
  */
 export interface SessionSummary {
   session_id: string;
   created_at?: string;
   /**
-   * The session's last activity — the newest stored message, not when it was started.
-   *
-   * The distinction is the sidebar's whole ordering problem, and the service's own schema says it
-   * in as many words: "the difference between 'what have I been working on' and 'what did I once
-   * open'". Optional because a service that predates the field sends nothing, and a restored
-   * conversation then falls back to `created_at` as it always did.
+   * The session's last activity (newest stored message). Optional for older services; callers fall
+   * back to `created_at`.
    */
   updated_at?: string;
   /**
-   * A name derived server-side from the session's first user message.
-   *
-   * `Sidebar.tsx` carried a comment saying the server "has never sent one, so the guard was
-   * decoration in front of a constant" — true when it was written, and false since
-   * `routes/sessions.py` began constructing `SessionSummary(..., title=title)`. The guard was
-   * deleted one release before it became load-bearing, which is why every restored conversation
-   * still read "Earlier conversation" until somebody clicked into it.
-   *
-   * `null` is a session whose first turn predates the field, and is deliberately distinguishable
-   * from `""` — only one of those is worth reporting.
+   * A name derived server-side from the first user message. `null` (first turn predates the field)
+   * is distinct from `""`.
    */
   title?: string | null;
 }
@@ -293,13 +210,8 @@ export interface SessionSummary {
 export interface SessionPage {
   sessions: SessionSummary[];
   /**
-   * `X-Next-Cursor`, or `''` when this is the last page.
-   *
-   * A header rather than an envelope because the service chose one — adding `{sessions, next}`
-   * would have broken every deployed client — and it survives the trip because the BFF copies
-   * response headers through and the SPA is same-origin with it. Absent is the service's word for
-   * "there is no next page", including on a deployment whose registry cannot resume a listing at
-   * all; following a cursor such a deployment did not advertise is a 422 by design.
+   * `X-Next-Cursor`, or `''` on the last page. Following a cursor the service did not advertise is
+   * a 422.
    */
   next: string;
 }
@@ -311,27 +223,13 @@ export interface TranscriptToolCall {
   arguments: string;
   result: string | null;
   /**
-   * The content address of the full result, when the service still holds it.
-   *
-   * The fourth field of a shape this interface declared three of — and the service does a *second*
-   * read (`fetchable_refs`) purely to populate it, whose own docstring calls this "the one path on
-   * which the ref `D-2026-08-09-a-preview-is-not-a-result` added never reached a surface". It did
-   * not, because the client's type stopped at three fields and `traceFrom` mapped three.
-   *
-   * The cost of dropping it is exactly one release of `USER-STORIES.md` A3 being true: live, a
-   * chemist opens the hazard table, the charge table and the solvent ranking as data; after a
-   * reload the same turn shows the 400-character paraphrase and no affordance at all.
-   *
-   * Empty means there is nothing to fetch — swept, or never stored. The service deliberately does
-   * not distinguish those, because the only consumer that acts on this cannot.
+   * Content address of the full result, when the service still holds it; empty means nothing to
+   * fetch (swept or never stored). Without it a reloaded transcript can only show the preview.
    */
   result_ref?: string;
   /**
-   * The model was shown a cut of this result, as `ToolResultEvent.result_cut` says live.
-   *
-   * When set, `result_ref` (if non-empty) opens the full text the tool returned rather than the
-   * cut; `result` stays the model's text. Optional because an older service does not send it,
-   * and absent reads as "not cut", which is what the service's own default says.
+   * The model was shown a cut of this result (as `ToolResultEvent.result_cut` live); `result_ref`
+   * then opens the full text. Absent means not cut.
    */
   result_cut?: boolean;
 }
@@ -341,45 +239,25 @@ export interface TranscriptMessage {
   role: string;
   text: string;
   /**
-   * The calls the agent made producing this message.
-   *
-   * This type used to declare `created_at` and no `tool_calls`, which was wrong in both
-   * directions: the service sends no timestamp, and it does send these. The visible cost was that
-   * reading a conversation back from the server — the whole point of `GET /sessions/{id}/messages`
-   * — silently lost every trace row, so a transcript rehydrated on a second device showed answers
-   * with no working behind them.
+   * The calls the agent made producing this message, so a rehydrated transcript keeps its trace
+   * rows.
    */
   tool_calls: TranscriptToolCall[];
   /**
-   * The turn that stored this message (`session_messages.correlation_id`) — the same id the turn's
-   * response header carried, so detach recovery can find *its* answer by identity rather than by
-   * text. `null` for a row stored off the request path or before the column existed; absent
-   * altogether from a service older than the field, which is why it is optional here.
+   * The turn that stored this message (`session_messages.correlation_id`), matching the turn's
+   * response header, so detach recovery can find its answer by identity. `null` or absent for rows
+   * without it.
    */
   correlation_id?: string | null;
   /**
-   * Who wrote this message: the person it was written for and the agent that wrote it — `agent`
-   * null for a person's own words (Chemclaw3 #478, `core/authorship.py`'s `Authorship`).
-   *
-   * Read since shared sessions (Chemclaw3 #483): a session can now hold more than one person, and
-   * in one that does a user bubble has to say *whose* question it is — the service runs each
-   * message as its sender, so "who asked" is also "whose roles and memories answered". `null` or
-   * absent for a row that records neither half, and from a service older than the field.
+   * Who wrote this message: the person it was for and the agent that wrote it (`agent` null for a
+   * person's own words). In a shared session a user bubble uses it to say whose question it is.
    */
   author?: Authorship | null;
   /**
-   * How the turn this *question* opened has ended so far (Chemclaw3
-   * `D-2026-10-03-a-turn-is-written-ahead-and-an-interrupted-one-says-so`).
-   *
-   * The service writes the chemist's message ahead of the turn now, so a question can be in the
-   * transcript before its answer — `running` — and after a turn that ended without one: `failed`,
-   * `stopped`, or `interrupted` when the process running it died (a restart, a killed pod). That
-   * last one is the case it exists for: the question is in the model's record of the conversation
-   * either way, and the transcript now says so instead of losing it. `done` once answered.
-   *
-   * `null` on every message that is not a question, and absent altogether from a service older
-   * than the field — which this client reads exactly as before: a question with its answer after
-   * it, or none.
+   * How the turn this question opened has ended so far: `running`, `done`, `failed`, `stopped`, or
+   * `interrupted` (the process died). The service writes the question ahead of the turn. `null` on
+   * non-questions; absent from older services, read as before.
    */
   turn_status?: TranscriptTurnStatus | null;
 }
@@ -400,10 +278,8 @@ export interface SessionMemberOut {
 }
 
 /**
- * Who may reach a session: its owner, and the members that owner admitted (Chemclaw3 #483).
- *
- * `owner` is `null` for a session with no recorded owner, which can have no members — nobody holds
- * the standing to have admitted them.
+ * Who may reach a session: its owner and the members the owner admitted. `owner` is `null` for a
+ * session with no recorded owner, which has no members.
  */
 export interface SessionMembersOut {
   owner: string | null;
@@ -425,9 +301,8 @@ export interface QueuedMessageOut {
 }
 
 /**
- * A session's line, and whether a turn is running ahead of it **on the replica that answered** —
- * `GET /sessions/{id}/queue`. What an open shared conversation reads to learn that somebody else's
- * turn has started or ended (Chemclaw3_ui #130).
+ * A session's line, and whether a turn is running on the replica that answered — `GET
+ * /sessions/{id}/queue`. Polled by an open shared conversation.
  */
 export interface SessionQueueOut {
   running: boolean;
@@ -435,10 +310,8 @@ export interface SessionQueueOut {
 }
 
 /**
- * A session somebody else owns that the caller has been let into — `GET /sessions/shared`.
- *
- * `owner` and `title` are `null` under the service's in-process session store, which keeps
- * memberships and no conversation list.
+ * A session somebody else owns that the caller was let into (`GET /sessions/shared`). `owner` and
+ * `title` are `null` under the in-process store.
  */
 export interface SharedSessionSummary {
   session_id: string;
@@ -457,11 +330,8 @@ export interface AttachmentSummary {
 }
 
 /**
- * One finished durable run, from the permanent job record rather than from Temporal.
- *
- * `rationale` is the field that makes this a registry rather than a log: it is why the run was
- * launched, recorded at launch, and it is what `find_past_jobs` searches. Results survive Temporal
- * history expiry here, so a job whose session is long gone is still answerable.
+ * One finished durable run from the permanent job record. `rationale` (why it was launched) is what
+ * `find_past_jobs` searches; results outlive Temporal history.
  */
 export interface JobRecordSummary {
   job_id: string;
@@ -470,36 +340,19 @@ export interface JobRecordSummary {
   rationale: string;
   summary: string;
   note_id: string;
-  /**
-   * The plan step the run served, or empty when it was not launched from one.
-   *
-   * In the *listing* upstream so that "which step was this for" needs no second lookup — and the
-   * live trace badges the same fact from `job_started.plan_step`, so dropping it here made one
-   * fact render two ways in one app depending on whether the page had been reloaded.
-   */
+  /** The plan step the run served, or empty. Matches `job_started.plan_step` live. */
   plan_step: string;
   /**
-   * How the run ended: `completed` or `failed`.
-   *
-   * Defaulted to `completed` upstream because that is what every row written before the column is,
-   * not because a caller may omit it. It exists for one failure and it is this surface's: a failing
-   * job raises before the workflow's `_finish`, so until this column a failed run wrote no row at
-   * all, and the model's own docstring says that without it "a failed run appears in
-   * `find_past_jobs` beside the successful ones with an empty summary and nothing saying it
-   * failed, which is a worse answer than the one that omitted it". `failure_reason` is deliberately
-   * not here: the listing says *that* a run failed, and opening the record says why.
+   * How the run ended: `completed` or `failed`. `failure_reason` is on the full record, not the
+   * listing.
    */
   state: string;
   completed_at: string | null;
 }
 
 /**
- * One page of the durable-run registry, with the cursor for the next.
- *
- * The cursor is a `job_id` rather than an opaque token, and the service says why: the anchor is a
- * row the caller already holds, so nothing about the ordering is disclosed and the cursor survives
- * the ordering gaining a third component. It is advertised only when the store actually saw a
- * further row, so following it never lands on an empty page.
+ * One page of the durable-run registry. The cursor is a `job_id`, advertised only when a further
+ * row exists.
  */
 export interface JobPage {
   jobs: JobRecordSummary[];
@@ -508,18 +361,8 @@ export interface JobPage {
 }
 
 /**
- * One standing query's finding — what a watch turned up since it last reported.
- *
- * Four fields, and no timestamp: the service does not send one, so nothing here may imply when the
- * notes were merged. `note_ids` resolve through the ordinary citation chip.
- *
- * **This declared the first two and dropped the other two, which are the ones a reader acts on.**
- * Upstream's own model says `headlines` exists because "without it this route answers with note
- * **ids** and a client can do nothing but print them" — which is what the card did. And `disputed`
- * has been computed since `D-2026-08-27` and rendered by the outbound delivery channels, so a
- * deployment with a channel configured saw it while one on the shipped default lost it on the only
- * path a UI reads: "a chemist who happens to ask is told, and a chemist watching the subject is
- * not", one layer below where that sentence was written.
+ * One standing query's finding since it last reported. No timestamp is sent. `headlines` and
+ * `disputed` are what a reader acts on; `note_ids` resolve through the citation chip.
  */
 export interface Digest {
   query: string;
@@ -531,34 +374,13 @@ export interface Digest {
 }
 
 /**
- * One question of the caller's OWN that is still waiting on somebody else.
+ * One of the caller's own questions still waiting on somebody else (`CheckInOut`,
+ * `api/routes/streams.py`) — the opposite direction from `PendingRequest`.
  *
- * `CheckInOut` in the service's `api/routes/streams.py`, and the opposite direction from
- * `PendingRequest`: that one is work stopped *here*, waiting on this reader; this one is work
- * stopped *somewhere else*, where the only thing to do is go and ask. They share a mailbox and
- * nothing else — the service made it a route of its own for that reason.
- *
- * Every field is defaulted upstream, so each one is always present and possibly empty. Two of them
- * are already whole days rather than timestamps: the service rounds, deliberately and downwards
- * (`FLOOR`, not a cast that rounds 4.6 days up to "5 left"), so that a deadline is not overstated
- * by two different surfaces doing the arithmetic two different ways. **Nothing here may recompute
- * them**, and there is nothing to recompute them from.
- *
- * `subject` and `rationale` are the requester's own words, truncated by the service at 1,000
- * characters with the truncation *named in the text itself* — so they are rendered as given, and a
- * renderer that shortened them further would be hiding a notice that says how much was dropped.
- *
- * **Three of the four things this used to say it does not carry are now here** (upstream's
- * `D-2026-09-18-a-wire-model-cannot-drop-a-field-that-never-arrived`, which closed Issue 16). That
- * entry — and the service's own backlog row — described all three as fields `CheckInOut` dropped.
- * Measured there before the fix, only `kind` was: `session_id` was a `pending_requests` column the
- * sweep's query never selected, and `truncated` was a `CheckIn` field the workflow never wrote
- * into the mailbox payload. Nothing here could have caught that, which is why the reading is
- * recorded rather than the outcome.
- *
- * **What it still does not carry is any timestamp**, and that is unchanged and deliberate: a
- * digest has none either, and the card is stamped with when _we_ claimed it and says "claimed",
- * never "asked".
+ * Every field is always present, possibly empty. The day counts are whole days rounded down by the
+ * service; never recompute them. `subject` and `rationale` are truncated by the service with the
+ * truncation named in the text, so render them as given. There is no timestamp; the card says when
+ * it was claimed.
  */
 export interface CheckInOut {
   request_id: string;
@@ -572,19 +394,12 @@ export interface CheckInOut {
   open_days: number;
   days_left: number;
   /**
-   * The conversation the question was asked in, or empty.
-   *
-   * Empty is ordinary rather than exceptional: a wait opened by a plate run or a connector job was
-   * never in a conversation. Always one of this reader's own — the sweep is scoped to who asked,
-   * and the route claims only the caller's mailbox.
+   * The conversation the question was asked in, or empty (a plate run or connector job has none).
    */
   session_id: string;
   /**
-   * Whether the notice this question arrived in was short of the asker's whole blocked set.
-   *
-   * A property of the claimed mailbox row, which the service stamps onto every entry that row
-   * carried, because its answer is a flat list flattened across rows. So it is the same value on
-   * every card from one notice, and reading it off any one of them is reading it off the notice.
+   * Whether the notice carrying this question was short of the asker's whole blocked set. Same
+   * value on every card from one notice.
    */
   truncated: boolean;
 }
@@ -611,30 +426,18 @@ export interface PendingRequest {
 
 export interface PendingRequestsOut {
   requests: PendingRequest[];
-  /**
-   * The length of `requests`, not a population.
-   *
-   * The service says so in as many words, and the distinction is load-bearing for the copy: "12"
-   * over five rows would be describing a page as a total.
-   */
+  /** The length of `requests`, not a total. */
   count: number;
   /**
-   * Everything matching this caller's routing, before the page bound and before the gate.
-   *
-   * It can exceed `count` for two different reasons — rows the page did not reach, and rows this
-   * caller may not answer because they raised them — and `verdict` is the service saying which.
+   * Everything matching this caller's routing before the page bound and the gate; `verdict` says
+   * why it exceeds `count`.
    */
   total_routed_to_you: number;
   /** Whether waiting rows exist that this page did not carry. */
   truncated: boolean;
   /**
-   * What this page *is*, in the service's own sentence, for rendering above the list.
-   *
-   * A `computed_field` upstream rather than a client derivation, deliberately: the arithmetic has
-   * two independent reasons a total can exceed a page and the wording separates them. This client
-   * declared none of the three, so 35 waiting rows rendered as 20 as though that were the inbox —
-   * and the consequence the service records is a raised question that ages out because it appeared
-   * in nobody's inbox. Empty from a service that predates the field, which renders as nothing.
+   * What this page is, in the service's own sentence, rendered above the list (a `computed_field`
+   * upstream). Empty from older services.
    */
   verdict: string;
 }
@@ -648,23 +451,16 @@ export interface DurableJobStatus {
   summary: string | null;
   result: Record<string, unknown>;
   /**
-   * The calculation keys this run rested on, as `record_knowledge_note` takes them.
-   *
-   * A sibling of the result envelope rather than part of it, so the sheet's `result` dump does not
-   * carry them. Empty for a run that recorded none — a report, or a run from before the refs were
-   * captured — which is the honest reading either way.
+   * Calculation keys the run rested on, as `record_knowledge_note` takes them. Empty when none were
+   * recorded.
    */
   calc_refs: string[];
   rationale: string;
 }
 
 /**
- * The untruncated text of one tool result, as `GET /sessions/{id}/tool-results/{ref}` returns it.
- *
- * `text` is deliberately not typed as parsed JSON, upstream and here. A tool result is whatever
- * the framework handed back, and a store that promised JSON would have to fail or lie about the
- * ones that are not — so the parsing, and the decision about what to do when it fails, belongs to
- * the renderer that wants a shape.
+ * The untruncated text of one tool result. `text` is not typed as JSON: parsing belongs to the
+ * renderer that wants a shape.
  */
 export interface StoredToolResult {
   ref: string;
@@ -676,14 +472,8 @@ export interface StoredToolResult {
 }
 
 /**
- * A note's identity and provenance, without its body. Also what a neighbour is.
- *
- * **Three of these are nullable upstream and were declared non-null here**, which is not a
- * pedantic difference for `confidence`: four of the five note producers in the service's `memory/`
- * package mint a note with none — a campaign, an interaction, an optimisation and a playbook — and
- * only a recorded failure scores one. So `null` is the *ordinary* value over most of the corpus,
- * and the badge that called `.toFixed(2)` on it threw, taking down the one panel whose whole job
- * is letting a chemist check a citation.
+ * A note's identity and provenance, without its body; also a neighbour. `confidence` and the other
+ * nullable fields are `null` for most notes.
  */
 export interface NoteRef {
   id: string;
@@ -715,18 +505,9 @@ export interface PlanStatusOut {
   plan_hash: string;
   plan: string[];
   /**
-   * What approving this plan would authorize: every tool its steps declare.
-   *
-   * The half of the plan a person is deciding about that the steps do not state, and the service
-   * puts it in the same payload for that reason —
-   * `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool` says in as many words that
-   * "a surface that showed the steps alone would be asking a person to approve a thing it had not
-   * shown them". The gate enforces it, so this is disclosure rather than decoration: a
-   * state-changing tool no step declared is refused even under a live approval.
-   *
-   * Absent — not empty — from a service that predates the field, which a reader must treat as
-   * "unknown" rather than as "this authorizes nothing". The `plan` event carries it too; this read
-   * is the fallback for a service that sends none there, and for the re-read after a 409.
+   * What approving this plan would authorize: every tool its steps declare. Absent (older service)
+   * means unknown, not "nothing". The `plan` event carries it too; this read is the fallback and
+   * the re-read after a 409.
    */
   scope?: string[];
   /** `plan_only` until a human approves; `execute` afterwards. */
@@ -734,13 +515,8 @@ export interface PlanStatusOut {
   approved: boolean;
   decided_by: string | null;
   /**
-   * Whose turn last wrote this plan — **the one person who may decide on it** (Chemclaw3 #483,
-   * `D-2026-09-27-in-a-shared-session-the-sender-governs`). A plan is the proposal one person's
-   * turn made about what *their* turns will do, so another member's yes, or the owner's, is not
-   * consent to it and the service answers it 403.
-   *
-   * `null` when no author is recorded, in which case the session's owner decides, as before
-   * authorship existed; absent from a service older than the field, which reads the same way.
+   * Whose turn last wrote this plan — the only person who may decide it (others get 403). `null` or
+   * absent: the session owner decides.
    */
   author?: string | null;
 }
@@ -754,37 +530,19 @@ export interface PendingPlan {
   updated_at: string;
   plan_hash: string;
   plan: string[];
-  /** What approving it would authorize — see `PlanStatus.scope`. The inbox carries it for the same
-   *  reason the card does, and here it arrives in the same payload as the steps, so there is no
-   *  revision to check it against. */
+  /** What approving it would authorize — see `PlanStatus.scope`. */
   scope?: string[];
   /**
-   * Whose conversation this plan is in — the session owner's actor id (Chemclaw3 #503). The inbox
-   * lists plans in conversations the reader was only let into, and opening one of those must adopt
-   * it as shared rather than as the reader's own. `null` when the service does not know the owner;
-   * absent from a service older than the field, where `/sessions/shared` is the only answer.
+   * The session owner's actor id. Opening a plan in a conversation the reader was only let into
+   * adopts it as shared. `null` when unknown; absent from older services, which fall back to
+   * `/sessions/shared`.
    */
   owner?: string | null;
 }
 
 /**
- * `GET /plans/pending` — undecided plans, with what the service's scan actually covered.
- *
- * The counts are why this is an object rather than an array, and they are the whole difference
- * between this screen and the one it replaces. `plans: []` has four meanings: `gated === 0` is
- * "this deployment has no plan gate, so nothing can ever be here", `unread > 0` is "the answer is
- * partial", `truncated` is "we stopped looking before the end", and none of those is "nothing is
- * waiting on you". The deleted holds inbox rendered every one of them as the last — see the note
- * at the top of `ReviewQueue.tsx`.
- */
-/**
- * One change to what the agent does, waiting on the person it would act on.
- *
- * The **body is here and is not optional**, which is the service's decision and the reason this
- * screen can decide in place where the plan section deliberately cannot. A plan is approved on the
- * strength of the reasoning that produced it, which lives in a conversation; a skill *is* the
- * document, and the service returns it whole precisely so nobody is asked to approve something
- * unseen (`api/routes/proposals.ProposalOut`).
+ * One change to what the agent does, waiting on the person it would act on. The body is always
+ * included so nobody approves something unseen.
  */
 export interface ProposalOut {
   /** `skill` or `profile`. Only `skill` has a destination a route can write. */
@@ -810,12 +568,7 @@ export interface ProposalsOut {
   proposals: ProposalOut[];
 }
 
-/**
- * One skill a chemist keeps, or one the organisation publishes.
- *
- * The same shape for both tiers because it is the same document; what differs is who may change it
- * and how far it reaches, which is the caller's business rather than the type's.
- */
+/** One skill a chemist keeps or the organisation publishes; one shape for both tiers. */
 export type SkillDocument = LocalSkillOut | OrgSkillOut;
 
 /** A personal skill on the wire. Two models upstream for one shape, so two names here. */
@@ -867,19 +620,8 @@ export interface PendingPlansOut {
   /** Gated sessions whose plan was not read, so the list is short by an unknown amount. */
   unread: number;
   /**
-   * Whether the service's walk through the caller's conversations stopped before the end.
-   *
-   * The fourth reading of an empty `plans`, and the one `unread` cannot carry: `unread` counts
-   * *gated* sessions whose plan went unread, and a walk that stopped early never learned whether
-   * the conversations beyond it were gated at all. So there is no number here — folding it into
-   * `unread` would invent plans that may not exist, which is what the service's own schema says
-   * about why it is a separate field.
-   *
-   * Optional because a service that predates the field sends nothing. Absent is read as "not
-   * reported" and changes no copy — the screen says exactly what it said before the field
-   * existed. It is deliberately NOT read as "the scan was complete": the version before this one
-   * walked the whole listing and had nothing to admit, but the version before *that* read only
-   * the first page and was silently short, which is the defect the field was added to end.
+   * Whether the service's walk through the caller's conversations stopped early — an empty `plans`
+   * that may be incomplete. Absent (older service) changes no copy and does not mean "complete".
    */
   truncated?: boolean;
 }
@@ -887,34 +629,16 @@ export interface PendingPlansOut {
 export type PendingPlans = PendingPlansOut;
 
 /**
- * `GET /protocols`: the envelope `listProtocols` unwraps.
- *
- * `total` and `truncated` are on the wire and deliberately not declared here: nothing on this side
- * reads them yet, and declaring a field nobody reads is how the contract check's "sent and not
- * read" direction gets satisfied without anything being surfaced. They are argued in
- * `tests/backendContract.test.ts`'s `NOT_READ` instead, which is where that gap is visible.
+ * `GET /protocols`: the envelope `listProtocols` unwraps. `total` and `truncated` are not declared
+ * because nothing reads them yet; they are argued in `tests/backendContract.test.ts`'s `NOT_READ`.
  */
 export interface DesignListOut {
   designs: DesignSummary[];
 }
 
 /**
- * One design at one revision, plus every revision of it — as `GET /protocols/{id}` returns them.
- *
- * The history rides along with the document rather than living on a route of its own, and that is
- * what makes the revision picker free: opening a design at revision 3 already knows there is a 4,
- * so a reader can never be looking at an old revision without the screen being able to say so.
- * The header row rides along for the same reason, which is why nothing here fetches the list a
- * second time to find out what status to draw.
- *
- * **It is `DesignOut` — the service's own FLAT shape — and it used to be a nested one this app
- * invented.** `{ revision: DesignRevision }` reads better and was never what came back: the
- * service puts the revision's fields at the top level, so `view.revision` is a *number* and
- * `revision.design` was `undefined` against the real front door — the document page threw on its
- * first field. The unit stubs, the component stub and the end-to-end fixture all emitted the
- * invented shape, so nothing in this repository could see it. Holding the service's shape is the
- * fix; a translation layer would only be one more place to be confidently wrong about somebody
- * else's contract.
+ * One design at one revision plus its whole revision history — `DesignOut`, the service's flat
+ * shape (`view.revision` is a number). Kept as the wire shape rather than translated.
  */
 export type ProtocolView = DesignOut;
 
@@ -931,15 +655,8 @@ export interface RevisionOut {
 export type RevisionWritten = RevisionOut;
 
 /**
- * POST one file to a session's attachment route, reporting progress.
- *
- * XHR rather than `fetch`, which is the one place in this client that deviates: `fetch` still
- * cannot report upload progress in any shipping browser, and an SOP or a large CSV over a lab VPN
- * is exactly where an indeterminate spinner stops being honest. Everything else here stays on
- * `fetch`.
- *
- * A module function rather than a method, because `uploadAttachment` has to be able to call it
- * twice — once, and once more after a recovered 401.
+ * POST one file to a session's attachment route with progress. XHR because `fetch` cannot report
+ * upload progress. A function so `uploadAttachment` can call it again after a recovered 401.
  */
 function upload(
   sessionId: string,
@@ -970,9 +687,7 @@ function upload(
         typeof xhr.response === 'object' && xhr.response !== null
           ? (xhr.response as { detail?: unknown; correlation_id?: unknown })
           : {};
-      // The same read-back as `request` above, through XHR's own accessor — an upload that fails
-      // is exactly as worth joining to the service's logs as a turn that does, and it is refused
-      // by the same per-principal limiter, so it honours the same `Retry-After`.
+      // Read the correlation id back as `request` does, so upload failures join the service's logs.
       const correlationId =
         xhr.getResponseHeader(CORRELATION_HEADER)?.trim() ||
         (typeof body.correlation_id === 'string' ? body.correlation_id : '');
@@ -995,15 +710,8 @@ function upload(
 
 export const api = {
   /**
-   * What is waiting on this person to decide about the agent's own behaviour.
-   *
-   * **Deliberately not wrapped in `orEmpty`, and that is the whole lesson of this page's history.**
-   * `ReviewQueue.tsx` has had to delete two inboxes for decisions that could not occur, and both
-   * times the failure was identical and quiet: a list route 404s, the client folds it into `[]`,
-   * and the section renders a confident permanently-empty queue that reads as "you are up to
-   * date". This tier answers **503** where a deployment keeps no proposals
-   * (`CHEMCLAW_AGENT_MEMORY_ENABLED` off, or an in-memory session store), and that is a different
-   * fact from "nothing is waiting". It is allowed to throw so the screen can say which.
+   * Behaviour proposals waiting on this person. Not wrapped in `orEmpty`: the service answers 503
+   * where proposals are disabled, which must not read as "nothing is waiting".
    */
   listProposals(getToken: TokenGetter, state = 'open'): Promise<BehaviourProposal[]> {
     return request<ProposalsOut>(`/proposals?state=${encodeURIComponent(state)}`, getToken).then(
@@ -1012,11 +720,8 @@ export const api = {
   },
 
   /**
-   * Accept or decline one proposal, bound to the document that was shown.
-   *
-   * `content_hash` is required by the service and is the point: a decision naming only the skill
-   * would authorize whatever that name currently holds, and the proposer can supersede an open
-   * proposal between the read and the click.
+   * Accept or decline one proposal, bound to the shown document by `content_hash`, so a superseded
+   * proposal is not authorized by name.
    */
   decideProposal(
     getToken: TokenGetter,
@@ -1046,13 +751,7 @@ export const api = {
     return request<LocalSkillOut>(`/skills/mine/${encodeURIComponent(name)}`, getToken);
   },
 
-  /**
-   * Stop one of this chemist's own skills acting.
-   *
-   * The half that makes the rest worth having: `D-2026-09-05` grants the personal tier its
-   * exemption from review on the condition that its owner can see what is acting on them *and
-   * remove it*, and until this screen existed the only thing that could exercise that was `curl`.
-   */
+  /** Stop one of this chemist's own skills acting. */
   forgetMySkill(getToken: TokenGetter, name: string): Promise<string[]> {
     return request<LocalSkillsOut>(`/skills/mine/${encodeURIComponent(name)}`, getToken, {
       method: 'DELETE',
@@ -1070,11 +769,8 @@ export const api = {
   },
 
   /**
-   * Every body ever activated under this name, newest first.
-   *
-   * The blame half of a rollback story for a tier with no commit log, and open to everyone rather
-   * than to administrators: this tier acts on people who did not approve it, so all of them can
-   * see what it says and what it replaced.
+   * Every body ever activated under this name, newest first; readable by everyone because this tier
+   * acts on everyone.
    */
   listOrgSkillVersions(getToken: TokenGetter, name: string): Promise<OrgSkillVersion[]> {
     return request<OrgSkillVersionsOut>(
@@ -1084,13 +780,9 @@ export const api = {
   },
 
   /**
-   * Keep one skill for yourself, replacing any earlier version of that name.
-   *
-   * The whole `SKILL.md` goes up and the name comes from its frontmatter, as with the organisation
-   * tier. Two refusals are the reader's to see rather than this client's to reword — a **409** for
-   * a name a skill this deployment ships already uses, or for the row cap (every personal skill is
-   * in the prompt of every turn its owner takes), and a **422** for a document that is not a
-   * `SKILL.md` or is over the length cap — so the service's own sentence is what surfaces.
+   * Keep one skill for yourself, replacing any earlier version of that name (from its frontmatter).
+   * The service's 409 (reserved name or row cap) and 422 (not a valid `SKILL.md`) messages are
+   * surfaced as-is.
    */
   saveMySkill(getToken: TokenGetter, body: string): Promise<SkillDocument> {
     return request<LocalSkillOut>('/skills/mine', getToken, {
@@ -1107,12 +799,7 @@ export const api = {
     });
   },
 
-  /**
-   * Make a body this tier already holds the active one again.
-   *
-   * A hash the service does not hold is a 404 — the pointer can only point at history, which is
-   * what makes this a rollback rather than a write.
-   */
+  /** Make a body this tier already holds active again; a hash it does not hold is a 404. */
   revertOrgSkill(getToken: TokenGetter, name: string, contentHash: string): Promise<SkillDocument> {
     return request<OrgSkillOut>(`/skills/org/${encodeURIComponent(name)}/revert`, getToken, {
       method: 'POST',
@@ -1136,11 +823,8 @@ export const api = {
   },
 
   /**
-   * Mint a backend session, optionally on a named agent profile.
-   *
-   * A profile narrows the agent — `property-lookup` is a cheap one that converts a pKa without
-   * running a research loop. The service 400s a name it does not know, which is why the picker
-   * that supplies this reads `listProfiles` rather than carrying a list of its own.
+   * Mint a backend session, optionally on a named agent profile (a name the service does not know
+   * is a 400).
    */
   createSession(getToken: TokenGetter, profile?: string): Promise<SessionOut> {
     return request<SessionOut>('/sessions', getToken, {
@@ -1164,20 +848,13 @@ export const api = {
   },
 
   /**
-   * One page of sessions, with the cursor for the next.
-   *
-   * Separate from `listSessions` rather than replacing it: the service caps a page at
-   * `service_max_listed_sessions` (100), so conversation 101 was simply unreachable — not below a
-   * fold, not fetched. The plain form stays because it is what every caller that wants "the recent
-   * ones" should use, and because degrading a *paged* read to an empty array on a 404 would hide
-   * the difference between "no more pages" and "this service has no such route".
+   * One page of sessions with the next cursor. Separate from `listSessions` (which folds 404 to
+   * `[]`) so "no more pages" and "no such route" stay distinguishable.
    */
   async pageSessions(getToken: TokenGetter, after?: string): Promise<SessionPage> {
     const query = after ? `?after=${encodeURIComponent(after)}` : '';
     try {
-      // Through `requestPage`, which carries the 401 recovery this route once skipped: the first
-      // authenticated call on boot (`Sidebar`'s listing) 401'd, logged `sessions.list_failed`,
-      // showed "showing local conversations only", and never asked the user to sign in.
+      // Through `requestPage` so the first authenticated call on boot can trigger sign-in.
       const page = await requestPage<SessionSummary[]>(`/sessions${query}`, getToken);
       return { sessions: page.body, next: page.next };
     } catch (err) {
@@ -1190,29 +867,12 @@ export const api = {
   },
 
   /**
-   * Stop the session's running turn — the explicit act a closed stream no longer performs.
+   * Stop the session's running turn; closing the stream only detaches. `false` when there was
+   * nothing to stop (finished in the race, or an older service).
    *
-   * The backend detaches on disconnect (its turn runs to completion unwatched), so Stop is a
-   * request of its own. `false` when there was nothing to stop: the turn may have finished in
-   * the race between pressing Stop and the request landing, which is an outcome, not an error —
-   * and an older backend without the route answers the same way, degrading Stop to the old
-   * disconnect-only behaviour rather than surfacing a banner.
-   */
-  /**
-   * Cancel the running turn.
-   *
-   * `keepalive` is for the one caller that is being torn down as it asks: a `pagehide` handler has
-   * until the document is discarded, and an ordinary `fetch` started there is cancelled with the
-   * page. It is not the default because `keepalive` requests are capped at 64 KiB by the browser
-   * and share a small per-page budget with the log sink's own final batch, and because every other
-   * caller is alive to await the answer.
-   *
-   * `reason: 'unload'` is the same caller saying *why*: the page is being discarded, which a
-   * reload and a closed tab both are, and the browser cannot tell them apart. The service defers
-   * such a stop for a grace window and cancels it if this person's reloaded page reattaches to the
-   * turn (Chemclaw3 `D-2026-10-03-an-unload-stop-waits-for-a-reload`), answering
-   * `{stopped: false, deferred: true}`. A service older than that ignores the query parameter and
-   * stops at once, as it always did — so sending it is safe before the service understands it.
+   * `keepalive` is for a `pagehide` caller (requests are capped at 64 KiB and share a budget with
+   * the log sink). `reason: 'unload'` lets the service defer the stop and cancel it if a reload
+   * reattaches; older services ignore it and stop at once.
    */
   async stopTurn(
     sessionId: string,
@@ -1237,17 +897,9 @@ export const api = {
   },
 
   /**
-   * Withdraw this person's message from a shared conversation's line before it runs —
-   * `DELETE /sessions/{id}/queue/{ticket}` (Chemclaw3 #499).
-   *
-   * **Not `stopTurn`, and the difference is who it reaches.** While a message waits, the turn that
-   * is running is somebody else's: a member's Stop is refused 403 there, and an *owner's* Stop
-   * would succeed and cancel a colleague's work to make room for a question they meant to take
-   * back. The ticket names this message and nothing else.
-   *
-   * `false` on a 404, which is "no such message is waiting": it started in the race between
-   * pressing the button and the request landing, or somebody already withdrew it. The caller
-   * decides what that means — Stop falls back to stopping the turn that has now started.
+   * Withdraw this person's queued message from a shared conversation (`DELETE
+   * /sessions/{id}/queue/{ticket}`). Not `stopTurn`: the running turn is somebody else's. `false`
+   * on 404 — it already started or was withdrawn; the caller then falls back to stopping.
    */
   async withdrawQueued(
     sessionId: string,
@@ -1272,11 +924,8 @@ export const api = {
   },
 
   /**
-   * A shared session's line and whether a turn is running — `GET /sessions/{id}/queue`.
-   *
-   * `null` on a 404: a service older than the route, or a session this person is no longer in.
-   * Either way there is nothing to follow, and the caller stops asking rather than raising a
-   * banner — following somebody else's turn is a courtesy, never something a chemist waits on.
+   * A shared session's line — `GET /sessions/{id}/queue`. `null` on 404 (older service or no longer
+   * a member): the caller stops polling without a banner.
    */
   async getQueue(sessionId: string, getToken: TokenGetter): Promise<SessionQueueOut | null> {
     try {
@@ -1299,12 +948,7 @@ export const api = {
   },
 
   /**
-   * Upload a working file, reporting progress and honouring a cancel.
-   *
-   * The body is `upload` below; this half is only the one-shot 401 recovery `request` gives every
-   * other route. It cannot share that path — see `upload`'s docstring for why this one is XHR —
-   * so it carries its own copy, which is the same shape and the same "once, never twice" rule.
-   * A `File` is re-readable, so a retry costs the bytes again and nothing else.
+   * Upload a working file with progress and cancel; adds the one-shot 401 recovery around `upload`.
    */
   async uploadAttachment(
     sessionId: string,
@@ -1323,16 +967,8 @@ export const api = {
   },
 
   /**
-   * The full text of one tool result.
-   *
-   * Called only when a reader asks for one — that is the whole design of the ref/payload split,
-   * and prefetching every result of every turn would re-open exactly the question the 200-character
-   * preview closed.
-   *
-   * Nothing is swallowed here. Unlike the list routes, there is no "the backend might not have
-   * this yet" case worth papering over: the affordance that calls this is only rendered when the
-   * turn carried a `result_ref`, and a service that emits a ref it will not serve is a fault the
-   * caller should see.
+   * The full text of one tool result, fetched only on demand. Not swallowed: it is only called when
+   * the turn carried a `result_ref`.
    */
   getToolResult(sessionId: string, ref: string, getToken: TokenGetter): Promise<StoredToolResult> {
     return contentAddressed<StoredToolResult>(
@@ -1342,15 +978,8 @@ export const api = {
   },
 
   /**
-   * One knowledge note, with its neighbourhood.
-   *
-   * `hops` is clamped upstream; 1 is the service's own default and the depth a citation chip
-   * wants — the note plus what it is directly linked to.
-   *
-   * The id is encoded rather than interpolated raw: unlike a session id, a note id is
-   * `note-{slug}` built from what the note is about, so it can carry characters that would
-   * otherwise change the shape of the path. The BFF's pattern accepts exactly what
-   * `encodeURIComponent` emits.
+   * One knowledge note with its neighbourhood (`hops` clamped upstream; 1 = direct links). The id
+   * is encoded: note slugs may contain path-significant characters.
    */
   getNote(noteId: string, getToken: TokenGetter, hops = 1): Promise<NoteView> {
     return contentAddressed<NoteView>(
@@ -1360,18 +989,9 @@ export const api = {
   },
 
   /**
-   * Delete one conversation on the service, not only in this browser.
-   *
-   * "Delete conversation" was a local map delete: the server session, its transcript, its
-   * checkpoints, its attachments and its ownership row all survived. The chemist who deleted it
-   * *because* it held something they did not want kept had been told something untrue — and the
-   * service has a twelve-table transactional sweep for exactly this case, whose own docstring
-   * frames it as "I do not want this conversation any more".
-   *
-   * A 404 is success here, deliberately. The service answers 404 for both "no such session" and
-   * "not yours", refusing to be an id oracle — and a conversation this browser holds a stale id
-   * for is a conversation that is already gone. Every other failure is the caller's to report,
-   * because a delete that silently did not happen is the failure this method exists to end.
+   * Delete one conversation on the service (transcript, checkpoints, attachments). A 404 counts as
+   * success: the service answers 404 for unknown and not-yours alike. Every other failure is
+   * reported.
    */
   async deleteSession(sessionId: string, getToken: TokenGetter): Promise<void> {
     try {
@@ -1385,15 +1005,8 @@ export const api = {
   },
 
   /**
-   * Branch this conversation onto a new session carrying its whole history.
-   *
-   * "Try a different direction from here without losing this thread" — and the nearest thing the
-   * service offers to editing a question and re-asking it while keeping both branches.
-   *
-   * Three refusals worth carrying, because each is a different fact: **409** a turn is in flight
-   * (a fork reads five of the parent's tables, and a turn committing partway through would land a
-   * child that resumes with holes), **501** this deployment has no durable session store so there
-   * is no thread to copy, and **404** which is the service refusing to say whether the id exists.
+   * Branch this conversation onto a new session carrying its history. Refusals: 409 turn in flight,
+   * 501 no durable session store, 404 unknown or not yours.
    */
   forkSession(sessionId: string, getToken: TokenGetter): Promise<SessionOut> {
     return request<SessionOut>(`/sessions/${encodeURIComponent(sessionId)}/fork`, getToken, {
@@ -1402,11 +1015,8 @@ export const api = {
   },
 
   /**
-   * Who is in a session: its owner and the members that owner admitted.
-   *
-   * Nothing is swallowed. A 404 here is the session gate's "unknown or not yours" — the caller was
-   * removed, or the service predates the route — and the panel that asks says it could not tell
-   * rather than drawing a session with nobody in it.
+   * Who is in a session. Not swallowed: a 404 means removed or an older service, and the panel says
+   * it could not tell.
    */
   listMembers(sessionId: string, getToken: TokenGetter): Promise<SessionMembersOut> {
     return request<SessionMembersOut>(
@@ -1416,12 +1026,8 @@ export const api = {
   },
 
   /**
-   * Let `actor` into this session — the owner's act alone.
-   *
-   * The refusals are the service's, and each keeps its own sentence: **403** the caller is a member
-   * rather than the owner, **409** the owner named themself (they already hold more than a
-   * membership grants), **422** a blank id. Admitting somebody twice is one membership upstream,
-   * so a repeat is a 204 rather than an error.
+   * Let `actor` into this session (owner only). Refusals keep the service's sentence: 403 not
+   * owner, 409 owner named themself, 422 blank id. A repeat is a 204.
    */
   async addMember(sessionId: string, actor: string, getToken: TokenGetter): Promise<void> {
     await request<void>(
@@ -1431,11 +1037,7 @@ export const api = {
     );
   },
 
-  /**
-   * Take `actor` out of this session: the owner removing somebody, or a member leaving (their own
-   * id). 404 is "not a member" — kept as an error, because "removed" and "there was nobody to
-   * remove" are different answers and the panel says which.
-   */
+  /** Remove `actor` (owner) or leave (own id). 404 "not a member" stays an error. */
   async removeMember(sessionId: string, actor: string, getToken: TokenGetter): Promise<void> {
     await request<void>(
       `/sessions/${encodeURIComponent(sessionId)}/members/${encodeURIComponent(actor)}`,
@@ -1444,12 +1046,7 @@ export const api = {
     );
   },
 
-  /**
-   * The sessions somebody else owns that the caller has been let into, newest admission first.
-   *
-   * A list route, so it degrades to `[]` on a 404 like `listSessions`: a service that predates
-   * shared sessions has nothing shared with anybody, and the sidebar section simply stays away.
-   */
+  /** Sessions others own that the caller was let into, newest first; 404 folds to `[]`. */
   listSharedSessions(getToken: TokenGetter): Promise<SharedSessionSummary[]> {
     return orEmpty('/sessions/shared', () =>
       request<SharedSessionSummary[]>('/sessions/shared', getToken),
@@ -1457,63 +1054,18 @@ export const api = {
   },
 
   /**
-   * Claim the standing-query digests waiting for this chemist.
-   *
-   * **The read is the consume.** The service's mailbox claim is destructive by design — a row this
-   * call returns is marked consumed and is never re-delivered — so the caller must persist what it
-   * gets before anything can drop it. That is why this is read once at boot into the store rather
-   * than polled from a component effect that can unmount mid-flight.
-   *
-   * The cost of losing one is bounded and worth stating, because it is what makes the destructive
-   * read acceptable: a digest is a *notification*. The notes it names are already merged knowledge
-   * and the query that found them is a saved watch, so losing the notification is not losing the
-   * knowledge.
-   *
-   * Swallowed to empty on a 404 like the other list routes: a service without standing queries is
-   * a smaller app, not an error.
+   * Claim the standing-query digests for this chemist. The read is destructive (claimed rows are
+   * never re-delivered), so the caller persists the result immediately; it is read once at boot.
+   * Losing one loses a notification, not knowledge. 404 folds to `[]`.
    */
   listDigests(getToken: TokenGetter): Promise<Digest[]> {
     return orEmpty('/digests', () => request<Digest[]>('/digests', getToken));
   },
 
   /**
-   * Claim the check-ins waiting for this chemist — their own work, still blocked.
-   *
-   * The same mailbox as `listDigests`, the same destructive contract, and therefore the same shape:
-   * **the read is the consume**, so the caller claims once at the top of the app straight into
-   * persisted state rather than polling it from a screen that can unmount mid-flight.
-   *
-   * What differs is the cost of losing one, and it is higher. A digest is a notification about
-   * knowledge that is already merged — the notes stay, the watch stays, so losing the notice is not
-   * losing the finding. A check-in has nothing behind it to re-find: the service's own handler says
-   * an unreported one is a blocked question "a chemist simply does not learn about until it
-   * expires", which is the gap the sweep exists to close. That is why the failure of this claim is
-   * recorded in the store and said on screen rather than only logged.
-   *
-   * Swallowed to empty on a 404 like the other list routes — a service that predates the check-in
-   * sweep is a smaller app, not an error. Nothing else is swallowed.
-   */
-  /**
-   * Claim the check-in mailbox, reporting *which* emptiness happened.
-   *
-   * Every other list route folds a 404 into `[]` through `orEmpty`, and for those that is right:
-   * an empty sidebar and a service that predates the route look the same to a reader and neither
-   * is a claim. This one is different, because the section it feeds says **"nothing of yours is
-   * blocked"** — an assertion about the chemist's work, on the one surface whose whole purpose is
-   * that a blocked question is not missed.
-   *
-   * Two ways to arrive at zero rows and only one of them supports that sentence:
-   *
-   * - The service answered `200 []`. The mailbox is genuinely empty.
-   * - The service has no such route (404), **or** it has the route and the sweep behind it is off
-   *   — `check_in_enabled` defaults to `false` upstream while `GET /check-ins` is mounted
-   *   unconditionally, so a deployment that has not turned the sweep on answers `200 []` for ever.
-   *
-   * The 404 is detectable here and is reported as `absent`. The second case is not visible from
-   * this side at all: the response model carries no "the sweep is running" signal. This used to say
-   * that was "recorded as a fifth bullet on `ISSUES.md` Issue 16 rather than guessed at" — it was
-   * not; that entry had four bullets and none of them was this. It is recorded now, on the closed
-   * entry, as the one thing the fix did not reach.
+   * Claim the check-in mailbox (destructive, like `listDigests`), reporting which emptiness
+   * happened: `'absent'` on a 404 rather than `[]`, because the section says "nothing of yours is
+   * blocked". A deployment with the sweep off also answers `200 []`, which is not detectable here.
    */
   async listCheckIns(getToken: TokenGetter): Promise<CheckIn[] | 'absent'> {
     try {
@@ -1528,29 +1080,16 @@ export const api = {
   },
 
   /**
-   * What is waiting on this chemist to answer — across every conversation.
-   *
-   * The inbox for `request_external_input`, for `BoCampaignWorkflow._measure` pausing at the bench
-   * for measured yields, and for the connector-job path. **Not the deleted `/approvals`**: that
-   * mechanism had three consumers and no producer, which is what made an empty list a lie. This one
-   * has three live producers, and the service filters the listing to what this caller may actually
-   * answer, so a row here is a row they can act on.
-   *
-   * Not swallowed into an empty list. "Nothing is waiting on you" and "we could not ask" are
-   * opposite things to tell somebody whose bench work is blocked — the same argument
-   * `listPendingPlans` makes, and the mistake the holds inbox made before it.
+   * Questions waiting on this chemist to answer, across conversations, filtered by the service to
+   * what the caller may answer. Not swallowed: "nothing waiting" and "could not ask" must differ.
    */
   listPendingRequests(getToken: TokenGetter): Promise<PendingRequestsOut> {
     return request<PendingRequestsOut>('/pending', getToken);
   },
 
   /**
-   * Answer one held-open question, releasing whatever is waiting on it.
-   *
-   * The service distinguishes four refusals and each is a different fact: 404 no such request, 403
-   * not routed to you, **409 already decided**, 503 the broker did not take it. The 409 is the one
-   * worth carrying to a surface — two chemists at one bench answering the same question is the
-   * ordinary case, and the second must be told rather than have their answer dropped.
+   * Answer one held-open question. Refusals: 404 unknown, 403 not routed to you, 409 already
+   * decided (surfaced to the reader), 503 broker did not take it.
    */
   answerPendingRequest(
     requestId: string,
@@ -1563,13 +1102,7 @@ export const api = {
     });
   },
 
-  /**
-   * The durable-run registry.
-   *
-   * Deliberately not scoped to the caller upstream — a run is a fact about the lab, and "what did
-   * we already compute for this substrate" is the question it exists to answer. `text` searches
-   * the recorded rationale, which is why a run three months old is findable at all.
-   */
+  /** The durable-run registry, not scoped to the caller. `text` searches the recorded rationale. */
   async listJobs(
     getToken: TokenGetter,
     options: { text?: string; connector?: string } = {},
@@ -1582,13 +1115,8 @@ export const api = {
   },
 
   /**
-   * One page of durable runs, with the cursor for the next — the same shape `pageSessions` has.
-   *
-   * Separate from `listJobs` for the same reason that pair is separate, and needed for the same
-   * reason: the search is capped at `job_record_search_limit` (20 in the shipped config), the
-   * service advertises `X-Next-Cursor` when it saw a further row, and nothing here read it — so a
-   * chemist with more finished runs than the cap could not reach the older ones from any client and
-   * the listing looked complete. `requestPage` rather than `request`, because the cursor is a header.
+   * One page of durable runs with the `X-Next-Cursor` cursor; needed because the search is capped
+   * (`job_record_search_limit`).
    */
   async pageJobs(
     getToken: TokenGetter,
@@ -1603,9 +1131,7 @@ export const api = {
       const page = await requestPage<JobRecordSummary[]>(`/jobs${suffix}`, getToken);
       return { jobs: page.body, next: page.next };
     } catch (err) {
-      // The registry's own degradation, unchanged from `listJobs`: a service without the route
-      // answers an empty page rather than an error, because this panel renders a failed search as
-      // an empty result deliberately.
+      // An older service without the route answers an empty page, as `listJobs` does.
       if (err instanceof ApiError && err.kind === 'session_not_found') {
         logger.warn('api.list_route_missing', { route: '/jobs' });
         return { jobs: [], next: '' };
@@ -1615,14 +1141,9 @@ export const api = {
   },
 
   /**
-   * One run's status, from the run registry.
-   *
-   * `sessionId` is the conversation the card asking belongs to (the frozen contract's wave-2
-   * amendment): the service keeps a result's `exhibit_id` — the report artefact G1's **Open
-   * report** focuses — only for a caller who names the run's origin session and can read it, and
-   * strips it otherwise, because an artefact id is a pointer into a session the registry's other
-   * readers may not be in. A card reconciled without it would lose its Open report on reload.
-   * Anything that is not a session id is not sent; the BFF refuses any other query on this route.
+   * One run's status from the registry. `sessionId` is the card's conversation: the service returns
+   * a result's `exhibit_id` only to a caller naming the run's origin session. Only a session id is
+   * ever sent; the BFF refuses other queries.
    */
   getJob(jobId: string, getToken: TokenGetter, sessionId?: string): Promise<DurableJobStatus> {
     const suffix =
@@ -1633,10 +1154,8 @@ export const api = {
   },
 
   /**
-   * Ask the service to cancel a running job.
-   *
-   * 202, not 204: cancellation is *requested*, and a workflow already past its last cancellation
-   * point will finish anyway. The caller must not tell the chemist it stopped.
+   * Request cancellation of a running job (202): a workflow past its last cancellation point still
+   * finishes, so do not tell the chemist it stopped.
    */
   cancelJob(jobId: string, getToken: TokenGetter): Promise<void> {
     return request<void>(`/jobs/${encodeURIComponent(jobId)}`, getToken, { method: 'DELETE' });
@@ -1648,24 +1167,16 @@ export const api = {
   },
 
   /**
-   * Every plan of the caller's that nobody has decided — the only plan read not tied to a session.
-   *
-   * Deliberately not error-swallowing into an empty inbox. `listApprovals` folded its 404 into
-   * `[]` and the screen said "nothing is waiting on you" for a release; a failure here reaches the
-   * caller so the screen can say it could not ask.
+   * Every undecided plan of the caller's. Not folded to `[]`: a failure must let the screen say it
+   * could not ask.
    */
   listPendingPlans(getToken: TokenGetter): Promise<PendingPlansOut> {
     return request<PendingPlansOut>('/plans/pending', getToken);
   },
 
   /**
-   * Approve or reject a harness plan, bound to the exact plan the human was shown.
-   *
-   * `planHash` is required by the service and is deliberately not defaulted to "whatever the plan
-   * is now": a plan that changed after being displayed is a different plan. A mismatch comes back
-   * as 409 and is re-kinded here, because on this route that status means the plan moved, while
-   * on the message route it means a turn is already running — one number, two meanings, and only
-   * the caller knows which route it asked.
+   * Approve or reject a plan, bound to the exact plan shown by `planHash`. A 409 here means the
+   * plan moved and is re-kinded, since 409 on the message route means a turn is running.
    */
   async decidePlan(
     sessionId: string,
@@ -1684,27 +1195,15 @@ export const api = {
       }
       throw err;
     } finally {
-      // Whatever the outcome, the inbox's answer is now suspect: an approval removes a row, and a
-      // 409 means the plan moved under the reader. Invalidating is what keeps
-      // `PENDING_PLANS_STALE_MS` from being a staleness window on the one action that invalidates
-      // it. **After the write settles, never before it**: invalidating refetches an active
-      // observer at once, so a read issued before the POST could be answered with the plan still
-      // pending and cached as fresh for the whole window. `void`ed rather than awaited because the
-      // caller is waiting on the decision, not on a re-read of a list it may not be looking at.
+      // Invalidate the inbox after the write settles, never before (an early refetch could cache
+      // the still-pending plan). Not awaited: the caller waits on the decision only.
       void queryClient.invalidateQueries({ queryKey: keys.pendingPlans });
     }
   },
 
   /**
-   * Experiment designs, newest activity first as the service orders them.
-   *
-   * A list route, so it degrades to `[]` on a 404 like every other one: a deployment whose service
-   * predates protocols yields a screen that says nothing is here rather than a banner about a
-   * feature that does not exist for it.
-   *
-   * The envelope is unwrapped here rather than at the caller. `{"designs": [...]}` is the service's
-   * shape and `orEmpty` is written over arrays; unwrapping inside it is what lets the 404 fold into
-   * an empty *list* instead of into an object nobody can read a length off.
+   * Experiment designs, newest activity first. Unwrapped inside `orEmpty` so a 404 folds to an
+   * empty list.
    */
   async listProtocols(
     getToken: TokenGetter,
@@ -1725,13 +1224,7 @@ export const api = {
     });
   },
 
-  /**
-   * One design — at its head, or at the revision asked for.
-   *
-   * Not swallowed. Unlike the list, this is opened by a click on a row that exists, so a 404 here
-   * is a design that vanished between the list and the open, which is a fault a reader should see
-   * rather than an empty document that looks like a design with nothing in it.
-   */
+  /** One design at its head or a given revision. Not swallowed: opened from a row that exists. */
   getProtocol(designId: string, getToken: TokenGetter, revision?: number): Promise<ProtocolView> {
     // Coerced rather than interpolated: `revision` reaches this from a URL and from a history row,
     // and the BFF forwards the query string untouched, so this is where it stops being arbitrary.
@@ -1743,18 +1236,9 @@ export const api = {
   },
 
   /**
-   * Write a new revision of a design.
-   *
-   * `parentRevision` is the revision the edit was written against and is deliberately not defaulted
-   * to "whatever the head is now" — that is the same argument `decidePlan` makes about `planHash`,
-   * and it has the same failure if it is dropped: a save that silently rebased onto somebody else's
-   * revision would discard their edit while telling this chemist theirs succeeded. The service
-   * answers 409 when it is not the head, and that is re-kinded to `revision_conflict` here, because
-   * 409 on the message route means a turn is already running and only the caller knows which route
-   * it asked.
-   *
-   * `changeNote` is required by the surface rather than by this function: a revision with no stated
-   * reason tells the next reader nothing about why the numbers moved.
+   * Write a new revision of a design against `parentRevision`, never defaulted to the current head,
+   * so a save cannot silently overwrite someone else's revision. A 409 is re-kinded to
+   * `revision_conflict`.
    */
   async putProtocolRevision(
     designId: string,
@@ -1777,13 +1261,8 @@ export const api = {
         },
       );
     } catch (err) {
-      // **The rebuild carries the correlation id, and it used to drop it.** `errorFromStatus` had
-      // just read the service's own reference off the failed response and attached it; a
-      // constructor call with no `options` silently returned it to `''`, so this route — and the
-      // status route below, which copied this shape — was the one place a banner could not say
-      // "(reference …)". `api/errors.ts` states the rule the rest of this file keeps: every banner
-      // carries a reference. `retryable` is deliberately not copied: it is derived from the kind,
-      // and the kind is what this line changes.
+      // Carry the correlation id across the re-kind so the banner keeps its reference. `retryable`
+      // follows from the kind.
       if (err instanceof ApiError && err.status === 409) {
         throw new ApiError('revision_conflict', err.message, 409, {
           correlationId: err.correlationId,
@@ -1800,11 +1279,7 @@ export const api = {
     to: number,
     getToken: TokenGetter,
   ): Promise<DesignDiff> {
-    // **`from_revision`/`to_revision`, which is what the route binds.** These were `from`/`to`;
-    // FastAPI ignores an unknown query parameter, so every comparison silently answered **200**
-    // with the route's defaults — revision 1 against the head — while `RevisionDiff`'s header
-    // printed the two numbers the chemist had actually clicked. A wrong diff is worse than a
-    // failed one here: the diff is the record of what an expert changed.
+    // The route binds `from_revision`/`to_revision`; FastAPI silently ignores unknown parameters.
     const query = new URLSearchParams({
       from_revision: String(Math.trunc(from)),
       to_revision: String(Math.trunc(to)),
@@ -1816,29 +1291,10 @@ export const api = {
   },
 
   /**
-   * Move a design's status, against the revision *and the status* the chemist was reading, with the
-   * reason beside it.
-   *
-   * 204: the service records the move and returns nothing. `reason` is what makes an `abandoned`
-   * design readable a year later — it is the only field that says why a design nobody ran exists.
-   *
-   * **`expectedRevision` is the revision on screen, and the service refuses anything else with a
-   * 409.** It is `parent_revision`'s twin for a sign-off: without it the service stamped whatever
-   * the head had become, so a chemist who read revision 1, thought about it, and clicked Approve
-   * after a colleague saved revision 2 had their name recorded against a document they never saw —
-   * with no race required, just the seconds between reading and clicking.
-   *
-   * **`expectedStatus` is the badge on screen, and it closes the half `expectedRevision` cannot
-   * see.** That compare-and-set is on the *document*, so it says nothing about the decision: two
-   * people looking at revision 1 could approve and abandon it and both were told 204, measured 100
-   * of 100, and a design retired because the starting material decomposes came back into the draft
-   * listing without anybody being told. The service now refuses the second move with
-   * `{"code": "status_conflict"}`, which `errorFromStatus` turns into its own kind — the document
-   * did not move, so sending the chemist to a diff would show them nothing.
-   *
-   * The `catch` is the older-deployment case, and it is `putProtocolRevision`'s for the same
-   * reason: a service that answers 409 with a bare string carries no code, and on this route a
-   * service that predates `expected_status` can only have refused the revision.
+   * Move a design's status (204), with a reason. `expectedRevision` (the revision on screen) and
+   * `expectedStatus` (the badge on screen) are compare-and-set guards: the service refuses a stale
+   * revision with 409 and a stale status with `status_conflict`. The `catch` handles older services
+   * whose 409 carries no code.
    */
   async setProtocolStatus(
     designId: string,
@@ -1859,9 +1315,7 @@ export const api = {
         }),
       });
     } catch (err) {
-      // The reference is carried across the re-kind for `putProtocolRevision`'s reason, and this
-      // is the site where losing it costs most: a refused sign-off is the failure a chemist is
-      // likeliest to have to ask somebody about.
+      // Keep the correlation id across the re-kind, as in `putProtocolRevision`.
       if (err instanceof ApiError && err.status === 409 && err.kind === 'turn_in_flight') {
         throw new ApiError('revision_conflict', err.message, 409, {
           correlationId: err.correlationId,
@@ -1871,23 +1325,15 @@ export const api = {
     }
   },
 
-  /* ── Artefacts ─────────────────────────────────────────────────────────────
-   *
-   * The service's `exhibit` routes (`shared/exhibits.ts` for why the code name is not the word a
-   * chemist reads). Every body is cast to the contract's own model name at the `request` call —
-   * which is what `tests/backendContract.test.ts` pairs with the service's declaration — and then
-   * *decoded*, because these bodies feed renderers that switch on a spec's kind and a malformed one
-   * must become a sentence rather than a `TypeError` inside a table.
+  /*
+   * ── Artefacts ── The service's `exhibit` routes. Each body is cast to the contract's model name
+   * (paired by `tests/backendContract.test.ts`) and then decoded, so a malformed spec becomes a
+   * message rather than a `TypeError`.
    */
 
   /**
-   * The artefacts of one session, newest activity first, and whether this deployment has them.
-   *
-   * Not `orEmpty`, and the reason is `enabled`: a 404 from a service that predates the route is
-   * *exactly* "this deployment has no artefacts", so it is folded into `enabled: false` — the
-   * answer that leaves the right column as the entity rail — with the same log line `orEmpty`
-   * writes. Folding it into an empty *enabled* list instead would put an "Artefacts" tab on screen
-   * that can never hold anything.
+   * One session's artefacts and whether this deployment has them. A 404 folds to `enabled: false`
+   * (logged), not an empty enabled list.
    */
   async listExhibits(sessionId: string, getToken: TokenGetter): Promise<ExhibitListOut> {
     try {
@@ -1905,12 +1351,7 @@ export const api = {
     }
   },
 
-  /**
-   * One artefact at its head, or at the revision asked for (`0` and absent both mean the head).
-   *
-   * Not swallowed: this is opened from a card or a list row that says the artefact exists, so a
-   * 404 is a fault the pane should name.
-   */
+  /** One artefact at its head or a given revision (`0`/absent = head). Not swallowed. */
   async getExhibit(
     sessionId: string,
     exhibitId: string,
@@ -1944,12 +1385,8 @@ export const api = {
   },
 
   /**
-   * What changed between two revisions, in `DesignDiff`'s shape so `RevisionDiff` draws it.
-   *
-   * `from`/`to`, which is what the contract names — and checked here against the protocol route's
-   * history, where a parameter spelled differently from the route's was silently ignored by
-   * FastAPI and every comparison answered revision 1 against the head under a header naming the
-   * two the chemist clicked. The contract test pins the spelling against the service's own route.
+   * What changed between two revisions, in `DesignDiff`'s shape for `RevisionDiff`. Parameter
+   * spelling `from`/`to` is pinned by the contract test.
    */
   async getExhibitDiff(
     sessionId: string,
@@ -1970,15 +1407,9 @@ export const api = {
   },
 
   /**
-   * Write a chemist's revision of an artefact.
-   *
-   * `parentRevision` is the revision the edit was written against and is deliberately not
-   * defaulted to "whatever the head is now" — `putProtocolRevision`'s argument, and the same
-   * failure if it is dropped: a save that silently rebased onto the agent's newer revision would
-   * discard it while telling the chemist theirs succeeded. The service answers 409 with the head,
-   * and `request` raises that as a `StaleRevisionError` carrying it.
-   *
-   * `title` is sent only when it changes; the contract reads its absence as "keep the title".
+   * Write a chemist's revision of an artefact against `parentRevision` (never defaulted to the
+   * head). A 409 raises `StaleRevisionError` carrying the head. `title` is sent only when it
+   * changes.
    */
   async postExhibitRevision(
     sessionId: string,
@@ -2006,11 +1437,8 @@ export const api = {
   },
 
   /**
-   * A chemist's own artefact — today, a tool result pinned from the answer (`kind: "result"`).
-   *
-   * The agent cannot create a `result` artefact; the chemist can, because the ref they pin is one
-   * the session's own tool-result store already holds, and the service checks that it does. A 409
-   * `exhibit_limit` is its own kind (`errorFromStatus`) so the sentence says what to do.
+   * Create a chemist's own artefact — today a pinned tool result (`kind: "result"`), which the
+   * service checks the session holds. A 409 `exhibit_limit` has its own error kind.
    */
   async createExhibit(
     sessionId: string,
@@ -2028,12 +1456,7 @@ export const api = {
     return (await exhibitDecoders()).decodeExhibitView(body);
   },
 
-  /**
-   * Every artefact of the caller's, across every session they own or were let into (phase 3).
-   *
-   * A list route that degrades to `[]` on a 404 like the others: a service without it is a smaller
-   * app, and the page says there is nothing to list.
-   */
+  /** Every artefact of the caller's across sessions; 404 folds to `[]`. */
   listMyExhibits(getToken: TokenGetter, limit = 50): Promise<ExhibitHeader[]> {
     const query = new URLSearchParams({ limit: String(Math.trunc(limit)) });
     return orEmpty('/exhibits', async () => {
@@ -2043,13 +1466,8 @@ export const api = {
   },
 
   /**
-   * Download one artefact in a format the service renders, as a file the browser saves.
-   *
-   * **Fetched, not linked.** An `<a href="/api/…/export.csv">` would be simpler and would not
-   * work: the BFF forwards a bearer token, never a cookie, so a plain navigation reaches the service
-   * unauthenticated. So this is `send` with the same one-shot 401 recovery `request` performs, and
-   * the response is handed to the browser as a blob under the name the service's
-   * `Content-Disposition` gives it — the service owns the filename because it owns the format.
+   * Download one artefact in a service-rendered format. Fetched, not linked, because the BFF
+   * forwards a bearer header, not a cookie. The filename comes from `Content-Disposition`.
    */
   async exportExhibit(
     sessionId: string,
@@ -2088,28 +1506,10 @@ export const api = {
   },
 
   /**
-   * One calculation by-product's bytes — `GET /calc-artifacts/content?ref=<calc_key>#<name>`.
-   *
-   * The route the C4 story waited on (artefacts wave 2): `fetch_artifact` hands the *model* bounded
-   * text and refuses binaries, which is right for a context window and useless for "take this
-   * geometry into another package". This is the file itself, with the stored media type and the
-   * name the calculation gave it. A geometry artefact that cites a calculation reads its XYZ here
-   * too, so the viewer and the download are one fetch of one thing.
-   *
-   * **Not session-scoped, and that is the service's decision, not a gap here**: the calc cache is
-   * shared across sessions (D-011's "a persisted result is never recomputed"), so any authenticated
-   * caller may read a stored by-product, as with notes and jobs.
-   *
-   * The ref is a **query parameter, encoded whole** — its `#` would otherwise end the URL at the
-   * fragment and its `:`/`@` are the calc key's own punctuation. The BFF whitelists the path and
-   * holds the parameter to `CALC_ARTIFACT_REF` before anything is forwarded.
-   *
-   * Fetched rather than linked, for `exportExhibit`'s reason: the bearer token rides a header, so a
-   * plain `<a href>` would reach the service unauthenticated. Two refusals get their own sentence
-   * because the service's status alone reads as something else here — a 404 is the calc store's
-   * eviction (by-products are reclaimed by design), not an unknown session; a 413 is the deployment's
-   * `calc_artifact_max_download_bytes`, not a fault. A ref that is not one (`CALC_ARTIFACT_REF`) is
-   * said to be not one, before any request and when the BFF refuses it, rather than as evicted.
+   * One calculation by-product's bytes — `GET /calc-artifacts/content?ref=<calc_key>#<name>`. Not
+   * session-scoped (the calc cache is shared). The ref is one query parameter encoded whole; the
+   * BFF validates it against `CALC_ARTIFACT_REF`. Fetched, not linked, for the bearer header. A 404
+   * means evicted and a 413 means over the deployment's download cap.
    */
   async getCalcArtifact(
     ref: string,
@@ -2127,9 +1527,8 @@ export const api = {
     if (res.status === 401 && (await recoverFrom(getToken))) res = await fetchFile();
     if (!res.ok) {
       const failure = await readFailure(res);
-      // Two 404s, told apart by who sent them: the BFF's own refusal of a request it does not
-      // forward is the bare `{"detail": "not found"}` (`server/app.ts`), and only the service's
-      // means the calc store has no such file.
+      // The BFF's own refusal is a bare `{"detail": "not found"}` (`server/app.ts`); only the
+      // service's 404 means the file was evicted.
       const sentence =
         res.status === 404 && failure.detail === BFF_NOT_FOUND
           ? NOT_A_CALC_REF
@@ -2163,11 +1562,8 @@ const NOT_A_CALC_REF =
   'That reference is not a calculation file (expected `<calculation key>#<file name>`), so there is nothing to download.';
 
 /**
- * The filename a `Content-Disposition: attachment` names, or the fallback.
- *
- * `filename*=UTF-8''…` first, because RFC 6266 says a recipient that understands it prefers it —
- * an artefact titled "Löslichkeit" is the ordinary case here, not an edge. Path separators are
- * stripped from whatever arrives: the browser does this too, and a name is a name, not a path.
+ * The filename from `Content-Disposition: attachment`, or the fallback. Prefers
+ * `filename*=UTF-8''…` (RFC 6266); path separators are stripped.
  */
 export function filenameFrom(header: string | null, fallback: string): string {
   if (!header) return fallback;

@@ -1,32 +1,12 @@
 /**
- * The right column, when the conversation has artefacts: **Artefacts | Index**.
+ * The right column when the conversation has artefacts: tabs **Artefacts | Index** (the entity
+ * rail's `RailBody`, unchanged). Lazily loaded by `RightColumn.tsx`. An `<aside>` beside `<main>`,
+ * not inside it. Deployments with artefacts off render the plain rail.
  *
- * Lazy (`RightColumn.tsx` loads it), because a conversation without artefacts — most of them —
- * never needs the views, the export menu or the editors, and `check:bundle` budgets the first load.
- *
- * ## One column, two indexes
- *
- * The entity rail used to be the only right-hand column, and the concept called it "a place to
- * hang artifacts" (`docs/chemistry-aware-frontend.md`, US-12). Rather than a second column
- * competing for width with it, the column became tabbed: **Artefacts**, the documents the agent
- * wrote, and **Index**, the rail's own body (`RailBody`) unchanged — the subjects, the jobs, the
- * notes and the transcript filter. A deployment with artefacts turned off never sees the tabs at
- * all; the shell renders the plain rail exactly as before.
- *
- * ## Landmarks
- *
- * The column is an `<aside>`, a sibling of `<main>`, for the reason `AppShell` gives about the rail:
- * it describes the conversation rather than being part of the document being read, and a landmark
- * nested in `<main>` is not where "skip to the transcript" should land.
- *
- * ## What one artefact's header carries
- *
- * Its title and kind; a revision picker reading `r3 · agent · 14:02`; **Compare** (the service's
- * diff, drawn by the protocols' `RevisionDiff`); **Export** (the service's formats, plus SDF and
- * SVG made here); **Print**; **Ask about this** (a chip in the composer that hands the artefact
- * back to the agent with the next message); and a menu with the two promotions — save as a note,
- * make a protocol — which are *requests to the agent*, because both are writes that already have
- * gated tools of their own, and the pane does not get a second door to the knowledge graph.
+ * One artefact's header: title and kind, a revision picker (`r3 · agent · 14:02`), Compare (the
+ * service's diff in `RevisionDiff`), Export (service formats plus SDF/SVG made here), Print, "Ask
+ * about this" (a composer chip), and promotions (save as note, make a protocol) sent as requests to
+ * the agent.
  */
 
 import { lazy, Suspense, useEffect, useId, useRef, useState } from 'react';
@@ -83,11 +63,7 @@ import { TableView } from './views/TableView.tsx';
 import { GoneSourcesStrip } from './Provenance.tsx';
 import { goneBindings } from './bindings.ts';
 
-/**
- * The HTML view, in a chunk of its own (wave 3). Most conversations never hold an `html` artefact,
- * and the sandbox plumbing — the frame, its message handshake, the source fallback — is nothing a
- * chemist reading a table should download.
- */
+/** The HTML view in its own chunk; few conversations hold an `html` artefact. */
 const HtmlView = lazy(() =>
   import('./views/HtmlView.tsx').then((module) => ({ default: module.HtmlView })),
 );
@@ -98,10 +74,8 @@ export interface PaneProps {
   sessionId: string;
   exhibits: ExhibitHeader[];
   /**
-   * Artefacts are off in this deployment but this conversation already holds some (the contract's
-   * hardening item 6): they are shown, compared, exported and printed, and nothing here makes,
-   * edits or hands one on — no edit, no Detach, no "Ask about this", no promotion — because each of
-   * those is a write the service would refuse or a request to an agent that has no artefact tools.
+   * Artefacts are off but this conversation has some: view, compare, export and print only — no
+   * edit, Detach, "Ask about this" or promotion.
    */
   readOnly?: boolean;
 }
@@ -111,28 +85,18 @@ export const FORMAT_LABEL: Record<ExportFormat, string> = {
   csv: 'CSV (.csv)',
   smi: 'SMILES (.smi)',
   xyz: 'XYZ coordinates (.xyz)',
-  // Says what the file is outside the sandbox: an ordinary page, whose scripts run with nothing
-  // around them if it is opened as one. Saved as `.html.txt` (`savedName`) so a double-click opens
-  // it as text; renaming it is then a decision somebody made.
+  // Saved as `.html.txt`: opened as a page outside the sandbox, its scripts would run.
   html: 'HTML source (.html.txt) — runs its scripts if opened as a web page',
 };
 
-/**
- * The name a service export is saved under: the service's own, except an `html` export, which is
- * saved as `<stem>.html.txt` (the contract lets the client choose the saved name). The service
- * already sends it as `text/plain`; the extension is what the reader's file manager goes by.
- */
+/** The saved filename: the service's own, except `html`, saved as `<stem>.html.txt`. */
 export function savedName(format: ExportFormat, served: string, stem: string): string {
   if (format !== 'html') return served;
   const base = served.replace(/\.html?(\.txt)?$/i, '') || stem;
   return `${base}.html.txt`;
 }
 
-/**
- * `14:02`, in the reader's own time zone and on a 24-hour clock — or nothing for a timestamp this
- * build cannot read. 24-hour because that is how a lab notebook times an entry and how the contract
- * writes the label, and because `02:05 PM` beside `r2` is longer than the fact it states.
- */
+/** `14:02` in local time, 24-hour, or nothing for an unreadable timestamp. */
 function clock(iso: string): string {
   const at = new Date(iso);
   return Number.isNaN(at.getTime())
@@ -141,10 +105,8 @@ function clock(iso: string): string {
 }
 
 /**
- * One revision as the picker names it: `r3 · agent · 14:02`.
- *
- * "agent" or the person — "you" when it is the reader — because the question the picker answers is
- * "whose numbers am I looking at", and in a shared session "human" does not answer it.
+ * One revision as the picker names it: `r3 · agent · 14:02` — the author ("you" for the reader)
+ * answers whose numbers these are.
  */
 export function revisionLabel(revision: ExhibitRevision, viewer: string | null): string {
   const who =
@@ -157,14 +119,8 @@ export function revisionLabel(revision: ExhibitRevision, viewer: string | null):
 }
 
 /**
- * The `unverified_figures` warning, above whatever the view draws.
- *
- * Above, for `Verdict`'s reason in `results/renderers.tsx`: a qualifier placed after the data is
- * read once the reader has already believed it. The wording is the contract's and it is careful in
- * both directions — "not found in any tool result" is what the service checked, and "unchecked, not
- * necessarily wrong" is what that does *not* establish: a figure the agent derived from two tool
- * outputs is flagged exactly like a transcription error, and calling it wrong would be this
- * surface inventing a verdict.
+ * The `unverified_figures` warning, above the view: figures no tool returned, "unchecked, not
+ * necessarily wrong" (a derived figure is flagged too).
  */
 export function UnverifiedStrip({
   figures,
@@ -333,7 +289,7 @@ function Compare({
 }): React.JSX.Element {
   const { auth } = useAuth();
   const earlier = revisions.filter((r) => r.revision < view.revision);
-  // The parent by default: "what did this revision change" is the question a reviewer asks first.
+  // Compare against the parent revision by default.
   const [from, setFrom] = useState(
     view.parent_revision > 0 ? view.parent_revision : (earlier.at(-1)?.revision ?? 0),
   );
@@ -397,8 +353,7 @@ function ExhibitDetail({
 }): React.JSX.Element {
   const { auth, ready } = useAuth();
   const viewer = useChatStore((s) => s.viewer);
-  // The revision picked on *this* artefact in *this* session, or the head — never one picked on
-  // whatever was shown before (`revisionShown`).
+  // The revision picked on this artefact in this session, or the head (`revisionShown`).
   const revision = useExhibitPane((s) => revisionShown(s, sessionId, header.exhibit_id));
   const setRevision = (picked: number): void =>
     useExhibitPane.getState().setRevision(sessionId, header.exhibit_id, picked);
@@ -445,13 +400,8 @@ function ExhibitDetail({
   };
 
   /**
-   * Print *this* artefact, and only while asked to.
-   *
-   * `data-print="document"` is what the print stylesheet keys on, and it hides every branch of the
-   * page that does not contain the marked element (`index.css`). So the mark cannot sit on the pane
-   * permanently: a chemist pressing Ctrl+P on the conversation would get the side pane and nothing
-   * else, the exact blank-transcript failure that stylesheet's own history records. The mark is
-   * set for the duration of one `window.print()` and taken off again.
+   * Print this artefact only: `data-print="document"` (which the print stylesheet keys on) is set
+   * for one `window.print()` and removed, so printing the conversation still works.
    */
   const print = (): void => {
     setPrinting(true);
@@ -630,11 +580,8 @@ function ArtefactsTab({
   const pickerId = useId();
   const chosen = focus ? exhibits.find((x) => x.exhibit_id === focus.exhibitId) : undefined;
   const fallback = exhibits[0];
-  // Nothing chosen here yet (or the choice is gone): the fallback is shown, and pinned as the
-  // choice, so a list that reorders under it — the newest-first order moves on every edit — keeps
-  // the same document in front instead of swapping one under an unsaved draft. Not while a draft
-  // is in front: the focus the new artefact's frame sets must not be overwritten by a fallback
-  // chosen from a list that has not caught up with it yet.
+  // With nothing chosen, show the fallback and pin it, so reordering cannot swap the document under
+  // a draft. Not while a draft is in front.
   useEffect(() => {
     if (!drafting && !chosen && fallback) {
       useExhibitPane.getState().pin(sessionId, fallback.exhibit_id);
@@ -760,10 +707,7 @@ export function PaneBody({
   );
 }
 
-/**
- * The column, at `lg` and wider: the tabbed body at the reader's width, with the resizer on its
- * leading edge.
- */
+/** The column at `lg` and wider, at the reader's width, with the resizer on its leading edge. */
 export function ExhibitPaneColumn(props: PaneProps): React.JSX.Element {
   const width = useExhibitPane((s) => s.widthPx);
   const setWidth = useExhibitPane((s) => s.setWidth);

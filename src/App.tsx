@@ -1,9 +1,6 @@
 /**
- * The application shell.
- *
- * Rendered by a route rather than mounted directly, so it takes the conversation to show rather
- * than reading `activeId` for itself. `children` is the escape hatch the not-found panel uses to
- * appear inside the normal chrome instead of replacing it.
+ * The application shell, rendered by a route with the conversation to show. `children` lets the
+ * not-found panel appear inside the normal chrome.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -24,9 +21,7 @@ import { MessageList } from './components/MessageList.tsx';
 import { JobFeed } from './components/JobFeed.tsx';
 import { Composer } from './components/Composer.tsx';
 import { RightColumn } from './components/exhibits/RightColumn.tsx';
-// The transcript→messages mapping used to be inline here (which is why this file imported
-// `ChatMessage`); it moved to its own module so it could be tested against real backend payloads
-// rather than only through a rendered shell.
+// The transcript→messages mapping lives in its own module, tested against real payloads.
 import { transcriptToMessages } from './state/transcript.ts';
 import { resumeInterruptedTurn } from './state/sendMessage.ts';
 import { followSharedConversation } from './state/sharedSync.ts';
@@ -51,26 +46,12 @@ function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
 }
 
 /**
- * Pull a transcript the server has but this browser does not.
+ * Pull a transcript the server has and this browser does not. Only for `sessionOrigin === 'server'`
+ * (a warmed local session has nothing to read).
  *
- * Guarded on `sessionOrigin === 'server'`. A session id alone is not enough: `warmSession` gives a
- * brand-new local conversation a session before its first message, which is exactly this guard's
- * other conditions, and reading `/messages` for it would be a wasted round-trip that raises a warn
- * banner if it fails.
- *
- * **Deliberately not a `useQuery`, while ten other reads in this app became one.** This is not a
- * view fetching what it renders; it is a procedure with an ordering constraint, and the constraint
- * is the whole of it: the plan has to be read back *before* the transcript is hydrated, because
- * hydrating raises `messageCount`, which is one of this hook's own guards — so the continuation
- * that would read the plan afterwards has already been abandoned. Splitting that into two queries
- * plus an effect that consumes them would put the ordering in a dependency array, which is the one
- * place it cannot be read. The failure path is the same shape: the banner is a *write to the
- * store*, not a rendered error state, so there is no `isError` for a surface to branch on.
- *
- * What the four lines here cost is what they cost everywhere else, and it is worth being plain
- * about that rather than pretending this one is free: `cancelled` is still a flag somebody has to
- * get right. The reason to leave it is that `useQuery` would not remove it — it would move it into
- * an effect that has to re-derive the same ordering with less to go on.
+ * Not a `useQuery`: it is an ordered procedure — the plan is read back before hydrating, because
+ * hydrating changes `messageCount`, one of this hook's own guards — and its failure path writes a
+ * banner to the store.
  */
 function useRemoteTranscript(conversationId: string | undefined, nonce: number): void {
   const { auth, ready } = useAuth();
@@ -88,9 +69,7 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
     if (!ready || !conversationId || !sessionId || messageCount > 0 || !fromServer) return;
     let cancelled = false;
     void (async () => {
-      // `getMessages` swallows only `session_not_found`; a 401, a 500 or a dropped connection all
-      // rethrow. Unhandled, that surfaced as an empty conversation with no explanation and no way
-      // to retry — the reader could not tell "nothing was said yet" from "we could not load it".
+      // Only `session_not_found` is swallowed; other failures get a banner and a retry.
       let remote: Awaited<ReturnType<typeof api.getMessages>>;
       try {
         remote = await api.getMessages(sessionId, auth);
@@ -110,13 +89,9 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
       if (cancelled || remote.length === 0) return;
       const messages = transcriptToMessages(remote);
       if (messages.length === 0) return;
-      // The plan is session state the transcript does not carry — `latestPlan` was stream-only,
-      // so a reload dropped the checklist while the session was still proposing (and possibly
-      // still blocked on) a plan. Read it back *before* hydrating: hydration raises
-      // `messageCount`, which re-runs this effect and flips `cancelled` on this continuation,
-      // so a read placed after it would always be discarded. Silent on any failure: an older
-      // service has no plan route, and a session with no plan is the ordinary case, not an
-      // error worth a banner.
+      // Read the plan back before hydrating (hydration re-runs this effect and cancels this
+      // continuation). Silent on failure: older services have no plan route and most sessions have
+      // no plan.
       let plan: {
         todos: string[];
         hash: string;
@@ -126,10 +101,8 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
       } | null = null;
       try {
         const status = await api.getPlan(sessionId, auth);
-        // `approved` is the EFFECTIVE state — the route folds `consumed_at` in, so a plan that was
-        // approved and whose approval has since been spent comes back false, which is exactly when
-        // the chemist owes another decision. Carried rather than dropped: without it the checklist
-        // returned and the decision it was blocked on did not.
+        // `approved` is the effective state (a spent approval reads false), so the decision card is
+        // restored when one is owed.
         if (status.plan.length > 0) {
           plan = {
             todos: status.plan,
@@ -138,9 +111,7 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
             // The same payload names what an approval authorizes, and dropping it cost the card a
             // second read of this route on every reload. Absent from an older service: unknown.
             scope: status.scope ?? null,
-            // Whose turn wrote it — in a shared conversation, the one person who may decide on it
-            // (Chemclaw3 #483). `null` (none recorded, or a service older than the field) leaves
-            // the decision with the owner.
+            // Whose turn wrote it; `null` leaves the decision with the owner.
             author: status.author ?? null,
           };
         }
@@ -169,15 +140,8 @@ function useRemoteTranscript(conversationId: string | undefined, nonce: number):
 }
 
 /**
- * Pick up an answer a reload interrupted, for the conversation on screen.
- *
- * Separate from `useRemoteTranscript` because it is a different question with a different
- * precondition. That effect asks "does this conversation have a history I have not read?" and
- * refuses to run once the conversation has any local message at all — which is what made it blind
- * to this case, where the conversation is full and one message in it is a hole. This one asks "is
- * the newest turn a turn that was cut off by a reload, and did the server finish it?".
- *
- * Keyed on the conversation and torn down on navigation, so switching away stops the poll.
+ * Pick up an answer a reload interrupted, for the conversation on screen. Separate from
+ * `useRemoteTranscript`, which runs only for an empty conversation. Torn down on navigation.
  */
 function useResumeInterruptedTurn(conversationId: string | undefined): void {
   const { auth, ready } = useAuth();
@@ -197,22 +161,16 @@ function useResumeInterruptedTurn(conversationId: string | undefined): void {
   }, [auth, ready, conversationId, interrupted]);
 }
 
-/** How long the shell trusts "does anybody else share this conversation" for one this person owns.
- *  The people panel invalidates the same key whenever it admits or removes somebody, so a change
- *  made here is seen at once; a minute is how long one made from another device may take. */
+/**
+ * How long the shell trusts an owned conversation's roster; the people panel invalidates it on
+ * change.
+ */
 const ROSTER_STALE_MS = 60_000;
 
 /**
- * Keep the conversation on screen in step with the other people in it, when there are any
- * (Chemclaw3_ui #130). `useRemoteTranscript` reads a transcript once, into an empty conversation;
- * a shared one changes under the reader, so it is re-read and merged on open, on focus and after
- * every turn, and somebody else's running turn is followed live. All of that is
- * `followSharedConversation`; this decides only *whether* to run it.
- *
- * Shared means: this person is a member of somebody else's conversation (`membership`), or they
- * own it and the roster names anybody else. The roster is read only for a conversation that has
- * been spoken in — a conversation nobody has written in yet has nothing to keep in step — and is
- * the people panel's own read under its own key, so opening the panel costs nothing extra.
+ * Keep a shared conversation in step with the other people in it (`followSharedConversation`); this
+ * decides only whether to run. Shared means: this person is a member, or the owner and the roster
+ * names someone else (read only once the conversation has messages, under the people panel's key).
  */
 function useSharedConversationSync(conversationId: string | undefined): void {
   const { auth, ready } = useAuth();
@@ -240,34 +198,16 @@ function useSharedConversationSync(conversationId: string | undefined): void {
 }
 
 /**
- * Claim the standing-query digests, once per page.
- *
- * At the top of the app rather than on `/review`, and the reason is the service's own contract:
- * `GET /digests` is a **destructive claim** — a row it returns is marked consumed and is never
- * re-delivered. So this has to happen somewhere that is mounted for the life of the session and
- * that writes straight into the persisted store. Reading it from the screen that displays it would
- * destroy a digest for anyone who opened that screen and navigated away before the response
- * landed.
- *
- * Once, not on an interval. A digest is produced at most once per subscription per day; polling it
- * would be a claim per poll against a mailbox that is usually empty, and the one thing worse than
- * not seeing a digest is claiming one into a page that is closing.
- */
-/**
- * Whether this page has already claimed its digests — module scope, not a ref.
- *
- * **A ref made "once per page" false.** `AppShell` is remounted whenever the route *shape* changes:
- * `/c/:id` renders it through `ConversationRoute` while `/review`, `/jobs` and `/protocols` render
- * it directly, so React reconciles a different component at that position and the ref goes with it.
- * Measured over four navigations: `GET /digests` was claimed 4 times, and that route is a
- * *destructive* claim whose rows are never re-delivered. Rows still landed (the `.then` writes
- * through `getState()`), so this was not loss — it was N unbounded windows in which a claim can be
- * in flight when the tab closes, where the docstring above argues for exactly one.
- *
- * `routes.tsx` already uses this shape for its prefetch latch.
+ * Whether this page has claimed its digests. Module scope, not a ref: `AppShell` remounts when the
+ * route shape changes, and a ref would claim again each time.
  */
 let digestsClaimed = false;
 
+/**
+ * Claim the standing-query digests once per page, at the top of the app, straight into the
+ * persisted store: `GET /digests` is a destructive claim, so it must not run from a screen the
+ * reader may leave before the response lands. Not polled.
+ */
 function useDigests(): void {
   const { auth, ready } = useAuth();
 
@@ -280,26 +220,17 @@ function useDigests(): void {
       .listDigests(auth)
       .then((digests) => useChatStore.getState().addDigests(digests))
       .catch(() => {
-        // The latch stays closed: retrying on the next render is how a flapping network turns one
-        // mailbox read into many. But **not silent** — `logger.debug` is below the shipped
-        // `CLIENT_LOG_LEVEL` of `info`, and "a failed claim consumed nothing" is only true of a
-        // request that never reached the service. A claim that committed server-side and then lost
-        // its response has consumed rows that are now delivered to nobody, with no record anywhere.
+        // The latch stays closed (no retry loop), but warn: a committed claim whose response was
+        // lost consumed rows nobody received.
         logger.warn('digests.claim_failed', {});
       });
   }, [auth, ready]);
 }
 
 /**
- * Claim this chemist's own blocked work, once per page.
- *
- * `useDigests`'s shape, because it is the same mailbox and the same destructive claim, and the
- * reasoning above applies unchanged. What differs is what a failure costs, so a failure is
- * recorded rather than only logged: a digest that is lost still leaves its notes merged and its
- * watch saved, while a check-in has nothing behind it — the service's own handler says an
- * unreported one is a blocked question nobody learns about until it expires. `ReviewQueue` reads
- * `checkInClaim` so that an empty section can only say "nothing is blocked" when the service
- * actually said so.
+ * Claim this chemist's own blocked work (check-ins) once per page — the same destructive mailbox as
+ * digests. A failure is recorded in the store, so the review page never says "nothing is blocked"
+ * unless the service said so.
  */
 let checkInsClaimed = false;
 
@@ -333,22 +264,8 @@ function useCheckIns(): void {
 let awaitingRead = false;
 
 /**
- * Fill the review badge from the service, once per page.
- *
- * **The badge was 0 after every reload, and stayed 0 until somebody opened `/review`.** `awaiting`
- * is a notification cache fed by `awaiting_answer` frames, and deliberately not persisted — a
- * persisted copy would outlive the answer. But the claim behind those frames is destructive and
- * at-most-once, so a reload does not replay them: the questions are still open, `GET /pending`
- * still lists them, and the one surface that says so is the screen a chemist only opens because
- * the badge told them to. That is the failure this whole path exists to end, arriving by the one
- * route the design left open.
- *
- * So the read that reconciles the cache happens here as well as in `ReviewQueue`, and `/pending` is
- * an ordinary GET rather than a claim — reading it twice costs a request and destroys nothing,
- * which is exactly why `useDigests` above cannot be written this way.
- *
- * The latch is released on failure, unlike the digest one: a retry here is free, and a badge that
- * reads 0 for the life of the page because one request lost its connection is the defect again.
+ * Fill the review badge from `GET /pending` once per page: the stream's claim is destructive, so a
+ * reload replays no frames. A plain GET, so the latch is released on failure.
  */
 function useAwaitingBadge(): void {
   const { auth, ready } = useAuth();
@@ -400,11 +317,8 @@ export function AppShell({
         key: '/',
         mod: true,
         label: 'Search conversations',
-        // **`getElementById` returns the first match, and there are two.** `SidebarBody` renders
-        // in both the always-mounted `lg:flex` column and the mobile drawer, so below `lg` the
-        // first match is inside a `display:none` subtree where `.focus()` is a no-op — the
-        // shortcut did nothing on exactly the bench tablets it was for. Query every copy and take
-        // the one that can actually take focus (`offsetParent` is null for a hidden element).
+        // Two copies of the sidebar exist (column and drawer); focus the one that is visible
+        // (`offsetParent`).
         run: () => {
           const boxes = Array.from(
             document.querySelectorAll<HTMLInputElement>('[data-conversation-search]'),
@@ -462,11 +376,7 @@ export function AppShell({
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <TopBar onRetry={onRetry} conversationId={children ? undefined : conversationId} />
-        {/* The rail is a sibling of <main>, not a child of it: it indexes the conversation rather
-            than being part of the document the reader is reading, and a landmark inside another
-            landmark is not what "skip to the transcript" should land in. It takes the same
-            `conversationId` the transcript does, from the same route parameter, which is what
-            makes it structurally impossible for the two to describe different conversations. */}
+        {/* The rail is a sibling of <main>, not inside it, and takes the same `conversationId` as the transcript. */}
         <div className="flex min-h-0 flex-1">
           <main className="flex min-w-0 flex-1 flex-col">
             {children ??
@@ -480,9 +390,7 @@ export function AppShell({
                 </>
               ))}
           </main>
-          {/* The rail, or — where the deployment has artefacts and this conversation has one — the
-              tabbed artefact pane that holds the rail as its Index tab. Same slot, same landmark
-              rule: a sibling of <main>, never inside it. */}
+          {/* The rail, or the artefact pane holding it as its Index tab; still a sibling of <main>. */}
           {conversationId && !children && <RightColumn conversationId={conversationId} />}
         </div>
       </div>

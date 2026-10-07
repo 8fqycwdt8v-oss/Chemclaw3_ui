@@ -1,10 +1,6 @@
 /**
- * The conversation store.
- *
- * Zustand rather than `useReducer` + Context because the streaming loop lives outside React and
- * fires an event per token. With a reducer we would have to thread `dispatch` through the turn
- * orchestrator via a ref and then memoise the entire component tree to stop it re-rendering on
- * every token. `getState()`/`setState()` from plain TypeScript is exactly what this needs, and
+ * The conversation store. Zustand rather than `useReducer` + Context because the streaming loop
+ * lives outside React and fires per token; `getState()`/`setState()` from plain TypeScript plus
  * selector-scoped subscriptions keep the composer and sidebar out of the per-token render path.
  */
 
@@ -13,9 +9,7 @@ import { persist, type PersistStorage, type StorageValue } from 'zustand/middlew
 import type { AwaitingAnswerEvent, ChemclawEvent, JobTerminalEvent } from '../../shared/events.ts';
 import { useEntityStore } from '../chem/entities.ts';
 import type { ApiErrorKind } from '../api/errors.ts';
-// Type-only, so this adds no edge to the module graph: the wire shape of a check-in is declared
-// where every other wire shape is, and restating it here would be a second definition of one
-// contract.
+// Type-only: the check-in wire shape is declared once, in the client.
 import type { CheckIn, Digest } from '../api/client.ts';
 import type {
   AssistantMessage,
@@ -29,17 +23,9 @@ import type {
 import { mergeTranscript } from './transcript.ts';
 
 /**
- * One finished job, plus what the wire event does not carry.
- *
- * The event has a job id and an outcome and nothing else — no session, no timestamp. The consumer
- * knows which stream it opened, so the association is attached at that boundary rather than by
- * inventing fields on the shared contract.
- *
- * `event` is the terminal union, not just the completion: a job that fails after the turn ends is
- * exactly as much news as one that succeeds, and it arrives on the same stream. Widening this
- * needed no persist migration — every item already on disk is a `job_completed`, which is still a
- * member of the union — but anything reading it must now branch on `event.type` rather than
- * assuming a `summary`.
+ * One finished job, plus the session and timestamp the wire event does not carry (attached by the
+ * consumer that opened the stream). `event` is the terminal union, so readers branch on
+ * `event.type`.
  */
 export interface JobFeedItem {
   event: JobTerminalEvent;
@@ -50,11 +36,8 @@ export interface JobFeedItem {
   seen: boolean;
   dismissed: boolean;
   /**
-   * When `dismissed` last changed in this browser, so the cross-tab fold can tell a dismissal the
-   * other tab made from a restore this tab made after it. Unlike a check-in or a digest, a job card
-   * can be put back (`restoreJobItem`), so neither "ours wins" (which undid the other tab's
-   * dismissal) nor "dismissed wins" (which would undo this tab's restore) is right on its own.
-   * Absent on every row persisted before it existed, which reads as 0.
+   * When `dismissed` last changed in this browser, so the cross-tab fold can tell another tab's
+   * dismissal from this tab's later restore. Absent reads as 0.
    */
   dismissedChangedAt?: number;
 }
@@ -65,31 +48,19 @@ interface PersistedState {
   order: string[];
   activeId: string | null;
   /**
-   * The half-written question in each conversation's composer.
-   *
-   * Persisted because losing it is the one data loss in this app the chemist did not ask for and
-   * cannot undo: `drafts` was in the store and absent from `partialize`, so a reload threw away
-   * what they were typing. It compounds with a reload during a long turn, which loses the answer
-   * too. Cheap — a draft is bounded by the composer's own message cap and there is one per
-   * conversation.
+   * The half-written question per conversation. Persisted so a reload does not lose what the
+   * chemist was typing.
    */
   drafts: Record<string, string>;
   jobFeed: JobFeedItem[];
   /**
-   * Standing-query findings, claimed from the service's mailbox.
-   *
-   * Persisted because **the read is the consume**: `GET /digests` marks every row it returns as
-   * consumed and never re-delivers it, so a digest held only in component state is one a reload
-   * destroys. Claimed once per page rather than polled, for the same reason.
+   * Standing-query findings claimed from the service's mailbox. Persisted because the read consumes
+   * them: `GET /digests` never re-delivers a row.
    */
   digests: DigestCard[];
   /**
-   * The caller's own blocked questions, claimed from the same mailbox as `digests`.
-   *
-   * Persisted for the same reason and with a sharper edge: `GET /check-ins` consumes the row it
-   * returns, and unlike a digest there is nothing behind it to re-find — the service's own handler
-   * says an unreported check-in is a blocked question a chemist does not learn about until it
-   * expires. Held only in component state it would be destroyed by a reload.
+   * The caller's own blocked questions, claimed from the same destructive mailbox as `digests`, so
+   * persisted for the same reason.
    */
   checkIns: CheckInCard[];
   notifyOnJobComplete: boolean;
@@ -100,11 +71,8 @@ export interface DigestCard {
   query: string;
   noteIds: string[];
   /**
-   * Which of `noteIds` the corpus now disagrees with, and one line of what each note says.
-   *
-   * Optional because they are absent from every card persisted before they were read at all, and an
-   * absent one is indistinguishable from an empty one — the same reason `migratePersisted` takes
-   * `digests` itself as an additive field rather than a version bump. Every reader defaults them.
+   * Which of `noteIds` the corpus now disagrees with, and one line per note. Optional (absent on
+   * older persisted cards); readers default them.
    */
   disputed?: string[];
   headlines?: Record<string, string>;
@@ -114,20 +82,13 @@ export interface DigestCard {
 }
 
 /**
- * One claimed check-in, plus what the wire shape does not carry.
- *
- * The service's six fields kept as they arrive — the two day counts especially, which it has
- * already floored, and which nothing here recomputes because there is no timestamp to recompute
- * them from. `receivedAt` is when WE claimed it, and is the only clock this card has.
+ * One claimed check-in. The service's fields are kept as they arrive (day counts are already
+ * floored and never recomputed); `receivedAt` is when this browser claimed it.
  */
 export interface CheckInCard {
   /**
-   * This card's identity: the service's own request id, or a content key when that is empty.
-   *
-   * `CheckIn`'s own docstring says every field is defaulted upstream and so "always present and
-   * possibly empty", and this was keyed on `request_id` with no guard — so two questions that
-   * both arrived with an empty id folded into one card and destroyed a notice the service will
-   * never send again. `checkInKey` is what decides it.
+   * This card's identity: the service's request id, or a content key when it is empty
+   * (`checkInKey`), so id-less rows do not collapse into one.
    */
   requestId: string;
   /** What class of answer is wanted, badged as given — the pending inbox badges its rows by it too. */
@@ -144,35 +105,23 @@ export interface CheckInCard {
   /** When WE claimed it. The service sends no timestamp, so nothing here may imply one. */
   receivedAt: number;
   /**
-   * When the last claim carrying this question landed — re-stamped on every refresh, where
-   * `receivedAt` deliberately is not.
-   *
-   * The two answer different questions and the card needs both. `receivedAt` orders the list and
-   * keeps a nine-day-old question from reading as news; `refreshedAt` says how old the *numbers*
-   * are. Without it nothing could decide which of two copies of one question is fresher, and
-   * `mergeWithStored` resolved that the wrong way round: a tab open since yesterday overwrote
-   * this morning's refresh on disk, so the countdown on screen was a day more generous than the
-   * truth — the exact direction the service's own `FLOOR` exists to avoid.
+   * When the last claim carrying this question landed — re-stamped on every refresh, unlike
+   * `receivedAt`. `receivedAt` orders the list; `refreshedAt` says how fresh the countdown is and
+   * decides which copy wins in `mergeWithStored`.
    */
   refreshedAt: number;
   dismissed: boolean;
 }
 
 /**
- * How the once-per-page claim of `GET /check-ins` went.
- *
- * Not persisted: it is a fact about this page's request, not about the rows. A reload re-claims,
- * so a stored `failed` would outlive the failure and a stored `ready` would outlive the evidence.
- *
- * It exists because the rows alone cannot tell the three apart. An empty list means "nothing of
- * yours is blocked" only when the claim actually answered — the same confident emptiness
- * `ReviewQueue` has now had to delete two sections over.
+ * How this page's single claim of `GET /check-ins` went. Not persisted: it describes this page's
+ * request. It lets an empty list mean "nothing blocked" only when the claim actually answered.
  */
 export type ClaimState = 'pending' | 'ready' | 'failed' | 'absent';
 
 /**
- * One migration step. Each takes the shape the previous version wrote and returns the next, so
- * `migrate` can compose however many the reader has skipped. See the note on `migrate` below.
+ * One migration step: takes the previous version's shape and returns the next, so `migrate`
+ * composes them.
  */
 function migrateV1toV2(state: Partial<PersistedState>): Partial<PersistedState> {
   const conversations: Record<string, Conversation> = {};
@@ -215,40 +164,16 @@ function migrateV2toV3(state: Partial<PersistedState>): Partial<PersistedState> 
 }
 
 /**
- * Bring whatever is on disk up to the current shape.
+ * Bring whatever is on disk up to the current shape, as a chain of per-version steps. Unknown or
+ * pre-v1 state becomes a clean slate.
  *
- * A chain of steps rather than one function with an early return, so each bump only has to
- * describe its own delta and the next one composes on top. The shape this replaced —
- * `if (version >= 2) return persisted` — quietly stopped applying to anything once v2 was the
- * floor, which is exactly the bug you get the first time you add a field afterwards.
- *
- * Unknown or older-than-v1 state falls back to a clean slate rather than guessing.
- *
- *  v1 -> v2  no new fields. Repairs state the old code could persist but the new code assumes
- *            away: a message left mid-stream would rehydrate as 'streaming' and spin forever,
- *            because there is no resume endpoint.
- *  v2 -> v3  adds the durable job feed and the notification preference, and makes
- *            `sessionOrigin` explicit. Everything already on disk was created locally, so 'local'
- *            is the honest default — 'server' would send the transcript rehydrate off to
- *            GET /messages for conversations that never had a remote copy.
- *
- * Exported because it is the only part of the persist config that can be wrong in a way nobody
- * notices until an upgrade lands on a real machine.
+ * - v1 -> v2: repairs messages left mid-stream (there is no resume endpoint).
+ * - v2 -> v3: adds the durable job feed and notification preference; `sessionOrigin` defaults to
+ *   `'local'`.
  */
 export function migratePersisted(persisted: unknown, version: number): PersistedState {
-  // **A version from the future is not migrated — it is discarded.** zustand calls `migrate`
-  // whenever the stored version *differs* from the configured one, newer included, and with only
-  // `if (version < n)` steps both guards are then false: a v4 slice was returned unchanged, cast
-  // to `PersistedState`, and handed to the app. Measured against a v4 payload whose `jobFeed` was
-  // a string, `useJobNotifications` did `jobFeed.filter(...)` on it and threw during the render of
-  // `AppShell` — which the root boundary answers by replacing the whole app with the crash screen,
-  // on every reload, because the value is still on disk.
-  //
-  // The trigger is not a hostile actor, it is an ordinary release: a canary or a rollback puts a
-  // browser that has run the newer bundle back on the older one. There is nothing an older reader
-  // can safely do with a shape written by a schema it has never seen, so this returns the empty
-  // state — the same answer `chatStorage.getItem` already gives for unparseable JSON, and a clean
-  // first run rather than a boot loop.
+  // A version from the future is discarded, not migrated: an older bundle (canary or rollback)
+  // cannot safely read a newer schema, and passing it through crashes the render on every reload.
   if (version > CHAT_PERSIST_VERSION) return emptyPersistedState();
 
   const steps: ((s: Partial<PersistedState>) => Partial<PersistedState>)[] = [];
@@ -260,9 +185,8 @@ export function migratePersisted(persisted: unknown, version: number): Persisted
 
   try {
     const migrated = steps.reduce<Partial<PersistedState>>((acc, step) => step(acc), state);
-    // Fields added after v3 without a version bump, because they are additive and an absent one is
-    // indistinguishable from an empty one. A bump would be for a field whose *absence* means
-    // something different from its empty value; neither of these is that.
+    // Additive fields since v3, defaulted here without a version bump: an absent one means the same
+    // as empty.
     return {
       ...migrated,
       drafts: migrated.drafts ?? {},
@@ -270,10 +194,8 @@ export function migratePersisted(persisted: unknown, version: number): Persisted
       checkIns: migrated.checkIns ?? [],
     } as PersistedState;
   } catch {
-    // A step that throws on a shape it did not expect — `migrateV1toV2` does exactly this on a
-    // non-array `order` or `messages` — used to surface as an unhandled rejection out of
-    // `persist.rehydrate()`, which no caller awaits. Same answer as above: a slice this reader
-    // cannot make sense of is a slice it does not have.
+    // A step that throws on an unexpected shape yields the empty state rather than an unhandled
+    // rejection from `persist.rehydrate()`.
     return emptyPersistedState();
   }
 }
@@ -295,12 +217,8 @@ const emptyPersistedState = (): PersistedState => ({
 /** Keep persisted state bounded — see `partialize` below. */
 const MAX_CONVERSATIONS = 30;
 /**
- * The most recent messages of any one conversation that are written to disk.
- *
- * `messages` was the one collection here with no bound at all, while `order`, `trace` and
- * `jobFeed` all had one — so a single long-lived conversation could carry the whole persisted
- * payload past the browser's quota on its own. Generous rather than tight: the in-memory
- * conversation keeps everything for the session, and this only decides what survives a reload.
+ * Most recent messages of one conversation written to disk, so one long conversation cannot exhaust
+ * the quota. Memory keeps everything for the session.
  */
 const MAX_PERSISTED_MESSAGES = 200;
 const MAX_JOB_FEED = 50;
@@ -308,49 +226,28 @@ const MAX_JOB_FEED = 50;
 const JOB_FEED_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * When a check-in's countdown was last true, which is what ages it out.
- *
- * Not `receivedAt`: a refresh deliberately keeps that (it orders the list), so a question still
- * open and re-sent every night was dropped from disk a week after it *first* arrived — and the
- * claim that refreshed it had already been consumed, so the card was lost on the next reload.
- * Falls back to `receivedAt` because nothing migrates `refreshedAt` onto a card persisted before
- * the field existed, and `undefined > cutoff` is false, so such a card would otherwise be dropped.
+ * When a check-in's countdown was last true, which is what ages it out (not `receivedAt`, which a
+ * refresh keeps). Falls back to `receivedAt` for cards persisted before `refreshedAt`.
  */
 const checkInFreshAt = (card: Pick<CheckInCard, 'receivedAt'> & { refreshedAt?: number }): number =>
   card.refreshedAt ?? card.receivedAt;
 
 /**
- * How many claimed check-ins are kept. The job feed has had a bound since it was written and this
- * did not, which matters more here than there: `_PAGE_ROWS` upstream is 200 and two free-text
- * fields are truncated at 1,000 chars each, so one claim can be a few hundred kilobytes, and
- * `withinLearnedCap` sheds *conversations* to stay inside the quota. Unbounded, a chemist with
- * many open questions would lose transcript persistence to a list that only ever grows.
+ * Bound on claimed check-ins; a claim can be hundreds of kilobytes and must not crowd out
+ * transcript persistence.
  */
 const MAX_CHECK_INS = 200;
 
 /**
- * How many claimed digests are kept, and why it is the check-ins' number rather than the feed's.
- *
- * This was the one persisted list with no count bound at all — held only by the 7-day age cutoff in
- * `partialize`, and `shedOldest` cannot help: it sheds conversations and then messages, and a
- * digest is the only copy there is (the read is the consume), so shedding one would destroy a
- * finding the service will never send again. Unbounded, therefore, a long enough list does not cost
- * itself, it costs the *transcript*: the payload cannot be made to fit, `shedOldest` returns `null`,
- * `storageWritable` latches false and history silently stops being saved. The same arithmetic as
- * `MAX_CHECK_INS` — same mailbox, same once-per-page claim, and a card of the same order of size
- * now that `headlines` is read — so the same number.
+ * Bound on claimed digests, matching `MAX_CHECK_INS` (same mailbox, similar card size).
+ * `shedOldest` cannot drop digests (they are the only copy), so without a count bound a long list
+ * would stop transcript persistence.
  */
 const MAX_DIGESTS = 200;
 
 /**
- * A check-in's identity, and the reason it is not simply `request_id`.
- *
- * `CheckIn`'s docstring states that every field is defaulted upstream and so is "always present
- * and possibly empty". Keyed on the id alone, two questions that both arrived with an empty id
- * folded into one card — and since the read is the consume, the one that lost is destroyed
- * rather than merely hidden. The content fallback is the shape `digests` already uses, and it has
- * a second virtue: a row with no id cannot be refreshed either, so a content key at least keeps
- * it stable across claims instead of minting a new card each time.
+ * A check-in's identity: `request_id`, or a content key when it is empty, so two id-less questions
+ * do not fold into one card (which, with a consuming read, would destroy one).
  */
 export const checkInKey = (row: {
   requestId: string;
@@ -417,17 +314,10 @@ function newAssistantMessage(): AssistantMessage {
 }
 
 /**
- * Close the open `tool_call` row for `tool` with how it ended, returning the updated trace.
- *
- * Both endings come through here, because a call is announced at issue now (backend D-159) and an
- * open row means "still running" — so a `tool_failed` that left its row open would read as running
- * forever. `tool_failed` still appends its own row afterwards; this only stops the claim.
- *
- * Neither event carries a call id, so the match is "the oldest still-open row for this tool" —
- * first issued, first answered. Two concurrent calls to the *same* tool returning out of order
- * would pair the previews the wrong way round; nothing on the wire can say otherwise, and the
- * alternative (a row per result) makes every reader do the same pairing by eye. An ending whose
- * call has already been dropped by `MAX_TRACE_ENTRIES` is discarded with it.
+ * Close the oldest still-open `tool_call` row for `tool` with how it ended. Calls are announced at
+ * issue, so an open row means "running". No call id on the wire: two concurrent calls to the same
+ * tool returning out of order pair the wrong way. An ending whose row was dropped by
+ * `MAX_TRACE_ENTRIES` is discarded.
  */
 function closeToolCall(
   trace: TraceEntry[],
@@ -468,13 +358,9 @@ function openCallIndex(trace: TraceEntry[], tool: string): number {
 }
 
 /**
- * Record where a queued call is, on its open row. Not a row of its own: it qualifies a step that
- * is already on screen, and a line per poll would bury the turn in "still waiting". An update
- * whose call already ended (or was dropped by `MAX_TRACE_ENTRIES`) is discarded.
- *
- * Paired by job id first: two calls to one tool in one step are two queued runs, and pairing by
- * name alone would put the second's "queued" on the first while it runs. A job id not yet seen
- * takes the oldest open row for the tool that carries no annotation, and only then the oldest.
+ * Record a queued call's position on its open row (not a new row). Paired by job id first; an
+ * unseen job id takes the oldest unannotated open row for the tool, then the oldest. Updates for
+ * ended or dropped calls are discarded.
  */
 function markQueued(
   trace: TraceEntry[],
@@ -498,28 +384,9 @@ function markQueued(
 }
 
 /**
- * Mark a `job_started` row as ended, whichever way it ended.
- *
- * The job-shaped sibling of `closeToolCall`, and it exists for the sharper version of the same
- * problem. A launch row carries the badge "runs asynchronously"; before this, nothing ever took
- * that badge off, so a job that failed an hour ago still read as in flight. Matched on the job id
- * rather than on issue order — unlike a tool call, a job has an id on the wire, so there is no
- * pairing to guess at.
- *
- * A launch row already dropped by `MAX_TRACE_ENTRIES`, or a completion for a job launched in a
- * different turn, simply finds nothing and leaves the trace alone.
- */
-/**
- * Fold one source's report into the sweep already standing, when there is one.
- *
- * A sweep arrives as one event per source, and both the reading and the cost say it is one step:
- * the rail draws "graph 6 · lexical failed" as one line, and a row per source spends the trace's
- * bounded `MAX_TRACE_ENTRIES` budget on retrieval — a retrieval-heavy turn evicting its own early
- * tool calls, and the result blocks that hang off them.
- *
- * Consecutive is the whole test, and it is the right one: the events of one `gather_evidence` call
- * arrive together, and anything between them ends the sweep. Returns `null` when this event starts
- * a new one, which is the caller's cue to append rather than merge.
+ * Fold one evidence source's report into the sweep row it belongs to. Consecutive events of one
+ * `gather_evidence` call form one row, saving the bounded trace budget. Returns `null` when this
+ * event starts a new sweep.
  */
 function foldIntoSweep(trace: TraceEntry[], entry: TraceEntry): TraceEntry[] | null {
   const last = trace[trace.length - 1];
@@ -535,6 +402,10 @@ function foldIntoSweep(trace: TraceEntry[], entry: TraceEntry): TraceEntry[] | n
   return [...trace.slice(0, -1), merged];
 }
 
+/**
+ * Mark a `job_started` row as ended, so its "runs asynchronously" badge comes off. Matched on job
+ * id; a launch row already dropped, or from another turn, leaves the trace alone.
+ */
 function settleJob(trace: TraceEntry[], jobId: string): TraceEntry[] {
   const index = trace.findIndex(
     (entry) => entry.kind === 'job_started' && entry.job?.jobId === jobId && !entry.job.settled,
@@ -579,13 +450,8 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
           agent: event.agent,
         },
       };
-    // Every source, not only the failures. This used to keep the raised ones and drop the rest,
-    // on the argument that a source asked and silent "belongs in an evidence summary, not in a
-    // trace of what went wrong" — which was right about the trace it was written against, and is
-    // what the rail now IS: one row per sweep reading `lexical failed · graph 6 · eln 0`, where a
-    // dark source and a broken one sit side by side and are told apart by name. Dropping the
-    // successes here made that row unbuildable, and left "which sources were even asked?"
-    // answerable only by reading the service's logs.
+    // Every source is kept, successes included, so the sweep row can show which sources were asked
+    // and which failed.
     case 'evidence_source': {
       const reported = {
         source: event.source,
@@ -595,9 +461,8 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
       return {
         ...base,
         kind: 'evidence_source',
-        // A sweep of one. Every entry is born a sweep so that `foldIntoSweep` has something to
-        // merge INTO and something to merge FROM without a second shape: the first source of a
-        // run stands as a one-source sweep, and each one after it is folded in.
+        // Every entry starts as a one-source sweep so `foldIntoSweep` has one shape to merge into
+        // and from.
         evidenceSweep: [reported],
         // The same source again, under the field a trace persisted before `evidenceSweep`
         // existed carries. Rehydrated transcripts still render from it.
@@ -646,9 +511,8 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
         kind: 'handoff',
         handoff: { from: event.from_agent, to: event.to_agent, reason: event.reason },
       };
-    // A row rather than a field on the message: the trace is what the transcript persists and what
-    // `MessageList` reads its result blocks from, so the artefact card sits beside them on the same
-    // footing — and a turn that revised one artefact twice keeps both announcements in order.
+    // A trace row rather than a message field, so the artefact card sits beside result blocks and
+    // repeated revisions stay in order.
     case 'exhibit':
       return {
         ...base,
@@ -670,13 +534,9 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
 
 export interface ChatState {
   /**
-   * The signed-in account's id (`oid`) whose history this store holds, or `null` before it is
-   * known and under a provider with no account.
-   *
-   * Not persisted — it is *which slot* was loaded, set by `hydrateChatForAccount` — and here rather
-   * than read off the auth context because the one consumer only labels things by it: the
-   * transcript says "You" over the reader's own messages in a shared conversation (Chemclaw3
-   * #483), and a label is no reason to make every transcript render depend on the auth provider.
+   * The signed-in account id (`oid`) whose history this store holds, or `null`. Not persisted; set
+   * by `hydrateChatForAccount`. Used to label the reader's own messages "You" in shared
+   * conversations.
    */
   viewer: string | null;
   conversations: Record<string, Conversation>;
@@ -684,17 +544,11 @@ export interface ChatState {
   activeId: string | null;
   composerLock: ComposerLock;
   banner: Banner | null;
-  /** Unsent text, keyed by conversation. Component state leaked across conversation switches:
-   *  the composer does not unmount when `conversationId` changes, so a draft typed in one could
-   *  be sent into another. */
+  /** Unsent text per conversation (the composer does not unmount on a conversation switch). */
   drafts: Record<string, string>;
   /**
-   * The agent profile a not-yet-created session should be minted on, keyed by conversation.
-   *
-   * Not persisted, and it does not need to be: it only has an effect until the session exists,
-   * and once it does the choice is fixed on the service side and the picker is gone. Keyed by
-   * conversation for the same reason `drafts` is — the composer does not unmount when the active
-   * conversation changes, so component state would leak the choice across a switch.
+   * The agent profile a not-yet-created session should use, per conversation. Not persisted: it
+   * only matters until the session exists.
    */
   sessionProfiles: Record<string, string>;
   /** Cross-turn job endings — successes and failures — from `GET /sessions/{id}/events`.
@@ -709,65 +563,26 @@ export interface ChatState {
   /** True once the backend has told *this tab* twice that we are over its stream cap. */
   jobStreamsThrottled: boolean;
   /**
-   * True while the tab holding the account's streams reports that it is over the cap.
-   *
-   * A second field rather than a second writer of `jobStreamsThrottled`, because the two carry
-   * different weights and only one of them may be irreversible. `jobStreamsThrottled` is this
-   * tab's own evidence — it 429'd, twice — and it never clears, because a tab that over-subscribed
-   * once will do it again. Relaying that decision into every other tab made one window's two 429s
-   * pin the whole account to a single stream for the life of every page, including tabs that never
-   * 429'd and including the next leader after a takeover; nothing expired it and nothing could.
-   *
-   * So what travels is a *report*, and it follows the reporter: a health note that says `false`
-   * clears it, and a leader that goes away is replaced by one that publishes its own health on
-   * takeover. It drives the indicator — a follower holds no streams and would otherwise show a
-   * chemist a healthy app — and it deliberately does not drive the budget, which is what the
-   * reporting tab's own flag is for.
+   * True while the tab holding the account's streams reports being over the cap. Separate from
+   * `jobStreamsThrottled` (this tab's own, irreversible evidence): a relayed report follows its
+   * reporter and clears when it says `false` or a new leader publishes. It drives the indicator,
+   * never the budget.
    */
   jobStreamsThrottledElsewhere: boolean;
   /**
-   * Sessions whose job push-back stream has failed to connect repeatedly.
-   *
-   * A list rather than a flag, because the streams are per session and a single boolean would
-   * flap: one dead session would clear the moment another delivered a frame, which is how the
-   * indicator would end up describing neither. Not persisted — it is a statement about the network
-   * right now, and a reload re-establishes every stream anyway.
+   * Sessions whose job stream has failed to connect repeatedly. A list, because one boolean would
+   * flap across sessions. Not persisted.
    */
   jobStreamsFailing: string[];
   /**
-   * Requests a person has to answer before something durable can continue.
-   *
-   * **Not persisted, and the reason is the whole design.** This list is a *notification* cache,
-   * not a projection: it is fed by `awaiting_answer` frames off the push-back stream so a badge can
-   * appear without polling, and it is replaced wholesale by `syncAwaiting` whenever
-   * `GET /pending` — the only authority on what is actually open — has been read. A persisted copy
-   * would survive a reload and outlive the answer, so the one failure this whole path exists to end
-   * (a question nobody is told about) would come back as its mirror image: a badge for a question
-   * somebody already answered.
-   *
-   * **Request ids, and nothing else.** It carried a four-field brief — `subject`, `kind`, `due_at`
-   * beside the id — written by both producers and read by *nobody*: the only consumers of this
-   * slice are the sidebar badge, which reads `.length`, and the inbox, which reads
-   * `awaitingRevision` and renders from its own `GET /pending` response. That is the shape
-   * `D-2026-08-26-an-attribution-nothing-can-write-is-not-an-attribution` names — a field whose
-   * docstring describes what a reader would do with it, and no reader. Deleting it also deletes a
-   * defect it had grown: `syncAwaiting` compared only ids, so a `/pending` read that corrected a
-   * `due_at` the stream never carried was discarded as "unchanged", which is the one job that
-   * function has. A set of ids compared by id is correct by construction.
-   *
-   * `state` was never in it either: an entry is here *because* it is waiting, and an expiry
-   * removes it.
+   * Request ids a person must answer before durable work can continue. A notification cache fed by
+   * `awaiting_answer` frames and replaced wholesale by `syncAwaiting` from `GET /pending`, the
+   * authority. Not persisted, so a reload cannot show a badge for an already-answered question.
    */
   awaiting: string[];
   /**
-   * Bumped by `noteAwaiting` and **never by `syncAwaiting`** — the count of times the *stream* said
-   * something changed.
-   *
-   * This exists so the inbox can re-read `GET /pending` on a push without re-reading it on its own
-   * reconciliation. Depending on `awaiting.length` instead looks equivalent and is not: the first
-   * read of a non-empty inbox moves that number from 0, which re-runs the effect that just set it,
-   * so every mount with an open question costs a second round trip to learn nothing. A counter the
-   * read cannot move has no such edge.
+   * Bumped by `noteAwaiting`, never by `syncAwaiting`: lets the inbox re-read `GET /pending` on a
+   * push without its own read re-triggering itself.
    */
   awaitingRevision: number;
   /** Opt-in, and deliberately separate from `Notification.permission` — a browser-level
@@ -778,19 +593,13 @@ export interface ChatState {
     messageId: string;
     abort: AbortController;
     /**
-     * Stop the turn on the server, then abort the local stream. Built by the send path, which
-     * is the one place that holds the auth provider — the backend detaches on disconnect now,
-     * so aborting the fetch alone would leave the turn running (and the session 409-busy) for
-     * its whole remaining duration.
+     * Stop the turn on the server, then abort the local stream. Aborting alone would leave the turn
+     * running, since the backend detaches on disconnect.
      */
     stop: () => void;
     /**
-     * The same cancellation, sent while this document is being discarded.
-     *
-     * Separate from `stop` because the unload path can do exactly one thing — get a `keepalive`
-     * request onto the wire with a token it already has — and none of the things `stop` does
-     * after that (abort the stream, await the outcome, tell the reader) survive the navigation
-     * anyway. See its docstring in `src/state/sendMessage.ts`.
+     * The same cancellation sent while the document is discarded: only a `keepalive` request
+     * survives navigation. See `src/state/sendMessage.ts`.
      */
     abandon: () => void;
   } | null;
@@ -802,17 +611,18 @@ export interface ChatState {
   setSessionId: (conversationId: string, sessionId: string, contextLost?: boolean) => void;
   hydrateTranscript: (conversationId: string, messages: ChatMessage[]) => void;
   /**
-   * Fold a re-read transcript into a conversation that already has messages — the shared-
-   * conversation sync (Chemclaw3_ui #130). Merged against the messages as they are *now*, inside
-   * the write, so a token that landed while the read was in flight is not lost. See
-   * `mergeTranscript` for the rules. Returns whether anything changed.
+   * Merge a re-read transcript into a conversation that already has messages (shared-conversation
+   * sync), against the messages as they are now. See `mergeTranscript`. Returns whether anything
+   * changed.
    */
   mergeRemoteTranscript: (conversationId: string, remote: ChatMessage[]) => boolean;
   /** Open a placeholder for somebody else's running turn, followed live. See
    *  `AssistantMessage.watched`. Returns its id. */
   startWatchedTurn: (conversationId: string) => string;
-  /** Remove every watched placeholder from a conversation — the view was closed before the
-   *  re-read could replace it. Returns whether there was one. */
+  /**
+   * Remove watched placeholders when the view closes before the re-read replaces them. Returns
+   * whether there was one.
+   */
   dropWatchedTurns: (conversationId: string) => boolean;
   attachPlan: (
     conversationId: string,
@@ -825,11 +635,8 @@ export interface ChatState {
     author?: string | null,
   ) => void;
   /**
-   * Record whether this person is a member of somebody else's conversation, and whose.
-   *
-   * Written from the two reads that can answer it — `GET /sessions/shared` and
-   * `GET /sessions/{id}/members` — and cleared (`undefined`) when the second says this person owns
-   * it. See `Conversation.membership`.
+   * Record whether this person is a member of somebody else's conversation, and whose (from `GET
+   * /sessions/shared` and `GET /sessions/{id}/members`); `undefined` when they own it.
    */
   setMembership: (conversationId: string, membership: { owner: string | null } | undefined) => void;
 
@@ -843,9 +650,8 @@ export interface ChatState {
   setTurnStalled: (conversationId: string, messageId: string, stalled: boolean) => void;
   finishTurn: (conversationId: string, messageId: string, status: 'done' | 'aborted') => void;
   /**
-   * End a turn that never ran: its message was withdrawn from a shared conversation's line
-   * (`queue_cancelled`, or this person's own withdrawal). Settled as `aborted` — there is no answer
-   * and nothing to retry as-is — with the reason on `AssistantMessage.withdrawn`, not `error`.
+   * End a turn whose queued message was withdrawn: settled as `aborted`, with the reason on
+   * `AssistantMessage.withdrawn`.
    */
   withdrawTurn: (conversationId: string, messageId: string, reason: string) => void;
   failTurn: (
@@ -861,86 +667,45 @@ export interface ChatState {
   setStreaming: (s: ChatState['streaming']) => void;
   pushJobFinished: (event: JobTerminalEvent, sessionId: string) => void;
   /**
-   * Record one `awaiting_answer` frame off the push-back stream.
-   *
-   * Adds on `state: 'waiting'` and **removes on anything else**, which is what makes an expiry a
-   * useful event rather than a second copy of the open: the workflow pushes again when the deadline
-   * passes, and a badge that only ever counted up would show a question that can no longer be
-   * answered. Idempotent on `request_id` because reminders re-push the same request and the stream
-   * is at-least-once on reconnect — and since the list holds ids, a re-push has nothing to correct
-   * and the second one is simply dropped.
+   * Record one `awaiting_answer` frame: add on `state: 'waiting'`, remove on anything else (an
+   * expiry is pushed too). Idempotent on `request_id` (reminders and reconnects re-push).
    */
   noteAwaiting: (event: AwaitingAnswerEvent) => void;
   /**
-   * Replace the list with what `GET /pending` actually holds.
-   *
-   * The stream says *that* something changed; this says *what is true*. Anything that reads the
-   * inbox calls it, so answering a question in another tab, or a request opened while this tab was
-   * closed, both reconcile on the next read rather than waiting for a frame that will never come.
-   * `App.tsx` calls it once per page as well as the inbox, because the claim behind the stream is
-   * destructive and a reload therefore replays nothing.
+   * Replace the list with what `GET /pending` holds. Every inbox read calls it, and `App.tsx` once
+   * per page, since the stream's claim is destructive and a reload replays nothing.
    */
   syncAwaiting: (requestIds: string[]) => void;
   /**
-   * Record digests claimed from the service, dropping any this browser already holds.
-   *
-   * Idempotent on (query, note ids): the claim is destructive so a row cannot arrive twice from the
-   * service, but a second tab claiming concurrently, or a StrictMode double-effect, can both reach
-   * this — and a duplicated finding reads as two findings.
+   * Record claimed digests, dropping duplicates by (query, note ids) — a second tab or StrictMode
+   * can deliver the same claim twice.
    */
   addDigests: (digests: Digest[]) => void;
   dismissDigest: (index: number) => void;
   /**
-   * Record the check-ins this page claimed, and mark the claim answered.
-   *
-   * Keyed on `request_id`, and a row that is already here is **refreshed rather than dropped**,
-   * which is where this departs from `addDigests`. A digest's identity is its content, so a second
-   * copy is the same finding; a check-in's identity is the question, and the sweep re-sends it
-   * every night with `open_days` up and `days_left` down. Dropping the later row would leave a
-   * card saying "5 days left" for as long as the reader kept it — a deadline this app would then
-   * be overstating, which is the exact direction the service floors its arithmetic to avoid.
-   *
-   * `dismissed` survives a refresh: the reader said they had seen that question, and a nightly
-   * sweep is not news that undoes it.
-   *
-   * Called with `[]` too, which is how an empty mailbox marks the claim answered — the difference
-   * between "nothing is blocked" and "we could not ask" is the whole reason this is not a bare
-   * array.
+   * Record this page's claimed check-ins and mark the claim answered. Keyed by `checkInKey`; an
+   * existing card is refreshed, not dropped, because the nightly sweep re-sends the same question
+   * with updated day counts. `dismissed` survives a refresh. Called with `[]` for an empty mailbox.
    */
   addCheckIns: (claimed: CheckIn[]) => void;
   /** Record that this page's one claim did not land, so the surface can say so rather than read
    *  as an empty mailbox. */
   failCheckInClaim: () => void;
-  /**
-   * The service answered 404: this deployment serves no check-in mailbox.
-   *
-   * Distinct from an empty one, because the section says "nothing of yours is blocked" and that
-   * sentence needs the service to have actually said so.
-   */
+  /** The service answered 404: no check-in mailbox. Distinct from an empty one. */
   markCheckInsAbsent: () => void;
   /** Dismiss one card, identified by `checkInKey` rather than by its possibly-empty id. */
   dismissCheckIn: (key: string) => void;
   /**
-   * Make a local conversation for a session the service forked from `parentId`.
-   *
-   * The parent's messages are carried over so the branch reads as a branch rather than as an empty
-   * thread that happens to share a history on the server — the service copied them, and a local
-   * conversation that showed none of them would be describing a different fork. Returns the new
-   * conversation's id, or `null` when the parent is gone.
+   * Make a local conversation for a session forked from `parentId`, carrying the parent's messages.
+   * Returns the new id, or `null` if the parent is gone.
    */
   adoptFork: (parentId: string, sessionId: string) => string | null;
   dismissJobItem: (jobId: string) => void;
   restoreJobItem: (jobId: string) => void;
   markJobsSeen: () => void;
   /**
-   * Stop a reload-interrupted turn from being polled for again.
-   *
-   * `finishTurn` clears `interruptedByReload` for every turn that *settles*; this is the one exit
-   * that settles nothing — recovery spent its whole budget and the answer is not on the server.
-   * Without it the flag persists and every future boot re-runs the full 630 s poll.
-   *
-   * Keyed on the flag still being set, so a newer turn that has taken this message's place is
-   * left alone — the same ownership rule the rest of the recovery path follows.
+   * Stop polling for a reload-interrupted turn whose recovery budget is spent and whose answer is
+   * not on the server. Only if the flag is still set, so a newer turn is left alone.
    */
   giveUpOnInterruptedTurn: (
     conversationId: string,
@@ -949,10 +714,9 @@ export interface ChatState {
     why?: string,
   ) => void;
   /**
-   * A reload-interrupted turn is still running and this page has reattached to it: show it as
-   * streaming again (Chemclaw3_ui#131) — or, with `false`, the follow ended without an answer and
-   * it goes back to what `partialize` left. `interruptedByReload` stays set until the turn settles,
-   * so a second reload mid-follow is recovered the same way as the first.
+   * A reload-interrupted turn is still running and this page reattached: show it streaming again,
+   * or with `false` revert to what `partialize` left. `interruptedByReload` stays set until it
+   * settles.
    */
   followInterruptedTurn: (conversationId: string, messageId: string, following: boolean) => void;
   setJobStreamsThrottled: (throttled: boolean) => void;
@@ -987,31 +751,15 @@ const updateAssistant = (
 };
 
 /**
- * The fewest messages one conversation is worth keeping on disk.
- *
- * The floor of the second shedding stage below. Under this the conversation is a title and a
- * fragment, which is worse than useless to come back to — at that point dropping the write and
- * saying so is the honest answer.
+ * Minimum messages worth keeping for one conversation on disk; below this, dropping the write and
+ * warning is better.
  */
 const MIN_PERSISTED_MESSAGES = 10;
 
 /**
- * Write a settled answer once, not twice.
- *
- * `applyEvent`'s answer branch sets `finalText` and deliberately leaves `streamedText` alone
- * ("Replace, never append"), and every reader picks one of the two — `finalText || streamedText`
- * in `MessageList` and `Sidebar`, `finalText ?? streamedText` in `sendMessage`. `partialize` then
- * wrote the message object whole, so a settled answer went to disk **twice, byte for byte**.
- * Measured on one 10,800-character answer: 22,544 characters persisted, **2.09x**. That is half the
- * effective history budget, and the single largest contributor to reaching the quota cliff the
- * shedding above exists to handle.
- *
- * Only when `finalText` is a non-empty string, which is exactly the condition under which no reader
- * consults `streamedText`. An aborted turn, a loop- or spend-capped turn, and an `answer` event
- * carrying `text: ''` all leave `finalText` null or empty — those keep their streamed text, because
- * there it is the only copy of the answer there is. `turnActivity` also reads `streamedText`, and
- * it is documented as meaningful only while `status === 'streaming'`, which a persisted message
- * never is: the branch above rewrites those to `aborted`.
+ * Persist a settled answer once. When `finalText` is non-empty no reader consults `streamedText`,
+ * so it is dropped from the persisted copy (it would otherwise double the size). Aborted or capped
+ * turns keep their streamed text, which may be the only copy.
  */
 function withoutDuplicateAnswer(m: ChatMessage): ChatMessage {
   if (m.role !== 'assistant' || !m.finalText) return m;
@@ -1019,25 +767,9 @@ function withoutDuplicateAnswer(m: ChatMessage): ChatMessage {
 }
 
 /**
- * Make a refused payload smaller, in two stages, and never to nothing.
- *
- * **Stage one: halve the conversations, but never below one.** The old form was
- * `slice(0, Math.floor(order.length / 2))`, and at one conversation `Math.floor(1 / 2)` is `0` — so
- * it returned a state with `order: []` and `conversations: {}`, which is not `null`, so
- * `writeChatStorageNow` wrote it and **returned successfully**. Measured with a single
- * over-quota conversation: two refusals, one write, `persisted conversations 0`, and
- * `storageWritable` still `true`, so the "history could not be saved" warning never fired. Every
- * other conversation — including ones that would have fit — was gone from disk after the next
- * reload, silently, reported as a success.
- *
- * **Stage two: halve the last conversation's messages.** One conversation can exceed the quota on
- * its own (a long turn with large tool results), and stage one has nothing left to drop. Keeping
- * the newest half is the right end to keep: what a chemist comes back for is the end of the
- * conversation.
- *
- * `null` means it cannot be made to fit and the caller should latch off — which is what the
- * existing `storageWritable` flag and its warning were always for, and what the empty-state bug
- * was silently routing around.
+ * Shrink a refused payload in two stages, never to nothing: first halve the conversations (keeping
+ * at least one), then halve the last conversation's messages (keeping the newest). `null` means it
+ * cannot fit; the caller latches `storageWritable` off and warns.
  */
 function shedOldest(state: PersistedState): PersistedState | null {
   if (state.order.length > 1) {
@@ -1071,23 +803,10 @@ function shedOldest(state: PersistedState): PersistedState | null {
 }
 
 /**
- * `localStorage`, with the three things `createJSONStorage(() => localStorage)` does not do.
- *
- * `persist` re-serialises the whole slice on EVERY store write — one per animation-frame token
- * flush, for as long as an answer is streaming — and hands the failure straight back to the
- * action that caused it. `appendUserMessage` runs before `sendMessage`'s try/catch, so a
- * `QuotaExceededError` there left the turn as an unhandled rejection: no bubble, no answer, no
- * banner, no lock. Send did nothing, for ever, because a reload does not empty the store that is
- * full.
- *
- * So: a refused write sheds the oldest conversations and tries again, a write that cannot succeed
- * at all is swallowed the way `prefsStore` already swallows its own, and the actual
- * `JSON.stringify` + `localStorage.setItem` is throttled to once every `PERSIST_THROTTLE_MS`
- * rather than once per frame — a full slice of history is up to a few hundred KB, and stringifying
- * it 60 times a second is main-thread work competing with the token render it is trying not to
- * jank. The in-memory store itself is never throttled, only the disk write; `flushChatPersistence`
- * forces the latest value out immediately, called on `pagehide`/`beforeunload` so a closed tab
- * never loses more than one throttle window's worth of history.
+ * `localStorage` plus three things `createJSONStorage` lacks: a refused write sheds and retries, a
+ * write that cannot succeed is swallowed (never an unhandled rejection in a send), and the disk
+ * write is throttled to `PERSIST_THROTTLE_MS` (the in-memory store is not). `flushChatPersistence`
+ * forces the latest value out on `pagehide`/`beforeunload`.
  */
 let storageWritable = true;
 
@@ -1098,21 +817,9 @@ let throttleTimer: ReturnType<typeof setTimeout> | null = null;
 let lastWriteAt = 0;
 
 /**
- * How many conversations this browser has been shown to accept, learned from a refusal.
- *
- * **The shed used to be forgotten the moment it succeeded**, and that is what made the over-quota
- * state permanent rather than transient. `shedOldest` operates on the partialized *snapshot* and
- * never touches memory, so the next flush 750 ms later re-partialized all thirty conversations,
- * re-stringified the whole payload, was refused, shed, and stringified again. Measured at the
- * caps' own ceiling (30 conversations x 100 messages x 2.5 kB, 5 MiB quota): **37.5 ms of blocking
- * main-thread work and 12.3 MiB stringified per flush, ten refusals, for every 750 ms of the tab's
- * life** — two dropped frames per throttle window, taken *while an answer is streaming*, which is
- * exactly the jank `PERSIST_THROTTLE_MS` was introduced to avoid.
- *
- * Remembering the number that fit turns that into one shed cycle instead of one per write. It only
- * ever tightens within a page's life and is deliberately not persisted: a quota is a property of
- * the browser at a moment, and re-learning it costs one cycle per load rather than pinning a
- * pessimistic bound for ever. `MAX_CONVERSATIONS` remains the ceiling; this is a floor under it.
+ * How many conversations this browser has been shown to accept, learned from a refusal, so an
+ * over-quota tab sheds once rather than on every flush. Per page, not persisted;
+ * `MAX_CONVERSATIONS` stays the ceiling.
  */
 let learnedConversationCap = MAX_CONVERSATIONS;
 
@@ -1137,11 +844,8 @@ function withinLearnedCap(state: PersistedState): PersistedState {
 }
 
 /**
- * Conversations this tab deliberately removed, so the merge below cannot resurrect them.
- *
- * In memory and per tab, which is the right lifetime: it only has to outlive the write that would
- * otherwise bring the conversation back from the copy another tab left on disk, and a reload has
- * already read the post-deletion state.
+ * Conversations this tab deleted, so the merge below cannot resurrect them from another tab's copy
+ * on disk. In memory, per tab.
  */
 const tombstoned = new Set<string>();
 
@@ -1151,25 +855,9 @@ export function forgetConversationOnDisk(...ids: string[]): void {
 }
 
 /**
- * Fold in any conversation another tab wrote that this one has never heard of.
- *
- * **Two tabs on one account resolve to the same key, read it once at boot, and then each write
- * their entire map every 750 ms.** So the write was a *replace* by two writers with divergent
- * views: a conversation started in tab B was erased from disk by tab A's next flush and was gone
- * on the next reload. Nothing anywhere coordinated them — there is no `storage` listener and no
- * `BroadcastChannel` in this app — and `hydrateChatForAccount`'s own comment makes exactly this
- * argument about a second `rehydrate()` clobbering live state, one scope out.
- *
- * A merge rather than a lock, because the conflict is not a real one: two tabs almost never edit
- * the *same* conversation, they hold different ones. Same-id collisions keep the newer
- * `updatedAt`, which is the tab that actually did something. Ids this tab deleted are skipped, or
- * "delete" would mean "delete until the other tab flushes".
- *
- * What this deliberately does not do is push the other tab's conversations onto *this* tab's
- * screen while it is open. That is live cross-tab sync — a feature, with a real question about
- * rehydrating over an in-flight turn — and the sidebar already learns about conversations from
- * elsewhere through `GET /sessions`. This is the narrower promise: nothing you did in one tab is
- * destroyed by the other.
+ * Fold in conversations another tab wrote, so two tabs flushing their whole maps do not erase each
+ * other's conversations. Same-id collisions keep the newer `updatedAt`; tombstoned ids are skipped.
+ * This is not live cross-tab sync — another tab's conversations appear here only after a reload.
  */
 function mergeWithStored(name: string, next: PersistedState): PersistedState {
   let stored: PersistedState | undefined;
@@ -1185,34 +873,15 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
   if (!stored?.conversations || !Array.isArray(stored.order)) return next;
 
   /**
-   * **Ordered by each row's own `receivedAt`, newest first, because every caller slices to its cap
-   * after this** — the order `addDigests`, `addCheckIns` and the job feed keep in memory.
-   *
-   * Neither positional order is right. Appending the stored rows cut, at the cap, exactly the rows
-   * another tab had just claimed (which the service has already consumed) and kept this tab's
-   * oldest. Prepending them was worse in the commonest case there is — one tab — because the
-   * stored copy is then this tab's own previous write: a row it had just trimmed at the cap came
-   * back at the head as the newest notice, and the slice evicted a genuinely newer one beneath
-   * it, so disk and memory diverged on every flush past the cap. Sorting on the row's own clock
-   * answers both, since the slice then drops what is oldest wherever it came from.
-   *
-   * On a tie this tab's rows come first — see `union`, the one caller, for why.
+   * Newest first by each row's own `receivedAt`, because every caller then slices to its cap: the
+   * oldest rows are dropped wherever they came from. Ties favour this tab's rows (see `union`).
    */
   const newestFirst = <T extends { receivedAt: number }>(rows: T[]): T[] =>
     rows.sort((a, b) => b.receivedAt - a.receivedAt);
   /**
-   * The two slices whose rows a re-fetch cannot replace, folded back unconditionally.
-   *
-   * **This merge covered conversations, order and drafts, and those are the three that could be
-   * refetched.** `digests` and `jobFeed` could not, and were the ones being destroyed: `GET
-   * /digests` is a *destructive claim* — this file's own `PersistedState.digests` says "the read
-   * is the consume … never re-delivers it" — and `useDigests` claims once per page, so every open
-   * tab claims. Tab B claims a standing-query finding; tab A flushes 750 ms later; the finding is
-   * gone from disk, gone from the service, and gone from both tabs on the next reload. Job
-   * endings are the same shape (`dismissJobItem`: "the backend's is consumed").
-   *
-   * Folded ABOVE the `extra.length === 0` return, because the conversation half being unchanged
-   * is exactly the common case in which the other tab has nonetheless claimed something.
+   * Fold back the slices a re-fetch cannot replace (`digests`, check-ins, the job feed), whose
+   * claims are destructive. Done before the `extra.length === 0` return, since the other tab may
+   * have claimed something while conversations are unchanged.
    */
   const union = <T extends { receivedAt: number }>(
     ours: T[],
@@ -1223,31 +892,19 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
     if (!Array.isArray(theirs) || theirs.length === 0) return ours;
     const known = new Map(ours.map((row) => [keyOf(row), row]));
     const added = theirs.filter((row) => !known.has(keyOf(row)));
-    // **On a key collision, "ours wins" is right for a digest and wrong for a check-in**, and the
-    // difference is what the payload *is*. A digest's identity is its content, so two copies of
-    // one key are the same finding. A check-in's identity is the question and its content is a
-    // countdown, so two copies differ precisely in the part that matters — and the service has
-    // already consumed both, so whichever is discarded is discarded for ever. Measured before
-    // this argument existed: a tab open since yesterday overwrote this morning's refresh, showing
-    // a deadline a day more generous than the truth, and undid a dismissal made in the other tab.
+    // On a key collision, ours wins for a digest (same content, same finding) but not for a
+    // check-in, whose content is a countdown: the fresher copy wins.
     for (const row of theirs) {
       const mine = known.get(keyOf(row));
       if (mine !== undefined) known.set(keyOf(row), fresher(mine, row));
     }
-    // `sort` is stable and this tab's rows go in first, so on a tie they win. A tie is not rare —
-    // `addDigests` stamps a whole claimed batch with one `Date.now()` — and a stored row tied with
-    // rows this tab kept is, in one tab, a row this tab trimmed from that same batch; preferring it
-    // would reproduce the divergence `newestFirst` describes one batch at a time.
+    // `sort` is stable and this tab's rows go first, so ties keep ours (a batch shares one
+    // `Date.now()`).
     return newestFirst([...known.values(), ...added]);
   };
-  // **What a reader did to a row is folded too, not just the row.** Before `fresher`, "ours wins"
-  // kept this tab's undismissed copy over the other tab's dismissed one on every flush, so a card
-  // dismissed in one window came back on the next reload. `seen` only ever goes one way, so it is
-  // OR-ed; `dismissed` can be undone, so the later of the two changes wins, and a tie (two rows
-  // persisted before the stamp existed) keeps the dismissal rather than resurrecting a card.
-  // Every stored slice is aged on `partialize`'s own cutoff before it is folded, for the reason
-  // the check-in fold below gives: without it, the row `partialize` had just dropped for age was
-  // put straight back on disk by this fold, rehydrated, dropped, and written again, for ever.
+  // Fold reader actions too: `seen` is OR-ed; `dismissed` takes the later change, a tie keeps the
+  // dismissal. Stored rows are aged on `partialize`'s cutoff first, or a just-dropped row would be
+  // written straight back.
   const cutoff = Date.now() - JOB_FEED_MAX_AGE_MS;
   const jobFeed = union(
     next.jobFeed,
@@ -1265,22 +922,15 @@ function mergeWithStored(name: string, next: PersistedState): PersistedState {
       };
     },
   ).slice(0, MAX_JOB_FEED);
-  // The same `(query, note ids)` identity `addDigests` dedups on, so a row claimed by both tabs
-  // folds to one rather than reading as two findings. Two copies of one key are the same finding,
-  // so ours wins — except for the dismissal, which nothing un-does and is therefore OR-ed.
+  // Same identity as `addDigests`, so a row both tabs claimed folds to one; dismissal is OR-ed.
   const digests = union(
     next.digests ?? [],
     Array.isArray(stored.digests) ? stored.digests.filter((d) => d.receivedAt > cutoff) : [],
     (d) => `${d.query}\u0000${d.noteIds.join(',')}`,
     (mine, theirs) => (theirs.dismissed && !mine.dismissed ? { ...mine, dismissed: true } : mine),
   ).slice(0, MAX_DIGESTS);
-  // Keyed by the service's own request id, which a digest does not have: two tabs claiming the
-  // same blocked question fold to one card rather than to two notices about one question.
-  // **Aged out on both sides.** `partialize` drops a card older than the cutoff, and this fold
-  // then put every stored row the new state does not know straight back on disk — so the row
-  // that was just dropped returned, and rehydrated, for ever. A stale digest is a stale finding;
-  // a stale check-in is a countdown that is days wrong, which is the one payload where that is
-  // not harmless, and the comment added beside `partialize` claimed it did not happen.
+  // Keyed by request id; both sides aged out first so a dropped stale countdown is not written
+  // back.
   const checkIns = union(
     next.checkIns ?? [],
     (stored.checkIns ?? []).filter((c) => checkInFreshAt(c) > cutoff),
@@ -1323,17 +973,8 @@ function writeChatStorageNow(name: string, value: StorageValue<PersistedState>):
   const wanted = merged.order.length;
   let state: PersistedState | null = withinLearnedCap(merged);
   /**
-   * Whether this write had to shed to land — and the only condition under which anything is
-   * learned.
-   *
-   * Learning from every *success* is what the first version of this did, and it was wrong in the
-   * one way that matters: the store's own first write happens before any conversation exists, so
-   * `order.length` is `0`, and the cap latched to zero and persisted an empty slice from then on.
-   * Caught by `tests/persistQuota.test.ts`, which is exactly the shape of bug that test exists
-   * for — a fix for silent data loss that causes silent data loss.
-   *
-   * A refusal is the only evidence about this browser's quota. A success says nothing: it may
-   * simply be a small payload.
+   * Whether this write had to shed to land. Only a refusal teaches anything about the quota; a
+   * success may just be a small payload.
    */
   let shed = false;
   while (state) {
@@ -1343,25 +984,10 @@ function writeChatStorageNow(name: string, value: StorageValue<PersistedState>):
       if (shed) {
         learnedConversationCap = Math.max(1, Math.min(learnedConversationCap, state.order.length));
       } else if (wanted > learnedConversationCap && learnedConversationCap < MAX_CONVERSATIONS) {
-        // **And it has to be able to come back up.** "Only ever downward" made one transient
-        // over-quota write cap the tab for the life of the page: measured at a 30 kB budget, 12
-        // fat conversations learned a cap of 6, and after all twelve were *deleted* and eight
-        // tiny ones created, two of the eight were silently never persisted — with
-        // `storageWritable` still true and nothing warning. The trigger (one oversized
-        // conversation) is precisely the thing a chemist deletes to fix it, so the old rule
-        // punished the remedy.
-        //
-        // It probes upward by ONE rather than jumping to `wanted`, and that is forced rather than
-        // cautious: `withinLearnedCap` truncates *before* the write, so a success only ever proves
-        // the cap itself fits — it says nothing about `cap + 1`, let alone `wanted`. The first
-        // attempt at this raised the cap to `state.order.length`, which after truncation always
-        // equals the cap, so it could never fire at all. One step per successful write converges
-        // in a few flushes and each over-reach costs exactly the one shed cycle the docstring
-        // above already budgets for.
-        //
-        // `wanted > cap` is the trigger, so a tab with fewer conversations than its cap never
-        // probes — and the empty-store trap cannot recur, because `wanted === 0` never exceeds a
-        // cap floored at 1.
+        // Probe the cap back up by one after a successful write, so deleting an oversized
+        // conversation lets the tab persist more again. One step, because truncation happens before
+        // the write and a success proves only the cap itself fits. Only when `wanted > cap`, so an
+        // empty store never probes.
         learnedConversationCap += 1;
       }
       return;
@@ -1396,27 +1022,10 @@ if (typeof window !== 'undefined') {
 }
 
 /**
- * Cancel a turn the reader is walking away from.
- *
- * The two handlers above save local state and neither cancels anything, so closing the tab,
- * reloading, or navigating away left the turn running on the service — a disconnect only
- * *detaches* (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`), so it ran to completion holding
- * one of eight admission permits for up to 600 s, for an answer nobody was going to read.
- *
- * **`event.persisted` is the whole decision, and it is the honest version of "gone for good".**
- * A `pagehide` with `persisted: true` is the page going into the back/forward cache: the document,
- * this store and the in-flight `fetch` are all frozen and may be resumed intact, so cancelling
- * there would destroy a turn the reader is about to come back to. With `persisted: false` the
- * document is being discarded, and nothing in this app resumes a turn across that — a reloaded tab
- * rehydrates a `streaming` message as failed (there is no resume endpoint) and picks the answer up
- * only from a later transcript read. The browser cannot tell a reload from a close at unload time,
- * and `PerformanceNavigationTiming` only says so on the *next* load, so a reload is cancelled too.
- * That is the deliberate half of the trade: the answer would still have landed in the transcript,
- * against which a chemist who reloads because the turn felt stuck is exactly the case that
- * otherwise comes back to a 409 from the turn they were trying to escape.
- *
- * An in-app route change is not a `pagehide` at all, so navigating to `/jobs` mid-turn is
- * untouched.
+ * Cancel the running turn when the page is discarded (`pagehide` with `persisted: false`). A
+ * disconnect only detaches, so otherwise the turn runs to completion holding an admission permit. A
+ * back/forward-cache entry (`persisted: true`) is left alone; a reload is indistinguishable from a
+ * close here and is cancelled too. In-app route changes are not affected.
  */
 function abandonTurnOnUnload(event: PageTransitionEvent): void {
   if (event.persisted) return;
@@ -1464,22 +1073,9 @@ const chatStorage: PersistStorage<PersistedState> = {
 };
 
 /**
- * Forget every conversation, in memory and on disk.
- *
- * Sign-out's other half. MSAL caches the *credential* in `sessionStorage`, which dies with the
- * tab; the transcripts live here, in `localStorage`, under one key that is not partitioned by
- * account — so signing out removed the credential and left the data it was protecting for the
- * next person to use the browser profile.
- *
- * It lives beside the store rather than in the auth provider because both halves are the store's
- * own: `clearAll` is what stops the previous account's conversations being on screen if the
- * sign-out redirect is slow or blocked, and `persist.clearStorage` is what stops them coming back
- * on the next load. Ordered, too: `clearAll` writes a fresh state through the persist middleware,
- * so removing the key has to come second.
- *
- * "Reset app" is the other caller, and `clearAll` alone is not enough there either: the next write
- * goes through `mergeWithStored`, which folds the stored digests, job endings and check-ins back
- * onto disk, so the notices the dialog says it discards rehydrated on the next load.
+ * Forget every conversation, in memory and on disk — the other half of sign-out, since transcripts
+ * live in `localStorage` while MSAL's credential is in `sessionStorage`. `clearAll` first (it
+ * writes through persist), then remove the key. Also used by "Reset app".
  */
 export function forgetLocalHistory(): void {
   useChatStore.getState().clearAll();
@@ -1487,15 +1083,9 @@ export function forgetLocalHistory(): void {
 }
 
 /**
- * The persisted-history key, partitioned by account.
- *
- * `chemclaw3.chat.v2` is frozen as the *base* — see the persist config below for why bumping it is
- * a wipe — but the transcripts under it belong to whoever was signed in when they were written, and
- * that identity was never in the key. On a shared analytical-development workstation the store
- * rehydrated the previous chemist's conversations before the next one's identity was known, because
- * one global key served everybody and it was cleared only on an explicit sign-out. Scoping the key
- * by the Entra object id (`oid`) makes each account's history its own storage slot; `'anon'` is the
- * pre-sign-in slot, and dev's shared `dev-user` principal gets its own by the same rule.
+ * The persisted-history key base. The full key is per account (`<base>.<oid>`, `'anon'` before
+ * sign-in), so a shared workstation never rehydrates the previous chemist's conversations. The base
+ * is frozen: changing it wipes everyone's history.
  */
 export const CHAT_STORAGE_BASE = 'chemclaw3.chat.v2';
 
@@ -1505,26 +1095,16 @@ export function chatStorageKey(oid: string | null | undefined): string {
 }
 
 /**
- * Point the persisted store at an account's own slot and load it — the account-aware other half of
- * `skipHydration: true`.
- *
- * Rehydration is deferred (`skipHydration`) precisely so it cannot happen before identity is known;
- * the auth bootstrap calls this once the provider — and therefore the `oid` — has resolved. Re-keying
- * before the read is what stops one account's transcript being served to the next, and it is a no-op
- * when the slot is already correct so a re-render cannot re-read history needlessly.
+ * Point the persisted store at an account's slot and load it — the other half of `skipHydration:
+ * true`. Called by the auth bootstrap once the `oid` is known; a no-op when the slot is already
+ * loaded.
  */
 let hydratedName: string | null = null;
 
 export function hydrateChatForAccount(oid: string | null | undefined): void {
   const name = chatStorageKey(oid);
-  // Once per account, not once per caller. The auth bootstrap can run this on every mount (a test
-  // remounting `AuthGate`, StrictMode's double-invoke), and a second `rehydrate()` is not
-  // harmless: `rehydrate` reads the *throttled* on-disk value and `set(..., replace)`s it over
-  // memory, so a re-read after the store has moved on (a freshly created conversation not yet
-  // flushed) would clobber live state with a stale snapshot. Reading the slot once, when the
-  // account first becomes known, is both sufficient and what the app actually wants.
-  // Before the once-per-slot guard: which account is reading is true whether or not the slot
-  // needs reading again.
+  // Read each slot once: a second `rehydrate()` would replace live, not-yet-flushed state with the
+  // throttled disk value. The viewer is set before that guard.
   if (useChatStore.getState().viewer !== (oid ?? null))
     useChatStore.setState({ viewer: oid ?? null });
   if (hydratedName === name) return;
@@ -1558,13 +1138,8 @@ export const useChatStore = create<ChatState>()(
       notifyOnJobComplete: false,
       streaming: null,
 
-      // Neither of these clears `composerLock`, and that is the fix rather than an omission.
-      // The lock and the `streaming` slot are single, global, app-wide things — one turn at a
-      // time — while `Composer` derives its own blocking per conversation. Clearing the lock on
-      // a conversation change therefore unblocked a composer whose turn was still running: a
-      // second turn started, overwrote the one `streaming` slot, and left the first turn's
-      // `AbortController` unreachable, so Stop could no longer release the backend's turn lease
-      // or its admission permit. The banner still clears, because it belongs to the view.
+      // Neither clears `composerLock`: the lock and the `streaming` slot are global (one turn at a
+      // time), and clearing it on a switch would let a second turn orphan the first.
       createConversation() {
         const conversation = newConversation();
         set((s) => ({
@@ -1582,26 +1157,13 @@ export const useChatStore = create<ChatState>()(
       },
 
       deleteConversation(id) {
-        // A turn belonging to the conversation being deleted has to be stopped here, not left to
-        // finish into a conversation that no longer exists.
-        //
-        // **Through `stop()`, not `abort()`.** This used to abort the fetch and say that "aborting
-        // also releases the backend's per-session turn lock" — which stopped being true at
-        // `D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`, and the slot's own docstring three
-        // hundred lines up already says so: the service could not tell Stop from a Wi-Fi handoff,
-        // so a dropped connection now *detaches* and the turn runs to completion on its own pump
-        // task. Aborting alone therefore left it generating for up to its 600 s deadline, spending
-        // the turn budget and holding the admission permit a queued turn is waiting on — for a
-        // chemist whose action was "cancel this and move on". `stop()` is `POST
-        // /sessions/{id}/turn/stop` and then the abort, in that order; the send path builds it
-        // precisely so this call site does not have to know that.
+        // Stop a turn belonging to the deleted conversation through `stop()` (server stop, then
+        // abort), not `abort()`: a disconnect only detaches, so the turn would keep running.
         const streaming = get().streaming;
         const wasStreamingThis = streaming?.conversationId === id;
         if (wasStreamingThis) streaming?.stop();
 
-        // The subject index goes with the conversation. It is keyed by conversation id and read
-        // by nobody else, so leaving it behind would be a rail for a transcript that no longer
-        // exists.
+        // The entity index is keyed by conversation and goes with it.
         useEntityStore.getState().forget(id);
         // And a tombstone, so the cross-tab merge in `writeChatStorageNow` cannot bring it back
         // from a copy another tab left on disk.
@@ -1610,9 +1172,7 @@ export const useChatStore = create<ChatState>()(
         set((s) => {
           const { [id]: _removed, ...rest } = s.conversations;
           const { [id]: _draft, ...drafts } = s.drafts;
-          // Keyed by conversation id and read by nobody else once the conversation is gone — the
-          // same argument the entity index above is dropped on. Left behind, it grew without
-          // bound for the life of the slot.
+          // Drop the conversation's profile choice too, or the map grows without bound.
           const { [id]: _profile, ...sessionProfiles } = s.sessionProfiles;
           const order = s.order.filter((x) => x !== id);
           return {
@@ -1621,8 +1181,7 @@ export const useChatStore = create<ChatState>()(
             sessionProfiles,
             order,
             activeId: s.activeId === id ? (order[0] ?? null) : s.activeId,
-            // Without this, deleting mid-turn leaves the composer locked with nothing to unlock
-            // it: the turn it was waiting on can no longer report back.
+            // Unlock the composer: the turn it waited on can no longer report back.
             ...(wasStreamingThis
               ? { streaming: null, composerLock: false as const, banner: null }
               : {}),
@@ -1631,11 +1190,7 @@ export const useChatStore = create<ChatState>()(
       },
 
       clearAll() {
-        // "Reset app" is the escape hatch from a poisoned state, so it has to leave nothing
-        // behind — including an in-flight turn that would otherwise write into a conversation
-        // this just deleted. Through `stop()` for the reason `deleteConversation` gives above, and
-        // with more force here: this is the control a chemist reaches for when a turn is wedged,
-        // which is exactly when leaving it running on the server is worst.
+        // Reset leaves nothing running: stop any in-flight turn on the server first.
         get().streaming?.stop();
         // Same reason as `deleteConversation`: every conversation these indexes describe is about
         // to stop existing.
@@ -1648,22 +1203,14 @@ export const useChatStore = create<ChatState>()(
             order: [fresh.id],
             activeId: fresh.id,
             drafts: {},
-            // **Content, and it was being left behind.** `clearAll` is half of
-            // `forgetLocalHistory()` — sign-out on a shared analytical-development workstation —
-            // and zustand *merges* a partial, so a key this object does not name survives. These
-            // two carry the previous chemist's work: a digest holds their saved-query text and the
-            // note ids it found, and `sessionProfiles` names the agent each of their conversations
-            // ran on. The ordering argument below (`clearAll` writes through persist *before*
-            // `clearStorage()` removes the key) is what made the omission durable rather than
-            // momentary — the surviving values get re-written into the fresh slot.
+            // Reset content keys explicitly: zustand merges a partial, so an unnamed key (digests,
+            // profiles) would survive a sign-out on a shared workstation.
             digests: [],
             // Content too, and the most personal of the three: a check-in holds the previous
             // chemist's own subject line, their reason for asking, and who they are waiting on.
             checkIns: [],
-            // `checkInClaim` is deliberately left as it was. The claim runs once per page
-            // (`useCheckIns` latches), so a reset to `pending` could never be moved off again and
-            // the section read "Reading what you are waiting on…" until a full reload. The
-            // outcome of the claim that did run on this page is still the true one.
+            // `checkInClaim` is kept: the claim runs once per page, so resetting it to `pending`
+            // would never clear.
             sessionProfiles: {},
             jobStreamsThrottled: false,
             jobStreamsThrottledElsewhere: false,
@@ -1699,25 +1246,12 @@ export const useChatStore = create<ChatState>()(
         set((s) => {
           const conversation = s.conversations[conversationId];
           if (!conversation || messages.length === 0) return {};
-          // The precondition the caller believes it is enforcing, enforced where it cannot race.
-          // The rehydrate effect starts only for an empty conversation and cancels itself when
-          // the message count changes — but that cancellation is an effect cleanup, so it runs on
-          // React's next render, while `sendMessage` appends synchronously. A transcript that
-          // resolved inside that window replaced the turn that had just started, and every later
-          // token was dropped in silence because `updateAssistant` matches on an id that is no
-          // longer in the array.
+          // Enforce the empty-conversation precondition inside the write: a transcript arriving
+          // after a send has started must not replace the new turn.
           if (conversation.messages.length !== 0) return {};
-          // Name it from what was actually asked in it.
-          //
-          // `GET /sessions` returns `{session_id, created_at}` and no title — the server mints a
-          // session before anyone has spoken and never revisits the row — so every conversation
-          // restored from another device landed in the sidebar as "Earlier conversation". A week
-          // of history was a column of identical rows distinguished only by a date.
-          //
-          // Only when this conversation is empty, which is not a formality: it is the same
-          // precondition the rehydrate effect runs under (`messageCount === 0`), so a title
-          // replaced here can only ever be the placeholder from `newConversation()` or the
-          // sidebar's stub. A conversation someone has typed into keeps the name it earned.
+          // Title the conversation from its first question; `GET /sessions` gives no title for
+          // older sessions. Only for an empty conversation, so a typed-into conversation keeps its
+          // name.
           const first = messages.find(isUser);
           return {
             conversations: {
@@ -1790,9 +1324,7 @@ export const useChatStore = create<ChatState>()(
         set((s) => {
           const conversation = s.conversations[conversationId];
           if (!conversation) return {};
-          // No write when nothing changed: both reads that call this run on every open of the
-          // panel and every sidebar listing, and a fresh conversation object per call would
-          // re-render its row and its transcript for nothing.
+          // No write when nothing changed, to avoid re-rendering on every panel open and listing.
           const held = conversation.membership;
           const unchanged =
             held && membership ? held.owner === membership.owner : !held && !membership;
@@ -1808,19 +1340,9 @@ export const useChatStore = create<ChatState>()(
       },
 
       attachPlan(conversationId, todos, planHash, awaitingApproval = false, scope = null, author) {
-        // The session's current plan, read back after a reload. `latestPlan` is stream-only state
-        // — the transcript stores the messages, not the plan — so a rehydrated conversation lost
-        // its checklist while the session, per `GET /sessions/{id}/plan`, was still proposing one.
-        // Attached to the newest assistant message because that is where the live stream would
-        // have left it: the latest plan belongs to the latest turn.
-        //
-        // **`awaitingApproval` restores the decision, not just the checklist.** The card is built
-        // from an `approval_request` trace entry, and a reload rebuilds a conversation from the
-        // stored transcript — which carries messages and tool calls and no signals at all. So the
-        // plan came back and the Approve button did not, while the gate went on refusing every
-        // state-changing call: the only way out was to send another message purely to make the
-        // service re-emit the event. The same read that restores the checklist already answers
-        // this (`PlanStatus.approved`); it was being fetched and thrown away.
+        // Restore the session's current plan after a reload (the transcript stores messages, not
+        // the plan), on the newest assistant message. Also restore the approval card when
+        // `PlanStatus.approved` is false, since the transcript carries no signals.
         set((s) => {
           const conversation = s.conversations[conversationId];
           if (!conversation || todos.length === 0) return {};
@@ -1829,9 +1351,7 @@ export const useChatStore = create<ChatState>()(
           const target = conversation.messages[index];
           if (!target || target.role !== 'assistant') return {};
           const messages = conversation.messages.slice();
-          // Never a second card: a rehydrate can run more than once for one conversation (the
-          // effect re-fires on `messageCount`), and appending each time would stack Approve
-          // buttons on one message.
+          // Never a second card: rehydrate can run more than once.
           const already = target.trace.some((e) => e.kind === 'approval_request');
           const trace =
             awaitingApproval && !already
@@ -1841,14 +1361,12 @@ export const useChatStore = create<ChatState>()(
                     id: `${target.id}-approval`,
                     at: Date.now(),
                     kind: 'approval_request' as const,
-                    // The surface's own wording, and deliberately so: this card is derived from
-                    // the plan route's `approved: false`, not from a prompt the service sent, and
-                    // quoting the service's sentence would claim an event that never arrived.
+                    // Our own wording: this card is derived from the plan route, not from a prompt
+                    // the service sent.
                     approval: {
                       prompt:
                         // "a decision", not "your": in a shared conversation the plan may be
-                        // another member's, and only its author decides (Chemclaw3 #483) — the
-                        // card beneath says whose.
+                        // another member's.
                         'This plan is still waiting for a decision, so the agent cannot carry ' +
                         'out its state-changing steps yet.',
                     },
@@ -1859,13 +1377,11 @@ export const useChatStore = create<ChatState>()(
             ...target,
             latestPlan: todos,
             latestPlanHash: planHash,
-            // Never inherited from the message: a scope belongs to the revision it was read for,
-            // and a previous one kept under this hash would name another plan's tools under
-            // these steps. Unknown stays `null`, which the card fetches rather than rendering.
+            // Never inherited: a scope belongs to the revision it was read for. Unknown stays
+            // `null` and the card fetches it.
             latestPlanScope: scope,
-            // Only when the caller read it. Absent means "streamed into this browser's own turn",
-            // which the card reads as this person's plan; `null` means the service recorded no
-            // author and the owner decides — two different answers that must not collapse.
+            // Only when read: absent means this browser's own turn; `null` means no recorded author
+            // (the owner decides).
             ...(author !== undefined ? { latestPlanAuthor: author } : {}),
             trace,
           };
@@ -1959,9 +1475,7 @@ export const useChatStore = create<ChatState>()(
               unsupportedClaims: event.unsupported_claims,
               reviewRequired: event.review_required,
               verifiedBy: event.verified_by,
-              // The three the mirror decoded and this branch used to drop. `checksRun` is the one
-              // with a reader: it is the only field that separates "we looked and it was fine" from
-              // "nobody looked", both gates shipping off.
+              // `checksRun` separates "checked and fine" from "nobody checked".
               checksRun: event.checks_run,
               challenged: event.challenged,
               reviewHoldId: event.review_hold_id,
@@ -1985,9 +1499,8 @@ export const useChatStore = create<ChatState>()(
         }
 
         if (event.type === 'queued') {
-          // Not a trace row: the turn has not done anything yet — that is the whole message. The
-          // two waits stay apart: a ticket is a place in a shared conversation's line, and no
-          // ticket is the process's admission wait (`QueuedEvent`).
+          // Not a trace row. A ticket is a place in a shared conversation's line; no ticket is the
+          // process's admission wait (`QueuedEvent`).
           const { ticket, position } = event;
           set((s) =>
             updateAssistant(s, conversationId, messageId, (m) =>
@@ -2012,12 +1525,9 @@ export const useChatStore = create<ChatState>()(
         }
 
         if (event.type === 'error') {
-          // The only `error`s that reach here: `streamTurn` throws on every other code, and these
-          // arrive BEFORE the answer they qualify (the backend names `loop_cap_reached` and
-          // `spend_cap_reached` as the codes that share their turn with an answer — a runaway
-          // guard of iterations or of spend). So this marks the answer partial rather than failing
-          // the message — `failTurn` is still what a real failure calls. The membership itself is
-          // `PARTIAL_ANSWER_CODES` in `api/streamTurn.ts`, which is the one place it stays true.
+          // The only `error` codes that reach here share their turn with an answer
+          // (`PARTIAL_ANSWER_CODES` in `api/streamTurn.ts`), so they mark the answer partial rather
+          // than failing the message.
           set((s) =>
             updateAssistant(s, conversationId, messageId, (m) => ({
               ...m,
@@ -2028,15 +1538,12 @@ export const useChatStore = create<ChatState>()(
         }
 
         if (event.type === 'tool_result') {
-          // Not its own row: it closes the `tool_call` row already in the trace. The result ref
-          // rides along on that row so the "see the full result" affordance sits next to the
-          // preview it completes, rather than in a second row saying the same thing.
+          // Closes the existing `tool_call` row; the result ref rides on it so the full-result
+          // affordance sits beside the preview.
           set((s) =>
             updateAssistant(s, conversationId, messageId, (m) => ({
               ...m,
-              // The ref is omitted rather than stored empty. The backend guarantees "" means
-              // "not stored" and nothing else, so collapsing it to absent leaves exactly one
-              // thing for a reader to check before offering to fetch it.
+              // An empty ref means "not stored", so it is omitted rather than stored empty.
               trace: closeToolCall(m.trace, event.tool, {
                 result: event.preview,
                 ...(event.result_ref ? { resultRef: event.result_ref } : {}),
@@ -2045,14 +1552,10 @@ export const useChatStore = create<ChatState>()(
                 // Omitted rather than stored empty, the same rule the ref takes: absent means "the
                 // service did not send the result with the event", and a block then fetches it.
                 ...(event.result_inline ? { resultInline: event.result_inline } : {}),
-                // The named figures, when the result was structured enough to have names. Kept
-                // beside `numbers` rather than instead of it — the grounding check reads one and
-                // the surfaces read the other.
+                // Named figures, kept beside `numbers`: the grounding check reads one, surfaces the
+                // other.
                 ...(event.values?.length ? { values: event.values } : {}),
-                // Kept whole. This is the untruncated list beside a truncated preview, and it is
-                // the only structured chemistry the stream carries — `provenance.ts` checks the
-                // answer's figures against it, so dropping it here is what made every figure in
-                // an answer uncheckable.
+                // Kept whole: `provenance.ts` checks the answer's figures against this list.
                 numbers: event.numbers,
               }),
             })),
@@ -2065,30 +1568,24 @@ export const useChatStore = create<ChatState>()(
 
         set((s) =>
           updateAssistant(s, conversationId, messageId, (m) => {
-            // A failure closes its call's row *and* adds its own: the row stops claiming the
-            // call is running, the new row carries the reason. Both job endings do the same to
-            // the launch row, which otherwise keeps its "runs asynchronously" badge forever.
+            // A failure closes its call's row and adds its own row with the reason; job endings
+            // likewise close the launch row.
             let base = m.trace;
             if (event.type === 'tool_failed') {
               base = closeToolCall(base, event.tool, { failed: true });
             } else if (event.type === 'job_completed' || event.type === 'job_failed') {
               base = settleJob(base, event.job_id);
             }
-            // One sweep is one row. `gather_evidence` asks every source at once and the service
-            // reports each separately, so this is a *merge* rather than an append — both because
-            // that is how a reader reads them and because a row per source spends the bounded
-            // trace on retrieval, evicting the early tool calls of a retrieval-heavy turn.
+            // One sweep is one row: evidence sources are merged rather than appended.
             const folded = event.type === 'evidence_source' ? foldIntoSweep(base, entry) : null;
             return {
               ...m,
               trace: (folded ?? [...base, entry]).slice(-MAX_TRACE_ENTRIES),
               latestPlan: event.type === 'plan' ? event.todos : m.latestPlan,
-              // The hash of the plan as rendered, so the approval card can bind a decision to
-              // exactly what was shown without a second round trip that races the next revision.
+              // The hash of the plan as rendered, so the approval binds to exactly what was shown.
               latestPlanHash: event.type === 'plan' ? event.plan_hash : m.latestPlanHash,
-              // The scope travels with the hash it belongs to, so the card shows the tool
-              // list for the plan it is rendering and not for a later revision. An older
-              // service sends none; `null` there means "go and fetch it", never "none".
+              // The scope travels with its hash. An older service sends none; `null` means "fetch
+              // it", never "none".
               latestPlanScope:
                 event.type === 'plan'
                   ? event.scope.length > 0
@@ -2110,19 +1607,8 @@ export const useChatStore = create<ChatState>()(
       },
 
       finishTurn(conversationId, messageId, status) {
-        // `endedAt` is stamped on every ending, not just the successful one: an aborted turn took
-        // as long as it took, and the summary line has no other way to say so. `stalled` is
-        // cleared because the flag describes a stream that is still open and silent, and leaving
-        // it set would put "no activity" beside a finished answer for ever.
-        //
-        // **And `interruptedByReload` is cleared, because nothing else ever cleared it.**
-        // `partialize` stamps it on a turn cut off by a reload and `resumeInterruptedTurn` reads
-        // it — but the flag was never removed, so every persisted copy from then on carried it and
-        // every subsequent boot re-entered the recovery poll. Two costs, both measured: a
-        // recoverable turn was re-fetched and `endedAt` rewritten to *now* (a 3 s turn recorded as
-        // 63.5 s in the probe, and as hours after an overnight reload), and an *un*recoverable one
-        // ran the full 630 s / 210-request budget on every page load, for ever, behind a message
-        // already shown as aborted. A settled turn is not interrupted, whichever way it settled.
+        // `endedAt` is stamped on every ending; `stalled` and `interruptedByReload` are cleared,
+        // since a settled turn is neither (a leftover flag would re-run recovery on every boot).
         set((s) =>
           updateAssistant(s, conversationId, messageId, (m) => ({
             ...m,
@@ -2210,9 +1696,8 @@ export const useChatStore = create<ChatState>()(
       pushJobFinished(event, sessionId) {
         set((s) => {
           const existing = s.jobFeed.find((j) => j.event.job_id === event.job_id);
-          // Re-delivery is expected: the stream reconnects with backoff and delivery is
-          // at-least-once. Keep the ORIGINAL item — replacing it would move a three-day-old card
-          // to the front of a persisted feed on every reconnect.
+          // Delivery is at-least-once: keep the original item so a reconnect does not move an old
+          // card to the front.
           if (existing) return {};
           const conversation = Object.values(s.conversations).find(
             (c) => c.sessionId === sessionId,
@@ -2233,8 +1718,7 @@ export const useChatStore = create<ChatState>()(
         set((s) => {
           if (event.state !== 'waiting') {
             const rest = s.awaiting.filter((id) => id !== event.request_id);
-            // Same identity when nothing was removed, so an expiry for a request this tab never
-            // saw open does not re-render every consumer of the list — nor re-read the inbox.
+            // Same identity when nothing was removed, to avoid re-renders and inbox re-reads.
             return rest.length === s.awaiting.length
               ? {}
               : { awaiting: rest, awaitingRevision: s.awaitingRevision + 1 };
@@ -2249,11 +1733,7 @@ export const useChatStore = create<ChatState>()(
 
       syncAwaiting(requestIds) {
         set((s) => {
-          // Compared before writing because this runs on every read of the inbox, and the common
-          // outcome is "unchanged" — a fresh array each time would re-render the sidebar badge on
-          // a timer for the life of the page. Comparing every element is the whole comparison now
-          // that an element is the id; it used to compare the id of a four-field record and drop
-          // the other three silently.
+          // Compare before writing: this runs on every inbox read and usually changes nothing.
           const same =
             requestIds.length === s.awaiting.length &&
             requestIds.every((id, i) => id === s.awaiting[i]);
@@ -2304,10 +1784,8 @@ export const useChatStore = create<ChatState>()(
       },
 
       setSessionIdIfAbsent(conversationId, sessionId) {
-        // Compare-and-set, returning the winner. Two warms racing would otherwise mint two backend
-        // sessions and leave the store pointing at the one the in-flight turn is NOT using —
-        // silent context loss with nothing to flag it. The loser is an orphan that ages out of the
-        // backend's LRU.
+        // Compare-and-set, returning the winner, so two racing warms cannot leave the store on a
+        // session the turn is not using.
         const existing = get().conversations[conversationId]?.sessionId;
         if (existing) return existing;
         get().setSessionId(conversationId, sessionId);
@@ -2321,9 +1799,7 @@ export const useChatStore = create<ChatState>()(
           ...newConversation(),
           sessionId,
           title: `${parent.title} (branch)`,
-          // The parent's history, minus anything still in flight: a fork is taken from a settled
-          // thread (the service refuses one with a turn running), so a message marked `streaming`
-          // here would be a spinner nothing can ever end.
+          // Without in-flight messages: a fork is taken from a settled thread.
           messages: parent.messages.filter(
             (m) => !(m.role === 'assistant' && m.status === 'streaming'),
           ),
@@ -2361,8 +1837,7 @@ export const useChatStore = create<ChatState>()(
       },
 
       dismissDigest(index) {
-        // A flag, not a delete, for the same reason the job feed uses one: the service's copy was
-        // consumed by the read that produced this, so this card is the only copy there is.
+        // A flag, not a delete: the service's copy was consumed, so this card is the only one.
         set((s) => ({
           digests: s.digests.map((d, i) => (i === index ? { ...d, dismissed: true } : d)),
         }));
@@ -2388,25 +1863,17 @@ export const useChatStore = create<ChatState>()(
               openDays: row.open_days,
               daysLeft: row.days_left,
               sessionId: row.session_id,
-              // Taken from the row rather than OR-ed with what is held, for the same reason the
-              // day counts are: the newest notice is the one that is true about now, and a card
-              // that kept a "may be short" from a night when the asker had 200 questions would go
-              // on saying it after they were down to three.
+              // Taken from the newest row: it is the one true about now.
               truncated: row.truncated,
-              // A refresh keeps the position and the time it first arrived, exactly as a
-              // redelivered job ending does: re-stamping would put a question that has been open
-              // for nine days back at the top as though it were news.
+              // A refresh keeps the original position and arrival time.
               receivedAt: held?.receivedAt ?? now,
-              // Re-stamped unconditionally, because this is the half `receivedAt` cannot answer:
-              // which of two copies of one question carries the newer countdown. `mergeWithStored`
-              // reads it, and without it a stale tab's copy won.
+              // Re-stamped every time: decides which copy carries the newer countdown in
+              // `mergeWithStored`.
               refreshedAt: now,
               dismissed: held?.dismissed ?? false,
             });
-            // The map is written before this reads it again, so a request that appears **twice in
-            // one claim** folds into one card rather than two. That is not hypothetical: the
-            // answer is flattened out of every claimed mailbox row, and one unread row per
-            // requester is a property the sweep maintains rather than one this client is told.
+            // Written before re-reading, so a request appearing twice in one claim folds into one
+            // card.
             if (!held) fresh.push(key);
           }
           const card = (id: string): CheckInCard => known.get(id) as CheckInCard;
@@ -2431,12 +1898,8 @@ export const useChatStore = create<ChatState>()(
       },
 
       dismissCheckIn(key) {
-        // A flag, not a delete, for `dismissDigest`'s reason — and by key rather than by index,
-        // because this list is rewritten in place by the next claim.
-        //
-        // The key is `checkInKey`'s, not the raw request id: an id-less row shares the empty
-        // string with every other id-less row, so dismissing one by id dismissed whichever
-        // happened to be first.
+        // A flag, not a delete (see `dismissDigest`), and by `checkInKey`, since id-less rows share
+        // an empty id.
         set((s) => ({
           checkIns: s.checkIns.map((c) => (checkInKey(c) === key ? { ...c, dismissed: true } : c)),
         }));
@@ -2455,25 +1918,15 @@ export const useChatStore = create<ChatState>()(
       },
     }),
     {
-      // Bumped to v2 to force a clean slate on iPhone/mobile browsers that kept serving the old
-      // v1 persisted state (poisoned sessions) after the recent fixes.
-      //
-      // The base KEY (`chemclaw3.chat.v2`) is frozen from here on. Schema changes go through
-      // `version` + `migrate` below: bumping the base key is a silent wipe of everyone's local
-      // history, which is only ever acceptable as the emergency it was the first time.
-      //
-      // The full key is per-account (`chemclaw3.chat.v2.<oid>`; see `chatStorageKey`). It starts on
-      // the `'anon'` slot and is re-pointed to the signed-in account's slot by
-      // `hydrateChatForAccount`, which the auth bootstrap calls once identity is known. Paired with
-      // `skipHydration` below: nothing is read off disk until that call, so one chemist's transcript
-      // is never rehydrated into the next chemist's session on a shared workstation.
+      // The base key (`chemclaw3.chat.v2`) is frozen: bumping it wipes everyone's history. Schema
+      // changes go through `version` + `migrate`. The full key is per account (`chatStorageKey`),
+      // starting on `'anon'` and re-pointed by `hydrateChatForAccount`.
       name: chatStorageKey(null),
       version: CHAT_PERSIST_VERSION,
       storage: chatStorage,
 
-      // Do NOT auto-load on store creation: which account's slot to read is not known until the
-      // auth provider resolves. `hydrateChatForAccount` performs the deferred read against the
-      // right slot. (A test that needs persisted state can call `useChatStore.persist.rehydrate()`.)
+      // No auto-load: the account's slot is unknown until auth resolves. Tests can call
+      // `useChatStore.persist.rehydrate()`.
       skipHydration: true,
 
       migrate: migratePersisted,
@@ -2489,9 +1942,8 @@ export const useChatStore = create<ChatState>()(
           conversations[id] = {
             ...conversation,
             messages: conversation.messages
-              // Somebody else's turn, followed live, is never written down: it is a view of an
-              // exchange the transcript holds, and persisted it would come back as an interrupted
-              // turn of this browser's own — and send `resumeInterruptedTurn` after it.
+              // Never persist a watched turn: it would come back as an interrupted turn of this
+              // browser's own.
               .filter((m) => !(m.role === 'assistant' && m.watched))
               .slice(-MAX_PERSISTED_MESSAGES)
               .map((m) =>
@@ -2499,8 +1951,7 @@ export const useChatStore = create<ChatState>()(
                   ? {
                       ...m,
                       status: 'aborted' as const,
-                      // Not just a status: the answer this turn was writing may well exist on the
-                      // server, and this is what tells the next boot to go and look. See
+                      // Tells the next boot to look for this turn's answer on the server. See
                       // `AssistantMessage.interruptedByReload`.
                       interruptedByReload: true,
                       error: {
@@ -2514,19 +1965,15 @@ export const useChatStore = create<ChatState>()(
           };
         }
 
-        // The feed is durable now, but bounded twice: dropped with the conversation it belongs to
-        // (so `MAX_CONVERSATIONS` trimming cannot leave orphan cards), and aged out, without which
-        // it would only ever grow.
+        // The job feed is dropped with its conversation and aged out.
         const cutoff = Date.now() - JOB_FEED_MAX_AGE_MS;
         const jobFeed = state.jobFeed.filter(
           (j) =>
             j.receivedAt > cutoff && (j.conversationId === null || conversations[j.conversationId]),
         );
 
-        // sessionId IS persisted: it may well still be alive after a reload, and if it is not,
-        // the 404 path recreates it transparently.
-        // Drafts, for the conversations that survived the trim — an orphan draft is a string
-        // keyed by an id nothing can open. See the field's own note on `PersistedState`.
+        // `sessionId` is persisted; a dead one is recreated on 404. Drafts are kept only for
+        // conversations that survived the trim.
         const drafts: Record<string, string> = {};
         for (const [id, text] of Object.entries(state.drafts)) {
           if (text && conversations[id]) drafts[id] = text;
@@ -2538,16 +1985,11 @@ export const useChatStore = create<ChatState>()(
           activeId: state.activeId,
           drafts,
           jobFeed,
-          // Aged out on the same clock as the job feed, and for the same reason: a finding from
-          // last month is history rather than news. Never dropped for being *unread* — the claim
-          // that produced it cannot be repeated.
+          // Aged out like the job feed; never dropped for being unread (the claim cannot be
+          // repeated).
           digests: state.digests.filter((d) => d.receivedAt > cutoff),
-          // The same cutoff, for a different reason: a check-in is a *dated* notice — it says how
-          // many days are left — so a countdown last refreshed a week ago is not merely old, it is
-          // wrong. So the age is the countdown's (`checkInFreshAt`), not the question's: one still
-          // open and refreshed nightly stays. Aged out rather than recomputed, because there is no
-          // timestamp to recompute from. Never dropped for being unread: the claim that produced
-          // it cannot be repeated.
+          // Aged on the countdown's freshness (`checkInFreshAt`): a week-old countdown is wrong,
+          // not just old.
           checkIns: state.checkIns.filter((c) => checkInFreshAt(c) > cutoff),
           notifyOnJobComplete: state.notifyOnJobComplete,
         };

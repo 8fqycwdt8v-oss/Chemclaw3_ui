@@ -1,30 +1,12 @@
 /**
- * The artefact pane's state: whether it is open, what it shows, how wide it is.
+ * The artefact pane's state: open, what it shows, width. Bodies live in React Query
+ * (`keys.exhibits`, `keys.exhibit`); this holds only the reader's choices.
  *
- * **Bodies are not here.** React Query is the source of truth for every artefact body and list
- * (`keys.exhibits`, `keys.exhibit`), keyed by session; this store holds only what is the *reader's*
- * — a column they opened or closed, a revision they picked, a width they dragged. Putting a body
- * here as well would be a second copy of a document two people can edit, and the copy that went
- * stale would be the one on screen.
+ * Width is per account (`oid`-partitioned key, re-pointed by `hydrateExhibitPaneForAccount`); only
+ * the width is persisted.
  *
- * ## Width is the reader's, not the conversation's, and it is per account
- *
- * The concept's own words: persisted "per user rather than per conversation". A chemist who wants a
- * wide pane wants it wide; asking again in every thread is the per-token failure `prefsStore`
- * records at a coarser grain. Per *account* rather than per browser for `chatStore`'s reason — a
- * shared analytical-development workstation has more than one chemist at it — so the persisted key
- * is partitioned by `oid` the same way, and `hydrateExhibitPaneForAccount` re-points it once the
- * account is known. Only the width is persisted: an open pane or a picked revision restored into a
- * conversation it was not picked in would be a state nobody chose.
- *
- * ## The auto-open rule
- *
- * An artefact the agent *creates* during a turn opens the pane on it — it is part of the answer,
- * and an answer whose main exhibit is behind a button is half an answer. **Unless the reader closed
- * the pane during this turn**: Claude's own behaviour, and the right one — a reader who dismissed
- * the column mid-answer has said where they want to look, and taking it back on the next frame
- * would be the app overruling them. `turnStarted` re-arms it, so the next question gets the
- * ordinary behaviour; `close` is the only thing that disarms it.
+ * Auto-open: an artefact the agent creates during a turn opens the pane, unless the reader closed
+ * it during that turn. `turnStarted` re-arms; `close` disarms.
  */
 
 import { create } from 'zustand';
@@ -32,11 +14,8 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import { MAX_EXHIBIT_REFS, type ExhibitRef } from '../../shared/exhibitConstants.ts';
 
 /**
- * The column's bounds, in CSS pixels.
- *
- * The minimum is where a table of three columns with units still reads; the maximum leaves the
- * transcript its reading measure (`max-w-prose` is 65ch ≈ 600px) beside the 256px sidebar on a
- * 1440px screen. The resizer clamps to both, and `aria-valuemin`/`aria-valuemax` publish them.
+ * The column's bounds in CSS pixels, leaving the transcript its reading measure; published as
+ * `aria-valuemin`/`aria-valuemax`.
  */
 export const PANE_MIN_PX = 300;
 export const PANE_MAX_PX = 760;
@@ -54,42 +33,28 @@ interface ExhibitPaneState {
   /** Whether the column is showing the pane, at `lg` and wider. */
   open: boolean;
   /**
-   * Whether the sheet is showing it, below `lg`. A second flag rather than the same one, because
-   * the auto-open must not reach it: a column opening beside the transcript is the answer's
-   * exhibit appearing where exhibits go, while a modal sheet sliding over a phone's whole screen
-   * mid-answer is the app taking the screen away. A deliberate Open sets both.
+   * Whether the sheet shows it below `lg`. Separate so auto-open never slides a sheet over a phone
+   * screen; a deliberate Open sets both.
    */
   sheetOpen: boolean;
   tab: PaneTab;
   /**
-   * The artefact in front **per session**, and the revision picked on it (`0` is the head).
-   *
-   * Per session, and the revision inside it, because both used to be single global values and
-   * that leaked in two directions. A revision picked on one artefact was the revision asked for on
-   * whatever artefact was shown next — switch conversation and the other session's artefact was
-   * fetched at `?revision=2`, which it may not have. And a focus set for a conversation that is
-   * not on screen (an artefact created by a turn the reader switched away from) had to either
-   * overwrite the one on screen or be lost. Keyed by session, neither can touch the other, and a
-   * revision only applies to the artefact it was picked on (`revisionShown`).
+   * The artefact in front per session, and the revision picked on it (`0` is the head), so neither
+   * leaks across sessions or artefacts (`revisionShown`).
    */
   focus: Record<string, PaneFocus>;
   /** Set by a close and cleared at the start of a turn — see the module docstring. */
   dismissedThisTurn: boolean;
   /** Persisted, per account. */
   widthPx: number;
-  /**
-   * Artefacts the reader has asked about, per conversation, waiting to ride the next message as
-   * `exhibit_refs` (phase 2). Not persisted: a chip is part of a message being written, and the
-   * draft it belongs to is what persistence keeps.
-   */
+  /** Artefacts to attach to the next message, per conversation (`exhibit_refs`). Not persisted. */
   refs: Record<string, ExhibitRef[]>;
 
   /** Open the pane on one artefact — a card's Open, a "My artefacts" row. Never auto. */
   show: (sessionId: string, exhibitId: string, revision?: number) => void;
   /**
-   * Open the pane where it was — the top bar's toggle and the sheet trigger. A session with no
-   * focus yet is pinned to `fallback`, the artefact that will be shown, so nothing that reorders
-   * the list afterwards can swap the document in front.
+   * Open the pane where it was; a session with no focus is pinned to `fallback` so reordering
+   * cannot swap the document.
    */
   reveal: (sessionId: string, fallback: string) => void;
   /** The reader closed it. Disarms the auto-open until the next turn. */
@@ -98,24 +63,20 @@ interface ExhibitPaneState {
   /** Show `revision` of one artefact in one session (`0` is the head). */
   setRevision: (sessionId: string, exhibitId: string, revision: number) => void;
   /**
-   * Make `exhibitId` the one in front for `sessionId` unless it already is — what the pane calls
-   * when it falls back to an artefact nobody chose, so the fallback becomes a choice and a list that
-   * reorders under it (a newer artefact, a colleague's edit) cannot swap the document under a draft.
+   * Make `exhibitId` the focus unless it already is, so a fallback becomes a choice that list
+   * reordering cannot change.
    */
   pin: (sessionId: string, exhibitId: string) => void;
   setWidth: (px: number) => void;
   /** A turn began: the auto-open is re-armed. */
   turnStarted: () => void;
   /**
-   * The agent created an artefact during a turn. Opens the pane on it unless the reader closed the
-   * pane this turn. Returns whether it opened, for the test that holds the rule.
+   * The agent created an artefact: open on it unless closed this turn. Returns whether it opened.
    */
   autoOpen: (sessionId: string, exhibitId: string) => boolean;
   /**
-   * The agent began *drafting* a new document (wave 2's `exhibit_draft`). The same rule as
-   * `autoOpen` — the column only, and not if the reader closed the pane this turn — without a
-   * focus to set: the artefact has no id until the tool runs, and the pane shows the draft in front
-   * of whatever was focused until it does. Returns whether it opened.
+   * The agent began drafting a document: open the column under the same rule (no focus to set yet).
+   * Returns whether it opened.
    */
   openForDraft: () => boolean;
   /** Put `exhibitId` in front for `sessionId` without opening anything — a turn's new artefact in
@@ -141,10 +102,7 @@ export interface PaneFocus {
 export const focusOf = (s: Pick<ExhibitPaneState, 'focus'>, sessionId: string): PaneFocus | null =>
   s.focus[sessionId] ?? null;
 
-/**
- * The revision to show of `exhibitId` in `sessionId`: the one picked on *that* artefact, or the
- * head. A revision picked on another artefact never applies — the leak this replaced.
- */
+/** The revision to show of `exhibitId`: the one picked on that artefact, or the head. */
 export const revisionShown = (
   s: Pick<ExhibitPaneState, 'focus'>,
   sessionId: string,
@@ -168,14 +126,8 @@ export const paneStorageKey = (oid: string | null | undefined): string =>
   `${PANE_STORAGE_BASE}.${oid ?? 'anon'}`;
 
 /**
- * `localStorage`, with every failure swallowed — read, write and remove alike.
- *
- * `persist` writes on *every* `set`, whatever `partialize` keeps, and this store is set at the start
- * of every turn (`turnStarted`). So a full quota or a denied storage throwing out of `setItem` was
- * not "the width is not remembered" — it was an exception out of `sendMessage`'s setup, which
- * `tests/persistQuota.test.ts` catches as a turn that raised a banner instead of running. The width
- * is the one thing at stake here, and losing it is the whole of the acceptable cost: the same
- * posture `prefsStore` and `themeStore` take for their own keys.
+ * `localStorage` with every failure swallowed: this store writes at every turn start, and a storage
+ * error must not break sending.
  */
 const storage = createJSONStorage<{ widthPx: number }>(() => ({
   getItem(name) {
@@ -319,10 +271,7 @@ export const useExhibitPane = create<ExhibitPaneState>()(
 
 let hydratedName: string | null = null;
 
-/**
- * Point the persisted width at this account's own slot and read it. Once per account: a second
- * `rehydrate()` would replace a width dragged since with the stored one.
- */
+/** Point the persisted width at this account's slot and read it, once per account. */
 export function hydrateExhibitPaneForAccount(oid: string | null | undefined): void {
   const name = paneStorageKey(oid);
   if (hydratedName === name) return;

@@ -1,33 +1,12 @@
 /**
- * A table artefact: columns with units, rows of values, sortable, editable cell by cell.
+ * A table artefact: columns with units, rows of values, sortable, editable per cell.
  *
- * **A value here is one the agent wrote, or one bound to a tool result (wave 3).** A written value
- * is why the pane puts the unverified-figures strip above this table when the service flags any,
- * and why a chemist's correction of one cell is worth a revision of its own: it is the most
- * informative thing the system observes, and the agent is told about it next turn.
- *
- * A bound cell — or every cell, when the table is one `rows_from` binding — carries a provenance
- * marker and is **read-only until detached**: correcting a value that claims to be a tool's output
- * would leave the claim standing over a number the tool never returned. Detach first makes it the
- * chemist's own; then it edits like any other cell. Every write starts from `raw_spec`, so the
- * bindings an edit did not touch go back verbatim.
- *
- * ## The unit is in the header, never in the cell
- *
- * `columns[].unit` is the service's field and the only place a unit is stated. A header reads
- * `Yield (%)`; a cell reads `82`. Nothing here infers a unit from a label or appends one to a
- * number, for the reason `Mention.values` gives in `chem/entities.ts`: a unit the payload did not
- * state is a claim the surface invented.
- *
- * ## Sorting is a view, editing is a revision
- *
- * Sorting reorders what is drawn and nothing else — the spec's row order is the agent's (or the
- * last editor's), and a save writes it back unchanged. An edit addresses a row by its index in the
- * *spec*, never by where it is drawn, so sorting by yield and then correcting row three corrects
- * the row the chemist clicked rather than the third row of the document.
- *
- * Editing is offered on the head only, as in `DocumentView`, and through the same `useRevise`, so a
- * 409 is the same rebase prompt with the same diff.
+ * Values are agent-written or bound to a tool result. A bound cell shows a provenance marker and is
+ * read-only until detached; every write starts from `raw_spec` so untouched bindings are sent back
+ * verbatim. Units live only in the column header (`columns[].unit`), never inferred or appended to
+ * a cell. Sorting is a view; edits address rows by spec index, so sorting never changes which row
+ * is edited. Editing is head-only, through `useRevise`, so a 409 gets the same rebase prompt as
+ * `DocumentView`.
  */
 
 import { useMemo, useRef, useState } from 'react';
@@ -73,11 +52,8 @@ const shown = (value: TableCell | undefined): string =>
       : value;
 
 /**
- * What a typed cell becomes.
- *
- * Empty is `null` — "no value", which the service's cell type has a member for. Otherwise a number
- * when the column was holding a number (or nothing) *and* the text is one; text stays text. A cell
- * that was text is never coerced to a number by an edit, because a sample id `007` is not seven.
+ * What a typed cell becomes: empty is `null`; a number if the column held a number (or nothing) and
+ * the text parses; otherwise text. A text cell is never coerced (sample id `007` is not seven).
  */
 export function parseCell(text: string, previous: TableCell | undefined): TableCell {
   const trimmed = text.trim();
@@ -120,9 +96,8 @@ export function TableView({
     /** The revision this cell edit was started on — what the save names as its parent. */
     base: number;
   } | null>(null);
-  // Mirrored in a ref because a cell commits on Enter *and* on blur, and the input unmounting after
-  // an Enter can blur it: the second commit must find nothing to commit, not the stale closure's
-  // copy of the edit, or one keystroke would write two revisions.
+  // Mirrored in a ref: a cell commits on Enter and on blur, and the second commit must find
+  // nothing, or one keystroke writes two revisions.
   const pending = useRef<typeof editing>(null);
   const setEditing = (next: typeof editing): void => {
     pending.current = next;
@@ -190,8 +165,8 @@ export function TableView({
   };
 
   /**
-   * The detach for one bound position, or nothing where it cannot be offered. Built per render, so
-   * the base is the revision drawn — `ProvenanceMarker` keeps the one its popover opened over.
+   * The detach for one bound position, or undefined where it cannot be offered. Built per render,
+   * so the base is the revision drawn.
    */
   const detachFor = (target: BoundTarget, provenance: Provenance): (() => void) | undefined => {
     if (!isHead || !raw || !canDetach(target, provenance)) return undefined;
@@ -300,8 +275,7 @@ export function TableView({
                           </span>
                         ) : isEditing ? (
                           <input
-                            // A cell editor takes focus because the reader just asked to type in
-                            // this cell; nothing else in the pane does.
+                            // The reader just asked to type in this cell.
                             // eslint-disable-next-line jsx-a11y/no-autofocus
                             autoFocus
                             aria-label={`${headerOf(column)}, row ${rowIndex + 1}`}

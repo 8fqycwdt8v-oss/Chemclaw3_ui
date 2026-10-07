@@ -1,10 +1,6 @@
 /**
- * `GET /config.js` — the runtime configuration bridge.
- *
- * Vite inlines `import.meta.env.VITE_*` at build time, so a SPA configured that way needs one
- * image per environment. Instead the server emits a tiny script assigning `window.__CHEMCLAW_CONFIG__`
- * from its own `process.env`, and `index.html` loads it before the module bundle. One image,
- * any tenant, no rebuild.
+ * `GET /config.js`: emits `window.__CHEMCLAW_CONFIG__` from this process's environment, loaded by
+ * `index.html` before the bundle, so one image serves any tenant without a rebuild.
  */
 
 import type { ServerResponse } from 'node:http';
@@ -14,9 +10,8 @@ export interface RuntimeConfig {
   authMode: 'dev' | 'msal';
   entraTenantId: string;
   /**
-   * The MSAL authority, already resolved — `ENTRA_AUTHORITY`, or Entra's public cloud for the
-   * tenant — so the SPA and the CSP this process sends are built from one value. See
-   * `entraAuthority` in `server/config.ts`.
+   * The resolved MSAL authority (`entraAuthority` in `server/config.ts`), so the SPA and this
+   * process's CSP share one value.
    */
   entraAuthority: string;
   entraClientId: string;
@@ -28,13 +23,10 @@ export interface RuntimeConfig {
   /** The service's privileged app-role names, so the SPA can hide what would 403. */
   reviewerRoles: string[];
   /**
-   * What the browser records — see `logLevel` in src/env.ts.
-   *
-   * The union is written out here rather than imported from `src/`, exactly as `authMode` is: this
-   * interface is one half of a seam, the SPA's `RuntimeConfig` is the other, and
-   * `tests/runtimeConfig.test.ts` asserts the two are mutually assignable — which is what catches a
-   * drift that a shared import would hide by construction. A server-side import of `src/lib` would
-   * also drag the browser's `config` into the BFF bundle.
+   * What the browser records (see `logLevel` in src/env.ts). The union is written out rather than
+   * imported from `src/`: `tests/runtimeConfig.test.ts` asserts this and the SPA's `RuntimeConfig`
+   * are mutually assignable, which a shared import would hide, and it keeps browser code out of the
+   * BFF bundle.
    */
   logLevel: 'silent' | 'error' | 'warn' | 'info' | 'debug';
   /** The service's message-length cap, so the composer refuses where the service refuses. */
@@ -43,25 +35,24 @@ export interface RuntimeConfig {
    *  See `sharedPollMs` in src/env.ts. */
   sharedPollMs: number;
   /**
-   * The HTML sandbox's origin (wave 3), or `''` when the second listener is not running — so the
-   * SPA never frames an origin this process is not serving. See `sandboxOrigin` in src/env.ts.
+   * The HTML sandbox origin, or `''` when the second listener is not running, so the SPA never
+   * frames an unserved origin.
    */
   sandboxOrigin: string;
   /**
-   * The origin the browser is meant to reach the app at (`APP_ORIGIN`), or `''` when unset — the
-   * one origin the sandbox shell takes content from and may be framed by. Published so a page
-   * opened at some other address shows the artefact as source with both origins named, rather
-   * than a frame that stays blank because the shell ignored it (contract, hardening item 5).
+   * The origin the app is meant to be reached at (`APP_ORIGIN`), or `''`: the one origin the
+   * sandbox shell accepts content from. Published so a page opened elsewhere shows the artefact as
+   * source with both origins named.
    */
   appOrigin: string;
   /**
-   * Whether an `html` artefact's script runs as soon as it is shown (`HTML_SCRIPTS_DEFAULT`, on by
-   * the owner's decision of 2026-10-03). Off puts back the per-view "Run scripts".
+   * Whether an `html` artefact's script runs as soon as shown (`HTML_SCRIPTS_DEFAULT`, default on).
+   * Off restores the per-view "Run scripts".
    */
   htmlScriptsDefault: boolean;
   /**
-   * Where the browser reads the README (`DOCS_BASE_URL`): the html view's "How the sandbox works"
-   * link. Configurable because the default is github.com, which an air-gapped browser cannot reach.
+   * Where the browser reads the README (`DOCS_BASE_URL`); configurable because github.com is
+   * unreachable when air-gapped.
    */
   docsBaseUrl: string;
 }

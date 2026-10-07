@@ -1,37 +1,13 @@
 /**
- * What is waiting on a human — across every conversation, not inside one.
+ * What is waiting on a human, across every conversation: undecided plans, held-open questions,
+ * behaviour proposals, and the reader's own check-ins.
  *
- * **There used to be a third section and it is gone.** A "proposal" was machine-written knowledge
- * waiting to enter the graph, and this page called deciding one "the line that makes
- * machine-written knowledge safe". Chemclaw3 deleted that gate and its `/proposals` routes
- * (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`): a note is written straight into the
- * graph carrying `created_by: agent`, and what makes it safe is now its citations and the fact
- * that it can be contradicted. This is the **second** time this page has had to delete an inbox
- * for a decision that cannot occur, and both times the failure mode was identical and quiet — the
- * client swallows a 404 on a list route into `[]`, so the section rendered a confident, permanently
- * empty queue that reads as "you are up to date". A dead section here is worse than a broken one.
+ * Plans (`GET /plans/pending`): under `plan_only` autonomy a state-changing step waits for a human
+ * to approve the exact plan shown, and the decision card otherwise lives only inside the turn. They
+ * are not decided here — the plan is approved beside the reasoning in its conversation.
  *
- * A **plan** is work the agent cannot start. Under `harness_autonomy="plan_only"` every
- * state-changing step is refused until a human approves the exact plan they were shown, and until
- * this section existed that decision was reachable only from inside the turn that raised it: the
- * card lives in a live conversation, a reload recovers it only for a conversation somebody opens,
- * and a chemist who closed the tab holds no session id. So a plan could sit blocking work with
- * nothing anywhere able to say which conversation it was in. `GET /plans/pending` is the route
- * that answers it, and this is the only screen that asks.
- *
- * **Those deletions are why the counts are rendered.** This page also used to carry an inbox for
- * durable interaction "holds". The service deleted that whole mechanism
- * (`D-2026-08-27-a-hold-nothing-can-open-is-not-a-hold`) because nothing could ever open one, and
- * the list call swallowed the resulting 404 into `[]` — so the page showed a confident,
- * permanently empty inbox describing a decision that could not occur. An empty list is not a
- * finding on its own, so this one never renders as one: the service reports what its scan covered,
- * and an empty `plans` says whether the deployment gates plans at all and whether the answer was
- * complete. A failed call says it failed.
- *
- * **It does not decide in place.** The service binds a decision to the hash of the plan as
- * displayed, so deciding from here would be safe; it would not be *informed*. A plan is approved
- * on the strength of the reasoning that produced it, which is one click away in the conversation
- * — the same argument the deleted holds section made for linking back rather than answering here.
+ * An empty list is never shown as "you are up to date" on its own: each section says which
+ * emptiness it is (no gate, nothing waiting, a partial scan), and a failed call says it failed.
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -66,12 +42,7 @@ function when(value: string | null): string {
   return Number.isNaN(at) ? '' : relativeTime(at);
 }
 
-/**
- * Why this list is empty — the sentence the deleted holds inbox could not say.
- *
- * Three emptinesses, and only the last one means "you are up to date". Separating them is the
- * whole reason the service returns counts beside the rows.
- */
+/** Why the plan list is empty: three different emptinesses, only one of which means up to date. */
 function NoPlansWaiting({ view }: { view: PendingPlansView }): React.JSX.Element {
   if (view.considered === 0) {
     return (
@@ -98,15 +69,9 @@ function NoPlansWaiting({ view }: { view: PendingPlansView }): React.JSX.Element
 }
 
 /**
- * How much of the answer is missing, said plainly — a short list that looks complete is worse.
- *
- * **Two different shortfalls, and the service reports them apart because they are not one claim.**
- * `unread` counts *gated* conversations whose plan the scan did not get to. `truncated` is the
- * walk through the listing stopping before the end, so it carries no count at all: the service
- * never learned whether the conversations beyond it are gated, and folding them into `unread`
- * would be inventing plans that may not exist. Reading only the first left the second invisible —
- * a service that stopped looking rendered exactly like one that had finished, which is the
- * confident emptiness this whole section exists to refuse.
+ * How much of the answer is missing: `unread` counts gated conversations whose plan was not read;
+ * `truncated` means the scan stopped early (no count — conversations beyond it may not be gated at
+ * all).
  */
 function PartialScan({ view }: { view: PendingPlansView }): React.JSX.Element | null {
   // `=== true` rather than truthiness: the field is additive, so a service that predates it sends
@@ -130,18 +95,9 @@ function PartialScan({ view }: { view: PendingPlansView }): React.JSX.Element | 
 }
 
 /**
- * The conversation a pending plan sits in, as `adoptShared` takes it — or `undefined` when it is
- * this person's own.
- *
- * **The plan says whose conversation it is** (`PendingPlan.owner`, Chemclaw3 #503), so the row is
- * built from the plan and the shared listing is only consulted for what the plan does not carry.
- * Before the field, the listing was the only source, and a plan whose session the listing had not
- * returned (a cap, a failed read, a malformed answer) was drawn as the reader's own and opened
- * with an owner's controls.
- *
- * Two cases still fall back to the listing alone, and both are what this did before the field: a
- * service that does not send `owner` yet, and a reader whose own id is unknown here — comparing an
- * owner against nobody would call every conversation somebody else's.
+ * The conversation a pending plan sits in, as `adoptShared` takes it, or `undefined` when it is
+ * this person's own. Built from `PendingPlan.owner`; falls back to the shared listing for older
+ * services or when the reader's id is unknown.
  */
 export function sharedConversationOf(
   pending: PendingPlan,
@@ -155,51 +111,37 @@ export function sharedConversationOf(
       session_id: pending.session_id,
       owner: pending.owner,
       title: pending.title,
-      // When this person was let in is not on the plan; its last activity is the nearest honest
-      // date, and it only orders the adopted conversation in the sidebar.
+      // Its last activity, used only to order the adopted conversation.
       added_at: pending.updated_at,
     }
   );
 }
 
-/**
- * Plans this chemist has not decided, in every conversation at once.
- *
- * The failure is surfaced rather than folded into an empty list: `api.listPendingPlans` lets the
- * error through for exactly this, because "we could not ask" and "nothing is waiting" are opposite
- * things to tell somebody whose work is blocked.
- */
+/** Undecided plans in every conversation. A failure is shown, not folded into an empty list. */
 function PlanInbox(): React.JSX.Element {
   const { auth, ready } = useAuth();
-  // `staleTime` rather than the module-level `{ at, plans }` this replaces, and `decidePlan`
-  // invalidates the key rather than nulling a variable — see `PENDING_PLANS_STALE_MS`. The
-  // reason the interval exists is unchanged and is the most expensive route in the app.
+  // `staleTime` bounds rescans of the most expensive route; `decidePlan` invalidates the key (see
+  // `PENDING_PLANS_STALE_MS`).
   const {
     data: view = null,
     isError: failed,
     isPending,
   } = useApiQuery({ ...pendingPlansQuery(auth), enabled: ready });
-  // **The inbox lists plans in conversations this person does not own** (Chemclaw3 #499): a plan
-  // their own turn wrote in somebody else's session is theirs alone to decide. The plan row says
-  // whose conversation it is (`owner`); a service older than that field does not, so the shared
-  // listing is still read — the same key the sidebar reads, so this is a cache hit rather than a
-  // second request. See `sharedConversationOf`.
+  // Plans can sit in conversations this person does not own. The shared listing (a cache hit, same
+  // key as the sidebar) is the fallback for services without `owner`.
   const { data: shared } = useApiQuery<SharedSessionSummary[], ApiError>({
     ...sharedSessionsQuery(auth),
     enabled: ready,
   });
-  // A listing that is not a list reads as nothing shared rather than taking the inbox down with
-  // it. The plan rows are the point of this section; whose conversation each one sits in is a
-  // qualifier, and a malformed answer to the qualifier must not cost the reader the plans.
+  // A malformed shared listing reads as nothing shared rather than hiding the plans.
   const sharedBySession = useMemo(
     () =>
       new Map((Array.isArray(shared) ? shared : []).map((row) => [row.session_id, row] as const)),
     [shared],
   );
 
-  // An error is shown as an error even while a refetch is in flight: `isError` stays true across a
-  // background refetch, which is the honest reading — the last thing we know is that we could not
-  // ask. Deliberately checked before `isPending`, which is `true` while `enabled` is false.
+  // An error stays shown during a background refetch; checked before `isPending` (true while
+  // disabled).
   if (failed) {
     return (
       <p role="alert" className="text-sm text-danger-ink">
@@ -248,18 +190,13 @@ function PlanInbox(): React.JSX.Element {
                   last active {when(pending.updated_at)}
                 </span>
               </div>
-              {/* The steps themselves, not a count of them: what is being approved is the work, and
-                a row that hid it would send a chemist into the conversation to find out whether it
-                is even the one they are looking for. */}
+              {/* The steps themselves: what is being approved is the work. */}
               <ol className="mt-2 flex list-decimal flex-col gap-1 pl-5 text-sm text-ink-muted">
                 {pending.plan.map((step, index) => (
                   <li key={`${index}-${step}`}>{step}</li>
                 ))}
               </ol>
-              {/* What deciding it would authorise. On the row rather than only in the conversation,
-                because a chemist triaging an inbox is choosing which one to open, and "this one
-                writes to the graph" is the fact that decides it. Absent from an older service,
-                which reads as unknown and prints nothing. */}
+              {/* What deciding it would authorise, so the reader can pick which plan to open. Absent from older services. */}
               {pending.scope && pending.scope.length > 0 && (
                 <p className="mt-2 text-xs text-ink-muted">
                   Approving authorises{' '}
@@ -268,14 +205,11 @@ function PlanInbox(): React.JSX.Element {
               )}
               <div className="mt-3">
                 <Button asChild size="sm" variant="outline">
-                  {/* `/open/:sessionId` adopts the server session into a local conversation, which
-                    is the only route that can turn an id from this list into something readable.
-                    The decision is answered there, beside the reasoning that produced the plan. */}
+                  {/* `/open/:sessionId` adopts the session locally; the decision is made there, beside its reasoning. */}
                   <Link
                     to={`/open/${pending.session_id}`}
-                    // A shared conversation is adopted *as* shared before the resolver sees it, so
-                    // it opens with the member's rules — no Delete or Branch, and a 404 read as
-                    // "removed", never as a dead handle to replace with a private session.
+                    // A shared conversation is adopted as shared first, so it opens with a member's
+                    // rules.
                     onClick={sharedRow ? () => adoptShared([sharedRow]) : undefined}
                   >
                     Open the conversation to decide
@@ -292,18 +226,8 @@ function PlanInbox(): React.JSX.Element {
 }
 
 /**
- * What the standing queries turned up, claimed once and kept.
- *
- * `GET /digests` was built, registered and never called from here — `USER-STORIES.md` H4 still
- * records the whole story as blocked on the backend, and only its *creation* half is.
- *
- * **The read is the consume, and that decides the shape of this component.** The service's mailbox
- * claim is destructive: a row returned here is marked consumed and never re-delivered. So the
- * claim happens once, at the top of the app, straight into the persisted store — not from an
- * effect on this screen, which would destroy a digest for anyone who opened `/review` and
- * navigated away before the response landed. This renders what was already claimed.
- *
- * Dismissal is a flag rather than a delete, because this card is now the only copy there is.
+ * Standing-query findings. Claimed once at app start into the persisted store (the read consumes
+ * them); this renders what was claimed. Dismissal is a flag, since this is the only copy.
  */
 function Digests(): React.JSX.Element | null {
   const digests = useChatStore((s) => s.digests);
@@ -355,10 +279,7 @@ function Digests(): React.JSX.Element | null {
                   Dismiss
                 </Button>
               </div>
-              {/* One line per note rather than a row of bare ids. The service sends `headlines`
-                  for exactly this reason — without it "a client can do nothing but print them" —
-                  and the dispute is marked on the note as well as counted above, because a reader
-                  scanning two findings has to see which one the graph argues with. */}
+              {/* One line per note (`headlines`), with disputed notes marked as well as counted. */}
               <ul className="mt-2 flex flex-col gap-1.5">
                 {digest.noteIds.map((noteId) => (
                   <li key={noteId} className="flex flex-wrap items-baseline gap-1.5 text-sm">
@@ -379,16 +300,9 @@ function Digests(): React.JSX.Element | null {
 }
 
 /**
- * What the page of waiting questions *is*, in the service's own sentence.
- *
- * Rendered as given rather than derived from the two counts beside it: the service computes it from
- * both reasons its total can exceed the page — rows this page did not reach, and rows this caller
- * may not answer because they raised them — and those are different things to tell somebody. Empty
- * from a service that predates the field, and an empty notice with a border round it says less than
- * no notice at all.
- *
- * Above the list in both directions, including over the empty state, because "nothing is waiting on
- * you" is the one sentence on this screen a partial page could contradict.
+ * What the page of waiting questions is, in the service's own sentence (it accounts for rows not
+ * reached and rows the caller may not answer). Shown above the list, including over the empty
+ * state. Empty from older services.
  */
 function PageVerdict({ verdict }: { verdict: string }): React.JSX.Element | null {
   if (!verdict) return null;
@@ -403,23 +317,10 @@ function PageVerdict({ verdict }: { verdict: string }): React.JSX.Element | null
 }
 
 /**
- * Questions the agent is holding a workflow open for.
- *
- * The third gate, and the one that had no surface at all. `GET /pending` has **three live
- * producers** — the `request_external_input` agent tool, `BoCampaignWorkflow._measure` pausing a
- * campaign at the bench for measured yields, and the connector-job path — and none of them could
- * reach a chemist: the request became a durable job that ran for seven days and expired.
- *
- * **This is not the `/approvals` inbox that was deleted.** That one had three consumers and no
- * producer, and swallowed its own 404 into `[]`, so it rendered a confident, permanently empty
- * inbox describing a decision that could not occur. The difference is the producers, and the
- * failure is surfaced rather than folded into an empty list, for the same reason `PlanInbox` does
- * it: "nothing is waiting" and "we could not ask" are opposite things to tell somebody whose bench
- * work is blocked.
- *
- * A campaign waiting on a yield is answered here as a number. Anything else is answered as text —
- * the service takes an opaque payload, and inventing a form per `kind` from a vocabulary this
- * client does not own would be guessing at a schema the workflow defines.
+ * Questions a workflow is holding open (`GET /pending`): from `request_external_input`, a BO
+ * campaign waiting for measured yields, or a connector job. A failure is surfaced, not shown as
+ * empty. A campaign yield is answered as a number; anything else as text, since the payload schema
+ * is the workflow's.
  */
 function PendingInbox(): React.JSX.Element {
   const { auth, ready } = useAuth();
@@ -428,14 +329,8 @@ function PendingInbox(): React.JSX.Element {
   const [notice, setNotice] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   /**
-   * Questions this view has seen settled — answered here, or refused with a 409 because somebody
-   * else did — which the list keeps hiding even while it still holds them.
-   *
-   * `keepPreviousData` is why this is needed: the submit moves the key, and until the refetch
-   * lands the list on screen *is* the previous answer, with the question just answered still in
-   * it behind a live Answer button. Answering it again was a 409, rendered as "somebody has
-   * already answered this one" to the person who had. The service stays the authority on what is
-   * open; this only withholds what this view already knows is not.
+   * Questions this view saw settled (answered here, or 409 because someone else did), hidden while
+   * `keepPreviousData` still shows the previous list. The service remains the authority.
    */
   const [settled, setSettled] = useState<ReadonlySet<string>>(() => new Set());
   const settle = (id: string): void => setSettled((held) => new Set(held).add(id));
@@ -443,14 +338,8 @@ function PendingInbox(): React.JSX.Element {
   // re-trigger the read that calls it. See `awaitingRevision` in the store.
   const pushes = useChatStore((s) => s.awaitingRevision);
 
-  // `nonce` and `pushes` are in the *key* rather than in a dependency array, which is the same
-  // mechanism said better: a frame off the push-back stream moves `pushes`, and that is the whole
-  // reason an inbox left open on screen notices a new question without polling for one.
-  //
-  // **The previous answer stays on screen while the new key loads.** Every push and every submit
-  // is a new key, and a new key starts with no data — so without `keepPreviousData` the whole
-  // inbox was swapped for a spinner, and the answer box a chemist was typing in unmounted and lost
-  // focus the moment another question arrived.
+  // `nonce` and `pushes` are part of the key, so a push-back frame refetches without polling.
+  // `keepPreviousData` keeps the list (and any answer being typed) on screen while a new key loads.
   const { data: view = null, isError: failed } = useApiQuery({
     queryKey: keys.pendingRequests(nonce, pushes),
     queryFn: () => api.listPendingRequests(auth),
@@ -458,11 +347,8 @@ function PendingInbox(): React.JSX.Element {
     placeholderData: keepPreviousData,
   });
 
-  // The reconciliation, which is a *use* of the answer rather than part of fetching it, so it
-  // belongs in an effect keyed on the answer rather than inside a `then`. The service is the
-  // authority on what is open; the `awaiting_answer` stream only says that something changed.
-  // This is what keeps the sidebar badge honest after an answer given in another tab, and what
-  // fills in the fields neither push carries whole.
+  // Reconcile the store with the authoritative list after each answer; keeps the sidebar badge
+  // honest across tabs.
   const waiting = useMemo(
     () => (view?.requests ?? []).filter((r) => r.state === 'waiting' && !settled.has(r.request_id)),
     [view, settled],
@@ -562,11 +448,8 @@ function PendingInbox(): React.JSX.Element {
                 <label className="flex flex-col gap-1 text-xs">
                   <span className="text-ink-muted">Your answer</span>
                   <input
-                    // Focused on open through a ref rather than `autoFocus`: the prop moves focus
-                    // on *mount*, which for a row rendered in a list is a jump a reader did not
-                    // ask for — and `jsx-a11y` refuses it for that reason. This form appears
-                    // because the reader clicked Answer, so moving focus into it is answering
-                    // their action rather than pre-empting it.
+                    // Focus moves into the form because the reader clicked Answer (via a ref, not
+                    // `autoFocus`).
                     ref={(el) => el?.focus()}
                     value={value}
                     onChange={(e) => setValue(e.target.value)}
@@ -617,30 +500,10 @@ function PendingInbox(): React.JSX.Element {
 }
 
 /**
- * The caller's own work, still blocked on somebody else.
- *
- * The other direction from the section above it, and the reason this is a fourth section rather
- * than more rows in that one: `GET /pending` lists what is waiting on *this reader*, and every row
- * there has an answer box. A check-in is a question this reader *asked*, waiting on a colleague,
- * an instrument or a bench — there is nothing here to answer, and the action is to go and ask.
- * Upstream keeps them apart for the same reason, and says so: they share a mailbox and nothing else.
- *
- * **The service's own gap this closes.** `awaiting.py` re-notifies `asked_of` on a timer and writes
- * to the requester exactly once, on expiry — and `awaiting_max_days` is 90, so before the check-in
- * sweep a chemist could hear nothing about their own blocked campaign for three months and then
- * hear that it had failed. The sweep writes nightly into the mailbox; this is the surface that
- * opens it, and until now nothing did: the route was served and no file here named it.
- *
- * **The read is the consume, so this renders what was already claimed**, exactly as `Digests` does
- * — the claim is at the top of the app, straight into persisted state, because a claim fired from
- * this screen would destroy a notice for anyone who opened `/review` and navigated away before the
- * response landed. Dismissal is a flag rather than a delete for the same reason: this card is the
- * only copy there is.
- *
- * **What it may not do is render an empty list as good news.** That is the failure this page has
- * now deleted two sections over, and here it is one request away: a claim that failed leaves
- * exactly the same empty array as a mailbox with nothing in it. `checkInClaim` is what tells them
- * apart, and all three states are said in words.
+ * The caller's own questions still blocked on somebody else (check-ins): nothing to answer here;
+ * the action is to go and ask. Claimed once at app start (the read consumes), so this renders what
+ * was claimed; dismissal is a flag. `checkInClaim` distinguishes "nothing blocked" from a failed or
+ * absent claim.
  */
 function CheckIns(): React.JSX.Element {
   const cards = useChatStore((s) => s.checkIns);
@@ -664,10 +527,7 @@ function CheckIns(): React.JSX.Element {
     // Only 'pending' is genuinely in flight: the claim runs once at the top of the app, so a
     // reader who navigated here later sees this for as long as that one request takes.
     if (claim === 'pending') return <Loading>Reading what you are waiting on…</Loading>;
-    // **Which emptiness this is.** "Nothing of yours is blocked" is a statement about the
-    // chemist's work, and it needs the service to have made it. A 404 says the deployment serves
-    // no mailbox at all, which is a different sentence and the one the page has already deleted
-    // two sections over for saying wrongly.
+    // A 404 means this deployment has no mailbox — not "nothing of yours is blocked".
     if (claim === 'absent') {
       return (
         <EmptyState icon={<Clock className="size-5" />} title="No check-in mailbox here">
@@ -684,10 +544,8 @@ function CheckIns(): React.JSX.Element {
     );
   }
 
-  // `=== true` rather than truthiness, exactly as `PartialScan` reads its own flag: a card
-  // persisted before this field existed carries `undefined`, and "not reported" must not become a
-  // claim in either direction. Read off any visible card, because the service stamps one notice's
-  // flag onto every entry that notice carried — it is the notice that was short, not the question.
+  // `=== true`: older cards carry `undefined`. The flag describes the notice, so any card carries
+  // it.
   const short = visible.some((card) => card.truncated === true);
 
   return (
@@ -711,14 +569,9 @@ function CheckIns(): React.JSX.Element {
                   <span className="font-medium">
                     {card.subject || 'A question with no subject'}
                   </span>
-                  {/* The same field and the same badge the pending inbox two sections up draws,
-                      so one page does not group two inboxes by two different things. Guarded
-                      because a card persisted before the service sent it has none. */}
+                  {/* The same badge the pending inbox draws. */}
                   {card.kind && <Badge tone="warn">{card.kind}</Badge>}
-                  {/* Tone by urgency, text by the number the service sent. `days_left` is floored
-                      upstream, so 0 is "under a day" rather than "today" — saying "0 days left"
-                      would read as expired, which it is not: the sweep does not carry a request
-                      that has already expired. */}
+                  {/* Tone by urgency. `days_left` is floored upstream, so 0 means under a day, not expired. */}
                   <Badge tone={card.daysLeft <= 1 ? 'danger' : 'warn'}>
                     {card.daysLeft === 0
                       ? 'less than a day left'
@@ -734,13 +587,9 @@ function CheckIns(): React.JSX.Element {
                 Dismiss
               </Button>
             </div>
-            {/* The requester's own words, as sent. The service truncates them at 1,000 characters
-                and says in the text itself how much it left out, so shortening them again here
-                would hide that notice. */}
+            {/* The requester's words as sent; the service already notes its own truncation. */}
             {card.rationale && <p className="mt-1.5 text-sm text-ink-muted">{card.rationale}</p>}
-            {/* Where the reasoning that raised the question lives, which is the same ending both
-                other inboxes on this page have. Absent rather than dead where the service sent no
-                session: a wait opened by a plate run or a connector job was never in one. */}
+            {/* Link to the conversation, when there is one (plate runs and connector jobs have none). */}
             {card.sessionId && (
               <div className="mt-2">
                 <Button asChild size="sm" variant="ghost">
@@ -773,11 +622,7 @@ export function ReviewQueue(): React.JSX.Element {
 
         <Digests />
 
-        {/* **The third section this page has carried, and the first that can be decided here.**
-            The two before it were deleted for describing decisions that could not occur, and the
-            docstring above says what that cost. This one is different in the way that matters: the
-            service returns the whole document precisely so nobody approves something unseen, so
-            the reasoning is not one click away in a conversation — it is on the card. */}
+        {/* Proposals can be decided here: the service returns the whole document, so nothing is approved unseen. */}
         <section aria-labelledby="proposals-heading">
           <h2 id="proposals-heading" className="mb-1 text-lg font-semibold tracking-tight">
             Skills the agent has proposed
@@ -805,9 +650,7 @@ export function ReviewQueue(): React.JSX.Element {
           <PendingInbox />
         </section>
 
-        {/* Last, because the two sections above hold work that is stopped *here* — a plan nobody
-            approved, a question only this reader can answer — and this one holds work that is
-            stopped somewhere else. It is a nudge rather than a decision. */}
+        {/* Last: work stopped somewhere else, a nudge rather than a decision. */}
         <section aria-labelledby="check-ins-heading">
           <h2 id="check-ins-heading" className="mb-1 text-lg font-semibold tracking-tight">
             Your work waiting on somebody else

@@ -4,17 +4,8 @@ playwright-report
 test-results
 package-lock.json
 
-# Contains a `git format-patch` output verbatim. Prettier strips the single space on a diff's blank
-# context lines, which is exactly the byte that makes `git am` work — formatting this file silently
-# turns a working patch into one that fails to apply.
-BACKEND-SESSION-LISTING.md
-
-# The sibling checkouts this repository's pipelines make so the backend-contract check gates rather
-# than warns: `.chemclaw3` is `.github/workflows/ci.yml`'s, `.jenkins-lib` is `Jenkinsfile`'s.
-# `.chemclaw3-mock` is the workflow's `oidc-mock` job's checkout of Chemclaw3_mock.
-# Neither tool may write outside the workspace, so another repository's source lands where this
-# one's globs reach. Kept in step with the other three surfaces by `tests/delivery.test.ts`, which
-# derives both directories from the pipelines themselves rather than reading a list typed here.
+# Sibling checkouts the pipelines make inside the workspace (Chemclaw3, Chemclaw3_mock, the Jenkins
+# library). Kept in step with .gitignore/.dockerignore/eslint by `tests/delivery.test.ts`.
 .chemclaw3
 .chemclaw3-mock
 .jenkins-lib

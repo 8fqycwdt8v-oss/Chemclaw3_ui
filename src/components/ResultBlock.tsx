@@ -1,38 +1,11 @@
 /**
- * A tool result, in the answer, as data.
+ * A tool result in the answer, as data, at the same depth as the sentence that refers to it (the
+ * sheet is the second look).
  *
- * The service's strongest single capability was reaching the chemist through its narrowest
- * channel: `screen_hazards` returns a severity-sorted table of cited rules, and the browser showed
- * 200 characters of it behind two disclosures while the rest arrived as sentences the model wrote
- * *about* the table. For a hazard screen, an ICH limit or a Pareto front, the difference between
- * the data and a paraphrase of the data is the difference between a record and a recollection.
- *
- * So a result with something structured to show gets a block in the answer flow, at the same depth
- * as the sentence that refers to it. The sheet stays exactly where it was — it is the second look
- * now rather than the only one.
- *
- * ## What it costs, and why that is affordable
- *
- * The stream carries a 200-character preview and a content address, never the table, so a block is
- * one `GET /sessions/{id}/tool-results/{ref}`. Three things keep that honest:
- *
- *  - it is **lazy**: the fetch starts when the block scrolls into view, so a long transcript the
- *    reader never scrolls back through costs nothing;
- *  - it is **capped** by the caller, at a small number of blocks per turn;
- *  - the URL is **content-addressed** and immutable, so it is *cacheable* — concurrent readers of
- *    one ref share a single request (`contentAddressed` in `src/api/client.ts`), and the fetch no
- *    longer forbids the browser from keeping the answer. It said "the browser and any cache in
- *    front of it can hold it forever" while `src/api/client.ts` set `cache: 'no-store'` on every
- *    request the SPA made, which is not "do not use the cache" but "do not write to it", so every
- *    remount refetched the whole payload. What is still missing is the service's end: neither
- *    `GET /sessions/{id}/tool-results/{ref}` nor `GET /notes/{id}` sends a `Cache-Control`, so a
- *    revalidation is the most the browser can do with it today.
- *
- * ## It renders only when there is something to render
- *
- * No renderer matched, or the payload is not JSON, and this draws nothing at all. A block exists to
- * put a *table* under the answer; a 4 KB blob of raw text there is noise, and the trace row below
- * already offers it to whoever wants it.
+ * Costs one `GET /sessions/{id}/tool-results/{ref}` per block unless the result came inline; kept
+ * affordable by fetching lazily on scroll, by the caller's per-turn cap, and by content-addressed
+ * caching shared across readers (`contentAddressed` in `src/api/client.ts`). Renders nothing when
+ * no renderer matches or the payload is not JSON.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -49,13 +22,7 @@ import { CutResultNotice } from './FullResultText.tsx';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
-/**
- * Has this block been scrolled to?
- *
- * `true` immediately where `IntersectionObserver` is absent — an environment without one is a test
- * or a very old browser, and in both the honest failure is to fetch rather than to show nothing
- * for ever.
- */
+/** Whether this block has been scrolled to; `true` immediately without `IntersectionObserver`. */
 function useVisible(ref: React.RefObject<HTMLElement | null>): boolean {
   const [visible, setVisible] = useState(() => typeof IntersectionObserver === 'undefined');
   useEffect(() => {
@@ -88,11 +55,8 @@ export function ResultBlock({
   tool: string;
   resultRef: string;
   /**
-   * The result the service sent with the event, when it was small enough to ride along.
-   *
-   * When it is here there is no fetch at all — the common case, since an ICH limit and a pKa are
-   * both an order of magnitude under the service's inline cap. Absent is not "no result": the ref
-   * is still what says one was stored, and the block falls back to fetching exactly as before.
+   * The result sent inline with the event, when small enough; then no fetch. Absent does not mean
+   * no result.
    */
   inline?: string;
   /** The assistant read a cut of this result; the block (fetched by ref) is the full text. */
@@ -108,9 +72,8 @@ export function ResultBlock({
     () =>
       inline
         ? {
-            // A `StoredToolResult` built from what the event already carried. The byte size is measured
-            // here rather than guessed: it is the same string the service sized, and the footer showing
-            // it is the same claim whichever way the text arrived.
+            // A `StoredToolResult` built from the inline text; its byte size is measured, the same
+            // claim either way.
             tool,
             text: inline,
             byte_size: new TextEncoder().encode(inline).length,
@@ -122,24 +85,9 @@ export function ResultBlock({
   const [sheet, setSheet] = useState(false);
 
   /**
-   * The stored result, fetched once it scrolls into view — and **two refs shorter than it was.**
-   *
-   * `requested` guarded against asking twice, because written the obvious way — `state.status` in
-   * the dependency list, `cancelled` set in the cleanup — the `setState({status:'loading'})`
-   * re-ran the effect, whose cleanup then cancelled the fetch its own previous run had just
-   * started: the request completes, the 200 comes back, and the block renders nothing for ever.
-   * `mounted` was re-armed on *every* mount rather than initialised once, because `StrictMode`
-   * mounts, unmounts and remounts every component in development, and a flag only ever set to
-   * `false` by that first cleanup stays false for the life of the component — the same empty block,
-   * in development, for ever, with the production build passing over it.
-   *
-   * Both were dedup and lifecycle bookkeeping that a `queryKey` does by construction, and — this
-   * is the half neither ref could ever reach — the key is *shared*, so the trace panel citing the
-   * same `result_ref` is the same read rather than a second round trip to the blob store.
-   *
-   * Quiet on failure, on purpose and unchanged: nothing asked for this fetch, so a banner over a
-   * speculative read would report a failure the reader did not cause and cannot act on. The trace
-   * row below still offers the same result, and says so properly when it cannot be read either.
+   * The stored result, fetched once visible, keyed so the trace panel citing the same ref shares
+   * the read. Quiet on failure: nothing asked for this fetch, and the trace row still offers the
+   * result.
    */
   const { data: fetched } = useApiQuery({
     ...toolResultQuery(sessionId, resultRef, auth),
@@ -151,26 +99,8 @@ export function ResultBlock({
   const result = preloaded ?? fetched ?? null;
 
   /**
-   * The payload, parsed and dispatched once per payload rather than once per render.
-   *
-   * Both halves used to run in the render body, and the enclosing memoisation is why that looked
-   * free: `Bubble` is memoised, `ResultBlocks` is memoised on the trace array, so this does not
-   * re-render per token. It re-renders per *trace mutation* — every tool call, every result, every
-   * plan revision and every job event — and a turn has ten to thirty of those. Measured through the
-   * real store over an eight-step turn (`tests/resultBlockParse.test.tsx` is the same measurement as
-   * an assertion), one 4.6 kB result was parsed and re-dispatched **15 times, once per mutation**,
-   * where it is now parsed once.
-   *
-   * **The saving is real and it is small, which is worth writing down rather than dressing up.**
-   * One parse plus a walk of `RENDERERS` measures 0.07 ms at 3 kB, 0.37 ms at 27 kB and 1.75 ms at
-   * 140 kB — so a fifteen-mutation turn was spending ~5 ms on a typical fetched result and ~26 ms
-   * on a large one, in the frames a chemist is reading in. The reason to do it anyway is that the
-   * cost is per *mutation* and the payload is unbounded, so it is a line that grows with both the
-   * service's inline cap and the length of a turn.
-   *
-   * `result` is a stable object — `preloaded` is memoised above and a fetched one is set once — so
-   * this recomputes when the payload changes and not otherwise. Nothing about the output changed;
-   * `rendererFor` is a pure function of `(tool, parsed)`.
+   * Parse and dispatch once per payload rather than on every trace mutation
+   * (`tests/resultBlockParse.test.tsx`).
    */
   const picked = useMemo(() => {
     if (!result) return null;
@@ -211,10 +141,7 @@ export function ResultBlock({
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-border-subtle bg-surface-sunken px-3 py-2">
         <h3 className="text-sm font-semibold">{renderer.title(tool)}</h3>
         <span className="font-mono text-2xs text-ink-subtle">{tool}</span>
-        {/* The method, at the altitude the number is read at. It used to be four disclosures down
-            while the value it qualifies sat at depth zero; a chemist should never have to ask
-            whether 4.76 came from a cited table or a semiempirical estimate. Nothing renders for a
-            tool this repo has no sourced method for — a confidently wrong label is worse. */}
+        {/* The method beside the data; nothing for a tool without a sourced method. */}
         {method && <Badge>{method.method}</Badge>}
         {summary && (
           <Badge tone={summary.tone} className="ml-auto">
@@ -226,23 +153,14 @@ export function ResultBlock({
       <div className="flex flex-col gap-2.5 p-3">
         <Verdict data={data} />
         <renderer.View data={data} tool={tool} compact onUsed={() => {}} />
-        {/* What the method does NOT establish, and only under a GENERIC renderer.
-            A typed one pins the service's own qualifying sentence out of the payload — "nothing
-            matching is not a clearance", "the index holds no searchable record" — which is both
-            more specific than the manifest's caveat and, for the hazard screen, the same warning
-            in different words. Two warnings saying one thing is how a reader learns to skip
-            both. The caveat is below the data rather than above it for the same reason it is not
-            in the header: these run to four lines. */}
+        {/* The method's caveat, only under a generic renderer: typed renderers already show the service's own qualifying sentence. */}
         {renderer.generic && method?.caveat && (
           <p className="border-l-2 border-warn/40 pl-2 text-2xs text-ink-muted">{method.caveat}</p>
         )}
       </div>
 
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border-subtle px-3 py-1.5">
-        {/* Only when there is something to fetch. A result can arrive complete on the event and
-            still have no ref — the store is off, the write failed — and a control that opens a
-            panel which can only 404 is worse than no control. The card is already the whole
-            result in that case. */}
+        {/* Only with a stored ref; a result can arrive inline with none. */}
         {resultRef && (
           <Button
             variant="link"
@@ -254,9 +172,7 @@ export function ResultBlock({
             Open full result
           </Button>
         )}
-        {/* Keep this result beside the conversation as an artefact. Only with a stored ref — the
-            service pins a ref its store holds, never an inline copy — and only where the
-            deployment has artefacts; `PinResult` decides both. */}
+        {/* Pin as an artefact; `PinResult` checks for a stored ref and artefacts being enabled. */}
         <PinResult sessionId={sessionId} resultRef={resultRef} tool={tool} />
         {/* The table above is what the tool returned; the assistant worked from less. Said on the
             card, because a figure here the answer never mentions is otherwise a puzzle. */}

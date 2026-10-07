@@ -1,31 +1,16 @@
 /**
- * The HTML sandbox's two-sided protocol (wave 3) — what the app and the sandbox shell agree on.
+ * The HTML sandbox protocol shared by the app and the sandbox shell.
  *
- * An `html` artefact is agent-written markup and script. It never runs on the app's origin, which
- * holds the bearer token: it runs in a frame served by the BFF's **second listener**
- * (`SANDBOX_ORIGIN`, a different origin, ideally a different hostname), embedded with
- * `sandbox="allow-scripts"` and nothing else — so its document is opaque-origin as well as
- * cross-origin, cannot reach the network through anything CSP governs (`connect-src 'none'` on the
- * shell — WebRTC is not among those, see `HtmlView`), and cannot touch the app's storage, cookies,
- * top window or a popup.
- *
- * The two halves talk in exactly three messages, and every check is on the receiving side:
- *
- *  - **frame → app: `{type: "ready"}`** (the contract's hardening handshake), posted by the shell to
- *    the app origin once its listener is armed. The app sends nothing before it, and takes it only
- *    from its own frame's window with the opaque origin (`readyMessage`, `HtmlView`).
- *  - **app → frame: `{type: "html", html, scripts, height, title}`**, posted once, in answer to that
- *    `ready`. The shell accepts it only from its parent window and only when `event.origin` is the
- *    app origin the server injected — so another tab, another frame or a page that framed the shell
- *    cannot hand it content. Posted with target `'*'` because the frame's origin is opaque and no origin string
- *    names it; what that does not protect is argued in `HtmlView`.
- *  - **frame → app: `{type: "height", px}`**, debounced and clamped by the shell, and clamped again
- *    by the app, which accepts it only from that frame's window (`event.source`) with the opaque
- *    origin (`"null"`) a sandboxed document posts from. Nothing else a frame posts is read.
- *
- * Imported by the BFF (`server/sandbox.ts`, which inlines the numbers into the shell's script) and
- * by the SPA (`HtmlView`), so the clamp the shell applies and the one the app applies are one pair
- * of constants. Dependency-free: it is on the server's path and in a lazy client chunk.
+ * An `html` artefact runs in a frame from the BFF's second listener (`SANDBOX_ORIGIN`), embedded
+ * with `sandbox="allow-scripts"` only: opaque and cross-origin, `connect-src 'none'`, no access to
+ * the app's token, storage or top window. Three messages, all checked by the receiver:
+ * - frame → app `{type: "ready"}` once the shell is armed; the app sends nothing before it.
+ * - app → frame `{type: "html", html, scripts, height, title}`, once; the shell accepts it only
+ *   from its parent with the injected app origin. Posted to `'*'` since the frame origin is opaque
+ *   (see `HtmlView`).
+ * - frame → app `{type: "height", px}`, clamped by both sides; accepted only from that frame's
+ *   window with origin `"null"`. Imported by `server/sandbox.ts` and `HtmlView` so both clamps
+ *   share constants; dependency-free.
  */
 
 /** The one path the sandbox listener serves a page on, and the one the app listener 404s. */
@@ -37,21 +22,15 @@ export const SANDBOX_MIN_HEIGHT = 80;
 export const SANDBOX_MAX_HEIGHT = 4_000;
 
 /**
- * How long the app waits for the shell's first `ready` before it stops showing a frame and shows
- * the source instead, with a notice that the sandbox did not answer.
- *
- * A frame that never says `ready` is a blank box with no explanation: the sandbox host unrouted,
- * blocked by a proxy that rewrote its CSP, an oauth-proxy login inside it, a certificate the
- * browser refused. Five seconds is several round trips to a page that is one static response and
- * one inline script; a sandbox slower than that is one a chemist would read as broken anyway.
+ * How long the app waits for the shell's first `ready` before showing the source with a notice
+ * instead of a blank frame (unrouted host, rewritten CSP, proxy login, refused certificate).
  */
 export const SANDBOX_READY_TIMEOUT_MS = 5_000;
 
 /**
- * Where the README is read from when a deployment names nowhere else (`DOCS_BASE_URL`). The html
- * view's "How the sandbox works" link resolves `README.md#html-sandbox-artefacts` against it — so
- * an air-gapped deployment points this at an internal mirror (or a path this origin serves) instead
- * of a host its browsers cannot reach.
+ * Where the README is read from when `DOCS_BASE_URL` is unset; the "How the sandbox works" link
+ * resolves `README.md#html-sandbox-artefacts` against it. Air-gapped deployments point this at an
+ * internal mirror.
  */
 export const DEFAULT_DOCS_BASE_URL = 'https://github.com/8fqycwdt8v-oss/Chemclaw3_ui/blob/main/';
 
@@ -86,11 +65,8 @@ export function heightMessage(data: unknown): number | null {
 }
 
 /**
- * The sandbox origin as a usable origin, or `''` when there is none to use.
- *
- * Unusable: unset, not an http(s) origin, or **the app's own origin** — a frame from the origin
- * holding the token is not a sandbox, whatever its attribute says, so that configuration is shown
- * as escaped source rather than run.
+ * The sandbox origin if usable, else `''`. Unusable: unset, not http(s), or the app's own origin (a
+ * frame on the token-holding origin is no sandbox, so content is shown as escaped source).
  */
 export function usableSandboxOrigin(sandboxOrigin: string, appOrigin: string): string {
   if (!sandboxOrigin) return '';

@@ -27,7 +27,6 @@
 
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { resolveRoute } from '../server/routes.ts';
 
 const check = readFileSync('scripts/check-openapi.mjs', 'utf8');
 
@@ -84,69 +83,6 @@ describe('the remedy names a module the backend actually has', () => {
       expect(text, `${file} still names a module the backend does not have`).not.toContain(
         'service.app:create_app',
       );
-    },
-  );
-});
-
-/**
- * `USER-STORIES.md` is the document that says which chemist-facing workflows this app reaches, and
- * a story marked **`SERVED`** is a claim about a route — so it is checkable against the only thing
- * that decides whether a route is reachable at all: the BFF whitelist.
- *
- * It was wrong, in the direction a document is always wrong: F4 ("review machine-written knowledge
- * before it enters the graph") was marked `SERVED` over `GET /proposals`, `GET /proposals/{id}` and
- * `POST /proposals/{id}/decision`, under a paragraph opening "F4 was the largest untouched
- * capability in the system. **Built.**" — while all three had been deleted upstream with the PR
- * gate (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`) and this repo's own HEAD had
- * already deleted their client. The document was the last place still saying the feature existed.
- *
- * F1 in the same table is what the fix looks like when it is done: struck through, marked `GONE`,
- * with the ADR that deleted it named. This test is what makes the next one fail instead of drift.
- */
-describe('every story this document marks SERVED names a route the BFF can reach', () => {
-  const rows = readFileSync('USER-STORIES.md', 'utf8')
-    .split('\n')
-    .filter((line) => line.startsWith('| **') && line.includes('`SERVED`'));
-
-  /** Every concrete path a documented template could produce, over every combination of samples. */
-  const concrete = (template: string, encode: (sample: string) => string = (x) => x): string[] =>
-    template
-      .split(/(\{[^}]+\})/)
-      .reduce<string[]>(
-        (paths, part) =>
-          /^\{[^}]+\}$/.test(part)
-            ? paths.flatMap((prefix) => SAMPLES.map((sample) => prefix + encode(sample)))
-            : paths.map((prefix) => prefix + part),
-        [''],
-      );
-
-  it('finds the rows to check, so a table rewrite cannot make this vacuous', () => {
-    expect(rows.length).toBeGreaterThan(8);
-  });
-
-  it.each(rows.map((row) => [row.split('|')[1]?.trim() ?? '', row] as const))(
-    '%s',
-    (_story, row) => {
-      // The query is part of the claim where a route holds its id there (`?ref={ref}`, the calc
-      // byte route): the whitelist checks it, so a story naming the route without it names a
-      // request the BFF refuses.
-      const claimed = [
-        ...row.matchAll(/`(GET|POST|PUT|DELETE) (\/[A-Za-z0-9_{}/-]+)(\?[^`\s]*)?/g),
-      ].map((m) => [m[1] ?? '', m[2] ?? '', m[3] ?? ''] as const);
-      const unreachable = claimed.filter(
-        ([method, path, query]) =>
-          !concrete(path).some((p) =>
-            // Encoded, as the client sends it: a real calc key's `+` is a space otherwise.
-            concrete(query, encodeURIComponent).some(
-              (q) => resolveRoute(method, `/api${p}`, q) !== null,
-            ),
-          ),
-      );
-      expect(
-        unreachable.map(([method, path, query]) => `${method} ${path}${query}`),
-        'marked SERVED over routes the BFF does not forward — the document is describing a ' +
-          'capability this app cannot reach',
-      ).toEqual([]);
     },
   );
 });

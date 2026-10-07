@@ -1,23 +1,11 @@
 /**
- * The BFF's request handling and its socket-level limits, as a server nobody has started yet.
+ * The BFF's request handling and socket limits, as an unstarted server (`index.ts` is the entry
+ * point), so tests can drive real sockets.
  *
- * Split out of `index.ts` so both are testable: `index.ts` is the *entry point* — validate the
- * config, listen, log, shut down — and everything a test would want to drive against real sockets
- * is here. The split is also what made the two defects below expressible as tests rather than as
- * measurements somebody had to take by hand.
- *
- * This process proxies a fixed route list, serves `/config.js`, serves static assets with SPA
- * fallback, answers its own `/healthz`, `/readyz` and `/metrics`, and accepts the browser's log
- * batches on `/api/client-events`. Bare `node:http` rather than a framework — a framework's routing
- * layer would be overhead, and its middleware ecosystem contains at least one thing
- * (`compression`) that silently destroys Server-Sent Events.
- *
- * **Every response is logged and counted**, which it was not: this file handled `/healthz`,
- * `/config.js`, `/api/*` and the static assets and emitted no line on any success path, so an
- * operator watching the UI pod during an incident saw three startup lines and then silence — no
- * request rate, no status distribution, no latency, no per-route volume, no upstream error rate.
- * Both the line and the counters are keyed on the route's PATTERN rather than its path, for the
- * reason `ResolvedRoute.template` gives.
+ * Proxies a fixed route list, serves `/config.js` and static assets with SPA fallback, answers
+ * `/healthz`, `/readyz`, `/metrics`, and accepts browser logs on `/api/client-events`. Bare
+ * `node:http`: compression middleware breaks SSE. Every response gets one access-log line and
+ * metrics, labelled by route pattern.
  */
 
 import http from 'node:http';
@@ -37,23 +25,14 @@ import { createSandboxHandler } from './sandbox.ts';
 import { SANDBOX_FRAME_PATH } from '../shared/sandbox.ts';
 
 /**
- * The headers that make this origin safe to be, applied to **every** response.
- *
- * They used to live inside `sirv`'s `setHeaders`, which made them a property of the static file
- * handler rather than of the process: `/api/*`, `/config.js` and `/healthz` all return before
- * `sirv` is ever called, so every one of them was served with no CSP and no nosniff. That matters
- * because the SPA's `script-src 'self'` is what makes the RDKit SVG path unexploitable, and a
- * proxied backend response is a same-origin document — an HTML-typed body on `/api/notes/<id>`
- * was measured executing script on the origin that holds the bearer token.
+ * Security headers for every response, including `/api/*` and `/config.js` (a proxied response is a
+ * same-origin document). The SPA's `script-src 'self'` is what keeps the RDKit SVG injected via
+ * `dangerouslySetInnerHTML` (`src/components/Molecule.tsx`) from executing script, and a proxied
+ * HTML-typed body must not run script on the origin that holds the bearer token.
  */
 export function setSecurityHeaders(res: http.ServerResponse, path = ''): void {
-  // One path gets a different policy: the RDKit worker's own script, which a dedicated worker
-  // takes as its policy instead of the document's — `RDKIT_WORKER_CSP` has the measurement. Keyed
-  // on the request path, not inside `sirv`'s `setHeaders`, because `sirv` answers a revalidation
-  // with a 304 *before* calling that hook, and a 304's headers replace the cached ones: the worker
-  // would come back from cache under the document's policy and stop drawing. A path of this shape
-  // is never answered with HTML — it carries an extension, so `sirv` never falls back to
-  // `index.html` for it; a missing one is a `text/plain` 404.
+  // The RDKit worker script gets `RDKIT_WORKER_CSP`, keyed on the request path (not `sirv`'s hook,
+  // which a 304 bypasses).
   res.setHeader('content-security-policy', isRdkitWorkerScript(path) ? RDKIT_WORKER_CSP : cfg.csp);
   res.setHeader('x-content-type-options', 'nosniff');
   res.setHeader('referrer-policy', 'same-origin');
@@ -63,16 +42,8 @@ export function setSecurityHeaders(res: http.ServerResponse, path = ''): void {
 }
 
 /**
- * Whether this asset's URL changes when its bytes do, and so may be cached for ever.
- *
- * Vite writes every build output as `assets/<name>-<hash>.<ext>`, and the hash is over the
- * content — a changed file is a changed URL, which is the whole precondition for `immutable`.
- * Anything copied verbatim out of `public/` keeps its name across deploys and is therefore
- * explicitly NOT this: caching `favicon.svg` for a year would mean a year to change it.
- *
- * Matched on the shape rather than on a list of names, because the list is Vite's to write. The
- * hash is base64url and at least eight characters, which no unhashed name in `public/` collides
- * with, and the `/assets/` prefix is what Vite's `assetsDir` guarantees.
+ * Whether an asset's URL changes with its bytes (`/assets/<name>-<hash>.<ext>`), and so may be
+ * cached immutably. Files from `public/` are not.
  */
 function isContentHashed(pathname: string): boolean {
   return /^\/assets\/.+-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/.test(pathname);
@@ -84,11 +55,8 @@ function createAssetHandler(): (
   res: http.ServerResponse,
   next?: () => void,
 ) => void {
-  // A missing client directory is survivable and the warning below says so: under `npm run dev`
-  // the BFF only proxies and serves /config.js, and Vite serves the client. It was not actually
-  // survivable — `sirv` calls `readdirSync` on construction and threw ENOENT one line after the
-  // warning promised a 404, so a plain `npm run dev` on a fresh checkout (no `dist/client` yet)
-  // killed the BFF at import.
+  // Under `npm run dev` there is no client build; skip `sirv` (which throws on a missing directory)
+  // and 404 instead.
   if (!existsSync(cfg.clientDir)) {
     log.warn(`client directory ${cfg.clientDir} does not exist — static assets will 404.`);
     log.warn('Run `npm run build:client` first, or use `npm run dev` for the Vite dev server.');
@@ -103,39 +71,21 @@ function createAssetHandler(): (
     // SPA fallback, so /auth/callback and any client route resolve to index.html.
     single: true,
     etag: true,
-    // Serve the precompressed output rather than compressing at request time. This is both faster
-    // and keeps any compression middleware — which would break SSE — out of the process.
-    //
-    // These two options compress NOTHING. They serve a pre-built `.gz`/`.br` sibling when the
-    // request allows it and fall through silently when there is none, and for the life of this
-    // file there was none: the build emitted zero sidecars, so the main bundle went out at
-    // 634,903 B against 194,190 B gzipped with `Accept-Encoding: gzip, br` sent. The step that
-    // makes this true is `scripts/compress-assets.mjs`, wired into `npm run build:client`, and
-    // `tests/staticAssets.test.ts` drives a real request to keep the pair honest.
+    // Serve the precompressed `.gz`/`.br` siblings `scripts/compress-assets.mjs` writes; no runtime
+    // compression (`tests/staticAssets.test.ts`).
     gzip: true,
     brotli: true,
     setHeaders(res, pathname) {
-      // Only caching lives here now: it is the one header that genuinely depends on which file is
-      // being served. Hashed assets are immutable; the HTML shell must never be cached, or a deploy
-      // won't take AND an authenticated shell can sit in a shared cache for the next visitor.
-      //
-      // The shell is served for the root, for /index.html, and — via `single` — for any client
-      // deep link with no file extension (`/c/abc`). The previous check matched only the first two,
-      // so every deep link was served with no cache-control at all. Testing the final segment's
-      // extension is testing which file sirv serves: every hashed asset has one and is served
-      // directly; an extensionless path falls back to index.html, which is HTML.
+      // The HTML shell (root, `/index.html`, and any extensionless deep link via `single`) must
+      // never be cached: a deploy must take effect and an authenticated shell must not sit in a
+      // shared cache.
       const servesHtmlShell =
         pathname === '/' || pathname === '/index.html' || !/\.[^/]+$/.test(pathname);
       if (servesHtmlShell) {
         res.setHeader('cache-control', 'no-cache');
         return;
       }
-      // Everything else got NO `cache-control` at all, which is not "cache normally" — it is
-      // heuristic freshness, and the heuristic is a fraction of the file's age, so a
-      // just-deployed asset is stale on arrival and every returning chemist reissued a
-      // conditional GET for every asset on every load, into the single-threaded process that is
-      // also piping their SSE streams. The comment above has said "hashed assets are immutable"
-      // since this file was written; this is where that finally gets said to the browser.
+      // Every other asset gets an explicit policy rather than heuristic freshness.
       res.setHeader(
         'cache-control',
         isContentHashed(pathname)
@@ -150,12 +100,8 @@ function createAssetHandler(): (
 }
 
 /**
- * Count the bytes this process writes for one response.
- *
- * `res.socket.bytesWritten` is per SOCKET and this server keeps connections alive, so it counts
- * every earlier response on the same connection too. Wrapping the two writers is the only way to
- * attribute bytes to a response — and both wrappers return the original's return value, so
- * backpressure (which `upstreamRes.pipe(res)` depends on) is unchanged.
+ * Count bytes written for one response by wrapping `write`/`end` (socket counters span keep-alive
+ * responses). Return values are preserved for backpressure.
  */
 function countBytes(res: http.ServerResponse): () => number {
   let bytes = 0;
@@ -178,38 +124,15 @@ function countBytes(res: http.ServerResponse): () => number {
 }
 
 /**
- * The status booked for a response the client walked away from.
- *
- * nginx's convention, and it is borrowed rather than invented because an abandoned response has no
- * status of its own: `res.statusCode` is whatever was set before the client left — 200 on an SSE
- * stream that had been running for minutes, and a bare `200` default on one where no header was
- * ever written. Booking either would make "how many streams did clients abandon?" unanswerable
- * from the scrape and would count an abandoned turn as a served one.
+ * The status booked for a response the client abandoned (nginx's 499), since `res.statusCode` would
+ * misreport it.
  */
 const CLIENT_CLOSED_REQUEST = 499;
 
 /**
- * One access-log line per response, plus the metrics behind `/metrics`.
- *
- * Written on `close` rather than at dispatch, so the status, the duration and the byte count are
- * the real ones — an SSE turn that ran for nine minutes books nine minutes here, which is the
- * whole point of measuring it. `route` is set by the caller as it dispatches; it starts as the
- * least specific label rather than as the raw path, because a label is a metric dimension and a
- * path is not.
- *
- * **`close`, not `finish`, and the difference was a permanently wrong gauge.** `finish` fires when
- * a response was fully written; a client that hangs up mid-response never reaches it, so neither
- * the access line nor `requestFinished` ran — and `requestStarted` had already run. Measured on
- * the route where it matters most: five aborted `GET /sessions/{id}/events` streams took
- * `chemclaw_ui_requests_in_flight` from 1 to 6 and left it at 6 for the life of the process, so
- * any alert on that gauge fires for ever after the first abandoned stream; and
- * `grep -c 'sessions/{id}/events' bff.log` returned **0** — the longest-lived, most
- * failure-prone route in this process had never written one access line. `close` is emitted on
- * every terminal outcome, completed or aborted, and exactly once, which is what makes the
- * decrement and the line a pair rather than a hope. `proxy.ts` already listened for exactly this
- * to tear the upstream request down (`res.on('close')` there, guarded by the same
- * `writableFinished`), so an abort was being handled correctly everywhere except in what this
- * process says about it.
+ * One access-log line and the metrics per response, on `close` (not `finish`), which fires exactly
+ * once for completed and aborted responses alike — so the in-flight gauge stays correct and long
+ * streams are logged with their real duration.
  */
 function observe(req: http.IncomingMessage, res: http.ServerResponse, trace: RequestTrace): void {
   const startedAt = Date.now();
@@ -217,8 +140,7 @@ function observe(req: http.IncomingMessage, res: http.ServerResponse, trace: Req
   requestStarted();
   res.on('close', () => {
     const durationMs = Date.now() - startedAt;
-    // `writableFinished` is the one honest reading of "did this response actually complete?":
-    // `res.finished` was deprecated for saying yes as soon as `end()` was *called*.
+    // `writableFinished` is whether the response actually completed.
     const aborted = !res.writableFinished;
     const status = aborted ? CLIENT_CLOSED_REQUEST : res.statusCode;
     requestFinished(trace.route, req.method ?? 'GET', status, durationMs / 1000);
@@ -229,34 +151,18 @@ function observe(req: http.IncomingMessage, res: http.ServerResponse, trace: Req
       status,
       duration_ms: durationMs,
       bytes: bytes(),
-      // Kept beside the 499 rather than replacing it: the status is what a query aggregates on,
-      // and this is what tells a reader the stream was answering when the client left.
+      // The 499 is what queries aggregate on; this says what status the stream had been sending.
       ...(aborted ? { aborted: true, sent_status: res.statusCode } : {}),
       ...(trace.upstreamMs === null ? {} : { upstream_ms: trace.upstreamMs }),
-      // The join key, and it is on EVERY line now. It used to be read off the upstream response,
-      // so a 502, a 499, a 413 and every `/api:blocked` logged `""` — the entire population during
-      // an outage, which is when somebody is trying to join a browser's report to the request that
-      // caused it. See `server/correlation.ts`.
+      // Correlation id on every line (see `server/correlation.ts`).
       correlation_id: trace.correlationId,
     });
   });
 }
 
 /**
- * What to do when the handler for a request rejects.
- *
- * Two dispatch arms here are asynchronous and were `void`ed — `readiness()` and
- * `handleClientEvents()`. `void` on a promise says "I am not waiting for this", and what it
- * actually bought was that a rejection from either became an `unhandledRejection`, which Node 22
- * treats as fatal by default: one request that threw where nobody was looking would take the
- * process down, killing every SSE stream on it. Neither is *expected* to reject — `readiness()`
- * resolves a verdict rather than throwing, and `handleClientEvents` catches its own parse — and
- * that is the argument for catching rather than against it, because a rejection here means the
- * assumption has already been wrong once.
- *
- * The answer is a 500 only if nothing has been written yet: a rejection *after* `writeHead` (the
- * likely one, `ERR_HTTP_HEADERS_SENT` on a response that raced a client abort) has no room for a
- * status, and the access line `observe` writes on `close` records what really happened either way.
+ * Handle a rejected request handler: answer 500 if nothing was written, otherwise leave it to the
+ * access line. Prevents an `unhandledRejection` (fatal on Node 22) taking down every stream.
  */
 function failRequest(
   res: http.ServerResponse,
@@ -284,12 +190,8 @@ export function createRequestListener(): http.RequestListener {
     setSecurityHeaders(res, path);
     const method = req.method ?? 'GET';
 
-    // One trace per request, narrowed as dispatch proceeds and read by `observe` when the response
-    // closes. The correlation id is minted HERE — before any route is chosen, so the line for a
-    // blocked path or a refused body carries one too — and put on the response immediately, so the
-    // browser can quote it back on `/api/client-events` whatever happens next. A proxied response
-    // may overwrite it with the service's own; `writeHead` beats `setHeader`, which is what makes
-    // that free.
+    // One trace per request. The correlation id is minted here, before routing, and set on the
+    // response at once; a proxied response may replace it with the service's.
     const trace: RequestTrace = {
       route: 'static',
       upstreamMs: null,
@@ -299,10 +201,8 @@ export function createRequestListener(): http.RequestListener {
     observe(req, res, trace);
 
     if (path === '/healthz') {
-      // Liveness, and deliberately still a literal: it answers "is this process serving?", which
-      // is the only question a restart decision may be made on. Readiness is `/readyz` below, and
-      // it is the one that fails while this pod is draining — a draining pod is still serving what
-      // it already has, and restarting it would take those requests with it.
+      // Liveness, a literal answer: restart decisions must not depend on the backend. Readiness is
+      // `/readyz`.
       trace.route = '/healthz';
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end('{"status":"ok"}');
@@ -327,9 +227,8 @@ export function createRequestListener(): http.RequestListener {
     }
 
     if (path === '/metrics') {
-      // This pod's own numbers, not the service's — `/api/metrics` is deliberately NOT
-      // whitelisted and must stay that way. Unauthenticated, like every other `/metrics` in this
-      // family, which is why nothing here carries an actor, a session or a path as a label.
+      // This pod's metrics. Unauthenticated, so no actor, session or path labels. `/api/metrics` is
+      // never whitelisted.
       trace.route = '/metrics';
       const body = renderMetrics();
       res.writeHead(200, {
@@ -360,9 +259,7 @@ export function createRequestListener(): http.RequestListener {
       // The query rides along for the one route that holds its id there (`CALC_ARTIFACT_REF`).
       const route = resolveRoute(method, path, rawUrl.slice(path.length));
       if (!route) {
-        // Not whitelisted: answered here, upstream never contacted. Labelled as one bucket rather
-        // than by path — an un-whitelisted path is attacker-chosen, so using it as a metric label
-        // would let anyone mint time series in this process.
+        // Not whitelisted: one bucket label, never the attacker-chosen path.
         trace.route = '/api:blocked';
         log.debug('blocked un-whitelisted request', { method, path });
         res.writeHead(404, { 'content-type': 'application/json' });
@@ -385,9 +282,8 @@ export function createRequestListener(): http.RequestListener {
     }
 
     if (path === SANDBOX_FRAME_PATH) {
-      // Never on the app's origin (`server/sandbox.ts`). Answered here, explicitly, because the
-      // asset handler below falls back to `index.html` for any extensionless path — so without
-      // this line the app would serve *something* at the sandbox's path on the token's origin.
+      // Never served on the app origin; answered explicitly because the SPA fallback would
+      // otherwise serve something here.
       trace.route = SANDBOX_FRAME_PATH;
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('Not Found');
@@ -401,13 +297,7 @@ export function createRequestListener(): http.RequestListener {
   };
 }
 
-/**
- * The header-phase bound actually applied: the configured one, or the whole-request bound if that
- * is tighter.
- *
- * Node refuses to construct a server whose `headersTimeout` exceeds its `requestTimeout`, and both
- * are operator-settable, so the clamp is here rather than in the operator's head.
- */
+/** The header-phase bound applied: clamped to the whole-request bound, as Node requires. */
 const headersTimeout = Math.min(cfg.headersTimeoutMs, cfg.requestTimeoutMs);
 
 /** The socket-level options both listeners share — see `createBffServer` for each one's reason. */
@@ -421,19 +311,9 @@ function serverOptions(): http.ServerOptions {
 }
 
 /**
- * The HTML sandbox's listener (wave 3), configured but not listening — `index.ts` starts it only
- * when `cfg.sandboxEnabled`.
- *
- * A server of its own rather than a second route table on this one, because what makes it a
- * sandbox is that it is a *different origin*, and a port is the smallest unit of one this process
- * can offer; a deployment puts a distinct hostname in front of it. It serves `server/sandbox.ts`'s
- * one page and nothing else — no assets, no `/config.js`, no proxy, no `/healthz` (the app
- * listener's probes cover the process; a probe on this port would be one more path to keep honest)
- * — and it never carries the app's own security headers, because they say `frame-ancestors 'none'`
- * and this page exists to be framed by the app.
- *
- * Every response is observed like every other this process writes: one access line and the same
- * counters, labelled by route pattern.
+ * The HTML sandbox listener, started by `index.ts` only when `cfg.sandboxEnabled`. A separate port
+ * (a different origin), serving `server/sandbox.ts`'s one page and nothing else, without the app's
+ * `frame-ancestors 'none'`. Observed like every other response.
  */
 export function createSandboxServer(appOrigin: string = cfg.appOrigin): http.Server {
   const handle = createSandboxHandler(appOrigin);
@@ -454,40 +334,23 @@ export function createSandboxServer(appOrigin: string = cfg.appOrigin): http.Ser
 export function createBffServer(): http.Server {
   const server = http.createServer(
     {
-      // Node only *checks* `headersTimeout`/`requestTimeout` on a sweep, every
-      // `connectionsCheckingInterval` — 30 s by default. A bound that is only enforced up to 30 s
-      // late is not the bound it claims to be, so the sweep is derived from the timeout instead of
-      // being left at a default that has nothing to do with it.
-      //
-      // From the TIGHTER of the two, which it was not: derived from `requestTimeout` alone it
-      // came out at 30 s, and the 30 s header bound below would then have been enforced at up to
-      // 60 s. Measured on this runtime with a socket sending a request line and nothing else:
-      // `headersTimeout` 1,000 ms with a 5,000 ms sweep held it 5,008 ms; the same bound with a
-      // 250 ms sweep held it 1,002 ms. The sweep is the bound, whenever it is the larger number.
-      // `headersTimeout` is already the smaller of the two, by the clamp above.
+      // Node enforces the request/header timeouts only on a sweep, so derive the sweep interval
+      // from the tighter timeout.
       connectionsCheckingInterval: Math.max(
         1_000,
         Math.min(30_000, Math.floor(headersTimeout / 4)),
       ),
-      // Time to RECEIVE a request, not to respond, so this bounds nothing about a 600 s turn or a
-      // job stream that is silent for minutes — both of those are responses. It was 0 (disabled)
-      // on exactly that reasoning, and the reasoning proved to be about the wrong half: 129
-      // unauthenticated one-byte POSTs, each holding one upstream socket for ever, took the whole
-      // /api surface offline until they were released. See `cfg.requestTimeoutMs`.
+      // Time to receive a request (not to respond); see `cfg.requestTimeoutMs`.
       requestTimeout: cfg.requestTimeoutMs,
-      // Must exceed any fronting load balancer's idle timeout, or connection reuse races produce
-      // sporadic 502s. This one really is about the LB; `headersTimeout` no longer is, and used to
-      // be pinned above this value for a reason that stopped being true before Node 14.11 — see
-      // `cfg.headersTimeoutMs` for what that costs and what was measured.
+      // Must exceed any fronting load balancer's idle timeout, or reused connections race into
+      // 502s.
       keepAliveTimeout: 120_000,
       headersTimeout,
     },
     createRequestListener(),
   );
 
-  // A ceiling this process chooses, rather than the one its file-descriptor limit imposes. Not set
-  // in `createServer` options because it is a property of the server object rather than one of
-  // them. See `cfg.maxConnections` — including what it does not buy.
+  // A connection ceiling this process chooses; see `cfg.maxConnections`.
   server.maxConnections = cfg.maxConnections;
 
   return server;

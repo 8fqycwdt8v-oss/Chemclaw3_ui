@@ -13,8 +13,9 @@ import { expect, test } from '@playwright/test';
  *
  * **What it does not assert is that a structure is drawn — `e2e/rdkit.spec.ts` does**, behind
  * this same BFF, together with the policy split that makes it possible (`RDKIT_WORKER_CSP` in
- * `server/config.ts`; README, "Enabling Entra SSO"). Until that fix no container-served page could draw anything, and this probe's answer
- * below was `false`: RDKit's Embind glue needs `Function(...)`, and the worker ran under the
+ * `server/config.ts`; README, "Enabling Entra SSO"). Until that fix no container-served page could
+ * draw anything, and this probe's answer below was `false`: RDKit's Embind glue needs
+ * `Function(...)`, and the worker ran under the
  * document's `script-src 'self' 'wasm-unsafe-eval'`. It now runs under its own policy, so the
  * answer is the chemistry's.
  */

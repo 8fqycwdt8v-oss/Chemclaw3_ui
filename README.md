@@ -207,9 +207,10 @@ warns, and `CHEMCLAW3_REQUIRED=1` makes that a failure.
 
 ## Delivery
 
-GitHub Actions runs `npm run ci` on pushes to `main`, on pull requests, and on manual dispatch. `Jenkinsfile` publishes the image **by digest** and
-rolls it out with `oc set image`; it re-runs the gate only when `RUN_GATE` is set. The four-repo
-release order (UI last) is in Chemclaw3's `deploy/jenkins/README.md`.
+GitHub Actions runs `npm run ci` on pushes to `main`, on pull requests, and on manual dispatch.
+`Jenkinsfile` publishes the image **by digest** and rolls it out with `oc set image`; it re-runs
+the gate only when `RUN_GATE` is set. The four-repo release order (UI last) is in Chemclaw3's
+`deploy/jenkins/README.md`.
 
 ## Backend requirements
 

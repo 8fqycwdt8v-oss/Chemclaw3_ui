@@ -3,8 +3,8 @@ import { expect, test } from '@playwright/test';
 /**
  * The "too complex to name here" sentence, through a real RDKit in a real browser behind the real
  * BFF — the _Known gaps_ row that could not be closed while no container could load the toolkit
- * (`RDKIT_WORKER_CSP` in `server/config.ts`). A file of its own because the stack flag below is a launch option, and
- * Playwright starts a separate browser for a file that sets one.
+ * (`RDKIT_WORKER_CSP` in `server/config.ts`). A file of its own because the stack flag below is a
+ * launch option, and Playwright starts a separate browser for a file that sets one.
  */
 
 /**

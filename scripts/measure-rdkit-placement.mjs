@@ -8,8 +8,9 @@
  *
  * It drives the app's own seam (`src/chem/rdkit.ts`) in a real Chromium through the Vite dev
  * server, because that is where the page placement can load the toolkit too: behind the BFF only
- * the worker may evaluate what Embind builds (`RDKIT_WORKER_CSP` in `server/config.ts`; README, "Enabling Entra SSO"), so the
- * page-side column would measure a toolkit that never loads. So this measures placement, which is
+ * the worker may evaluate what Embind builds (`RDKIT_WORKER_CSP` in `server/config.ts`; README,
+ * "Enabling Entra SSO"), so the page-side column would measure a toolkit that never loads. So this
+ * measures placement, which is
  * what W28.7 changed; `e2e/rdkit.spec.ts` is what proves a structure is drawn in the container.
  *
  * What it reports per call is the *main thread*, not the wall clock: a worker makes the second

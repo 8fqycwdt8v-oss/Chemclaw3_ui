@@ -1,450 +1,127 @@
-# Production readiness — what is enforced, bounded, measured and accepted
+# Production readiness
 
-The record for `Chemclaw3_ui`: the browser client and the Node BFF in front of it.
+What `Chemclaw3_ui` (the SPA and its Node BFF) enforces, bounds and accepts, each with the test
+that holds it.
 
-**The rule this document is written under.** Every clause names the test that holds it. A clause
-with no test is not softened into "we are careful about X" — it is rewritten as an accepted risk,
-with who decides and what would change the answer, or it is deleted. That rule is itself checked:
-`tests/readinessRecord.test.ts` fails if an **Enforced**, **Bounded** or **Measured** clause cites
-no file; if an **Enforced** or **Bounded** clause names no file under `tests/` or `e2e/`, since
-only a test can drive a refusal or a ceiling; if any file cited anywhere in this document does not
-exist; or if a `§n` anywhere in it names a section this document does not have. A rename cannot
-retire a citation here in silence, and a sub-bullet cannot hide from the rule by being indented.
-
-**Three of those were added after the check was measured rather than read.** It said "names the
-test" and accepted any file, so an **Enforced** clause citing `src/lib/utils.ts` passed; it started
-a clause only at column 0, so a nested `  - **Enforced.** …` with no citation was absorbed into its
-neighbour and never existed; and `§n` was a shape rather than a reference, so a section number
-this document does not have anchored an accepted risk and read as filed. (That last sentence
-cannot name the number it was driven with — the check now refuses it, which is the check working.) Each was driven, and each passed.
-
-The four words mean different things and the difference is the point:
-
-| Word         | What it claims                                                                 |
-| ------------ | ------------------------------------------------------------------------------ |
-| **Enforced** | Something is impossible, or refused, and a test drives the refusal.            |
-| **Bounded**  | Something is possible and has a stated ceiling; the ceiling is asserted.       |
-| **Measured** | A number somebody ran, with the conditions it was run under. Not a promise.    |
-| **Accepted** | A real risk nobody has removed. It names who decides and what would change it. |
-
-A fifth category is deliberately absent: "believed". Everything that was believed and turned out
-not to be true is in the last section, because a control that has never been driven is
-indistinguishable from one that does not work — and this repository has produced both.
-
----
+| Word         | Claim                                                                  |
+| ------------ | ---------------------------------------------------------------------- |
+| **Enforced** | Something is refused or impossible, and a test drives the refusal.     |
+| **Bounded**  | Something has a stated ceiling, and the ceiling is asserted.           |
+| **Measured** | A number someone ran, with its conditions. Not a promise.              |
+| **Accepted** | A real risk nobody has removed; it names who decides and what changes. |
 
 ## 1. The gate
 
-- **Enforced.** There is one gate definition, `scripts/ci.mjs`, and neither pipeline may hold a
-  second edition of it. `tests/gate.test.ts` fails if a step names an npm script that does not
-  exist, if a GitHub workflow step is anything but an install or a named script, if either pipeline
-  runs `node` on anything but a file under `scripts/`, if the Jenkinsfile's shell grows one of the
-  assertion spellings, or if a script under `scripts/` is reachable from no composer — that last
-  one by shape rather than by a `check:` prefix, so a `verify-*` script is held to it too.
-- **Enforced.** The gate leaves `dist/client` free of the dev-auth provider. The dev-auth bundle is
-  a second artifact in `dist/client-dev-auth` (`CLIENT_OUT_DIR`), and the gate's last step asserts
-  the production directory is clean — `scripts/assert-no-dev-auth.mjs`, pinned by
-  `tests/gate.test.ts`, which also asserts the ordering that makes it meaningful. Both directions
-  run: a step that asserts the marker is **absent** from the production build, and one that asserts
-  it is **present** in the dev-auth build, so a marker string that went stale fails rather than
-  passing quietly.
-- **Bounded.** What the gate does **not** run is named rather than implied: `npm run ci:container`
-  (a second runner, a container runtime; it skips with a reason where there is none and
-  `CI_REQUIRE_CONTAINER=1` turns that skip into a failure), `npm run check:live`
-  (`smoke` + `check:openapi`, both of which need a live Chemclaw3), and
-  `playwright.full-stack.config.ts` (four repositories). `tests/gate.test.ts` holds the live pair in
-  both directions — in `check:live`, and not a step of `ci`.
-- **Accepted.** `check:live` is operator-run and no pipeline calls it, so `npm run smoke` and
-  `npm run check:openapi` execute only when a person types them against a live stack. A scheduled
-  job would be permanently red (no runner here can reach a service) or taught to pass without
-  running, which is the failure those two scripts exist to refuse. Recorded in `ISSUES.md` under
-  "Known gaps in the UI rebuild"; `tests/gate.test.ts` fails if a pipeline starts naming
-  `check:live`, so wiring it in forces this paragraph to move with it.
-- **Accepted.** `npm run ci` does not install a browser. Provisioning one differs per pipeline
-  (`--with-deps` needs root; this sandbox has Chromium at a fixed path and must not re-download), so
-  both pipelines install it in the step before the gate. A machine with no browser fails at the
-  `e2e` step rather than skipping it; the decision is recorded where the gate is defined
-  (`scripts/ci.mjs`).
+- **Enforced.** One gate definition, `scripts/ci.mjs`; both pipelines run `npm run ci` and hold no
+  inline assertions of their own. Every script under `scripts/` is reachable from an npm script
+  (`tests/gate.test.ts`).
+- **Enforced.** The gate leaves `dist/client` free of the dev-auth provider; the dev-auth bundle
+  goes to `dist/client-dev-auth`, and the last step asserts the marker is absent from one and
+  present in the other (`scripts/assert-no-dev-auth.mjs`, `tests/gate.test.ts`).
+- **Bounded.** Not in the gate: `ci:container` (needs a container runtime; `CI_REQUIRE_CONTAINER=1`
+  fails instead of skipping), `check:live` (needs a live service) and the full-stack/kind lanes
+  (`tests/gate.test.ts`).
+- **Accepted.** `check:live` is on no schedule — no pipeline runner can reach a service. `npm run ci`
+  does not install a browser; each pipeline installs one before the gate.
 
 ## 2. The wire contract with Chemclaw3
 
-- **Enforced.** Every route the BFF forwards is one the service registers; every path and JSON body
-  `src/api/` sends is one that service declares, down to the required fields of the Pydantic model
-  behind it; every event the service declares survives `normalizeEvent`; every field that
-  normaliser reads exists on the model that sends it; and every member of `ErrorCode`,
-  `RefusalReason` and `AnswerCheck` survives the narrowing filter that mirrors it.
-  `tests/backendContract.test.ts` reads all of that out of a `Chemclaw3` checkout rather than off
-  a running service. **Where that checkout is has one answer for the whole suite**, and it had two:
-  this reader resolved `CHEMCLAW3_DIR` else `../Chemclaw3`, while `tests/protocolStatusTransitions.test.ts`
-  also honoured `CHEMCLAW_REPO` — the variable `README.md` documents and `docker-compose.yml`
-  reads — so a developer who took the documented route ran the drift check and not the contract
-  check, in the same green run. Both now call one resolver (`CHEMCLAW3_DIR`, then `CHEMCLAW_REPO`,
-  and only where none of those is set, `../Chemclaw3`), and `tests/delivery.test.ts` refuses any
-  other file in the suite that reads a checkout variable of its own.
-- **Enforced.** Every member of the event union survives `normalizeEvent` carrying every field,
-  checked by round-tripping a frame of each rather than by reading the list — the list is the thing
-  that has been wrong six times (`tests/eventContract.test.ts`).
-- **Enforced.** The runtime gate and the interface union are held to being **one** vocabulary,
-  which this clause used to describe them as while only one of them was read. `EVENT_TYPES` is what
-  admits an event; the fixture above is checked against the `ChemclawEvent` interfaces; a name in
-  the first with no interface and no branch was invisible to every assertion in the file — measured
-  at zero failures. A name in the gate must now normalise onto a declared member, and the one
-  legitimate exception, an alias carrying a second wire spelling through a two-repository rename,
-  is pinned by name rather than counted (`tests/eventContract.test.ts`).
-- **Enforced.** A wire name this client admits and the service does not declare fails, unless it is
-  argued — and an argument is a reason of at least 40 characters, a phrase naming the `ISSUES.md`
-  row whose deletion retires it, and a review date that is a failure once it has passed. Two maps,
-  because "not yet declared" and "no longer declared" are the same absence to a checker and
-  different promises to a reader: `AHEAD_OF_BACKEND` is a reader that landed first,
-  `RETAINED_FOR_ROLLOUT` is an old spelling kept until deployed browsers have reloaded. The
-  validator is driven over a map built to be wrong in every one of those ways, because both maps
-  are normally empty and a loop over an empty map checks nothing (`tests/backendContract.test.ts`).
-  This part needs no sibling checkout, so unlike the clause above it runs in every lane.
-- **Enforced, and this clause used to record the opposite.** With no sibling checkout the contract
-  check verifies **nothing** and says so: a warning naming what the run is therefore not evidence
-  about, and `CHEMCLAW3_REQUIRED=1` turns the skip into a failure. The GitHub Actions runner — the
-  lane that runs on every push — now checks Chemclaw3 out and sets both variables, so the check
-  gates there. It is a **full** checkout where `Jenkinsfile`'s `Preflight` clones sparsely, because
-  that pipeline's sparse path list is derived from what the reader opens and repeating it here
-  would be a second declaration of one fact with nothing reconciling the two;
-  `tests/delivery.test.ts` asserts this lane names no Chemclaw3 source directory at all. No
-  credential was ever the blocker and is not one now — every repository in this family is public.
+- **Enforced.** Against a Chemclaw3 checkout: every whitelisted route is one the service registers;
+  every path and JSON body `src/api/` sends is declared, including required fields; every declared
+  event survives `normalizeEvent` and every field it reads exists; `ErrorCode`, `RefusalReason` and
+  `AnswerCheck` match; every model-shaped response is cast to the model's own name and its fields
+  compared (`tests/backendContract.test.ts`). The checkout resolves from `CHEMCLAW3_DIR`, then
+  `CHEMCLAW_REPO`, else `../Chemclaw3`, in one resolver (`tests/backendContract.ts`).
+- **Enforced.** Every event-union member round-trips through `normalizeEvent` with every field, and
+  `EVENT_TYPES` and the schemas are one vocabulary (`tests/eventContract.test.ts`).
+- **Enforced.** A wire name this client admits and the service does not declare fails unless argued
+  in `AHEAD_OF_BACKEND` / `RETAINED_FOR_ROLLOUT` with a reason, an `ISSUES.md` phrase and an unexpired
+  review date. This half needs no checkout (`tests/backendContract.test.ts`).
+- **Accepted.** With no checkout the check verifies nothing (a warning; `CHEMCLAW3_REQUIRED=1` fails
+  instead). The GitHub lane checks out Chemclaw3 at `CHEMCLAW3_REF` (default `main`); Jenkins runs
+  the gate only when `RUN_GATE` is set. Nested element types, non-model responses and what a
+  deployment actually serves are outside it. `ISSUES.md` Issue 14.
 
-  **What it costs is the reason this was an accepted risk rather than an oversight, and it is now
-  paid**: this lane reds on a rename merged in another repository, including on a pull request that
-  has nothing to do with the contract. The judgement is that a check which silently verifies
-  nothing is worse than one that occasionally fails loudly for a reason a reader can see.
+## 3. Path encoding
 
-  **That was the cheap half of the cost and it was the only half either record gave.** The step
-  carried no `ref:`, and `actions/checkout` takes a _different_ repository's default branch at the
-  moment the job runs — so the same commit here was green one day and red the next with nothing
-  changed, and a re-run of an old pull request judged it against that day's service. A rename reds
-  a build for a reason a reader can see; an unpinned ref makes the verdict not a function of the
-  commits under test, which is a different property and is not a trade anybody took. The checkout
-  now reads the dispatch input, then `vars.CHEMCLAW3_REF`, then `main` — resolved by
-  `scripts/chemclaw3-ref.mjs` in a step of its own, which prints the ref, which of the three it
-  came from and whether the run is a fork pull request, then hands it to the checkout as an output
-  and prints the commit that landed: the default still tracks `main` so a real rename still reds,
-  and a pull request blocked by an unrelated upstream change is unblocked by moving a repository
-  variable rather than by weakening the check. `Jenkinsfile` already declared `CHEMCLAW3_BRANCH`
-  for its own clone, so the two lanes now name one fact; `tests/delivery.test.ts` holds both to it.
-
-  **Both lanes make that checkout _inside_ the workspace, and all four surfaces that decide what a
-  directory here is now know about both.** `actions/checkout` and `git clone` may only write into
-  the workspace, so `.chemclaw3` and `Jenkinsfile`'s `.jenkins-lib` land where this repository's
-  lint, format, `git status` and `COPY . .` reach them. Two of the four covered only the first and
-  the record said otherwise; `.jenkins-lib` was covered by none, latent behind `RUN_GATE`'s
-  default. The reconciling guard read the first `path:` in the workflow rather than the Chemclaw3
-  step's — satisfiable by a comment, and structurally unable to see the other pipeline — and is now
-  a derivation over both pipelines asserted against each surface separately.
-
-  The Jenkins `Gate` stage also sets both variables against the checkout its `Preflight` stage
-  makes, but that stage is behind a parameter: `RUN_GATE` defaults to `false`, so it gates there
-  only in a run somebody ticked the box on, and that lane builds and ships an image rather than
-  answering a pull request. `tests/delivery.test.ts` holds this paragraph to the default the
-  pipeline declares, so flipping the parameter fails here until the record is rewritten. Recorded
-  in `ISSUES.md` Issue 14.
-
-- **Enforced.** Every route the service registers declares what it returns, and every call this
-  client makes to a route answering one readable model casts the body to that model's own name
-  (`request<PlanStatusOut>(…)`) and reshapes after the cast. The reader takes the declaration at
-  the cast, so the properties declared there are compared to the model's fields: a property
-  declared here and sent by nobody fails, a field sent and not declared fails unless `NOT_READ`
-  argues it, and a call that casts a model-shaped answer to anything else fails
-  (`undeclaredReads`, `tests/backendContract.test.ts`).
-- **Accepted.** Below the top level: an element type inside a response is compared only where some
-  route also returns it by name, and a response that is not one model (`dict[str, str]`,
-  `list[str]`, a bare `Response`) is printed rather than compared. `DesignListOut.total` and
-  `.truncated` are sent and not read — the protocols panel has no copy for a short listing yet —
-  and are argued in `NOT_READ`. The three fields drift has actually cost are driven end to end
-  (`tests/contractDrift.test.tsx`). `ISSUES.md` Issue 14.
-- **Accepted.** The check reads what the service **declares**, not what a deployment **serves**.
-  `npm run check:openapi` is still the only thing that asks a running service, and it is
-  operator-run (§1).
-
-## 3. Path encoding, one escape closed and one allowance held
-
-- **Enforced.** Every path-segment interpolation in a file that can reach the service is an
-  `encodeURIComponent` call — as an invariant over the tree, parsed with the TypeScript compiler,
-  in both spellings (template literal and `+` concatenation), with a hoisted
-  `const id = encodeURIComponent(raw)` recognised so that the cheapest way to green is not a double
-  encode. Two behavioural tests drive the fetch seam and the XHR upload seam with a hostile id
+- **Enforced.** Every path-segment interpolation that can reach the service is `encodeURIComponent`,
+  checked over the tree with the TypeScript compiler (templates, `+` concatenation, hoisted and
+  imported constants), plus behavioural tests on the fetch and XHR seams
   (`tests/pathEncoding.test.ts`).
-- **Closed — escape 1: a path assembled off a named constant.** Driven on 2026-09-14:
-  `const PROBE_BASE = '/api/jobs/'; fetch(PROBE_BASE + jobId)` in `src/hooks/useOffline.ts` passed
-  the whole rule, while the same URL written as a template failed it. The scan now resolves an
-  identifier to the compile-time string it is bound to — a `const` in the file, a concatenation or
-  substitution-free template of those, or a constant imported by a relative path — on the left of a
-  `+`, in a template span and at the URL's head. That was declined once as "a dataflow analysis",
-  and it is not one: a `const` bound to a string has one value, visible at its declaration.
-  Followed rather than inlined because inlining fixes the one site and leaves the shape open to the
-  next hook that hoists its base. Fixtures in `tests/pathEncoding.test.ts` drive each shape. **Still
-  outside it:** a base that is not a compile-time string (a `let`, a parameter, `config.apiBase`)
-  — whose own literal tail the scan already reads — and a re-export (`export { X } from`).
-- **Accepted, and now held by a test — encoding is not a character policy.** Driven on 2026-09-14 through
-  `resolveRoute`: `/api/notes/note-a%00b` resolves and is forwarded as `/notes/note-a%00b`; so does
-  the same id with `%0A`; so does `/api/jobs/qm%00-1`. A traversal does not — `/api/notes/..%2F..%2Fmetrics` is refused, by
-  `isTraversal` rather than by the character class, and `tests/routes.test.ts` drives that in both
-  directions. The wide `NOTE`/`JOB`/`PENDING` classes exist because those ids embed things this
-  repository does not own (a slug a model wrote, a Temporal workflow id), and narrowing them to
-  exclude `%00` is a different change with a different blast radius than the traversal one that was
-  measured. **Accepted**, and it is the upstream's `[^/]+` path parameter that makes it harmless
-  today, which is a property of somebody else's component. `tests/routes.test.ts` now pins the
-  three forwards above, so the day this changes it is a diff somebody argued for — **what would
-  change it:** an ingress in front of this process that normalises before the service.
+- **Accepted.** Encoded `%00`/`%0A` inside wide-class ids is forwarded; traversal is refused by
+  `isTraversal` (`tests/routes.test.ts`). `ISSUES.md` Issue 15.
 
 ## 4. The BFF
 
-- **Enforced.** The proxy is a whitelist, not a pass-through: `server/routes.ts` matches method and
-  a per-id-shape pattern, and everything else 404s without reaching the service. Session ids are 32
-  lowercase hex, result refs 64, design ids `design-` plus twelve hex — which doubles as structural
-  traversal protection, since a segment matching those cannot contain `/`, `.` or an escape.
-  `tests/routes.test.ts` drives the shapes, the wrong verbs, the deleted routes that must stay
-  un-whitelisted, and the traversal probes through the real request listener.
-- **Enforced.** Header hygiene on the way upstream: the bearer token is forwarded verbatim,
-  `cookie` and `proxy-authorization` are dropped, the service's own `X-Chemclaw-*` headers are
-  dropped (a browser has no business setting them), and the `X-Forwarded` family is dropped because
-  a browser can set it to spoof the edge. A caller with no credential sends no `authorization` at
-  all (`tests/proxyAuth.test.ts`).
-- **Enforced.** Header hygiene on the way back: the upstream cannot relax this origin's policy, and
-  an upstream `Set-Cookie` or CORS grant is not relayed onto it (`tests/securityHeaders.test.ts`).
-  A correlation id is minted at the front door rather than read off the upstream response, and a
-  client-supplied one is never carried upstream (`tests/bffObservability.test.ts`).
-- **Enforced — the SSRF posture is that there is no user-controlled destination.** The upstream is
-  one address from configuration (`CHEMCLAW_API_URL`); the path is produced by the matched route's
-  own `target`, never by the caller's string; a path prefix on that URL is refused at startup
-  because `proxy.ts` and `ready.ts` use `hostname`/`port` and never `pathname`
-  (`tests/serverConfig.test.ts`). There is no "forward to the URL in this parameter" surface to
-  harden.
-- **Bounded.** A request body is capped and refused before the upstream is contacted, an upstream
-  that never answers is given up on rather than holding the socket for ever, and neither a held
-  stream nor a hung request takes the whole `/api` surface down with it — the stream that does not
-  fit is refused rather than queued, and the socket pool comes back without anyone intervening
-  (`tests/serverLimits.test.ts`, `tests/upstreamPool.test.ts`, `tests/upstreamHang.test.ts`).
-- **Bounded.** `POST /api/client-events` is unauthenticated by construction — the page that posts is
-  served before sign-in — so the pod takes at most `CLIENT_EVENTS_RATE_PER_MIN` batches a minute
-  (default 3000) and answers the rest with a 429 and a `Retry-After` the browser's sink waits out; a message full of newlines cannot forge a
-  second log line (`tests/bffObservability.test.ts`, `tests/clientLogging.test.ts`).
-- **Bounded.** Every metric label is the route **pattern**, never the id-bearing path, and no
-  actor, session or correlation id is a label; an un-whitelisted path is bucketed rather than
-  labelled with (`tests/bffObservability.test.ts`).
-- **Enforced.** `/healthz` is liveness and stays a literal answer; `/readyz` probes the service's
-  own and costs one upstream call however many probes arrive at once
-  (`tests/bffObservability.test.ts`). A SIGTERM fails `/readyz` first and closes the listener after
-  a readiness period rather than dropping in-flight requests (`tests/bffLifecycle.test.ts`).
-- **Enforced — the HTML sandbox's configuration is refused rather than served half-working.** The
-  BFF will not start with `SANDBOX_ORIGIN` set and `APP_ORIGIN` missing, equal to it, or not a plain
-  origin; with an http sandbox under an https app (mixed content); with `SANDBOX_PORT` not a whole
-  number from 1 to 65535 or equal to `PORT`; or with `HTML_SCRIPTS_DEFAULT` anything but `on`/`off`.
-  `ALLOW_FRAMING=true` turns the sandbox **off** with the reason in the startup line rather than
-  refusing, because a framed app cannot frame the sandbox (its `frame-ancestors` names `APP_ORIGIN`
-  alone and every ancestor is checked) and every launcher now sets the origins
-  (`tests/sandboxServer.test.ts`).
-- **Enforced — the app origin never serves `/sandbox/frame`.** The app listener answers it 404
-  whatever the SPA fallback would have served, and the sandbox listener serves that one page and
-  404s every other path; every response there, refusals included, carries a closed CSP and
-  `nosniff` (`tests/sandboxServer.test.ts`). `SANDBOX_PORT` is checked whether or not a sandbox is
-  configured, and `DOCS_BASE_URL` must be a link a page may follow (http(s) or a path). In a real browser the sandboxed page cannot fetch, read
-  the app's cookie or storage, navigate the top window or itself off the sandbox origin, or open a
-  popup; the app takes `ready` and heights from that frame only, and the shell takes content from
-  the app origin only (`e2e/sandbox.spec.ts`). The example OpenShift manifests are held to the same
-  configuration (`tests/openshiftManifests.test.ts`).
-- **Accepted — HTML artefact scripts run by default, and can still reach the network over
-  WebRTC.** An owner decision of 2026-10-03. Inside the sandbox a script can send data out through
-  a STUN/UDP candidate (CSP does not govern WebRTC; the prelude that removes the constructors is
-  bypassable from a nested frame's fresh realm) — including anything a reader types into a form the
-  page draws, such as a fake password prompt — and write the clipboard after a click. It cannot
-  navigate: the content frame is bounded by the shell's CSP and cannot reach its parent's location.
-  Browser policy narrows the first
-  (`WebRtcIPHandling=disable_non_proxied_udp` on Chrome/Edge — it reduces, it does not eliminate:
-  TURN over TCP through a proxy remains — or `media.peerconnection.enabled=false` on Firefox), and
-  `HTML_SCRIPTS_DEFAULT=off` removes both; the view tells the reader never to type a secret there. **Who decides:** the product owner, who took it;
-  a deployment's operator, who holds the kill switch. **What would change it:** a browser control
-  for WebRTC that CSP or a sandbox token can express. Recorded in `ISSUES.md` Issue 25; the
-  residual is driven, not asserted safe, in `e2e/sandbox.spec.ts`.
+- **Enforced.** The proxy is a whitelist of method + per-id-shape patterns; anything else 404s
+  without reaching the service (`tests/routes.test.ts`).
+- **Enforced.** Upstream headers: the bearer passes verbatim; `cookie`, `proxy-authorization`,
+  `x-chemclaw-*` and `x-forwarded-*` are dropped (`tests/proxyAuth.test.ts`). Downstream: the
+  upstream cannot relax this origin's policy or set cookies/CORS here
+  (`tests/securityHeaders.test.ts`).
+- **Enforced.** No user-controlled destination: the upstream is `CHEMCLAW_API_URL`, the path comes
+  from the matched route, and a path prefix in the URL is refused (`tests/serverConfig.test.ts`).
+- **Bounded.** Body size, upstream timeouts, connection and socket pools; a held stream or hung
+  request cannot take `/api` down (`tests/serverLimits.test.ts`, `tests/upstreamPool.test.ts`,
+  `tests/upstreamHang.test.ts`).
+- **Bounded.** `POST /api/client-events` is unauthenticated and rate-limited
+  (`CLIENT_EVENTS_RATE_PER_MIN`, 429 + `Retry-After`); a message cannot forge a log line. Metric
+  labels are route patterns only (`tests/bffObservability.test.ts`, `tests/clientLogging.test.ts`).
+- **Enforced.** `/healthz` is liveness; `/readyz` probes the service, single-flighted. SIGTERM fails
+  `/readyz` first, then closes (`tests/bffObservability.test.ts`, `tests/bffLifecycle.test.ts`).
+- **Enforced.** Invalid sandbox configuration is refused at boot; the app origin never serves
+  `/sandbox/frame`; the sandbox listener serves only that page under a closed CSP
+  (`tests/sandboxServer.test.ts`). In a browser the sandboxed page cannot fetch, read app storage,
+  navigate or open popups (`e2e/sandbox.spec.ts`). The OpenShift examples match
+  (`tests/openshiftManifests.test.ts`).
+- **Accepted.** HTML artefact scripts run by default and can still send data over WebRTC.
+  `HTML_SCRIPTS_DEFAULT=off` removes it. The product owner decides. `ISSUES.md` Issue 25.
 
 ## 5. Identity
 
-- **Enforced.** An unrecognised `AUTH_MODE` is refused at startup, naming the value it was given,
-  rather than resolving to `dev` — which is how `AUTH_MODE=MSAL` or a value with a trailing newline
-  used to boot with no sign-in at all. Dev auth on a non-loopback bind is refused unless a
-  deployment declares it (`tests/serverConfig.test.ts`).
-- **Enforced.** In `msal` mode the BFF's readiness includes an auth-posture probe: a backend that
-  serves an anonymous `/sessions` with 200 makes this pod **unready**, because an authenticated
-  front end in front of an unauthenticated service is the deployment nobody notices
+- **Enforced.** An unknown `AUTH_MODE` is refused; dev auth on a non-loopback bind needs
+  `ALLOW_INSECURE_AUTH` (`tests/serverConfig.test.ts`).
+- **Enforced.** Under `msal`, a backend that serves anonymous `/sessions` makes the pod unready
   (`tests/upstreamPosture.test.ts`).
-- **Enforced.** The MSAL token cache is `sessionStorage`, so the token dies with the tab
-  (`tests/msalAuth.test.ts`).
-- **Accepted — the access token lives in the browser.** Any script on this origin can read it, and
-  MSAL refreshes it through a hidden iframe to `login.microsoftonline.com`, a mechanism browsers
-  are removing; the symptom when it goes is "people keep getting logged out", reported first by
-  Safari and Firefox. The replacement (BFF token custody: stateless AES-256-GCM sealed cookie,
-  `__Host-` prefix, chunked, three CSRF checks, ~1,500 lines of tests) is **built and not adopted**
-  — PR #11, retained, to be reopened rather than rebuilt. **What would unblock it:** a
-  confidential-client registration in the target tenant (a Web platform, a client secret, and
-  `<origin>/auth/callback` as a redirect URI) plus two managed secrets with a rotation owner.
-  **Who decides:** the tenant administrator for the registration, and whoever owns this app's
-  operations for the secrets — not this repository and not a code review. Full reasoning in
-  `ISSUES.md` Issue 8. This origin sets no cookies today, so there is no CSRF surface to defend
-  (`tests/proxyAuth.test.ts` holds the `cookie`-stripping half).
+- **Enforced.** The MSAL cache is `sessionStorage` (`tests/msalAuth.test.ts`).
+- **Accepted.** The access token is readable by script on this origin, and silent refresh depends on
+  third-party cookies. `ISSUES.md` Issue 8.
 
 ## 6. One tab holds the job streams
 
-`service_max_event_streams_per_user` is 5 per principal per process and has no idea what a tab is.
-A leader election plus an interest protocol is what keeps two windows from spending six.
+The backend caps event streams per user; a `BroadcastChannel` leader election keeps several tabs
+to one set of streams.
 
-- **Enforced.** Every failure mode of the election is driven on real `BroadcastChannel`s in
-  `tests/jobStreamElection.test.ts`: two tabs opening in the same millisecond (a campaign, not a
-  lock — smallest id wins); the leader closing (`pagehide`, not `beforeunload`); the leader
-  crashing with nothing announced (the lease, and negatively — one missed heartbeat must not depose
-  a busy leader); the leader suspended or backgrounded; two tabs both believing they lead, with
-  both directions of the total order driven, because a symmetrical rule is how an election ends
-  with zero leaders and silent notifications; and no `BroadcastChannel` at all, where every tab
-  leads — which is what this app did before and is safe.
-- **Enforced.** The leader watches the **merge** of what every tab declares, round-robin by rank, so
-  each window's first choice is taken before any window's second. Without it, measured: two
-  windows, one stream for the account, the follower's conversation watched by nobody — the loss
-  this whole feature exists to prevent, arriving from the direction the election does not look in.
-  Both budget cases are asserted in opposite directions: a backgrounded leader trims what it asks
-  for and must not trim what the account holds, while `jobStreamsThrottled` is evidence about the
-  account and does cut the merged set (`tests/jobStreamElection.test.ts`).
-- **Measured, and fixed — the starvation case.** `mergeWatchSets` took rank 0 and stopped at the
-  budget, so with more interested tabs than the budget the tabs past `budget - 1` appeared at no
-  rank at all — and since the peer order is a sort on a stable random id, it was the same tabs
-  every time, for the life of the page. Driven at budget 3 with six windows: the same three
-  sessions at t=0.5 s and at t=6 min, three of six conversations watched by nobody. The rotation is
-  derived from the clock (`ROTATION_MS`, 60 s) rather than from a counter, and only rotates when
-  starved. After: all six held over one cycle, three at a time (`tests/jobStreamElection.test.ts`).
-- **Measured, and fixed — a hidden tab's interest.** Leadership and interest shared a 3 s lease
-  refreshed by a 1 Hz watchdog, and Chrome's intensive throttling drops a hidden tab to one timer
-  callback a minute. Driven, sampled every 500 ms over three minutes: **342 of 360 samples** had
-  that window's conversation watched by nobody, each recovery spending a fresh connect against the
-  cap. `INTEREST_LEASE_MS` is five minutes; after: 0 of 360. A follower that leaves politely sends
-  an interest carrying no sessions, freeing its slot at once (`tests/jobStreamElection.test.ts`).
-- **Enforced.** A relayed throttle is a report, not a decision: `jobStreamsThrottled` is evidence
-  that _this_ tab 429'd twice and is deliberately irreversible, so relaying it pinned the whole
-  account to one stream for the life of every page. The notice travels; the budget reads this tab's
-  own flag (`tests/streamThrottleNotice.test.tsx`, `tests/jobStreamRateLimit.test.ts`).
-- **Accepted, and recovered late.** A job ending read off a stream and not yet relayed dies with
-  the tab that read it: the service's claim is destructive by design, so the row is gone from the
-  mailbox before the browser has it. The window is accepted — the leader publishes synchronously
-  inside the read loop, so for a tab that is merely closed it is microseconds. What is recovered is
-  the _fact_ of the ending: on every takeover (and the first election at page load) the new leader
-  asks `GET /jobs/{id}` about each run this account saw launched and never saw end, within the job
-  feed's seven-day retention and at most ten, and publishes what the registry reports
-  (`src/state/jobReconcile.ts`; `tests/jobReconcile.test.ts`, and a leader dying mid-frame in
-  `tests/jobStreamElection.test.ts`). What is not recovered is the frame's own payload — the
-  registry answers with the run's `result`, not the push-back's summary object. `ISSUES.md`
-  Issue 12.
+- **Enforced.** Simultaneous open, leader close, crash, suspension, split brain and no
+  `BroadcastChannel` at all; the leader watches the round-robin merge of every tab's interest and
+  rotates when the budget starves a tab (`tests/jobStreamElection.test.ts`).
+- **Enforced.** A relayed throttle is a notice, not a budget change
+  (`tests/streamThrottleNotice.test.tsx`, `tests/jobStreamRateLimit.test.ts`).
+- **Accepted.** A job ending read by a tab that dies before relaying it is recovered late from
+  `GET /jobs/{id}` on the next takeover (`tests/jobReconcile.test.ts`). `ISSUES.md` Issue 12.
 
 ## 7. Chemistry on the client
 
-- **Measured.** Moving the toolkit to a worker took a 600-character draw from 587 ms of blocked
-  main thread to 0 — measured by `scripts/measure-rdkit-placement.mjs`, **through the Vite dev
-  server**, which serves `index.html` itself and sends none of the BFF's headers.
-- **Closed 2026-09-26: the container draws structures, and the document still refuses `eval`.**
-  `@rdkit/rdkit`'s Embind builds its invokers with `Function(...)`, which needs `'unsafe-eval'`;
-  the document's `script-src 'self' 'wasm-unsafe-eval'` never grants it, so behind the BFF RDKit
-  used to load nowhere. Measured in Chromium before anything was built: a dedicated worker loaded
-  from a network URL runs under its own response's CSP, and a `blob:` worker inherits the
-  document's. So the BFF sends `RDKIT_WORKER_CSP` (`default-src 'none'; script-src 'self'
-'wasm-unsafe-eval' 'unsafe-eval'; connect-src 'self'; base-uri 'none'`) on the RDKit worker's
-  script only, keyed on its path so a 304 carries it too; with `'wasm-unsafe-eval'` alone the
-  worker drew nothing, with `'unsafe-eval'` it drew. Enforced by `tests/workerCsp.test.ts` (which
-  responses get which policy), `tests/csp.test.ts` (no `'unsafe-eval'` in the document), and
-  `e2e/rdkit.spec.ts` (a structure's `svg` behind the real BFF, the document's header without
-  `'unsafe-eval'`, and the page refusing a string `setTimeout`). `ISSUES.md` Issue 10.
-- **Enforced.** A dead or silent worker is not turned into "that is not a molecule": the client
-  gives up on a worker that never replies and answers on the page, and a stack exhaustion is
-  reported as a fact about a thread rather than as a chemical negative
+- **Enforced.** Only the RDKit worker script gets `'unsafe-eval'` (`RDKIT_WORKER_CSP`); the document
+  never does (`tests/workerCsp.test.ts`, `tests/csp.test.ts`, `e2e/rdkit.spec.ts`).
+- **Enforced.** A dead or silent worker, or a stack exhaustion, is never reported as "not a molecule"
   (`tests/rdkitWorker.test.ts`).
-- **Accepted.** `canonicalSmiles` can answer `null` for a legal 600-character chain, depending on
-  the JavaScript stack at the moment of the call rather than on length — measured three ways in
-  `scripts/measure-rdkit-placement.mjs`, and it predates the worker. The cost is bounded and
-  traced: a `null` is an omission, never a second identity, because every consumer drops the
-  molecule rather than admitting it under its raw spelling, so no cache key, dedupe key or citation
-  is ever minted from an uncanonicalised string. `tests/rdkitUnavailable.test.tsx` pins that bound
-  by failing when either drop site falls back to the raw string. `ISSUES.md` Issue 11.
+- **Measured.** The worker takes a 600-character draw from 587 ms of blocked main thread to 0
+  (`scripts/measure-rdkit-placement.mjs`, through the Vite dev server).
+- **Accepted.** Canonicalisation of a long legal chain can answer "too complex" depending on stack
+  state; no consumer keys a molecule by its raw spelling (`tests/rdkitUnavailable.test.tsx`,
+  `tests/rdkitTooComplex.test.tsx`). `ISSUES.md` Issue 11.
 
 ## 8. Routing and links
 
-- **Enforced.** `/open/:sessionId` is the second-device link and says that is what it is. Sharing
-  is **declined, not deferred**: every session-scoped route upstream resolves through an ownership
-  check that 404s a non-owner indistinguishably from an unknown id, so a link handed to a colleague
-  does not degrade — the conversation simply does not exist for them. Three user-visible strings
-  used to promise otherwise. The old `/s/` path is not a redirect and not left to the catch-all
-  either: it renders an explanation and goes nowhere, because falling through to `/` minted a fresh
-  conversation and a reader saw an empty screen and read "mine was lost".
-  `tests/routing.test.tsx` drives the adopted title, the truncated-link copy, the message on `/s/`,
-  that the URL does not move, and that no conversation is minted — against what is **rendered**,
-  because `routes.tsx` quotes all three old strings in the paragraph explaining why they are gone
-  and a file-wide `toContain` would have passed with the change reverted.
-- **Accepted.** A link copied before a session id rotates (a `session_not_found` recovery, a
-  `resetSession`, a fresh conversation) points at a session the chemist has stopped using. That is
-  the session handle being disposable, which is the same property that makes `/c/<local id>` the
-  real URL. `ISSUES.md`, "the second-device link now says that is what it is".
+- **Enforced.** `/open/:sessionId` is a second-device link for the owner (non-owners get a 404 from
+  the service); the legacy `/s/` path explains itself and mints nothing (`tests/routing.test.tsx`).
+- **Accepted.** A link copied before a session id rotates points at a session the chemist has left.
 
 ## 9. What the browser keeps
 
-- **Bounded.** Persistence has a byte budget rather than a count cap, and shedding shrinks what is
-  written so the next flush does not redo the work; a migration from a **newer** persisted version
-  is refused rather than passed through to a renderer that throws (`tests/persistBudget.test.ts`,
-  `tests/persistQuota.test.ts`, `tests/persistence.test.ts`).
-- **Enforced.** Two tabs merge rather than overwrite: neither erases a conversation the other
-  wrote, and neither resurrects one this tab deleted (`tests/persistBudget.test.ts`).
-- **Accepted.** There is no cross-tab **live** sync: a conversation started in tab B appears in tab
-  A on its next reload. Rehydrating over an in-flight turn is the question that makes it a feature
-  rather than a fix, and the sidebar already learns about other tabs' conversations from
-  `GET /sessions`. Recorded in `tasks/todo.md` under "What is left, and why".
-
----
-
-## 10. Controls found wanting during this programme, and fixed
-
-This section is the evidence that the sections above are worth anything. Each of these was a
-control that existed, was believed, and did not do what it said.
-
-- **A whole gate that had never run.** `scripts/check-openapi.mjs` is the contract check, and it
-  needs a live Chemclaw3: against a real backend it fetched a 404 and exited 1, so its one honest
-  signal ("this check did not run") read as a mistyped base URL. `tests/backendContract.test.ts`
-  reads the declaration instead, offline (W30.1).
-- **Three meta-tests that passed with their subject deleted.** `gate.test.ts` pinned a
-  `console.log` rather than a call — so replacing the real invocation of `check-serving.mjs` with
-  `{ status: 0 }` left the suite green and deleted the only end-to-end check that the proxy
-  whitelist refuses `/api/metrics`. `delivery.test.ts` read a script's text for four probe strings,
-  one of which occurs twice. Nothing pinned `CI_REQUIRE_CONTAINER: '1'`, the line that **arms** the
-  container job, while the cosmetic half of the same env block was held.
-- **A path-encoding invariant with six exceptions.** The finding named one call site; scanning for
-  the rule found eight segments across seven call sites in two files.
-- **An inline-assertion guard that was a four-item blacklist.** `wget … | tee`, `node --eval "…"`
-  and `test -f … || exit 1` all walked past it — the second being the probe the rule names, three
-  characters apart.
-- **A gate that left `dist/client` carrying the dev-auth provider.** Driven after a green gate:
-  `assert-no-dev-auth` named `dist/client/assets/devAuth-*.js`, and `npm start` serves that
-  directory.
-- **An election that starved three of six windows for the life of the page**, and an interest that
-  was dead for 342 of 360 samples in a backgrounded tab (§6).
-- **A worker win no deployment can observe** (§7), found by trying to prove it in a real browser.
-- **A contract-check reader that enrolled prose as a wire contract.** Added in W30.2: the
-  apostrophe in a `//` comment inside the `EVENT_TYPES` literal opened a quoted-string scan, so
-  four words of English arrived as event names. It strips comments now — the same fix the Python
-  side of the same reader had already needed, which is why it was recognised.
-- **Two tests that reported the stop path as broken whenever the machine was busy.** They spun on
-  an unbounded `while (!ready()) await sleep(5)` inside vitest's default 5,000 ms budget, and each
-  runs in 6 ms alone. Adding a 126th test file was enough to make both fail (W30.1).
-
-## 11. What is accepted, in one list
-
-Every one of these is argued above and recorded in `ISSUES.md` with an anchor:
-
-| Accepted                                                                                              | Where                     |
-| ----------------------------------------------------------------------------------------------------- | ------------------------- |
-| The access token is readable by any script on this origin; silent refresh runs on third-party cookies | `ISSUES.md` Issue 8       |
-| `canonicalSmiles` answers `null` for some legal long chains, depending on the JS stack                | `ISSUES.md` Issue 11      |
-| A job ending read off a stream and not yet relayed is recovered late, from the run registry           | `ISSUES.md` Issue 12      |
-| The old wire name `note_proposed` is still accepted, and must be, until the service ships the new one | `ISSUES.md` Issue 13      |
-| The contract check verifies nothing without a checkout, and compares no element type below a response | `ISSUES.md` Issue 14      |
-| `check:live` is operator-run: `smoke` and `check:openapi` are on no schedule                          | `ISSUES.md`, "Known gaps" |
-| `%00` / `%0A` in a wide-class id is forwarded encoded; a non-constant URL base is outside the scan    | `ISSUES.md` Issue 15      |
-| No screenshot baselines; no real MSAL redirect exercised; the sketcher canvas has no accessible path  | `ISSUES.md`, "Known gaps" |
-| HTML artefact scripts run by default; inside the sandbox they can still send data over WebRTC         | `ISSUES.md` Issue 25      |
+- **Bounded.** Persistence has a byte budget; a newer persisted version is refused
+  (`tests/persistBudget.test.ts`, `tests/persistQuota.test.ts`, `tests/persistence.test.ts`).
+- **Enforced.** Two tabs merge rather than overwrite each other's conversations
+  (`tests/persistBudget.test.ts`).
+- **Accepted.** No live cross-tab sync of local conversations; another tab's appear on reload.

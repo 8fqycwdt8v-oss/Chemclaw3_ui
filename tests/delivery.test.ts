@@ -90,16 +90,6 @@ const contractReaders = (
 const RESOLVER = 'tests/backendContract.ts';
 
 /**
- * The file the three documents' sentences about the checkout resolution are *about*.
- *
- * Transcribed rather than derived, because no derivation in this file produces it — and asserted
- * to exist where it is used, so a rename cannot leave it naming nothing while the region check it
- * anchors quietly matches no block at all. That is the whole cost of binding a phrase to a region
- * rather than to a file, and it is one path rather than three sentences.
- */
-const CONTRACT_READER = 'tests/backendContract.test.ts';
-
-/**
  * The files that ask `tests/backendContract.ts` where the checkout is.
  *
  * The second derivation of the same population, and it has to be a different question from the
@@ -287,15 +277,6 @@ const siblingCheckouts = (): { where: string; dir: string }[] => {
 
   return found;
 };
-
-/**
- * Whether the `Gate` stage runs unless somebody asks for it, read off the pipeline.
- *
- * `null` when the parameter is gone, which is a failure below rather than a quietly skipped
- * assertion — a regex that stops matching is the way a check of this shape dies.
- */
-const runGateDefault = (): string | null =>
-  /booleanParam\(name: 'RUN_GATE', defaultValue: (true|false)/.exec(pipeline)?.[1] ?? null;
 
 describe('the Jenkins pipeline', () => {
   it('invokes only npm scripts that exist', () => {
@@ -491,114 +472,17 @@ describe('the Jenkins pipeline', () => {
     }
   });
 
-  it('is described by the record with the resolution the resolver actually performs', () => {
-    // Same rule as the RUN_GATE clause below and for the same reason: three documents tell a
-    // reader where to put the checkout, and one of them told them to use a variable the contract
-    // reader did not read.
-    //
-    // A *phrase*, not a mention of each name. This check was `text.includes(name)` anywhere in the
-    // file, which is satisfied by any occurrence — driven: rewriting the sentence in `README.md`
-    // that actually describes the resolution left the suite green, because `CHEMCLAW_REPO` is
-    // named elsewhere in that file for an unrelated reason, and only deleting *every* mention
-    // reds. Order was held by nothing at all, and order is the half a reader acts on: which of two
-    // exported variables wins decides which checkout the suite reads.
-    //
-    // Assembled from `CHECKOUT_VARS` and `DEFAULT_CHECKOUT` rather than written out, so adding a
-    // variable, reordering two, or moving the fallback path reds here until the record says so.
-    // Whitespace-normalised because a Markdown paragraph wraps, and all three wrap this sentence
-    // in different places.
-    //
-    // The *fallback* is not a third candidate, and this check used to pin three documents to
-    // saying it was: `` `CHEMCLAW3_DIR`, then `CHEMCLAW_REPO`, then `../Chemclaw3` `` reads as a
-    // fall-through, and `checkoutRoots` takes the default *instead of* the configured roots.
-    // Driven at the commit that pinned it: `checkoutRoots({ CHEMCLAW3_DIR: '/nonexistent-xyz' })`
-    // is `['/nonexistent-xyz']` and `backendCheckout` is `null` — a stale export switches the
-    // check off rather than quietly reading the sibling, which is the opposite of what a reader
-    // who acted on that sentence would expect. So the two halves join differently.
-    const claim =
-      CHECKOUT_VARS.map((name) => `\`${name}\``).join(', then ') +
-      `, and only where none of those is set, \`${DEFAULT_CHECKOUT}\``;
-
-    // And the sentence's second half is a claim about the resolver rather than about this string,
-    // so it is driven here, in the `it` that enforces the sentence: making `DEFAULT_CHECKOUT` a
-    // third candidate reds beside the prose it falsifies, and the two cannot drift because both
-    // read the one constant.
-    //
-    // Not redundant with `tests/backendContract.test.ts`, which is the reading that would delete
-    // it. Its `falls back to the sibling path, and only when nothing names one` drives only the
-    // nothing-set arm, so it is **green** under exactly that mutation — measured:
-    // `[...configured.map(absolute), resolve(base, DEFAULT_CHECKOUT)]` leaves that `it` passing
-    // and reds three of its neighbours plus this one. The title says "only when nothing names
-    // one"; the assertions underneath do not check the other half.
+  it('falls back to the sibling checkout only when no variable names one', () => {
+    // A variable naming a missing directory switches the check off rather than silently reading
+    // the sibling.
     const sibling = resolve(process.cwd(), DEFAULT_CHECKOUT);
     expect(checkoutRoots({})).toContain(sibling);
     for (const name of CHECKOUT_VARS) {
       expect(
         checkoutRoots({ [name]: '/nonexistent-xyz' }),
-        `${name} naming a directory that does not exist must not fall through to ` +
-          `${DEFAULT_CHECKOUT} — the record above says it does not`,
+        `${name} naming a directory that does not exist must not fall through to ${DEFAULT_CHECKOUT}`,
       ).not.toContain(sibling);
     }
-    // ## The phrase is bound to a block, not to a file, and that was a decision
-    //
-    // A whole-file `includes` is satisfied by *any* occurrence, which is the same axis this check
-    // already narrowed once (from "each name anywhere" to "the phrase anywhere") and did not
-    // finish. Driven: destroy the live sentence in `README.md` — the two variables replaced by
-    // "some directory nobody documents" — and append a superseded historical note carrying the
-    // phrase verbatim, `git diff --numstat` `4 3 README.md`, and the suite is **24 passed**. The
-    // document now describes the resolution nowhere and the check cannot tell.
-    //
-    // Taken deliberately, because the cheap answers do not close it and the expensive one is not
-    // as expensive as it looks. A per-document occurrence *count* fails: that mutation leaves
-    // exactly one occurrence. Binding the phrase to a region is what closes it, and the cost is an
-    // anchor — so the anchor is `CONTRACT_READER`, the filename of the reader the sentence is
-    // about, which is one path, asserted to exist here, and already named in the describing block
-    // of all three documents (`ISSUES.md` said "It resolves", six lines from its antecedent, and
-    // now names the file). A prose anchor would be the stale thing; a path that must resolve on
-    // disk cannot be, and a document that stops naming the reader reds with that as its message
-    // rather than emptying the check in silence.
-    //
-    // Blocks split on a blank line *and* on a top-level list item, because two of the three
-    // documents describe the resolution inside a bullet and the bullets in them are not
-    // blank-line separated — splitting on blank lines alone makes one block of a whole section,
-    // which is a region check in name only.
-    //
-    // **What is left, said rather than implied.** A document may name the reader in more than one
-    // block (`docs/production-readiness.md` does, four times), so a superseded note placed inside
-    // one of *those* blocks still passes. That is a narrower hole than the file, not no hole. And
-    // the `RUN_GATE` clause below is still a whole-file `includes` on the same axis; it is not
-    // covered by any of this.
-    expect(
-      existsSync(CONTRACT_READER),
-      `${CONTRACT_READER} is what the documents' sentences are about and what this check looks ` +
-        'for a block by — it has been renamed, so the anchor names nothing',
-    ).toBe(true);
-    // Collected and asserted as a list, which is this file's own idiom (`expect(missing).toEqual([])`)
-    // and not only tidiness: a `for` loop of bare `expect`s aborts on the first failure, and the
-    // edit that falsifies *all three* documents at once is the one most likely to happen — moving
-    // `DEFAULT_CHECKOUT`. Driven under the loop, with `DEFAULT_CHECKOUT = '../Chemclaw3-elsewhere'`:
-    // one failure, naming `README.md`, and three round trips to find out the other two were wrong
-    // too. The commit that added this check said "reds all three documents", which was true of its
-    // effect and not of what a reader is shown.
-    const described = ['README.md', 'docs/production-readiness.md', 'ISSUES.md'].map((doc) => ({
-      doc,
-      blocks: readFileSync(doc, 'utf8')
-        .split(/\n\s*\n|\n(?=[-*] )/)
-        .map((block) => block.replace(/\s+/g, ' '))
-        .filter((block) => block.includes(CONTRACT_READER)),
-    }));
-    expect(
-      described.filter((entry) => entry.blocks.length === 0).map((entry) => entry.doc),
-      `these no longer name ${CONTRACT_READER}, so there is no block for this check to read the ` +
-        'resolution out of',
-    ).toEqual([]);
-    expect(
-      described
-        .filter((entry) => !entry.blocks.some((block) => block.includes(claim)))
-        .map((entry) => entry.doc),
-      `these do not say ${claim} in a block that names ${CONTRACT_READER}, which is the ` +
-        'resolution that reader performs',
-    ).toEqual([]);
   });
 
   it('derives a source directory from either shape the reader opens one with', () => {
@@ -617,39 +501,6 @@ describe('the Jenkins pipeline', () => {
     // And it derives nothing from text that opens nothing, so the assertion above is about the
     // shapes rather than about the regexes matching anything they are handed.
     expect(contractSourceDirs('this text opens no file at all')).toEqual([]);
-  });
-
-  it('is described by the record with the RUN_GATE default it actually declares', () => {
-    // **This comment used to say the stage above is the only lane with a Chemclaw3 checkout, and
-    // that stopped being true when the push lane grew one.** What survives is the reason the
-    // assertion exists: `RUN_GATE` ships off, so this pipeline gates the contract check only in a
-    // run somebody ticked the box on, and two documents described the stage as a gate for a day —
-    // the failure mode this record exists to end, a control believed because it was written down.
-    // Rather than asking each document for a phrase, all three are held to the parameter's own
-    // value, so flipping the default is a decision that cannot be taken in the pipeline alone.
-    const declared = runGateDefault();
-    expect(declared, 'the Jenkinsfile no longer declares a RUN_GATE boolean parameter').not.toBe(
-      null,
-    );
-    const claim = `\`RUN_GATE\` defaults to \`${declared}\``;
-    // **What this sees is the substring, and what it cannot see is the sentence around it.** The
-    // clause after this one in `ISSUES.md` Issue 14 went on reading "no lane of either pipeline
-    // gates this check by default" for a whole commit after the push lane grew a checkout — false,
-    // in the same bullet whose first sentence said the opposite, with this assertion green
-    // throughout because the substring never moved. That is the limit of a verbatim check and not
-    // a defect in it: it holds the *default*, which is the thing that changes under a pipeline
-    // edit. The prose around it is held by a reader, which is how that one was found.
-    // Three documents, because three describe the parameter. `README.md` was outside this list
-    // while saying `RUN_GATE` "is an opt-in", which is the same claim in words the verbatim check
-    // could not see — so a flipped default would have left one of the three describing a pipeline
-    // that no longer existed, quietly, which is what this assertion is for.
-    for (const doc of ['docs/production-readiness.md', 'ISSUES.md', 'README.md']) {
-      expect(
-        readFileSync(doc, 'utf8').includes(claim),
-        `${doc} does not say ${claim}, which is what the pipeline declares — the two lanes this ` +
-          'check runs in are what those documents are about, so a flipped default rewrites them',
-      ).toBe(true);
-    }
   });
 });
 

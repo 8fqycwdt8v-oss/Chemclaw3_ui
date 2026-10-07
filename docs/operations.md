@@ -1,11 +1,8 @@
 # Operating the UI — build, configure, deploy, verify, troubleshoot
 
-The operator's path through `Chemclaw3_ui`, end to end. [`README.md`](../README.md) says what the
-UI does and argues its design; this file says how to run it. Where the README already carries the
-full reasoning (the HTML sandbox, Entra), this file states the steps and links there.
-
-Every default below is the one `server/config.ts` resolves (or the file named beside it). Where this
-file and the code disagree, the code is right and this file is the bug.
+How to run `Chemclaw3_ui`. [`README.md`](../README.md) says what the UI does and covers the HTML
+sandbox and Entra in more detail. Every default below is the one `server/config.ts` resolves (or the
+file named beside it); where they disagree, the code is right.
 
 ---
 
@@ -308,8 +305,8 @@ path prefix needs the prefix in the ingress, not in `CHEMCLAW_API_URL`.
 
 **No structures are drawn, behind a proxy or CDN.** The RDKit worker script
 (`/assets/rdkit.worker-<hash>.js`) carries its own CSP with `'unsafe-eval'`; a proxy that sets one
-CSP for every response breaks it. Pass the BFF's headers through per path (README, `ISSUES.md`
-Issue 10).
+CSP for every response breaks it. Pass the BFF's headers through per path (README, "Enabling Entra
+SSO").
 
 **Answers arrive all at once, or streams drop.**
 

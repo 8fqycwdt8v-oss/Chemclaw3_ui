@@ -22,10 +22,11 @@ deployment.
 ### The design lifecycle is a transcription
 
 `LEGAL_STATUS_MOVES` and `STATUSES_NEEDING_A_PROTOCOL` (`shared/protocols.ts`) copy rules core
-enforces in `require_movable`, which the API contract does not carry, and nothing compares them with
-core any more (`tests/protocolStatusTransitions.test.ts` holds only that the table is total and
-consistent). A wrong table is a button that 422s or a missing one. Needs core to publish the
-transitions in the document (an `x-` extension on `StatusIn`, or a route); then generate the table.
+enforces in `require_movable`, which the API contract does not carry.
+`tests/protocolStatusTransitions.test.ts` parses core's `protocols/store.py` at the pinned commit
+and compares the literals (a failure under `CHEMCLAW3_REQUIRED=1`, a skip without it); it cannot
+see a rule enforced in a shape it does not parse. Needs core to publish the transitions in the
+document (an `x-` extension on `StatusIn`, or a route); then generate the table and drop the parser.
 
 ### The contract is looser than the service in places the UI works around
 
@@ -81,8 +82,8 @@ cancel a standing query. Needs routes in Chemclaw3 before this UI can show them.
 - **Flaky once:** `e2e/protocols.spec.ts` ("an edit becomes a new revision…") timed out once on the
   mobile project. Keep the trace from the next occurrence.
 - **No screenshot baselines.** The axe pass covers accessibility, not layout regressions.
-- **`check:live` is on no schedule.** `smoke` needs a live service and runs only when an operator
-  types it; `tests/gate.test.ts` keeps it out of both pipelines.
+- **`check:live` is on no schedule.** `smoke` and `check:live-contract` need a live service and run only when an
+  operator types them; `tests/gate.test.ts` keeps it out of both pipelines.
 - **The sketcher canvas (Ketcher) has no accessible path.** The SMILES field and `.mol`/`.sdf` drop
   are the accessible alternatives, announced in the dialog (`SKETCHER_ALTERNATIVE`); axe excludes
   only `[data-sketcher-canvas]`. Changes if Ketcher ships keyboard editing.

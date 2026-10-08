@@ -34,6 +34,10 @@ offline and repeatable, and a core that has moved on cannot red this repository.
 - `tests/pinnedContract.test.ts` also holds what generation cannot see: the BFF whitelist and every
   request `src/api/` makes against the document's routes, an exhaustive case for every event kind,
   and the lists this UI keeps (`EXHIBIT_KINDS`, `DESIGN_STATUSES`) against the document's enums.
+- `npm run check:live-contract <service url>` (part of operator-run `check:live`) diffs the contract a
+  deployment serves at `/openapi.json` with the pin; it needs the service directly, not the BFF.
+- The design-lifecycle table is compared with core's `protocols/store.py` at the pinned commit
+  (`tests/protocolStatusTransitions.test.ts`), by the same reader and the same required/skip rule.
 - Request bodies are `satisfies` their generated request model at the call site, so `tsc` holds the
   keys and the required fields.
 

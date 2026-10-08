@@ -542,8 +542,9 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
     case 'exhibit_draft':
       return null;
     default: {
-      const unhandled: never = event;
-      return unhandled;
+      // Compile-time guard only: at runtime an unknown kind is not a row, as before.
+      const _unhandled: never = event;
+      return null;
     }
   }
 }

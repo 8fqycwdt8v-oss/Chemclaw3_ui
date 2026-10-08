@@ -165,7 +165,9 @@ function main() {
     }
     console.log('  Not in the list, and why:');
     console.log('    ci:container    needs a container runtime; skips with a reason without one.');
-    console.log('    check:live      smoke, which needs a live Chemclaw3 service.\n');
+    console.log(
+      '    check:live      smoke + check:live-contract, which need a live Chemclaw3 service.\n',
+    );
     exit(0);
   }
 

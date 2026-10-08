@@ -71,12 +71,13 @@ const jenkinsfile = read('Jenkinsfile');
 /**
  * The checks that need a **live Chemclaw3 service** and therefore cannot be in an offline gate.
  *
- * It exits non-zero when it cannot reach one, deliberately: "a check that reports success it did
- * not perform is worse than no check". Putting it in `npm run ci` would mean a permanently red
- * gate, or teaching it to pass when it did not run, and the second is the failure mode it exists
- * to refuse. It is `npm run check:live` instead — a named home, which is what it did not have.
+ * Each exits non-zero when it cannot reach one, deliberately: "a check that reports success it did
+ * not perform is worse than no check". Putting them in `npm run ci` would mean a permanently red
+ * gate, or teaching them to pass when they did not run, and the second is the failure mode they
+ * exist to refuse. They are `npm run check:live` instead — a named home, which is what they did
+ * not have.
  */
-const NEEDS_A_LIVE_SERVICE = ['smoke'];
+const NEEDS_A_LIVE_SERVICE = ['smoke', 'check:live-contract'];
 
 /** The composers a pipeline runs. Everything in the gate is reachable from one of these. */
 const GATE_COMPOSERS = ['ci', 'ci:container'];

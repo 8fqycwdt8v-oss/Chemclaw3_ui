@@ -196,7 +196,7 @@ npm run typecheck
 npm run lint
 npm run test:e2e       # Playwright against the real BFF and e2e/fixture-service.ts
 npm run test:e2e:oidc-mock   # real MSAL sign-in against Chemclaw3_mock (CI's oidc-mock job)
-npm run check:live     # smoke; needs a live service, operator-run
+npm run check:live     # smoke + the served contract vs the pin; needs a live service, operator-run
 npm run contract:check # the committed API contract is core's file at the pinned commit
 ```
 

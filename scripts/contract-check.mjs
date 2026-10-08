@@ -51,12 +51,14 @@ function checkoutDir() {
 }
 
 /**
- * What the lock says core's file was, or `{ problem }` when it cannot be read at all.
+ * A file of core as it was at the locked commit, or `{ problem }` when it cannot be read at all.
+ * Never core's `main`: the blob is read with `git show <sha>:<path>`.
  *
  * @param {ReturnType<typeof readLock>} lock
  * @param {boolean} required
+ * @param {string} [path] defaults to the contract document
  */
-function coreFileAtPin(lock, required) {
+export function coreFileAtPin(lock, required, path = lock.path) {
   const found = checkoutDir();
   if (!found) {
     return {
@@ -85,10 +87,10 @@ function coreFileAtPin(lock, required) {
       };
     }
   }
-  const shown = git(['show', `${lock.commit}:${lock.path}`], dir);
+  const shown = git(['show', `${lock.commit}:${path}`], dir);
   if (shown.status !== 0) {
     return {
-      problem: `${lock.path} does not exist at ${lock.commit}: ${(shown.stderr || '').trim()}`,
+      problem: `${path} does not exist at ${lock.commit}: ${(shown.stderr || '').trim()}`,
     };
   }
   return { text: shown.stdout, where: `${from} (${dir})` };

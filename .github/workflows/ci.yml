@@ -16,13 +16,6 @@ on:
   # been queued yet") nor re-run, and the PR simply had no route to a verdict while every other
   # branch's CI drained normally. `Chemclaw3`'s own ci.yml added this trigger for the same reason.
   workflow_dispatch:
-    inputs:
-      chemclaw3_ref:
-        description: >-
-          The Chemclaw3 revision the contract check reads. Empty falls back to the repository
-          variable CHEMCLAW3_REF, and empty again to `main`. A branch, a tag or a full SHA.
-        required: false
-        type: string
 
 # A second push to a PR supersedes the first; there is no value in finishing a run for a commit
 # nobody will merge.
@@ -57,63 +50,26 @@ jobs:
           node-version: '22'
           cache: npm
 
-      # The service this client is written against. Without it `tests/backendContract.test.ts`
-      # verifies **nothing** and says so in a warning — which is what this lane did, and it is the
-      # lane that runs on every push, so the one check comparing what this client sends to what
-      # Chemclaw3 declares was a gate nowhere by default.
-      #
-      # A **full** checkout, deliberately, where `Jenkinsfile`'s `Preflight` clones sparsely. That
-      # pipeline needs `deploy/jenkins/lib` for the build and derives the rest of its sparse paths
-      # from the reader itself, asserted by `tests/delivery.test.ts`. Repeating that list here
-      # would be a second declaration of it with nothing reconciling the two — the defect that file
-      # exists to prevent — so this names no paths at all and cannot drift from the reader.
-      # No credential: every repository in this family is public, so `contents: read` reaches it.
-      #
-      # **`ref:` is named, so pinning this lane is a setting — and pinning is opt-in.** With neither
-      # the dispatch input nor `vars.CHEMCLAW3_REF` set, the step below resolves to `main`, which
-      # `actions/checkout` reads as that branch's HEAD *at the moment the job runs*. So by default
-      # this lane's verdict is still not a function of this repository's inputs alone: the same UI
-      # commit can be green one day and red the next with nothing changed here, and re-running an
-      # old pull request judges it against today's Chemclaw3. That is deliberate — a real rename
-      # upstream should red loudly, which is what this check is for — but it means the default lane
-      # is not repeatable, and naming `ref:` did not change that.
-      #
-      # What the variable buys is a remedy that is not "edit the guard": a pull request blocked by
-      # an unrelated upstream change is unblocked by pointing `vars.CHEMCLAW3_REF` at the last
-      # agreeing revision — a repository setting with an audit trail — rather than by weakening
-      # what is asserted. Only a full SHA there makes a run repeatable; a branch or tag still
-      # moves. `Jenkinsfile` already declares `CHEMCLAW3_BRANCH` for its own clone of the same
-      # repository; this is that fact in the other lane, and `tests/delivery.test.ts` holds both
-      # lanes to naming one.
-      #
-      # **Resolved in a step of its own, and printed, before anything uses it.** The precedence is
-      # the dispatch input, then `vars.CHEMCLAW3_REF`, then `main` — it used to be that expression
-      # inline in `ref:`, which worked and said nothing: whether a pull request from a fork is
-      # passed `vars` at all is unverified (`ISSUES.md`), and if it is not, a pinned gate silently
-      # reads `main` for exactly those runs. `scripts/chemclaw3-ref.mjs` prints the ref, which arm
-      # it came from and whether the run is a fork PR, and hands the ref on as an output, so the
-      # value in the log is the value checked out rather than a second evaluation of it. The values
-      # travel as `env`, never spliced into the command line.
-      - name: Which Chemclaw3 revision this run reads, and why
-        id: chemclaw3_ref
-        env:
-          CHEMCLAW3_REF_INPUT: ${{ inputs.chemclaw3_ref }}
-          CHEMCLAW3_REF_VARIABLE: ${{ vars.CHEMCLAW3_REF }}
-          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
-        run: node scripts/chemclaw3-ref.mjs
+      # The commit of core this repository's API contract is pinned to (`contracts/core.lock`),
+      # printed in a step of its own so the sha in the log is the sha the checkout reads. There is
+      # no variable or dispatch input that names another: bumping the pin is a commit
+      # (`docs/api-contract.md`), so this lane's verdict is a function of this repository's inputs
+      # alone. A force-pushed or deleted pin fails the checkout below, loudly.
+      - name: Which Chemclaw3 commit the API contract is pinned to
+        id: contract_pin
+        run: node scripts/contract-check.mjs --pinned-sha
 
+      # `npm run contract:check` compares the committed copy with core's file at that commit, so
+      # the checkout is that one commit, shallow: the check reads a single blob out of it. No
+      # credential: every repository in this family is public.
       - name: The Chemclaw3 checkout the contract check reads
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: 8fqycwdt8v-oss/Chemclaw3
-          ref: ${{ steps.chemclaw3_ref.outputs.ref }}
+          ref: ${{ steps.contract_pin.outputs.sha }}
           path: .chemclaw3
           fetch-depth: 1
-
-      # The commit that ref named at this moment — a branch moves, so the ref alone does not say
-      # what was read. Into the log and the run summary beside the ref.
-      - name: The Chemclaw3 commit that landed
-        run: node scripts/chemclaw3-ref.mjs --checked-out .chemclaw3
+          persist-credentials: false
 
       - run: npm ci
 
@@ -125,11 +81,9 @@ jobs:
       - name: The gate
         env:
           CHEMCLAW3_DIR: ${{ github.workspace }}/.chemclaw3
-          # REQUIRED rather than best-effort. A check that degrades to a warning the moment the
-          # checkout moves is a control this lane would claim and not have, which is the state
-          # this step replaces. What it costs is real and was the recorded reason for not doing
-          # it: this lane now reds on a rename merged in another repository, including on a pull
-          # request that has nothing to do with the contract.
+          # REQUIRED rather than best-effort: a contract check that degrades to a warning when the
+          # checkout is missing or the pinned commit is unreachable is a control this lane would
+          # claim and not have.
           CHEMCLAW3_REQUIRED: '1'
         run: npm run ci
 

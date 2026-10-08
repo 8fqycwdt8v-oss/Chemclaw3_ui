@@ -38,7 +38,7 @@ export default tseslint.config(
   // them in a file anyone edits. Only `worktrees/` is ignored, matching `.gitignore`.
   //
   // `.chemclaw3/**` is the same shape and arrived the same way: `.github/workflows/ci.yml` checks
-  // the **service** out there so `tests/backendContract.test.ts` gates rather than warns, and
+  // the **service** out there at the pinned commit for `npm run contract:check`, and
   // `actions/checkout` may only write inside the workspace — so another repository's source lands
   // where this one's globs reach. Driven: the push lane failed on 10 `no-undef`/`no-unused-vars`
   // errors in `.chemclaw3/src/chemclaw/api/static/app.js`, a browser script written against rules
@@ -46,8 +46,8 @@ export default tseslint.config(
   // the workspace cannot see that, which is why it reached CI.
   //
   // `.jenkins-lib/**` is the *same repository* one pipeline over, and it was ignored nowhere.
-  // `Jenkinsfile`'s `Preflight` sparse-checkouts Chemclaw3 into `${WORKSPACE}/.jenkins-lib`
-  // including `src/chemclaw/api` — which holds that very `static/app.js`. It is latent only
+  // `Jenkinsfile`'s `Preflight` clones Chemclaw3 into `${WORKSPACE}/.jenkins-lib`, and the
+  // `Gate` stage's contract check fetches the pinned commit into it. It is latent only
   // because `RUN_GATE` ships `false`, and that parameter is a supported flip rather than a
   // decision: ticking the box reds the lane that ships the image, on another repository's file.
   //
@@ -64,6 +64,8 @@ export default tseslint.config(
       'node_modules/**',
       'playwright-report/**',
       'test-results/**',
+      // Generated from the pinned contract (`scripts/generate-api.mjs`); `generate:check` holds it.
+      'shared/generated/**',
       '.claude/worktrees/**',
       '.chemclaw3/**',
       '.chemclaw3-mock/**',

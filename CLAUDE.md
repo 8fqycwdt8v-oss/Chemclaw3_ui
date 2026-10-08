@@ -25,7 +25,8 @@ repo is a PR there, not a workaround here.
 | `src/components/` | UI; `ui/` primitives, `chem/` composites, `exhibits/` artefact pane  |
 | `src/results/`    | tool-result renderers, keyed on payload shape                        |
 | `src/chem/`       | RDKit client/worker/engine, sketcher, entity extraction              |
-| `shared/`         | imported by SPA and BFF: wire contracts and shared constants         |
+| `shared/`         | imported by SPA and BFF: wire types, event readings, constants       |
+| `contracts/`      | the pinned core API contract and its lock                            |
 | `tests/`, `e2e/`  | vitest unit tests; Playwright specs + `e2e/fixture-service.ts`       |
 | `scripts/`        | the gate (`ci.mjs`) and every check it runs; each has an npm script  |
 | `docs/`           | `operations.md`, `production-readiness.md`, `dependencies.md`        |
@@ -36,13 +37,12 @@ browser via `/config.js` — never `import.meta.env` for deploy-time values.
 
 ## API types and the backend
 
-The wire types are **hand-mirrored** from Chemclaw3: `shared/events.ts` (SSE events, from
-`api/events.py`), `shared/protocols.ts`, `shared/exhibits.ts`, and the request/response interfaces
-in `src/api/client.ts` (named after the service's Pydantic models). `tests/backendContract.test.ts`
-checks them against a Chemclaw3 checkout (`CHEMCLAW3_DIR`, `CHEMCLAW_REPO`, else `../Chemclaw3`).
-A name ahead of or behind the service is argued in that file's maps with an `ISSUES.md` entry. A
-later wave generates these types from the backend; until then, change both sides together and ship
-the UI half first when it must read both shapes.
+The wire types are **generated** from core's API contract, pinned at a commit:
+`contracts/core-openapi.json` (verbatim copy) + `contracts/core.lock` (commit, version, sha256),
+generated into `shared/generated/` (never edit). `shared/wire.ts` aliases the models under the
+UI's names; `shared/events.ts` holds the tolerant readings. Don't hand-write a wire type: if the
+document lacks one, say why in `shared/wireUntyped.ts`. To bump the contract: `docs/api-contract.md`
+(copy, lock, `npm run generate:api`, `npm run ci`).
 
 ## Commands
 
@@ -54,6 +54,8 @@ npm test              # vitest
 npm run format:check  # prettier (npm run format to fix)
 npm run build         # client + server bundles
 npm run test:e2e      # Playwright against the real BFF and the fixture service
+npm run generate:api  # regenerate shared/generated/ from the pinned contract
+npm run contract:check # the copy matches its lock, and core's file at the pinned commit
 npm run ci            # the whole gate, as CI runs it (npm run ci -- --list)
 ```
 

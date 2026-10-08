@@ -8,6 +8,7 @@
 
 import type { ExhibitRef } from '../../shared/exhibitConstants.ts';
 import type { AnswerEvent, ChemclawEvent, ErrorCode } from '../../shared/events.ts';
+import type { MessageIn } from '../../shared/wire.ts';
 import {
   ApiError,
   correlationFrom,
@@ -133,8 +134,8 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
           body: JSON.stringify({
             message: opts.message,
             dry_run: opts.dryRun ?? false,
-            exhibit_refs: opts.exhibitRefs ?? [],
-          }),
+            exhibit_refs: [...(opts.exhibitRefs ?? [])],
+          } satisfies MessageIn),
         });
   } catch {
     if (opts.signal.aborted) throw new ApiError('aborted', 'Stopped.');

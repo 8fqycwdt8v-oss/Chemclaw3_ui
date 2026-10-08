@@ -537,8 +537,8 @@ function Row({
         </Step>
       );
 
-    // The wire name is `note_proposed`, but nothing reviews notes: label it as recorded, not "for
-    // review".
+    // Nothing reviews notes: label the row as recorded, not "for review". The row kind predates the
+    // wire event's name (`note_recorded`) and is what persisted transcripts hold.
     case 'note_proposed':
       return (
         <Step tone="idle">

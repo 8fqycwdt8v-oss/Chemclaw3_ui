@@ -493,7 +493,8 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
         kind: 'question',
         question: { question: event.question, options: event.options },
       };
-    case 'note_proposed':
+    // The wire event is `note_recorded`; the row keeps the kind it was persisted under.
+    case 'note_recorded':
       return {
         ...base,
         kind: 'note_proposed',
@@ -527,8 +528,23 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
           author: event.author,
         },
       };
-    default:
+    // Not trace rows. Each is handled before this function (`applyEvent`) or by another consumer
+    // (`sendMessage` for drafts, the job stream for `awaiting_answer`). Named, not defaulted, so a
+    // kind the contract gains fails the typecheck here until someone decides what it is.
+    case 'token':
+    case 'answer':
+    case 'tool_queued':
+    case 'queued':
+    case 'capability_degraded':
+    case 'error':
+    case 'tool_result':
+    case 'awaiting_answer':
+    case 'exhibit_draft':
       return null;
+    default: {
+      const unhandled: never = event;
+      return unhandled;
+    }
   }
 }
 

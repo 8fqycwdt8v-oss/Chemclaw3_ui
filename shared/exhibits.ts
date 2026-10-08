@@ -1,5 +1,5 @@
 /**
- * The artefact contract — a mirror of the service's exhibit REST bodies. "Exhibit" is the code name
+ * The artefact decoders for the service's exhibit REST bodies. "Exhibit" is the code name
  * (the service already uses "artifact" for calculation by-products); users only ever read
  * "Artefact".
  *
@@ -14,10 +14,12 @@
  *
  * Valibot schemas (types are `v.InferOutput`), tolerant per field (`v.fallback`) but strict per
  * spec: an unreadable spec becomes `null` and the view says so rather than drawing a half-coerced
- * document.
+ * document. Written here rather than generated because the contract types `spec` as `unknown`; the
+ * fields each decoder reads are held against the contract in `tests/pinnedContract.test.ts`.
  */
 
 import * as v from 'valibot';
+import { text, textList } from './eventCoercion.ts';
 import type { ExhibitKind } from './exhibitConstants.ts';
 
 export {
@@ -57,11 +59,9 @@ export const EXPORT_FORMAT_LIST = ['md', 'csv', 'smi', 'xyz', 'html'] as const;
 export type ExportFormat = (typeof EXPORT_FORMAT_LIST)[number];
 
 /*
- * ── field vocabulary ── Each a `v.fallback`, so a malformed field costs only that field.
- * Re-declared rather than imported from `shared/events.ts`, which keeps its helpers private.
+ * ── field vocabulary ── Each a `v.fallback`, so a malformed field costs only that field. The
+ * shapes shared with the events are `shared/eventCoercion.ts`'s.
  */
-
-const text = (fallback = '') => v.fallback(v.string(), fallback);
 
 /** A revision number: a whole number of at least zero. `0` is what the service means by "none"
  *  (`parent_revision` of a first revision) and is the honest reading of a malformed one. */
@@ -75,15 +75,6 @@ const revision = () =>
   );
 
 const authorKind = () => v.fallback(v.picklist(AUTHOR_KINDS), 'agent' as AuthorKind);
-
-const textList = () =>
-  v.fallback(
-    v.pipe(
-      v.array(v.unknown()),
-      v.transform((entries) => entries.map(String)),
-    ),
-    [] as string[],
-  );
 
 /*
  * ── bindings ── A bound value in a stored spec: the outer object is strict (exactly one `$bind`

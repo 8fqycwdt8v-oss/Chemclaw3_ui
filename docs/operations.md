@@ -242,8 +242,8 @@ image to a kind cluster at `http://127.0.0.1:15173`.
 | sandbox listener          | `GET https://<sandbox host>/sandbox/frame`               | 200 with its own CSP; `GET https://<app host>/sandbox/frame` is 404            |
 | whitelist                 | `GET /api/metrics`                                       | 404 (never forwarded)                                                          |
 | the image's four promises | `npm run check:serving -- https://<app host>`            | four ✓                                                                         |
+| served contract = pin     | `npm run check:live-contract <service url>`              | `ok`; drift names pinned vs served `info.version` (needs the service directly) |
 | a real streamed turn      | `ACCESS_TOKEN=<bearer> npm run smoke https://<app host>` | frames arrive **incrementally**; omit `ACCESS_TOKEN` under `dev`               |
-| wire contract vs backend  | `npm run check:openapi <backend url>`                    | needs the backend reachable directly                                           |
 
 The startup log says what the process decided: one `listening` line (upstream, auth mode, version)
 and one `html sandbox on: …` or `html sandbox off: <reason>` line. `GET /metrics` exposes

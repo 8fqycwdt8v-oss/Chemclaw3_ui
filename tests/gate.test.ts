@@ -17,7 +17,7 @@
  *    Groovy file is the exact shape that was removed. For the workflow that is an allowlist of
  *    what a step may be; for the Jenkinsfile, whose shell legitimately builds and deploys, it is a
  *    blacklist of spellings plus one allowlist — `node` may only run a file under `scripts/`.
- * 3. **An orphaned check.** `npm run smoke` and `npm run check:openapi` existed for months wired
+ * 3. **An orphaned check.** `npm run smoke` and a live contract check existed for months wired
  *    into nothing at all — scripts with a name, a docstring and no caller, which is a control that
  *    reads as one and is not. Every assertion script must be reachable from a composer, and one
  *    that is deliberately out of the offline gate must be out *in code*, not in prose. What
@@ -71,13 +71,13 @@ const jenkinsfile = read('Jenkinsfile');
 /**
  * The checks that need a **live Chemclaw3 service** and therefore cannot be in an offline gate.
  *
- * Both exit non-zero when they cannot reach one, deliberately — `scripts/check-openapi.mjs` argues
- * it in its own comments: "a check that reports success it did not perform is worse than no
- * check". Putting either in `npm run ci` would mean a permanently red gate, or teaching them to
- * pass when they did not run, and the second is the failure mode they exist to refuse. They are
- * `npm run check:live` instead — a named home, which is what they did not have.
+ * Each exits non-zero when it cannot reach one, deliberately: "a check that reports success it did
+ * not perform is worse than no check". Putting them in `npm run ci` would mean a permanently red
+ * gate, or teaching them to pass when they did not run, and the second is the failure mode they
+ * exist to refuse. They are `npm run check:live` instead — a named home, which is what they did
+ * not have.
  */
-const NEEDS_A_LIVE_SERVICE = ['smoke', 'check:openapi'];
+const NEEDS_A_LIVE_SERVICE = ['smoke', 'check:live-contract'];
 
 /** The composers a pipeline runs. Everything in the gate is reachable from one of these. */
 const GATE_COMPOSERS = ['ci', 'ci:container'];
@@ -335,12 +335,10 @@ const TOOLING = new Set([
   // measurement — the behaviour it found is held by `tests/rdkitTooComplex.test.tsx`, which is in
   // the gate, and this prints a table and exits 0.
   'measure-rdkit-rangeerror.mjs',
-  // Reporting, not assertion: it resolves which Chemclaw3 revision the GitHub lane checks out and
-  // prints that with where it came from, so a run's base is in its log rather than inferred from
-  // an expression (`ISSUES.md`, the `CHEMCLAW3_REF` entry). It exits non-zero only on a value
-  // that cannot be a git ref, which is input hygiene for `$GITHUB_OUTPUT`, not a claim about the
-  // product. `tests/delivery.test.ts` holds its precedence and that the checkout reads its output.
-  'chemclaw3-ref.mjs',
+  // Generation, not assertion: it writes `shared/generated/` from the pinned contract. Its
+  // `--check` mode is the gate's `generate` step, and `tests/pinnedContract.test.ts` holds that the
+  // committed files are what it produces.
+  'generate-api.mjs',
   // Provisioning, not assertion: it gives a Chemclaw3_mock checkout the `.venv` the OIDC lane
   // (`playwright.oidc-mock.config.ts`) starts the tenant from, as the mock's README installs it.
   // A file because a workflow step may only run `npm`/`npx` or `node scripts/<file>.mjs`.

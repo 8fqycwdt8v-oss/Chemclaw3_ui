@@ -26,21 +26,19 @@ that holds it.
 
 ## 2. The wire contract with Chemclaw3
 
-- **Enforced.** Against a Chemclaw3 checkout: every whitelisted route is one the service registers;
-  every path and JSON body `src/api/` sends is declared, including required fields; every declared
-  event survives `normalizeEvent` and every field it reads exists; `ErrorCode`, `RefusalReason` and
-  `AnswerCheck` match; every model-shaped response is cast to the model's own name and its fields
-  compared (`tests/backendContract.test.ts`). The checkout resolves from `CHEMCLAW3_DIR`, then
-  `CHEMCLAW_REPO`, else `../Chemclaw3`, in one resolver (`tests/backendContract.ts`).
-- **Enforced.** Every event-union member round-trips through `normalizeEvent` with every field, and
-  `EVENT_TYPES` and the schemas are one vocabulary (`tests/eventContract.test.ts`).
-- **Enforced.** A wire name this client admits and the service does not declare fails unless argued
-  in `AHEAD_OF_BACKEND` / `RETAINED_FOR_ROLLOUT` with a reason, an `ISSUES.md` phrase and an unexpired
-  review date. This half needs no checkout (`tests/backendContract.test.ts`).
-- **Accepted.** With no checkout the check verifies nothing (a warning; `CHEMCLAW3_REQUIRED=1` fails
-  instead). The GitHub lane checks out Chemclaw3 at `CHEMCLAW3_REF` (default `main`); Jenkins runs
-  the gate only when `RUN_GATE` is set. Nested element types, non-model responses and what a
-  deployment actually serves are outside it. `ISSUES.md` Issue 14.
+- **Enforced.** The wire types are generated from core's API contract, pinned by commit
+  (`contracts/core.lock`); the committed copy is core's file at that commit and
+  `shared/generated/` is what it produces (`npm run contract:check`, `npm run generate:check`,
+  `tests/contractPin.test.ts`; `docs/api-contract.md`).
+- **Enforced.** Every whitelisted route and every request `src/api/` makes is declared by the
+  document; request bodies are `satisfies` their generated model; every event kind the document
+  declares has a case in the reducer (`tests/pinnedContract.test.ts`, `tsc`).
+- **Enforced.** Every event-union member round-trips through `normalizeEvent` with every field
+  (`tests/eventContract.test.ts`).
+- **Accepted.** With no Chemclaw3 checkout the comparison with core is skipped, loudly; the pipelines
+  set `CHEMCLAW3_REQUIRED=1`, which makes it a failure. Jenkins runs the gate only when `RUN_GATE`
+  is set. What a deployment actually serves, semantics, and the design-lifecycle table are outside
+  it (`ISSUES.md`).
 
 ## 3. Path encoding
 

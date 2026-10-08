@@ -3,19 +3,7 @@
 Open items and accepted risks. A closed item is deleted in the change that closes it; git keeps
 the history. File new ones at https://github.com/8fqycwdt8v-oss/Chemclaw3_ui/issues/new.
 
-`tests/backendContract.test.ts` reads this file: an argued wire name in `AHEAD_OF_BACKEND`,
-`RETAINED_FOR_ROLLOUT` or `FIELDS_AHEAD_OF_BACKEND` must quote a phrase from an entry here, so
-deleting that entry retires the exemption.
-
 ## Open
-
-### A maintainer's `CHEMCLAW3_REF` pin may not survive a fork PR
-
-CI resolves the Chemclaw3 checkout ref as dispatch input → `vars.CHEMCLAW3_REF` → `main`
-(`scripts/chemclaw3-ref.mjs`, which logs the ref, the arm it came from and whether the run is a
-fork PR). Unverified: whether GitHub passes `vars` to fork pull requests. If not, a pinned ref
-silently becomes `main` there. To close: run one fork PR while `CHEMCLAW3_REF` is set and read the
-first step's log.
 
 ### Issue 12: a job ending read off a stream and not yet relayed dies with the tab that read it
 
@@ -24,40 +12,50 @@ before `tab.publish` is lost. `src/state/jobReconcile.ts` recovers the _fact_ on
 from `GET /jobs/{id}` (seven-day window, ten newest), but not the push-back payload. The remaining
 fix is upstream: acknowledge before the claim, or store the push-back payload on the run record.
 
-### Issue 13: the note event is renamed in two repositories, and the last step waits on a rollout
+### Issue 13: the old spelling of the note event is still admitted
 
-The service now emits `note_recorded`; this client accepts both it and the old `note_proposed`
-(normalised to the internal `note_proposed`). Step 3 — remove `note_proposed` from `EVENT_TYPES`
-and `normalizeEvent` and rename the internal type — waits until the service's rename has rolled
-out to every deployment. `RETAINED_FOR_ROLLOUT` in `tests/backendContract.test.ts` holds the
-exemption and its review date.
+The service emits `note_recorded` (the pinned contract's name). This client also admits the old
+`note_proposed` and normalises it onto `note_recorded` (`WIRE_ALIASES` in `shared/events.ts`, pinned
+by `tests/eventContract.test.ts`). Remove the alias once the rename has rolled out to every
+deployment.
 
-### Issue 14: what the contract check does not see
+### The design lifecycle is a transcription
 
-`tests/backendContract.test.ts` compares this client against a Chemclaw3 checkout's declarations
-(see `docs/production-readiness.md` §2). Outside it:
+`LEGAL_STATUS_MOVES` and `STATUSES_NEEDING_A_PROTOCOL` (`shared/protocols.ts`) copy rules core
+enforces in `require_movable`, which the API contract does not carry.
+`tests/protocolStatusTransitions.test.ts` parses core's `protocols/store.py` at the pinned commit
+and compares the literals (a failure under `CHEMCLAW3_REQUIRED=1`, a skip without it); it cannot
+see a rule enforced in a shape it does not parse. Needs core to publish the transitions in the
+document (an `x-` extension on `StatusIn`, or a route); then generate the table and drop the parser.
 
-- **No checkout, no check.** It warns and passes unless `CHEMCLAW3_REQUIRED=1`. The GitHub push
-  lane checks Chemclaw3 out; the Jenkins `Gate` stage runs it only when `RUN_GATE` is set. Both
-  lanes therefore red on an upstream rename — accepted; the owner of CI decides.
-- **Nested element types** are compared only where some route returns them by name; non-model
-  responses (`dict`, `list[str]`, `Response`) are printed, not compared. Query parameters are not
-  compared.
-- **Declared, not served.** What a deployment actually serves is `npm run check:openapi`, which is
-  operator-run.
-- **`DesignListOut.total` / `.truncated`** are sent and not read (argued in `NOT_READ`): the
-  protocols panel has no copy for a truncated listing. The panel's owner decides.
+### The contract is looser than the service in places the UI works around
+
+Found by typing the UI from the pinned document; each is a request to core, not a UI fix.
+
+- Fields with a default are not `required` and carry no `default` when it is `None` or a factory
+  (`Setpoints.ph`, `DesignListOut.designs`, `NoteRef.tags`, ...), so the generated types say
+  "may be absent" while the service always sends them. `Served` in `shared/wire.ts` reads responses
+  as complete; core marking them required (or emitting the default) would let that go.
+- `ExhibitView.spec` / `raw_spec` are `unknown`, so the per-kind specs the document does declare
+  (`TableSpec`, `ChartSpec`, ...) are not reachable from the view; the UI validates in
+  `shared/exhibits.ts`.
+- `DesignOut.kind` and `RevisionSummary.kind` are bare strings; the UI reads `request` or `protocol`.
+- `GET /healthz` and `POST /sessions/{id}/turn/stop` answer an unconstrained `object`
+  (`shared/wireUntyped.ts`).
+- Sent and not read by any surface: `NoteRef.artifact_refs` / `calc_refs`, `NeighborRef.relations_in`
+  / `relations_out`, `ArmRow`'s `atmosphere`, `concentration_molar`, `ph`, `pressure_bar`,
+  `PendingRequestOut.reminders`, and `DesignListOut.total` / `.truncated` (the protocols panel has no
+  copy for a truncated listing; its owner decides).
 
 ### Issue 20: TypeScript 7 waits on typescript-eslint
 
 `npm ci` fails with ERESOLVE until typescript-eslint's peer range admits TypeScript 7. The
 migration is its own PR, not a lockfile bump.
 
-### Issue 21: three unit tests time out on a loaded machine
+### Issue 21: two unit tests time out on a loaded machine
 
-`tests/turnStall.test.tsx`, `tests/backendContract.test.ts` and `tests/serverLimits.test.ts` fail
-under heavy host load and pass alone. Make the first assert order rather than elapsed time, and
-give the contract test a timeout derived from what it reads.
+`tests/turnStall.test.tsx` and `tests/serverLimits.test.ts` fail under heavy host load and pass
+alone. Make the first assert order rather than elapsed time.
 
 ### Issue 22: shared sessions — what still needs the service
 
@@ -84,8 +82,8 @@ cancel a standing query. Needs routes in Chemclaw3 before this UI can show them.
 - **Flaky once:** `e2e/protocols.spec.ts` ("an edit becomes a new revision…") timed out once on the
   mobile project. Keep the trace from the next occurrence.
 - **No screenshot baselines.** The axe pass covers accessibility, not layout regressions.
-- **`check:live` is on no schedule.** `smoke` and `check:openapi` need a live service and run only
-  when an operator types them; `tests/gate.test.ts` keeps them out of both pipelines.
+- **`check:live` is on no schedule.** `smoke` and `check:live-contract` need a live service and run only when an
+  operator types them; `tests/gate.test.ts` keeps it out of both pipelines.
 - **The sketcher canvas (Ketcher) has no accessible path.** The SMILES field and `.mol`/`.sdf` drop
   are the accessible alternatives, announced in the dialog (`SKETCHER_ALTERNATIVE`); axe excludes
   only `[data-sketcher-canvas]`. Changes if Ketcher ships keyboard editing.

@@ -174,8 +174,9 @@ through untouched, ideally a separate registrable domain); see
 server/   the BFF — route whitelist, streaming proxy, static host, /config.js, access log,
           /metrics, /readyz, the browser log sink, the sandbox listener
 src/      the SPA — api/ auth/ state/ hooks/ chem/ components/ results/ lib/
-shared/   imported by SPA and BFF: contracts hand-mirrored from the service (events.ts,
-          protocols.ts, exhibits.ts) and constants both sides must agree on
+shared/   imported by SPA and BFF: wire types generated from the pinned core contract
+          (generated/, wire.ts, protocols.ts, events.ts, exhibits.ts) and shared constants
+contracts/ the pinned core API contract (verbatim copy) and its lock
 scripts/  the gate (ci.mjs) and its checks, dev launcher, server bundler, smoke test
 tests/    vitest unit tests
 e2e/      Playwright specs and the SSE fixture service
@@ -195,15 +196,17 @@ npm run typecheck
 npm run lint
 npm run test:e2e       # Playwright against the real BFF and e2e/fixture-service.ts
 npm run test:e2e:oidc-mock   # real MSAL sign-in against Chemclaw3_mock (CI's oidc-mock job)
-npm run check:live     # smoke + check:openapi; needs a live service, operator-run
+npm run check:live     # smoke + the served contract vs the pin; needs a live service, operator-run
+npm run contract:check # the committed API contract is core's file at the pinned commit
 ```
 
 `test:e2e:full-stack` and `test:e2e:kind` need the whole four-repository system already up.
 
 The e2e fixture emits SSE frames with real gaps, through the real BFF, so a buffering chain fails.
-`tests/backendContract.test.ts` checks routes, request bodies, events and response fields against a
-Chemclaw3 checkout (`CHEMCLAW3_DIR`, then `CHEMCLAW_REPO`, else `../Chemclaw3`); with no checkout it
-warns, and `CHEMCLAW3_REQUIRED=1` makes that a failure.
+The wire types are generated from the API contract Chemclaw3 publishes, pinned at a commit in
+`contracts/` (`docs/api-contract.md`). `npm run contract:check` compares the committed copy with
+core's file at that commit (`CHEMCLAW3_DIR`, else `../Chemclaw3`); with no checkout it says it
+skipped, and `CHEMCLAW3_REQUIRED=1` makes that a failure.
 
 ## Delivery
 

@@ -14,12 +14,8 @@
 import { describe, expect, it } from 'vitest';
 import { spawn, spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import type { AddressInfo } from 'node:net';
-import { join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
-import { CHECKOUT_VARS, DEFAULT_CHECKOUT, checkoutRoots } from './backendContract.ts';
 
 const pipeline = readFileSync('Jenkinsfile', 'utf8');
 const workflow = readFileSync('.github/workflows/ci.yml', 'utf8');
@@ -43,128 +39,6 @@ const shellBlocks = [
   ...[...pipeline.matchAll(/"""([\s\S]*?)"""/g)].map((m) => asShellReceivesIt(m[1] ?? '')),
   ...[...pipeline.matchAll(/sh '''([\s\S]*?)'''/g)].map((m) => m[1] ?? ''),
 ];
-
-/**
- * This file, which is the one source in the suite the derivations below must not read.
- *
- * Not tidiness and not a hole: the probes further down hand those derivations text built to
- * contain every shape they claim to see (`readPy(root, 'kg/…')`, a `join(root, 'src', 'chemclaw',
- * 'durable', …)`, a `/src/chemclaw/publish/` URL), and a scan that read its own fixtures would
- * demand the pipeline fetch four directories nothing opens. What stops a real read hiding behind
- * the exclusion is the last assertion in this describe, which holds *every* file in the suite —
- * this one included — to resolving a checkout through one function rather than an environment
- * variable of its own.
- */
-const DERIVATION_OWNER = 'tests/delivery.test.ts';
-
-/** Every TypeScript source in this suite, as `{ path, text }`. */
-const suiteSources = (): { path: string; text: string }[] => {
-  const walk = (dir: string): string[] =>
-    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-      const full = `${dir}/${entry.name}`;
-      if (entry.isDirectory()) return walk(full);
-      return /\.tsx?$/.test(entry.name) ? [full] : [];
-    });
-  return [...walk('tests'), ...walk('e2e')]
-    .filter((path) => path !== DERIVATION_OWNER)
-    .map((path) => ({ path, text: readFileSync(path, 'utf8') }));
-};
-
-/**
- * The cross-repository readers, derived rather than named: a file this suite holds that opens
- * something out of a Chemclaw3 checkout.
- *
- * The list used to be three filenames written here, under a docstring saying the *directories*
- * were derived rather than transcribed — true of the directories and false of the readers, which
- * is the same sentence being right about somebody else. Driven on `0fca446`: a fourth reader
- * opening `src/chemclaw/memory/tiers.py` left this file green at 20 passed while the Gate stage's
- * sparse checkout fetched no `memory/`, which is the silent demotion to a warning that the
- * derivation exists to prevent, arriving by the one route it could not see.
- */
-const contractReaders = (
-  files: { path: string; text: string }[] = suiteSources(),
-): { path: string; text: string }[] =>
-  files.filter((file) => contractSourceDirs(file.text).length > 0);
-
-/** The one file allowed to answer "where is the Chemclaw3 checkout". */
-const RESOLVER = 'tests/backendContract.ts';
-
-/**
- * The files that ask `tests/backendContract.ts` where the checkout is.
- *
- * The second derivation of the same population, and it has to be a different question from the
- * first or the agreement below would be an identity. This one reads the *import*; the other reads
- * the *path*. A file in one and not the other is a defect in whichever direction it is missing
- * from, and both directions have happened in this repository.
- *
- * The named functions rather than the module: `tests/eventContract.test.ts` imports
- * `clientEventTypes` from it and opens no checkout at all, so a predicate about the *module* put
- * it in this set and failed it for a read it does not make — driven, before this. And the *import
- * clause* rather than a window of characters before the `from`: the first edition allowed 200 of
- * them, and adding three parser names to `tests/backendContract.test.ts`'s import list pushed
- * `backendCheckout` out of the window, failing the file that owns this axis for having grown.
- *
- * And the whole specifier rather than `[./]*backendContract.ts`: `suiteSources()` walks `e2e/` as
- * well as `tests/`, and a file there must write `'../tests/backendContract.ts'`, which that form
- * never matches. Both halves of that were wrong and the second is the one that matters — an `e2e/`
- * reader that asks and then opens opaquely fell into *neither* population, so nothing fired and
- * the sparse checkout did not fetch what it read, which is precisely the silent demotion this pair
- * of derivations exists to prevent, one directory over. The other half failed a file that does ask
- * with a message telling it to ask, which is a red with no edit that clears it. The probe below
- * drives both shapes from `e2e/`.
- */
-const RESOLVER_FUNCTIONS = ['backendCheckout', 'backendSearchPath', 'checkoutRoots'];
-
-const resolverUsers = (
-  files: { path: string; text: string }[] = suiteSources(),
-): { path: string; text: string }[] =>
-  files.filter(
-    (file) =>
-      file.path === RESOLVER ||
-      [...file.text.matchAll(/import\s*\{([\s\S]*?)\}\s*from\s*'[^']*backendContract\.ts'/g)].some(
-        (match) =>
-          RESOLVER_FUNCTIONS.some((name) => new RegExp(`\\b${name}\\b`).test(match[1] ?? '')),
-      ),
-  );
-
-/** The readers, as one text, for the directory derivation the sparse checkout follows. */
-const contractReader = (): string =>
-  contractReaders()
-    .map((file) => file.text)
-    .join('\n');
-
-/**
- * Every `src/chemclaw/<dir>` a cross-repository reader in this suite opens in a Chemclaw3 checkout.
- *
- * Read off the readers rather than written down here, because the pipeline's sparse checkout has to
- * follow it and the failure of a transcribed list is silent in the direction that matters: a new
- * read, a path that is not fetched, and a lane that goes back to warning instead of checking.
- *
- * Three shapes, because the readers write three: a relative path handed to `readPy`/`literal`, an
- * explicit `join(root, 'src', 'chemclaw', …)`, and a `…/src/chemclaw/<dir>/…` path built into a
- * URL. Takes its sources as an argument so the derivation can be driven over text written to
- * contain each of them — the second loop's answer is a *subset* of the first's today (`api`, which
- * `readPy` already reaches), so deleting it leaves this file green while removing the only thing
- * that sees a `join()` read of a directory nothing else opens.
- *
- * The boundary, stated because a derivation that looks exhaustive is read as one: all three shapes
- * match a *literal* first path segment. A reader that builds the directory name — holding it in a
- * constant, or joining a variable — is invisible here exactly as it is to the path-encoding rule,
- * and the remedy is the same one: write the read in a shape this can see.
- */
-const contractSourceDirs = (sources: string = contractReader()): string[] => {
-  const dirs = new Set<string>();
-  for (const match of sources.matchAll(/(?:readPy\(root, |literal\()'([a-z_]+)\//g)) {
-    if (match[1]) dirs.add(match[1]);
-  }
-  for (const match of sources.matchAll(/'src', 'chemclaw', '([a-z_]+)'/g)) {
-    if (match[1]) dirs.add(match[1]);
-  }
-  for (const match of sources.matchAll(/\/src\/chemclaw\/([a-z_]+)\//g)) {
-    if (match[1]) dirs.add(match[1]);
-  }
-  return [...dirs].sort();
-};
 
 /**
  * Every step of the GitHub workflow, as `{ name, text }`.
@@ -324,183 +198,19 @@ describe('the Jenkins pipeline', () => {
     expect(pipeline).toContain("booleanParam(name: 'DRY_RUN', defaultValue: true");
   });
 
-  it('gives its gate the Chemclaw3 checkout the contract reader needs', () => {
-    // `tests/backendContract.test.ts` verifies nothing without a Chemclaw3 checkout, and this is
-    // the one lane that already makes one — Preflight clones that repository on every run for the
-    // build library. The sparse paths are *derived* from what the reader opens rather than
-    // transcribed, so a reader that grows a fourth source directory fails here instead of
-    // silently reducing the gate to a warning in the lane that has the credential.
-    const dirs = contractSourceDirs();
-    expect(dirs.length, 'found no Chemclaw3 source the contract reader opens').toBeGreaterThan(1);
-
-    const sparse = shellBlocks.find((block) => block.includes('git sparse-checkout set')) ?? '';
-    for (const dir of dirs) {
-      expect(
-        sparse,
-        `Preflight's sparse checkout omits src/chemclaw/${dir}, which the contract reader opens`,
-      ).toContain(`src/chemclaw/${dir}`);
-    }
-
-    // And the gate stage has to say where it went, and refuse to pass when it is not there.
+  it('gives its gate a checkout to read the pinned contract from, and refuses to warn instead', () => {
+    // `npm run contract:check` compares the committed contract with core's file at the pinned
+    // commit. Preflight clones Chemclaw3 for the build library on every run; the check fetches the
+    // pinned commit into it. REQUIRED, because a check that degrades to a warning when the
+    // checkout moves is a control this stage would claim and not have.
     expect(pipeline).toContain('CHEMCLAW3_DIR = "${env.WORKSPACE}/.jenkins-lib"');
     expect(pipeline).toContain("CHEMCLAW3_REQUIRED = '1'");
-  });
-
-  it('derives the readers themselves, rather than being handed a list of them', () => {
-    // Two derivations of one population, over inputs built to disagree with each other. The set is
-    // normally three files that already agree, so a filter over it answers the same thing whatever
-    // its predicate does — this is what makes the assertion below about the predicates.
-    const probe = [
-      // Opens a checkout path and never asks where the checkout is: the shape that grew a fourth
-      // reader outside the sparse list.
-      { path: 'tests/rogue.test.ts', text: "readPy(root, 'memory/tiers.py')" },
-      // Asks where the checkout is and opens it in a shape no derivation can follow: the boundary
-      // the directory derivation's own docstring states and nothing used to enforce.
-      {
-        path: 'tests/opaque.test.ts',
-        text: "import { backendCheckout } from './backendContract.ts';\nreadFileSync(join(root, DIR))",
-      },
-      // Names a path in prose and opens nothing. In neither set, and that is the point: a mention
-      // is not a read, and a derivation that counted one would make the pipeline fetch prose.
-      { path: 'tests/prose.test.ts', text: 'transcribed from src/chemclaw/api/events.py' },
-      // Both, which is what every real reader is.
-      {
-        path: 'tests/honest.test.ts',
-        text: "import { backendCheckout } from './backendContract.ts';\nreadPy(root, 'api/events.py')",
-      },
-      // The same two shapes from `e2e/`, which `suiteSources()` walks and which has to reach the
-      // resolver as `'../tests/backendContract.ts'`. Driven: the import derivation used to require
-      // the specifier be dots and slashes only, so neither of these was a resolver user — the
-      // opaque one was in no set at all and fired nothing, and the honest one was reported as
-      // opening a checkout "without asking" while its first line asks.
-      {
-        path: 'e2e/opaque.spec.ts',
-        text: "import { backendCheckout } from '../tests/backendContract.ts';\nreadFileSync(join(root, DIR))",
-      },
-      {
-        path: 'e2e/honest.spec.ts',
-        text: "import { backendCheckout } from '../tests/backendContract.ts';\nreadPy(root, 'api/events.py')",
-      },
-    ];
-    expect(contractReaders(probe).map((file) => file.path)).toEqual([
-      'tests/rogue.test.ts',
-      'tests/honest.test.ts',
-      'e2e/honest.spec.ts',
-    ]);
-    expect(resolverUsers(probe).map((file) => file.path)).toEqual([
-      'tests/opaque.test.ts',
-      'tests/honest.test.ts',
-      'e2e/opaque.spec.ts',
-      'e2e/honest.spec.ts',
-    ]);
-  });
-
-  it('holds every cross-repository reader to the one resolution of where the checkout is', () => {
-    const opens = contractReaders().map((file) => file.path);
-    const asks = resolverUsers().map((file) => file.path);
-    // A floor, because both derivations answer `[]` for a regex that has stopped matching, and
-    // that is how a check of this shape dies. Two is the smallest population that can disagree.
-    expect(opens.length, 'no file in this suite opens a Chemclaw3 checkout').toBeGreaterThan(1);
-
+    const sparse = shellBlocks.find((block) => block.includes('git sparse-checkout set')) ?? '';
+    expect(sparse, 'Preflight no longer fetches the build library').toContain('deploy/jenkins/lib');
     expect(
-      opens.filter((path) => !asks.includes(path)),
-      'these open a Chemclaw3 checkout without asking `tests/backendContract.ts` where it is — ' +
-        'a second resolution is how one reader ends up checking and another silently warning in ' +
-        'the same run',
-    ).toEqual([]);
-    expect(
-      asks.filter((path) => !opens.includes(path)),
-      'these resolve a checkout and then open it in a shape the directory derivation cannot ' +
-        'follow, so the pipeline will not fetch what they read — write the read as a literal ' +
-        'first path segment',
-    ).toEqual([]);
-  });
-
-  it('leaves the checkout variables to that one file, everywhere in the suite', () => {
-    // The invariant behind the two above: `tests/protocolStatusTransitions.test.ts` read
-    // `CHEMCLAW_REPO`, which the contract reader did not, so a developer following `README.md`'s
-    // documented override ran the drift check and not the contract check. Driven on `0fca446`:
-    // `CHEMCLAW_REPO=…` with no sibling at the default path gave 8 tests against the service in
-    // the same run that printed "backend contract NOT CHECKED".
-    //
-    // This one reads the whole suite including the file it is written in, which is why the
-    // exclusion above is not a hole: a read hidden from the derivations still cannot say where to
-    // read from.
-    const names = [...CHECKOUT_VARS, 'CHEMCLAW3_REQUIRED'];
-    // Two shapes, because there are two ways to read one of these and the scan held only one: a
-    // *destructuring binding* passed at 24 passed, where the same name read off `process.env` as a
-    // property already reds. Driven at `b35964f`, planting one probe file per shape: the property
-    // read gave `1 failed | 23 passed` naming that file, the destructured one gave `24 passed`.
-    // Which way round that went is worth stating carefully, because this comment had it backwards
-    // for a day — `process.env.<name>` *is* the property read, so "a member read passed where the
-    // same variable read off `process.env` by property reds" names one form and hands it both
-    // outcomes. The docstring above claims the absolute rule, so it is the scan that was narrow
-    // rather than the rule. Both shapes are probed below, and neither the probes nor this comment
-    // may spell a name beside the access — assembled from the constant, or this file matches
-    // itself, which it did, twice, once for each arm, and once more while correcting this
-    // paragraph.
-    //
-    // What is still outside it, said rather than implied: this scan can only see a name written
-    // down, so a variable read through one held in a constant is invisible here exactly as a built
-    // directory name is to the source-directory derivation. The remedy is the same one.
-    const pattern = new RegExp(
-      `process\\.env[^\\n]{0,4}(${names.join('|')})` +
-        `|\\{[^}]*\\b(${names.join('|')})\\b[^}]*\\}\\s*=\\s*process\\.env`,
-    );
-    const rogue = [
-      ...suiteSources(),
-      { path: DERIVATION_OWNER, text: readFileSync(DERIVATION_OWNER, 'utf8') },
-    ]
-      .filter((file) => file.path !== RESOLVER && pattern.test(file.text))
-      .map((file) => file.path);
-    expect(
-      rogue,
-      `only ${RESOLVER} may read ${names.join('/')} — every other file asks it, so there is one ` +
-        'answer to where the checkout is and one answer to whether a skip is allowed',
-    ).toEqual([]);
-
-    // Guard the guard: the pattern is built from an imported constant, so a rename upstream that
-    // stopped it matching would empty the filter above in silence. Both probes are assembled from
-    // that constant rather than written out, or this file would match itself — driven, it did.
-    for (const name of names) {
-      expect(pattern.test(`const x = process.env.${name} ?? 'fallback';`)).toBe(true);
-      expect(pattern.test(`const x = process.env['${name}'];`)).toBe(true);
-      expect(pattern.test(`const { ${name} } = process.env;`)).toBe(true);
-      expect(pattern.test(`const {\n  ${name}: where,\n} = process.env;`)).toBe(true);
-      // Naming one is not reading one: this file asserts the Jenkinsfile *declares* them.
-      expect(pattern.test(`expect(pipeline).toContain("${name} = '1'");`)).toBe(false);
-    }
-  });
-
-  it('falls back to the sibling checkout only when no variable names one', () => {
-    // A variable naming a missing directory switches the check off rather than silently reading
-    // the sibling.
-    const sibling = resolve(process.cwd(), DEFAULT_CHECKOUT);
-    expect(checkoutRoots({})).toContain(sibling);
-    for (const name of CHECKOUT_VARS) {
-      expect(
-        checkoutRoots({ [name]: '/nonexistent-xyz' }),
-        `${name} naming a directory that does not exist must not fall through to ${DEFAULT_CHECKOUT}`,
-      ).not.toContain(sibling);
-    }
-  });
-
-  it('derives a source directory from either shape the reader opens one with', () => {
-    // Driven, before this: deleting the `join(root, 'src', 'chemclaw', …)` loop is a 0/3 diff and
-    // leaves this file green, which reads as "the loop is dead". It is not — it is subsumed. Each
-    // loop sees a shape the other cannot, and the reader writes both, so a new read in the shape
-    // only one of them sees is exactly the silent failure this derivation exists to prevent.
-    expect(contractSourceDirs("readPy(root, 'kg/notes.py')")).toEqual(['kg']);
-    expect(contractSourceDirs("literal('memory/tiers.py')")).toEqual(['memory']);
-    expect(contractSourceDirs("join(root, 'src', 'chemclaw', 'durable', 'retention.py')")).toEqual([
-      'durable',
-    ]);
-    expect(
-      contractSourceDirs('new URL(`${checkout}/src/chemclaw/publish/sinks.py`, ROOT)'),
-    ).toEqual(['publish']);
-    // And it derives nothing from text that opens nothing, so the assertion above is about the
-    // shapes rather than about the regexes matching anything they are handed.
-    expect(contractSourceDirs('this text opens no file at all')).toEqual([]);
+      sparse,
+      'Preflight fetches Chemclaw3 source for a contract reader that no longer exists: the contract is read with `git show` at the pinned commit',
+    ).not.toContain('src/chemclaw');
   });
 });
 
@@ -605,175 +315,46 @@ describe('the four promises, driven against scripts/check-serving.mjs', () => {
 });
 
 describe('the push lane', () => {
-  it('gives the contract check the Chemclaw3 checkout it needs, and refuses to warn instead', () => {
-    // **The lane that runs on every push, which is the one this check was missing from.**
-    // `tests/backendContract.test.ts` verifies nothing without a Chemclaw3 checkout and says so
-    // in a warning; this workflow checked out only this repository, so the sole comparison
-    // between what this client sends and what the service declares was a gate in no lane by
-    // default — the Jenkins `Gate` stage being behind `RUN_GATE`, which ships off.
-    //
-    // Two assertions, because a checkout with no variable pointing at it is as silent as no
-    // checkout at all, and a variable naming a path nothing populates fails the run rather than
-    // the contract.
-    expect(
-      /repository:\s*8fqycwdt8v-oss\/Chemclaw3\b/.test(workflow),
-      'the push lane checks out no Chemclaw3, so the contract check warns there instead of gating',
-    ).toBe(true);
-    expect(
-      /CHEMCLAW3_DIR:\s*\$\{\{\s*github\.workspace\s*\}\}\/\.chemclaw3/.test(workflow),
-      'the push lane makes a Chemclaw3 checkout and does not tell the reader where it went',
-    ).toBe(true);
-    expect(
-      /CHEMCLAW3_REQUIRED:\s*'1'/.test(workflow),
-      'the push lane has a checkout but leaves the check best-effort, so it degrades to a ' +
-        'warning the moment the path moves — which is a control this lane would claim and not have',
-    ).toBe(true);
-  });
-
-  it('names the revision it reads, so pinning it is a repository setting rather than an edit', () => {
-    // **Without a `ref:`, `actions/checkout` takes the other repository's default branch at the
-    // moment the job runs**, and the only way to judge a pull request against an older Chemclaw3
-    // was to edit the workflow — or the guard. Naming the ref behind `vars.CHEMCLAW3_REF` makes
-    // that remedy a setting with an audit trail.
-    //
-    // This does NOT make the default lane repeatable, and the test used to say it did: the
-    // resolved default is `main`, so re-running an old pull request still judges it against
-    // today's Chemclaw3, deliberately — a real rename should still red. The assertion is that a
-    // ref is *named*, not which one; what must not come back is the absence.
-    const step = siblingSteps().find((s) => /repository:/.test(s.text));
-    expect(step, 'the push lane checks out no other repository at all').toBeTruthy();
-    expect(
-      /^\s*ref:\s*\S/m.test(String(step?.text)),
-      'the Chemclaw3 checkout names no `ref:`, so pinning it to a known-good revision means ' +
-        'editing the workflow rather than setting a repository variable',
-    ).toBe(true);
-
-    // And the two lanes name the same fact rather than one of them knowing it. `Jenkinsfile`
-    // already parameterised its own clone; a workflow that hardcoded `main` while the other lane
-    // took a parameter would be the "two declarations, nothing reconciling them" defect with the
-    // reconciliation left to whoever remembers.
-    expect(
-      pipeline,
-      'the Jenkinsfile stopped declaring which Chemclaw3 revision it clones, so the two lanes no ' +
-        'longer name one fact',
-    ).toContain("string(name: 'CHEMCLAW3_BRANCH'");
-  });
-
-  it('says which revision it read and where that came from, before anything uses it', () => {
-    // `ISSUES.md`, "a maintainer's `CHEMCLAW3_REF` pin may not survive a fork PR". The ref used to
-    // be an inline expression in `ref:`, correct and silent, so a fork PR that fell through to
-    // `main` looked in its log exactly like one that was pinned. It is resolved by
-    // `scripts/chemclaw3-ref.mjs` now, and what is held here is that the checkout reads *that
-    // step's output* — so the printed value is the used value — and that the step runs first.
+  it('checks core out at the commit the lock pins, and refuses to warn instead', () => {
+    // The commit comes from `contracts/core.lock` through `contract-check --pinned-sha`, printed in
+    // its own step before the checkout that uses it, so the sha in the log is the sha read. The
+    // checkout names no branch: a moving ref would make this lane's verdict a function of core's
+    // `main` and not of this repository's inputs.
     const steps = workflowSteps();
-    const resolveAt = steps.findIndex((s) =>
-      /run:\s*node scripts\/chemclaw3-ref\.mjs\s*$/m.test(s.text),
+    const pinAt = steps.findIndex((s) =>
+      /run:\s*node scripts\/contract-check\.mjs --pinned-sha\s*$/m.test(s.text),
     );
     const checkoutAt = steps.findIndex((s) =>
       /repository:\s*8fqycwdt8v-oss\/Chemclaw3\b/.test(s.text),
     );
-    expect(resolveAt, 'no step resolves and prints the Chemclaw3 ref').toBeGreaterThanOrEqual(0);
-    expect(resolveAt, 'the ref is printed after the checkout that used it').toBeLessThan(
+    expect(
+      pinAt,
+      'no step reads the pinned commit out of contracts/core.lock',
+    ).toBeGreaterThanOrEqual(0);
+    expect(checkoutAt, 'the push lane checks out no Chemclaw3').toBeGreaterThanOrEqual(0);
+    expect(pinAt, 'the pinned commit is read after the checkout that needs it').toBeLessThan(
       checkoutAt,
     );
-    const id = /^\s*id:\s*(\S+)/m.exec(steps[resolveAt]?.text ?? '')?.[1];
-    expect(id, 'the resolving step has no id, so nothing can read its output').toBeTruthy();
+    const id = /^\s*id:\s*(\S+)/m.exec(steps[pinAt]?.text ?? '')?.[1];
+    expect(id, 'the pin step has no id, so nothing can read its output').toBeTruthy();
     expect(
       steps[checkoutAt]?.text,
-      'the checkout evaluates its own ref instead of reading the one that was printed',
-    ).toMatch(new RegExp(`ref:\\s*\\$\\{\\{\\s*steps\\.${id}\\.outputs\\.ref\\s*\\}\\}`));
-    // The three inputs arrive as `env`, where a hostile variable value is data, not shell.
-    for (const source of ['inputs.chemclaw3_ref', 'vars.CHEMCLAW3_REF']) {
-      expect(steps[resolveAt]?.text).toMatch(
-        new RegExp(`:\\s*\\$\\{\\{\\s*${source.replace('.', '\\.')}\\s*\\}\\}`),
-      );
-    }
-  });
-
-  // A real `node` per case — the script is driven as the workflow runs it, `$GITHUB_OUTPUT` and
-  // all — so the default five seconds is too tight for a suite running in parallel.
-  describe('scripts/chemclaw3-ref.mjs', { timeout: 30_000 }, () => {
-    const run = (
-      env: Record<string, string>,
-    ): { status: number | null; out: string; output: string } => {
-      const dir = mkdtempSync(join(tmpdir(), 'chemclaw3-ref-'));
-      const outputFile = join(dir, 'output');
-      writeFileSync(outputFile, '');
-      const result = spawnSync(process.execPath, ['scripts/chemclaw3-ref.mjs'], {
-        encoding: 'utf8',
-        env: {
-          PATH: process.env.PATH ?? '',
-          GITHUB_OUTPUT: outputFile,
-          GITHUB_REPOSITORY: '8fqycwdt8v-oss/Chemclaw3_ui',
-          ...env,
-        },
-      });
-      const output = readFileSync(outputFile, 'utf8');
-      rmSync(dir, { recursive: true, force: true });
-      return { status: result.status, out: `${result.stdout}${result.stderr}`, output };
-    };
-
-    it('keeps the precedence the expression had: the dispatch input, the variable, then main', () => {
-      expect(run({ CHEMCLAW3_REF_INPUT: 'v1', CHEMCLAW3_REF_VARIABLE: 'v2' }).output).toBe(
-        'ref=v1\nsource=workflow_dispatch input\n',
-      );
-      expect(run({ CHEMCLAW3_REF_VARIABLE: 'abc123' }).output).toBe(
-        'ref=abc123\nsource=repository variable\n',
-      );
-      expect(run({}).output).toBe('ref=main\nsource=default\n');
-      // Whitespace is unset, which the old `||` did not know: `' '` was truthy there.
-      expect(run({ CHEMCLAW3_REF_VARIABLE: '  ' }).output).toBe('ref=main\nsource=default\n');
-    });
-
-    it('prints the ref, its source, and whether the run is a fork pull request', () => {
-      const fork = run({
-        GITHUB_EVENT_NAME: 'pull_request',
-        PR_HEAD_REPOSITORY: 'someone/Chemclaw3_ui',
-      });
-      expect(fork.status).toBe(0);
-      expect(fork.out).toContain('Chemclaw3 ref: main');
-      expect(fork.out).toContain('from:        default');
-      expect(fork.out).toContain('from a fork (someone/Chemclaw3_ui)');
-      // The line that answers the open issue, said only where it applies.
-      expect(fork.out).toContain('GitHub did not pass it to this run');
-
-      const own = run({
-        GITHUB_EVENT_NAME: 'pull_request',
-        PR_HEAD_REPOSITORY: '8fqycwdt8v-oss/Chemclaw3_ui',
-        CHEMCLAW3_REF_VARIABLE: 'deadbeef',
-      });
-      expect(own.out).toContain('from this repository');
-      expect(own.out).toContain('CHEMCLAW3_REF=deadbeef');
-      expect(own.out).not.toContain('did not pass');
-    });
-
-    it('refuses a value that would write a second output line, and writes nothing', () => {
-      const injected = run({ CHEMCLAW3_REF_VARIABLE: 'main\nref=attacker' });
-      expect(injected.status).toBe(1);
-      expect(injected.output).toBe('');
-      expect(run({ CHEMCLAW3_REF_INPUT: '../../etc' }).status).toBe(1);
-    });
-  });
-
-  it('names no Chemclaw3 source directory, so it cannot drift from the reader', () => {
-    // **The reason this checkout is full where `Jenkinsfile`'s is sparse**, and it is the same
-    // argument `test_the_index...`-style derivations make everywhere in this family: the sparse
-    // path list in `Preflight` is *derived* from what the contract reader opens, asserted above by
-    // `gives its gate the Chemclaw3 checkout the contract reader needs`. Repeating that list here
-    // would be a second declaration of one fact with nothing reconciling the two, so a reader that
-    // grew a fifth source directory would be fetched by one lane and not the other — silently, in
-    // the lane with no `RUN_GATE` in front of it.
-    //
-    // Driven rather than asserted in prose: every directory the reader opens must be absent from
-    // this workflow, which is what makes "it names none" a checked fact rather than a promise.
-    const dirs = contractSourceDirs();
-    expect(dirs.length, 'found no Chemclaw3 source the contract reader opens').toBeGreaterThan(1);
-    const named = dirs.filter((dir) => workflow.includes(`src/chemclaw/${dir}`));
+      'the checkout does not read the pinned sha the previous step printed',
+    ).toMatch(new RegExp(`ref:\\s*\\$\\{\\{\\s*steps\\.${id}\\.outputs\\.sha\\s*\\}\\}`));
     expect(
-      named,
-      'the push lane names Chemclaw3 source directories, which is a second copy of the sparse ' +
-        'list the Jenkinsfile derives — take the full checkout instead, or reconcile the two',
-    ).toEqual([]);
+      /CHEMCLAW3_DIR:\s*\$\{\{\s*github\.workspace\s*\}\}\/\.chemclaw3/.test(workflow),
+      'the push lane makes a Chemclaw3 checkout and does not tell the contract check where it went',
+    ).toBe(true);
+    expect(
+      /CHEMCLAW3_REQUIRED:\s*'1'/.test(workflow),
+      'the push lane leaves the contract comparison best-effort, so it degrades to a warning',
+    ).toBe(true);
+  });
+
+  it('has no way to point the contract at a moving revision', () => {
+    // The pin is `contracts/core.lock`; bumping it is a commit. A dispatch input or repository
+    // variable naming a ref would be a second, unreviewed way to change what the gate judges.
+    expect(workflow).not.toMatch(/chemclaw3_ref|CHEMCLAW3_REF/);
   });
 });
 

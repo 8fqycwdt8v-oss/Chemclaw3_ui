@@ -91,7 +91,7 @@ export interface JobEntity extends EntityBase {
 export interface NoteEntity extends EntityBase {
   kind: 'note';
   noteId: string;
-  /** The reference the note was recorded under, when it came from a `note_proposed` event. */
+  /** The reference the note was recorded under, when it came from a `note_recorded` event. */
   reference?: string;
 }
 
@@ -331,7 +331,7 @@ export const useEntityStore = create<EntityState>()(() => ({
         return;
       }
 
-      case 'note_proposed': {
+      case 'note_recorded': {
         add({
           kind: 'note',
           key: `note:${event.note_id}`,

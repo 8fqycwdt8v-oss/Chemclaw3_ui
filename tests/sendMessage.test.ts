@@ -751,8 +751,7 @@ describe('sendMessage', () => {
  * Wait for a condition, with a deadline and a name.
  *
  * The two stop tests below used `while (!ready()) await sleep(5)` with no ceiling, and each runs
- * in 6 ms on its own. Measured under the full suite the day `tests/backendContract.test.ts` was
- * added — 126 files rather than 125 — both timed out at vitest's default 5,000 ms and the run
+ * in 6 ms on its own. Under the full suite both timed out at vitest's default 5,000 ms and the run
  * reported them as failures of the *stop* path, which is not what had happened: the token they
  * were spinning for lands through `updateAssistant`, whose store writes are batched per animation
  * frame, and a starved worker simply does not get one. An unbounded spin loop inside a 5,000 ms

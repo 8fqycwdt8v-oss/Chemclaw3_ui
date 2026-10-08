@@ -7,8 +7,9 @@ otherwise lives at its call site.
 
 ### `valibot` in `shared/events.ts`
 
-Each event is a valibot schema and its type is `v.InferOutput` of it, so a field cannot exist in
-the type and be missing from the decoder (hand-written decoders silently dropped unknown fields).
+Each event is a valibot schema, generated from the pinned contract (`shared/generated/events.ts`),
+and its type is `v.InferOutput` of it, so a field cannot exist in the type and be missing from the
+decoder (hand-written decoders silently dropped unknown fields).
 Chosen over zod for size (~2–4 kB gz vs ~13 kB); `shared/` is bundled into the SPA.
 
 - **Enforced.** Every `ChemclawEvent` member survives normalisation with every field
@@ -19,6 +20,15 @@ Chosen over zod for size (~2–4 kB gz vs ~13 kB); `shared/` is bundled into the
 
 `src/env.ts` stays schema-free: `RuntimeConfig` is the only declaration, read once at boot, and a
 missing key is a default.
+
+### `openapi-typescript` for the wire types
+
+Dev only: `npm run generate:api` turns the pinned contract (`docs/api-contract.md`) into
+`shared/generated/api.ts`. Chosen over hand-mirroring, which drifted three times in production
+(`capability_degraded`, `tool_failed`, `job_failed`). Its output is types, erased at build, so it
+adds nothing to the bundle.
+
+- **Enforced.** The committed output is what the pinned document produces (`npm run generate:check`).
 
 ### `@tanstack/react-query` for reads
 
@@ -60,3 +70,4 @@ triads, which got cancellation and StrictMode wrong.
 | `immer`                 | the lazy `ProtocolDocument` chunk                              |
 | `events`                | the lazy sketcher chunk (`ketcher-core` imports it undeclared) |
 | `culori`, `js-yaml`     | dev only (contrast gate; manifest test)                        |
+| `openapi-typescript`    | dev only (`scripts/generate-api.mjs`)                          |

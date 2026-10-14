@@ -1,7 +1,8 @@
 /**
- * The two cookies the sign-in sets, and the only code that reads or writes one.
+ * The cookies the sign-in sets (the session; a sealed one per sign-in in progress), and the only
+ * code that reads or writes one.
  *
- * Both are host-only (`Path=/`, no `Domain`) and `HttpOnly`; both carry `Secure` and the `__Host-`
+ * All are host-only (`Path=/`, no `Domain`) and `HttpOnly`; all carry `Secure` and the `__Host-`
  * prefix exactly when `APP_ORIGIN` is https (`cfg.cookieSecure`). Values are random identifiers, so
  * parsing accepts nothing but the base64url alphabet and a forged or mangled value is simply
  * absent.
@@ -13,18 +14,40 @@ import type { IncomingMessage } from 'node:http';
 export type SameSite = 'Strict' | 'Lax';
 
 const VALUE = /^[A-Za-z0-9_-]{16,128}$/;
+/** A sealed value (`sealed.ts`) is longer: base64url, bounded so a huge cookie is never parsed. */
+const SEALED_VALUE = /^[A-Za-z0-9_-]{16,2048}$/;
 
-/** One cookie's value from the request, or `''` when absent or malformed. */
-export function readCookie(req: IncomingMessage, name: string): string {
+function raw(req: IncomingMessage, name: string): string {
   const header = req.headers.cookie;
   if (!header) return '';
   for (const part of header.split(';')) {
     const eq = part.indexOf('=');
     if (eq < 0 || part.slice(0, eq).trim() !== name) continue;
-    const value = part.slice(eq + 1).trim();
-    return VALUE.test(value) ? value : '';
+    return part.slice(eq + 1).trim();
   }
   return '';
+}
+
+/** One cookie's value from the request, or `''` when absent or malformed. */
+export function readCookie(req: IncomingMessage, name: string): string {
+  const value = raw(req, name);
+  return VALUE.test(value) ? value : '';
+}
+
+/** As `readCookie`, for a sealed value. */
+export function readSealedCookie(req: IncomingMessage, name: string): string {
+  const value = raw(req, name);
+  return SEALED_VALUE.test(value) ? value : '';
+}
+
+/** The names of every cookie on the request that starts with `prefix`. */
+export function cookieNames(req: IncomingMessage, prefix: string): string[] {
+  const header = req.headers.cookie;
+  if (!header) return [];
+  return header
+    .split(';')
+    .map((part) => part.slice(0, Math.max(0, part.indexOf('='))).trim())
+    .filter((name) => name.startsWith(prefix));
 }
 
 export interface CookieOptions {

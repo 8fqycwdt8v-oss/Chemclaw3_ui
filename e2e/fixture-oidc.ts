@@ -75,6 +75,11 @@ export interface Behaviour {
     issuer?: string;
     audience?: string;
     omit?: boolean;
+    /**
+     * Sign with an algorithm a client must never accept for an ID token: `none` (unsigned) or
+     * `HS256` keyed with the client secret, the classic downgrade.
+     */
+    alg?: 'none' | 'HS256';
   };
   /** Answer refresh requests with this instead of a token set. */
   refreshFails: 'invalid_grant' | 'server_error' | 'unreachable' | null;
@@ -229,6 +234,7 @@ export async function startFixtureOidc(options: FixtureOidcOptions): Promise<Fix
 
   const idTokenFor = async (person: Person, nonce: string): Promise<string> => {
     const over = behaviour.idToken;
+    if (over.alg) return downgraded(over.alg, person, nonce);
     return sign(
       {
         iss: over.issuer ?? issuer(),
@@ -243,6 +249,32 @@ export async function startFixtureOidc(options: FixtureOidcOptions): Promise<Fix
       over.badSignature ? strangerKey : signing,
       over.expired ? -3600 : 3600,
     );
+  };
+
+  /** An ID token under an algorithm the BFF must refuse, whatever else is right about it. */
+  const downgraded = async (
+    alg: 'none' | 'HS256',
+    person: Person,
+    nonce: string,
+  ): Promise<string> => {
+    const now = Math.floor(Date.now() / 1000);
+    const claims = {
+      iss: issuer(),
+      aud: options.clientId,
+      sub: `sub-${person.key}`,
+      oid: person.oid,
+      name: person.name,
+      nonce,
+      iat: now,
+      exp: now + 3600,
+    };
+    if (alg === 'HS256') {
+      return new SignJWT(claims)
+        .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+        .sign(new TextEncoder().encode(options.clientSecret ?? 'public-client'));
+    }
+    const part = (value: unknown): string => b64url(Buffer.from(JSON.stringify(value)));
+    return `${part({ alg: 'none', typ: 'JWT' })}.${part(claims)}.`;
   };
 
   const readForm = async (req: IncomingMessage): Promise<Record<string, string>> => {

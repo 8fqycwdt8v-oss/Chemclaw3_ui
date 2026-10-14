@@ -179,16 +179,17 @@ test('the access token is renewed behind the page’s back, and nothing shows it
   expect((await frontDoorSeen()).refused).toEqual([]);
 });
 
-test('a state-changing request without the CSRF header is refused, and a read still works', async ({
+test('a request without the CSRF header is refused, GET included, and with it succeeds', async ({
   page,
 }) => {
   await signIn(page);
   const status = await page.evaluate(async () => {
     const forged = await fetch('/api/sessions', { method: 'POST', body: '{}' });
-    const read = await fetch('/api/sessions');
-    return { forged: forged.status, read: read.status };
+    const bare = await fetch('/api/sessions');
+    const read = await fetch('/api/sessions', { headers: { 'x-chemclaw-csrf': '1' } });
+    return { forged: forged.status, bare: bare.status, read: read.status };
   });
-  expect(status).toEqual({ forged: 403, read: 200 });
+  expect(status).toEqual({ forged: 403, bare: 403, read: 200 });
 });
 
 test('signing out ends the session here and at the provider, and the next visit asks again', async ({
@@ -218,7 +219,9 @@ test('signing out ends the session here and at the provider, and the next visit 
   expect(await sessionCookie(context)).toBeUndefined();
   const gone = await page.request.get(`${APP}/auth/session`);
   expect(await gone.json()).toEqual({ authenticated: false });
-  const api = await page.request.get(`${APP}/api/sessions`);
+  const api = await page.request.get(`${APP}/api/sessions`, {
+    headers: { 'x-chemclaw-csrf': '1' },
+  });
   expect(api.status()).toBe(401);
 });
 

@@ -90,6 +90,11 @@ that holds it.
   (`tests/bffFlow.test.ts`).
 - **Enforced.** One refresh per session at a time, a refused refresh ends the session, a backend 401
   renews once and replays (`tests/bffTokens.test.ts`, `tests/bffProxy.test.ts`).
+- **Enforced.** A sign-in in progress is a sealed cookie, not server state, so an anonymous flood of
+  `/auth/login` cannot lock anyone out; tamper, replay and expiry of that cookie are refused
+  (`tests/bffFlow.test.ts`, `tests/bffSealed.test.ts`).
+- **Enforced.** Every `/api` request, GET included, carries `X-Chemclaw-Csrf`; sign-out, expiry and
+  a refused refresh end the session's live streams (`tests/bffProxy.test.ts`).
 - **Accepted.** Sessions are in each pod's memory: a release signs people in again (silently), and
   more than one replica needs router affinity. `ISSUES.md` Issue 26.
 - **Not verified here.** A real Entra tenant. `docs/operations.md`, "What a human verifies".

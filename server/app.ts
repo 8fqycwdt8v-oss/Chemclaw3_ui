@@ -225,6 +225,7 @@ function proxyAsSession(
           bearer,
           renew: (refused) => auth.custody.renewAfterRefusal(session, refused),
           replayable: !route.upload,
+          watch: (end) => auth.sessions.watch(session, end),
         },
       ),
     )
@@ -363,6 +364,7 @@ export function createRequestListener(): http.RequestListener {
         route.sse,
         trace,
         route.upload ? cfg.maxUploadBytes : cfg.maxBodyBytes,
+        auth ? 'anonymous' : undefined,
       );
       return;
     }

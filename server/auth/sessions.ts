@@ -1,15 +1,7 @@
 /**
- * Server-side sessions and half-finished sign-ins, held in this process's memory.
- *
- * A session is the only place a token exists: the browser holds an opaque random id and nothing
- * else. Memory is a choice, not an oversight (docs/operations.md, "Token custody"): single-flight
- * refresh and revocation are trivial in one process, nothing outlives a restart that should not,
- * and the cost — a replica that has not seen a session does not know it — is met by session
- * affinity at the router; a miss sends the browser through a silent sign-in.
- *
- * Bounded everywhere: sessions by count (least recently used dropped), idle and absolute lifetime;
- * pending sign-ins by count and TTL. An unauthenticated caller can create the latter, so they are
- * the ones that must not grow without limit.
+ * Server-side sessions, in this process's memory: the only place a token exists. The browser holds
+ * an opaque random id. Bounded by count (least recently used dropped) and by idle and absolute
+ * lifetime. Ending a session, however it ends, also ends the live requests made under it.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -41,6 +33,8 @@ export interface Session {
   refreshRetryAt: number;
   /** When a 401 from the backend last forced a refresh; bounds how often one can. */
   forcedRefreshAt: number;
+  /** Ends of the live requests made under this session; run when it ends. */
+  readonly watchers: Set<() => void>;
 }
 
 export interface SessionLimits {
@@ -88,12 +82,13 @@ export class SessionStore {
       refreshing: null,
       refreshRetryAt: 0,
       forcedRefreshAt: 0,
+      watchers: new Set(),
     };
     this.sessions.set(session.id, session);
     while (this.sessions.size > this.limits.maxSessions) {
       const oldest = this.sessions.keys().next().value;
       if (oldest === undefined) break;
-      this.sessions.delete(oldest);
+      this.delete(oldest);
     }
     return session;
   }
@@ -105,18 +100,36 @@ export class SessionStore {
     if (!session) return undefined;
     const at = this.now();
     if (this.expired(session, at)) {
-      this.sessions.delete(id);
+      this.delete(id);
       return undefined;
     }
     session.lastSeenAt = at;
+    // Re-inserted at the end (recency order), which is not an end of the session.
     this.sessions.delete(id);
     this.sessions.set(id, session);
     return session;
   }
 
+  /** Register the end of a live request made under `session`; returns how to withdraw it. */
+  watch(session: Session, end: () => void): () => void {
+    // A session already gone ends the request at once rather than never.
+    if (this.sessions.get(session.id) !== session) {
+      end();
+      return () => undefined;
+    }
+    session.watchers.add(end);
+    return () => session.watchers.delete(end);
+  }
+
+  /** End a session and every live request made under it. */
   delete(id: string): Session | undefined {
     const session = this.sessions.get(id);
     this.sessions.delete(id);
+    if (session) {
+      const ends = [...session.watchers];
+      session.watchers.clear();
+      for (const end of ends) end();
+    }
     return session;
   }
 
@@ -124,7 +137,7 @@ export class SessionStore {
   sweep(): void {
     const at = this.now();
     for (const [id, session] of this.sessions) {
-      if (this.expired(session, at)) this.sessions.delete(id);
+      if (this.expired(session, at)) this.delete(id);
     }
   }
 
@@ -139,67 +152,38 @@ export class SessionStore {
   }
 }
 
-/** What a sign-in remembers between sending the browser away and its coming back. */
-export interface PendingLogin {
-  verifier: string;
-  nonce: string;
-  returnTo: string;
-  /** SHA-256 of the binding cookie's value: the browser that began this is the one that finishes it. */
-  bindingDigest: Buffer;
-  expiresAt: number;
-}
-
-export class PendingLogins {
-  private readonly pending = new Map<string, PendingLogin>();
+/**
+ * The states whose callback has been taken, so a sealed login cookie replayed within its life finds
+ * its state spent. Bounded and expiring; evicting the oldest only matters to an attacker who
+ * already holds a sealed cookie *and* the provider's single-use code.
+ */
+export class SpentStates {
+  private readonly spent = new Map<string, number>();
   private readonly ttlMs: number;
-  private readonly maxPending: number;
+  private readonly max: number;
   private readonly now: () => number;
 
-  constructor(ttlMs: number, maxPending: number, now: () => number = Date.now) {
+  constructor(ttlMs: number, max: number, now: () => number = Date.now) {
     this.ttlMs = ttlMs;
-    this.maxPending = maxPending;
+    this.max = max;
     this.now = now;
   }
 
-  get size(): number {
-    return this.pending.size;
-  }
-
-  /** Remember a sign-in under `state`; the oldest are forgotten over the cap. */
-  add(
-    state: string,
-    login: Omit<PendingLogin, 'expiresAt' | 'bindingDigest'>,
-    binding: string,
-  ): void {
-    this.sweep();
-    this.pending.set(state, {
-      ...login,
-      bindingDigest: sha256(binding),
-      expiresAt: this.now() + this.ttlMs,
-    });
-    while (this.pending.size > this.maxPending) {
-      const oldest = this.pending.keys().next().value;
-      if (oldest === undefined) break;
-      this.pending.delete(oldest);
-    }
-  }
-
-  /**
-   * Take a sign-in out for use: single-use (a replayed callback finds nothing), and only for the
-   * browser whose binding matches. A mismatch still consumes it — the state is spent either way.
-   */
-  take(state: string, binding: string): PendingLogin | undefined {
-    const login = this.pending.get(state);
-    this.pending.delete(state);
-    if (!login || login.expiresAt < this.now()) return undefined;
-    if (!binding || !timingSafeEqual(login.bindingDigest, sha256(binding))) return undefined;
-    return login;
-  }
-
-  sweep(): void {
+  /** Mark `state` spent; false if it already was. */
+  spend(state: string): boolean {
+    const key = createHash('sha256').update(state).digest('base64url');
     const at = this.now();
-    for (const [state, login] of this.pending) {
-      if (login.expiresAt < at) this.pending.delete(state);
+    for (const [k, until] of this.spent) {
+      if (until >= at) break;
+      this.spent.delete(k);
     }
+    if (this.spent.has(key)) return false;
+    this.spent.set(key, at + this.ttlMs);
+    while (this.spent.size > this.max) {
+      const oldest = this.spent.keys().next().value;
+      if (oldest === undefined) break;
+      this.spent.delete(oldest);
+    }
+    return true;
   }
 }

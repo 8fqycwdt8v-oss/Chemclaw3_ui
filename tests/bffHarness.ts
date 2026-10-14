@@ -46,6 +46,8 @@ export interface Core {
   rejectNext: number;
   /** Bearers the service refuses whenever they arrive (revoked behind the BFF's back). */
   refused: Set<string>;
+  /** Streams on `/events` the service holds open right now (they never end by themselves). */
+  openStreams: number;
   /** Hold every answer this long (ms). */
   delayMs: number;
   close: () => Promise<void>;
@@ -57,6 +59,7 @@ async function startCore(idp: () => FixtureOidc): Promise<Core> {
     seen: [],
     rejectNext: 0,
     refused: new Set<string>(),
+    openStreams: 0,
     delayMs: 0,
     close: () => Promise.resolve(),
   };
@@ -88,6 +91,15 @@ async function startCore(idp: () => FixtureOidc): Promise<Core> {
           if (core.rejectNext > 0 && bearer) core.rejectNext -= 1;
           res.writeHead(401, { 'content-type': 'application/json' });
           res.end('{"detail":"invalid token"}');
+          return;
+        }
+        if (path.endsWith('/events')) {
+          res.writeHead(200, { 'content-type': 'text/event-stream' });
+          res.write(': open\n\n');
+          core.openStreams += 1;
+          res.on('close', () => {
+            core.openStreams -= 1;
+          });
           return;
         }
         if (path.endsWith('/stream') || path.endsWith('/messages')) {
@@ -151,6 +163,11 @@ export class Browser {
 
   cookies(url: string): Map<string, StoredCookie> {
     return this.jar.get(new URL(url).host) ?? new Map();
+  }
+
+  /** Every cookie whose name starts with `prefix` (the per-sign-in login cookies). */
+  cookiesWithPrefix(url: string, prefix: string): [string, StoredCookie][] {
+    return [...this.cookies(url)].filter(([name]) => name.startsWith(prefix));
   }
 
   cookie(url: string, name: string): StoredCookie | undefined {

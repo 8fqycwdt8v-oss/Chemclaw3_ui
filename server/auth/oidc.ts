@@ -1,14 +1,8 @@
 /**
- * The OpenID Connect client: discovery, the authorization-code exchange with PKCE, refresh,
- * revocation, and validation of the ID token.
- *
- * Everything the identity provider says is checked here before the rest of the BFF sees it. The ID
- * token is verified with `jose` against the provider's published keys (cached, re-read when a `kid`
- * is unknown, so rotation needs no restart): signature with an asymmetric algorithm only, `iss`
- * equal to the issuer discovery reports (and to `ENTRA_ISSUER` when pinned), `aud` equal to this
- * client, `exp` present and in the future, and the `nonce` this sign-in minted. Network failure
- * and a provider that answers "no" are different errors, because one ends a session and the other
- * must not.
+ * The OpenID Connect client: discovery, the code and refresh exchanges (PKCE), revocation, and
+ * ID-token validation with `jose` (asymmetric signature against cached keys, `iss`, `aud`, `exp`,
+ * `nonce`). A provider that answers "no" and one that cannot be reached are different errors:
+ * one ends a session and the other must not.
  */
 
 import { createRemoteJWKSet, errors, jwtVerify } from 'jose';
@@ -52,6 +46,8 @@ export interface OidcOptions {
   timeoutMs: number;
   /** After a key id is not found, how long before the key set is fetched again. */
   jwksCooldownMs?: number;
+  /** Origins besides the issuer's that the discovery document may name endpoints on. */
+  endpointOrigins?: string[];
   fetchImpl?: typeof fetch;
 }
 
@@ -131,6 +127,28 @@ export class OidcClient {
     return { status: res.status, body };
   }
 
+  /**
+   * An endpoint discovery names must be https (loopback http excepted) on the issuer's origin or
+   * one the operator listed (`ENTRA_ENDPOINTS_ORIGINS`).
+   */
+  private checkEndpoint(endpoint: string, issuer: string): void {
+    let url: URL;
+    let home: URL;
+    try {
+      url = new URL(endpoint);
+      home = new URL(issuer);
+    } catch {
+      throw new IdpUnavailable('discovery names an endpoint that is not a URL');
+    }
+    const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname);
+    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
+      throw new IdpUnavailable(`discovery names a non-https endpoint (${url.origin})`);
+    }
+    if (url.origin !== home.origin && !(this.options.endpointOrigins ?? []).includes(url.origin)) {
+      throw new IdpUnavailable(`discovery names an endpoint on ${url.origin}, not the issuer's`);
+    }
+  }
+
   /** The provider's discovery document, cached and read once at a time. */
   async discovery(): Promise<Discovery> {
     const at = this.now();
@@ -173,17 +191,20 @@ export class OidcClient {
         `discovery reports issuer ${issuer}, not the pinned ${this.options.issuer}`,
       );
     }
+    const endSession = str(body.end_session_endpoint);
+    const revocation = str(body.revocation_endpoint);
+    // The client secret and the user's code are sent to these, so a document that points them
+    // elsewhere is refused whole rather than followed.
+    for (const endpoint of [authorize, token, jwks, endSession, revocation]) {
+      if (endpoint !== undefined) this.checkEndpoint(endpoint, issuer);
+    }
     const doc: Discovery = {
       issuer,
       authorization_endpoint: authorize,
       token_endpoint: token,
       jwks_uri: jwks,
-      ...(str(body.end_session_endpoint)
-        ? { end_session_endpoint: str(body.end_session_endpoint)! }
-        : {}),
-      ...(str(body.revocation_endpoint)
-        ? { revocation_endpoint: str(body.revocation_endpoint)! }
-        : {}),
+      ...(endSession ? { end_session_endpoint: endSession } : {}),
+      ...(revocation ? { revocation_endpoint: revocation } : {}),
     };
     this.discovered = { at: this.now(), doc };
     return doc;

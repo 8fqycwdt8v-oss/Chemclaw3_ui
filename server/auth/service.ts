@@ -1,14 +1,9 @@
 /**
  * The BFF's sign-in routes (`/auth/*`) and the lookup that turns a cookie into a session.
  *
- *   GET  /auth/login?returnTo=   start: PKCE verifier, state, nonce; redirect to the provider
- *   GET  /auth/callback          finish: validate, exchange, new session, cookie, redirect back
- *   GET  /auth/session           who is signed in (no token, ever)
- *   POST /auth/logout            end the session here, revoke, and say where the provider's ends
- *
- * Only this module builds or reads the session cookie. Every response is `no-store`. A failure the
- * person can act on is a small HTML page with a way back in; the reason it failed goes to the log,
- * keyed by the correlation id the page quotes, because the provider's wording describes an account.
+ * `login` and `callback` keep no server state for a sign-in: it rides in a sealed cookie
+ * (`sealed.ts`). Only this module builds or reads the session cookie. Every response is
+ * `no-store`; a failure is a small page with a way back in, the reason going to the log.
  */
 
 import { createHash } from 'node:crypto';
@@ -18,18 +13,19 @@ import type { LogoutView, SessionView } from '../../shared/auth.ts';
 import { cfg } from '../config.ts';
 import { log } from '../log.ts';
 import { authEventRecorded } from '../metrics.ts';
-import { clearCookie, readCookie, setCookie } from './cookies.ts';
-import { Custody, SessionEnded } from './custody.ts';
+import { clearCookie, cookieNames, readCookie, readSealedCookie, setCookie } from './cookies.ts';
+import { Custody } from './custody.ts';
 import { csrfRefusal } from './csrf.ts';
 import { IdpRejected, IdpUnavailable, OidcClient } from './oidc.ts';
-import { PendingLogins, SessionStore, randomToken } from './sessions.ts';
+import { deriveKey, seal, tagOf, unseal } from './sealed.ts';
+import { SessionStore, SpentStates, randomToken, sameSecret } from './sessions.ts';
 import type { Session } from './sessions.ts';
 
-/** Sign-ins in progress this process remembers: far above the rate limit's reach in one TTL. */
-const MAX_PENDING_LOGINS = 10_000;
+/** Callbacks remembered as taken; bounded, and each expires with the cookie that carried it. */
+const MAX_SPENT_STATES = 10_000;
 
-/** A failed refresh is not retried for this long, unless the token has run out. */
-const REFRESH_RETRY_BACKOFF_MS = 5_000;
+/** Sign-ins in progress per browser (one cookie each, so several tabs can sign in at once). */
+const MAX_LOGIN_COOKIES = 3;
 
 /** A backend 401 forces a refresh at most this often for one session. */
 const FORCED_REFRESH_MIN_INTERVAL_MS = 30_000;
@@ -54,9 +50,9 @@ function withMarker(returnTo: string): string {
 export class AuthService {
   readonly sessions: SessionStore;
   readonly custody: Custody;
-  private readonly pending: PendingLogins;
+  private readonly spent: SpentStates;
   private readonly oidc: OidcClient;
-  private loginWindow = { count: 0, resetAt: 0 };
+  private readonly key: Buffer;
 
   constructor() {
     this.sessions = new SessionStore({
@@ -64,7 +60,8 @@ export class AuthService {
       maxAgeMs: cfg.sessionMaxAgeMs,
       maxSessions: cfg.maxSessions,
     });
-    this.pending = new PendingLogins(cfg.loginStateTtlMs, MAX_PENDING_LOGINS);
+    this.spent = new SpentStates(cfg.loginStateTtlMs, MAX_SPENT_STATES);
+    this.key = deriveKey(cfg.sessionKey);
     this.oidc = new OidcClient({
       authority: cfg.entraAuthority,
       clientId: cfg.entraClientId,
@@ -75,10 +72,11 @@ export class AuthService {
       ...(cfg.entraIssuer ? { issuer: cfg.entraIssuer } : {}),
       endSession: cfg.endSessionEnabled,
       timeoutMs: cfg.oidcHttpTimeoutMs,
+      endpointOrigins: cfg.entraEndpointOrigins,
     });
     this.custody = new Custody(this.sessions, this.oidc, {
       skewMs: cfg.tokenRefreshSkewMs,
-      retryBackoffMs: REFRESH_RETRY_BACKOFF_MS,
+      retryBackoffMs: cfg.tokenRefreshBackoffMs,
       forcedRefreshMinIntervalMs: FORCED_REFRESH_MIN_INTERVAL_MS,
     });
   }
@@ -110,7 +108,7 @@ export class AuthService {
     }
     switch (path) {
       case AUTH_PATHS.login:
-        return this.login(res, query, correlationId);
+        return this.login(req, res, query, correlationId);
       case AUTH_PATHS.callback:
         return this.callback(req, res, query, correlationId);
       case AUTH_PATHS.session:
@@ -120,27 +118,41 @@ export class AuthService {
     }
   }
 
-  private withinLoginRate(): boolean {
-    const at = Date.now();
-    if (at >= this.loginWindow.resetAt) this.loginWindow = { count: 0, resetAt: at + 60_000 };
-    this.loginWindow.count += 1;
-    return this.loginWindow.count <= cfg.authRatePerMin;
+  private loginCookie(tag: string): string {
+    return `${cfg.loginCookieName}_${tag}`;
+  }
+
+  private loginCookieFlags = { secure: cfg.cookieSecure, sameSite: 'Lax' } as const;
+
+  /**
+   * Set-Cookie values that clear this browser's expired sign-in cookies and, past
+   * `MAX_LOGIN_COOKIES`, its oldest, so a browser never accumulates them.
+   */
+  private tidyLoginCookies(req: IncomingMessage): string[] {
+    const prefix = `${cfg.loginCookieName}_`;
+    const live: { name: string; expiresAt: number }[] = [];
+    const clear: string[] = [];
+    for (const name of cookieNames(req, prefix)) {
+      const login = unseal(readSealedCookie(req, name), name.slice(prefix.length), this.key);
+      if (login) live.push({ name, expiresAt: login.expiresAt });
+      else clear.push(name);
+    }
+    live.sort((a, b) => a.expiresAt - b.expiresAt);
+    clear.push(
+      ...live.slice(0, Math.max(0, live.length - (MAX_LOGIN_COOKIES - 1))).map((l) => l.name),
+    );
+    return clear.map((name) => clearCookie(name, this.loginCookieFlags));
   }
 
   private async login(
+    req: IncomingMessage,
     res: ServerResponse,
     query: URLSearchParams,
     correlationId: string,
   ): Promise<void> {
-    if (!this.withinLoginRate()) {
-      res.writeHead(429, { ...NO_STORE, 'content-type': 'application/json', 'retry-after': '30' });
-      res.end('{"detail":"too many sign-ins"}');
-      return;
-    }
     const state = randomToken();
     const nonce = randomToken();
     const verifier = randomToken();
-    const binding = randomToken();
     let location: string;
     try {
       location = await this.oidc.authorizeUrl({ state, nonce, challenge: challengeFor(verifier) });
@@ -155,21 +167,28 @@ export class AuthService {
       );
       return;
     }
-    this.pending.add(
-      state,
-      { verifier, nonce, returnTo: safeReturnTo(query.get('returnTo')) },
-      binding,
+    const sealed = seal(
+      {
+        state,
+        nonce,
+        verifier,
+        returnTo: safeReturnTo(query.get('returnTo')),
+        expiresAt: Date.now() + cfg.loginStateTtlMs,
+      },
+      this.key,
     );
     authEventRecorded('login_started');
     res.writeHead(302, {
       ...NO_STORE,
       location,
-      'set-cookie': setCookie(cfg.loginCookieName, binding, {
-        secure: cfg.cookieSecure,
+      'set-cookie': [
+        ...this.tidyLoginCookies(req),
         // Lax: the provider's redirect back is a cross-site navigation and must carry it.
-        sameSite: 'Lax',
-        maxAgeSeconds: cfg.loginStateTtlMs / 1000,
-      }),
+        setCookie(this.loginCookie(tagOf(state)), sealed, {
+          ...this.loginCookieFlags,
+          maxAgeSeconds: cfg.loginStateTtlMs / 1000,
+        }),
+      ],
     });
     res.end();
   }
@@ -180,12 +199,17 @@ export class AuthService {
     query: URLSearchParams,
     correlationId: string,
   ): Promise<void> {
-    const loginCookie = clearCookie(cfg.loginCookieName, {
-      secure: cfg.cookieSecure,
-      sameSite: 'Lax',
-    });
     const state = query.get('state') ?? '';
-    const login = this.pending.take(state, readCookie(req, cfg.loginCookieName));
+    const tag = tagOf(state);
+    const cookieName = this.loginCookie(tag);
+    const loginCookie = clearCookie(cookieName, this.loginCookieFlags);
+    const stored = unseal(readSealedCookie(req, cookieName), tag, this.key);
+    // The cookie names this state, so only the browser that began the sign-in can present it; the
+    // state is then spent, so the same cookie cannot be presented twice.
+    const login =
+      state && stored && sameSecret(stored.state, state) && this.spent.spend(state)
+        ? stored
+        : undefined;
     if (!login) {
       authEventRecorded('login_failed');
       this.fail(
@@ -194,7 +218,7 @@ export class AuthService {
         'Sign-in could not be completed',
         'This sign-in expired, was already used, or was not started in this browser.',
         correlationId,
-        new Error('unknown or unbound state'),
+        new Error('unknown, spent or unbound state'),
         loginCookie,
       );
       return;
@@ -214,6 +238,7 @@ export class AuthService {
       );
       return;
     }
+    let session: Session | undefined;
     try {
       const tokens = await this.oidc.exchangeCode(code, login.verifier);
       if (!tokens.idToken) throw new IdpRejected('invalid_id_token', 'no ID token was issued');
@@ -222,7 +247,7 @@ export class AuthService {
       // an id set by anyone else never becomes an authenticated one.
       const previous = readCookie(req, cfg.sessionCookieName);
       if (previous) this.sessions.delete(previous);
-      const session = this.sessions.create({
+      session = this.sessions.create({
         account,
         accessToken: tokens.accessToken,
         accessExpiresAt: tokens.expiresAt,
@@ -244,6 +269,8 @@ export class AuthService {
       });
       res.end();
     } catch (error) {
+      // A session created for a response that could not be written would sit unclaimed.
+      if (session) this.sessions.delete(session.id);
       authEventRecorded('login_failed');
       const unavailable = error instanceof IdpUnavailable;
       this.fail(
@@ -261,7 +288,7 @@ export class AuthService {
   }
 
   private session(req: IncomingMessage, res: ServerResponse): void {
-    const refusal = csrfRefusal(req, cfg.appOrigin);
+    const refusal = csrfRefusal(req, cfg.appOrigin, false);
     if (refusal) return this.refuse(res, refusal);
     const session = this.sessionFor(req);
     const body: SessionView = session
@@ -332,5 +359,3 @@ export class AuthService {
     res.end(html);
   }
 }
-
-export { SessionEnded };

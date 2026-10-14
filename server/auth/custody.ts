@@ -1,12 +1,8 @@
 /**
- * Token custody: what bearer a session's next request carries, and how it is renewed.
- *
- * One refresh per session at a time (`Session.refreshing` is shared by every request that needs
- * it), so a burst of requests as a token expires costs the provider one call, and a 401 storm
- * costs one more. A refresh that the provider answers "no" ends the session; one it cannot answer
- * leaves the session alone and, while the current token still has life, the request proceeds on it.
- * Nothing here ever reaches the browser: callers receive a bearer string for the proxy to inject,
- * or an error to turn into a status.
+ * Token custody: which bearer a session's next request carries, and how it is renewed. One refresh
+ * per session at a time, shared by every request that needs it. A refresh the provider refuses ends
+ * the session; one it cannot answer leaves it alone. Tokens never leave this module except as the
+ * bearer string handed to the proxy.
  */
 
 import { log } from '../log.ts';
@@ -66,7 +62,13 @@ export class Custody {
       if (remaining > 0) return session.accessToken;
       this.end(session, 'access token expired and no refresh token was issued');
     }
-    if (remaining > 0 && this.now() < session.refreshRetryAt) return session.accessToken;
+    // After a failed refresh the provider is left alone for a while. A token with life left carries
+    // the request; one without is answered at once, so an outage costs one attempt per window and
+    // not one per request wave.
+    if (this.now() < session.refreshRetryAt) {
+      if (remaining > 0) return session.accessToken;
+      throw new IdpUnavailable('identity provider unavailable; retrying shortly');
+    }
 
     await this.refresh(session);
     return session.accessToken;

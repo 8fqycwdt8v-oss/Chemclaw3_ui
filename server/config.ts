@@ -289,8 +289,15 @@ export interface BffConfig {
   loginStateTtlMs: number;
   /** Every call to the identity provider gives up after this (`OIDC_HTTP_TIMEOUT_MS`). */
   oidcHttpTimeoutMs: number;
-  /** Sign-ins this process starts per minute (`AUTH_RATE_PER_MIN`); the rest get 429. */
-  authRatePerMin: number;
+  /** After a failed refresh the provider is left alone this long (`TOKEN_REFRESH_BACKOFF_SECONDS`). */
+  tokenRefreshBackoffMs: number;
+  /**
+   * The secret the sign-in cookie's key is derived from (`SESSION_KEY` or `SESSION_KEY_FILE`);
+   * empty means a random key per process.
+   */
+  sessionKey: string;
+  /** Origins besides the issuer's that discovery may point at (`ENTRA_ENDPOINTS_ORIGINS`). */
+  entraEndpointOrigins: string[];
   /** The session cookie's name: `__Host-` prefixed exactly when `APP_ORIGIN` is https. */
   sessionCookieName: string;
   /** The cookie that ties a sign-in in progress to the browser that began it. */
@@ -418,7 +425,12 @@ export const cfg: BffConfig = {
   tokenRefreshSkewMs: num('TOKEN_REFRESH_SKEW_SECONDS', 120) * 1_000,
   loginStateTtlMs: num('LOGIN_STATE_TTL_SECONDS', 600) * 1_000,
   oidcHttpTimeoutMs: num('OIDC_HTTP_TIMEOUT_MS', 10_000),
-  authRatePerMin: Math.max(1, Math.floor(num('AUTH_RATE_PER_MIN', 600))),
+  tokenRefreshBackoffMs: num('TOKEN_REFRESH_BACKOFF_SECONDS', 5) * 1_000,
+  sessionKey: secret('SESSION_KEY'),
+  entraEndpointOrigins: str('ENTRA_ENDPOINTS_ORIGINS')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean),
   sessionCookieName: `${cookiePrefix}chemclaw_session`,
   loginCookieName: `${cookiePrefix}chemclaw_login`,
   cookieSecure,
@@ -634,6 +646,22 @@ function bffProblems(c: BffConfig): string[] {
     }
   }
 
+  if (c.allowFraming) {
+    problems.push(
+      'ALLOW_FRAMING=true is refused when AUTH_MODE=bff: a signed-in app that any origin can frame ' +
+        'can be clickjacked into acting as the person.',
+    );
+  }
+  if (c.sessionKey && c.sessionKey.length < 32) {
+    problems.push('SESSION_KEY must be at least 32 characters (try `openssl rand -base64 32`).');
+  }
+  for (const origin of c.entraEndpointOrigins) {
+    if (plainOrigin(origin) !== origin.replace(/\/+$/, '')) {
+      problems.push(
+        `ENTRA_ENDPOINTS_ORIGINS has ${JSON.stringify(origin)}, which is not an origin.`,
+      );
+    }
+  }
   if (c.rawEntraAuthority) problems.push(...authorityProblems(c.rawEntraAuthority));
   if (c.entraIssuer && !/^https?:\/\//.test(c.entraIssuer)) {
     problems.push(`ENTRA_ISSUER ${JSON.stringify(c.entraIssuer)} is not a URL.`);
@@ -651,6 +679,9 @@ function bffProblems(c: BffConfig): string[] {
   }
   if (!(c.tokenRefreshSkewMs >= 0))
     problems.push('TOKEN_REFRESH_SKEW_SECONDS must not be negative.');
+  if (!(c.tokenRefreshBackoffMs >= 0)) {
+    problems.push('TOKEN_REFRESH_BACKOFF_SECONDS must not be negative.');
+  }
   return problems;
 }
 
@@ -673,6 +704,12 @@ function authorityProblems(raw: string): string[] {
     return [
       `ENTRA_AUTHORITY must be https, got ${JSON.stringify(raw)}. The client secret and the ` +
         'sign-in code travel to it. Only a loopback test authority may be plain http.',
+    ];
+  }
+  if (parsed.pathname.split('/').some((part) => MULTI_TENANT_AUTHORITIES.has(part.toLowerCase()))) {
+    return [
+      `ENTRA_AUTHORITY ${JSON.stringify(raw)} names no single tenant, so an ID token cannot be ` +
+        'validated against it. Use the tenant GUID.',
     ];
   }
   if (parsed.search || parsed.hash || parsed.username || parsed.password) {

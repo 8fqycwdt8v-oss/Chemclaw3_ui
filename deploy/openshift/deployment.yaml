@@ -49,8 +49,7 @@ spec:
             - name: CHEMCLAW_API_URL
               value: http://chemclaw-service:8080
             # The BFF signs users in and holds their tokens (docs/operations.md, "Token custody").
-            # Its registration is a WEB application with a client secret, mounted below — not the
-            # single-page registration the previous mode used.
+            # Its registration is a WEB application with a client secret, mounted below.
             - name: AUTH_MODE
               value: bff
             - name: ENTRA_TENANT_ID

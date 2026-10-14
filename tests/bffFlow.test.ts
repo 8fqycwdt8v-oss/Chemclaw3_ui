@@ -79,12 +79,18 @@ describe('the authorization request', () => {
     }
   });
 
-  it('binds the sign-in to the browser with a short-lived, HttpOnly, Lax cookie', async () => {
+  it('keeps the sign-in in a sealed, short-lived, HttpOnly, Lax cookie named for its state', async () => {
     const browser = freshBrowser();
     const res = await browser.request(`${stack.origin}/auth/login`);
     const raw = res.headers.getSetCookie().join('\n');
     expect(raw).toMatch(
-      /^chemclaw_login=[A-Za-z0-9_-]{43}; Path=\/; HttpOnly; SameSite=Lax; Max-Age=600$/,
+      /^chemclaw_login_[A-Za-z0-9_-]{22}=[A-Za-z0-9_-]{100,}; Path=\/; HttpOnly; SameSite=Lax; Max-Age=600$/,
+    );
+    // Sealed: neither the verifier nor the nonce is readable in it.
+    const url = new URL(res.headers.get('location') ?? '');
+    const value = raw.split('=')[1]?.split(';')[0] ?? '';
+    expect(Buffer.from(value, 'base64url').toString('latin1')).not.toContain(
+      url.searchParams.get('nonce') ?? 'x',
     );
     expect(raw).not.toMatch(/Domain/i);
     expect(res.headers.get('cache-control')).toBe('no-store');
@@ -112,7 +118,7 @@ describe('a completed sign-in', () => {
     // Over plain-http loopback: neither Secure nor __Host- (see the https case below).
     expect(cookie?.raw).not.toMatch(/Secure|Domain/);
     // The login binding is gone.
-    expect(browser.cookie(stack.origin, 'chemclaw_login')).toBeUndefined();
+    expect(browser.cookiesWithPrefix(stack.origin, 'chemclaw_login')).toEqual([]);
   });
 
   it('reports who signed in, and nothing that is a token', async () => {
@@ -255,6 +261,8 @@ describe('what is refused coming back from the provider', () => {
     ['is signed by a key the provider does not publish', { badSignature: true }],
     ['names another issuer', { issuer: 'https://evil.example/v2.0' }],
     ['is for another client', { audience: 'some-other-client' }],
+    ['is unsigned (alg none)', { alg: 'none' as const }],
+    ['is signed HS256 with the client secret as the key', { alg: 'HS256' as const }],
   ])('an ID token that %s', async (_why, tamper) => {
     stack.idp.behaviour.idToken = tamper;
     try {
@@ -306,7 +314,7 @@ describe('what is refused coming back from the provider', () => {
       const { res } = await stack.signIn('alice', '/', browser);
       const page = await res.text();
       expect(page).not.toMatch(/expired|signature|nonce|JWT/i);
-      expect(browser.cookie(stack.origin, 'chemclaw_login')).toBeUndefined();
+      expect(browser.cookiesWithPrefix(stack.origin, 'chemclaw_login')).toEqual([]);
     } finally {
       stack.idp.behaviour.idToken = {};
     }
@@ -331,15 +339,159 @@ describe('where a sign-in may return to', () => {
     ['/api/sessions', '/'],
     ['/path\r\nSet-Cookie: x=1', '/'],
     ['', '/'],
+    // Not ASCII: could not be written into a Location header, so it used to fail after the
+    // sign-in had succeeded.
+    ['/日本語', '/'],
+    ['/caf\u00e9?q=\u00fc', '/'],
+    ['/a b', '/'],
+    // Longer than a return path may be.
+    [`/${'a'.repeat(600)}`, '/'],
+    // An encoded slash that decodes to an authority.
+    ['%2F%2Fevil.example', '/'],
   ])('refuses %j and lands on the root', async (returnTo, expected) => {
     expect((await landing(returnTo)).startsWith(expected)).toBe(true);
     expect(await landing(returnTo)).toBe('/?signed_in=1');
+  });
+
+  it('still signs the person in when the return path is refused, with a session to show for it', async () => {
+    for (const returnTo of ['/日本語', `/${'a'.repeat(600)}`]) {
+      const browser = freshBrowser();
+      const { res } = await stack.signIn('alice', returnTo, browser);
+      expect(res.status).toBe(200);
+      expect(browser.cookie(stack.origin, cookieName)).toBeDefined();
+      expect(await (await browser.request(`${stack.origin}/auth/session`)).json()).toMatchObject({
+        authenticated: true,
+      });
+    }
+  });
+
+  it('keeps an encoded path as it was written', async () => {
+    expect(await landing('/open/%E6%97%A5?q=%2F')).toBe('/open/%E6%97%A5?q=%2F&signed_in=1');
   });
 
   it('keeps a path on this origin, with its query', async () => {
     expect(await landing('/open/' + 'f'.repeat(32) + '?x=1')).toBe(
       `/open/${'f'.repeat(32)}?x=1&signed_in=1`,
     );
+  });
+});
+
+describe('the sealed sign-in cookie', () => {
+  const PREFIX = 'chemclaw_login';
+
+  /** Begin a sign-in; returns the authorize URL, the cookie's name and value. */
+  async function begin(
+    browser: Browser,
+    returnTo = '/',
+  ): Promise<{ authorize: URL; name: string; value: string }> {
+    const res = await browser.request(
+      `${stack.origin}/auth/login?returnTo=${encodeURIComponent(returnTo)}`,
+    );
+    const authorize = new URL(res.headers.get('location') ?? '');
+    const [name, cookie] = browser.cookiesWithPrefix(stack.origin, PREFIX).at(-1) ?? [
+      '',
+      { value: '', raw: '' },
+    ];
+    return { authorize, name, value: cookie.value };
+  }
+
+  /** The callback the provider would send the browser to for `authorize`. */
+  async function callbackFor(authorize: URL): Promise<string> {
+    const url = new URL(authorize);
+    url.searchParams.set('person', 'alice');
+    return (await new Browser().request(url.toString())).headers.get('location') ?? '';
+  }
+
+  it('stays well under the 4 kB a browser keeps, with the longest return path allowed', async () => {
+    const { name, value } = await begin(freshBrowser(), `/${'a'.repeat(511)}`);
+    expect(`${name}=${value}`.length).toBeLessThan(2_000);
+    // Three at once, plus a session cookie, still fit a request header comfortably.
+    expect(3 * `${name}=${value}`.length + 100).toBeLessThan(8_000);
+  });
+
+  it('is refused when one byte of it is changed', async () => {
+    const browser = freshBrowser();
+    const { authorize, name, value } = await begin(browser);
+    const callback = await callbackFor(authorize);
+    const flipped = value.slice(0, 40) + (value[40] === 'A' ? 'B' : 'A') + value.slice(41);
+    browser.jar.get(new URL(stack.origin).host)?.set(name, { value: flipped, raw: '' });
+    expect((await browser.request(callback)).status).toBe(400);
+    expect(browser.cookie(stack.origin, cookieName)).toBeUndefined();
+  });
+
+  it('is refused under another sign-in’s name, so it cannot be moved', async () => {
+    const browser = freshBrowser();
+    const first = await begin(browser);
+    const second = await begin(browser);
+    const callback = await callbackFor(second.authorize);
+    browser.jar.get(new URL(stack.origin).host)?.set(second.name, { value: first.value, raw: '' });
+    expect((await browser.request(callback)).status).toBe(400);
+  });
+
+  it('is refused when presented again after the callback was taken (replay)', async () => {
+    const browser = freshBrowser();
+    const { authorize, name, value } = await begin(browser);
+    const callback = await callbackFor(authorize);
+    expect((await browser.request(callback)).status).toBe(302);
+
+    // Somebody who kept the cookie's value presents it again with the same callback.
+    const replayer = freshBrowser();
+    replayer.jar.set(new URL(stack.origin).host, new Map([[name, { value, raw: '' }]]));
+    const replay = await replayer.request(callback);
+    expect(replay.status).toBe(400);
+    expect(replayer.cookie(stack.origin, cookieName)).toBeUndefined();
+  });
+
+  it('expires', async () => {
+    const quick = await startStack({ env: { LOGIN_STATE_TTL_SECONDS: '1' } });
+    try {
+      const browser = freshBrowser();
+      const res = await browser.request(`${quick.origin}/auth/login`);
+      const authorize = new URL(res.headers.get('location') ?? '');
+      authorize.searchParams.set('person', 'alice');
+      const callback =
+        (await freshBrowser().request(authorize.toString())).headers.get('location') ?? '';
+      await new Promise((resolve) => setTimeout(resolve, 1_300));
+      expect((await browser.request(callback)).status).toBe(400);
+    } finally {
+      await quick.stop();
+    }
+  });
+
+  it('lets two tabs sign in at once, each with its own cookie, and keeps at most three', async () => {
+    const browser = freshBrowser();
+    const one = await begin(browser, '/one');
+    const two = await begin(browser, '/two');
+    expect(browser.cookiesWithPrefix(stack.origin, PREFIX)).toHaveLength(2);
+
+    // The first tab's callback arrives after the second began: it still lands on its own page.
+    const back = await browser.request(await callbackFor(one.authorize));
+    expect(new URL(back.headers.get('location') ?? '', stack.origin).pathname).toBe('/one');
+    const other = await browser.request(await callbackFor(two.authorize));
+    expect(new URL(other.headers.get('location') ?? '', stack.origin).pathname).toBe('/two');
+
+    const crowded = freshBrowser();
+    const starts = [];
+    for (let i = 0; i < 5; i += 1) starts.push(await begin(crowded, `/${i}`));
+    expect(crowded.cookiesWithPrefix(stack.origin, PREFIX).length).toBeLessThanOrEqual(3);
+    // The oldest was dropped to make room, so its callback finds nothing; the newest works.
+    expect((await crowded.request(await callbackFor(starts[0]!.authorize))).status).toBe(400);
+    expect((await crowded.request(await callbackFor(starts[4]!.authorize))).status).toBe(302);
+  });
+});
+
+describe('an anonymous flood of sign-ins', () => {
+  it('cannot stop a different browser from signing in, and keeps nothing on the server', async () => {
+    const flood = Array.from({ length: 1_500 }, () =>
+      fetch(`${stack.bffUrl}/auth/login`, { redirect: 'manual' }),
+    );
+    const answers = await Promise.all(flood);
+    expect(answers.every((r) => r.status === 302)).toBe(true);
+
+    const browser = freshBrowser();
+    const { res } = await stack.signIn('alice', '/', browser);
+    expect(res.status).toBe(200);
+    expect(browser.cookie(stack.origin, cookieName)).toBeDefined();
   });
 });
 
@@ -406,7 +558,7 @@ describe('over https', () => {
       browser.hosts.set('app.example', new URL(secure.bffUrl).host);
       const login = await browser.request('https://app.example/auth/login');
       expect(login.headers.getSetCookie().join()).toMatch(
-        /^__Host-chemclaw_login=[A-Za-z0-9_-]+; Path=\/; HttpOnly; SameSite=Lax; Secure; Max-Age=600$/,
+        /^__Host-chemclaw_login_[A-Za-z0-9_-]{22}=[A-Za-z0-9_-]+; Path=\/; HttpOnly; SameSite=Lax; Secure; Max-Age=600$/,
       );
       await secure.signIn('alice', '/', browser);
       const cookie = browser.cookie('https://app.example', '__Host-chemclaw_session');

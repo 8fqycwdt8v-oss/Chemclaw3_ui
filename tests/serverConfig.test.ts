@@ -39,7 +39,9 @@ const base: BffConfig = {
   tokenRefreshSkewMs: 120_000,
   loginStateTtlMs: 600_000,
   oidcHttpTimeoutMs: 10_000,
-  authRatePerMin: 600,
+  tokenRefreshBackoffMs: 5_000,
+  sessionKey: '',
+  entraEndpointOrigins: [],
   sessionCookieName: 'chemclaw_session',
   loginCookieName: 'chemclaw_login',
   cookieSecure: false,
@@ -503,6 +505,35 @@ describe('AUTH_MODE=bff', () => {
       );
     },
   );
+
+  it('refuses to be framed: a signed-in app any origin can frame can be clickjacked', () => {
+    const problems = validateConfig(config({ ...bff, allowFraming: true }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('ALLOW_FRAMING');
+  });
+
+  it.each([
+    'https://login.microsoftonline.com/common',
+    'https://login.microsoftonline.com/organizations/',
+    'https://login.microsoftonline.com/consumers',
+    'https://login.example/Common/v2.0',
+  ])('refuses the authority %s, which names no single tenant', (raw) => {
+    const problems = validateConfig(
+      config({ ...bff, rawEntraAuthority: raw, entraAuthority: raw.replace(/\/+$/, '') }),
+    );
+    expect(problems.join()).toContain('names no single tenant');
+  });
+
+  it('holds the sign-in cookie key to a length worth the name, and the extra endpoint origins to origins', () => {
+    expect(validateConfig(config({ ...bff, sessionKey: 'short' })).join()).toContain('SESSION_KEY');
+    expect(validateConfig(config({ ...bff, sessionKey: 'k'.repeat(32) }))).toEqual([]);
+    expect(
+      validateConfig(config({ ...bff, entraEndpointOrigins: ['https://sts.example/path'] })).join(),
+    ).toContain('ENTRA_ENDPOINTS_ORIGINS');
+    expect(
+      validateConfig(config({ ...bff, entraEndpointOrigins: ['https://sts.example'] })),
+    ).toEqual([]);
+  });
 
   it('refuses a scope that is an App ID URI, which yields a token the backend rejects', () => {
     expect(validateConfig(config({ ...bff, apiScope: 'api-client-id' })).join()).toContain(

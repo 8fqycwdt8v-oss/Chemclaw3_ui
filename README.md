@@ -92,7 +92,9 @@ Browser-facing values are served at runtime by `GET /config.js`, so one image ru
 - `MAX_MESSAGE_CHARS` not a whole number above zero;
 - under `bff`: missing `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `API_SCOPE`, `ENTRA_CLIENT_SECRET` (or
   `ENTRA_CLIENT_AUTH=none`) or `APP_ORIGIN`; a plain-http `APP_ORIGIN` off loopback; an
-  `ENTRA_AUTHORITY` that is not https (loopback excepted) or carries a query, fragment or userinfo;
+  `ENTRA_AUTHORITY` that is not https (loopback excepted), names `common`/`organizations`/
+  `consumers`, or carries a query, fragment or userinfo; `ALLOW_FRAMING=true`; a `SESSION_KEY`
+  under 32 characters;
 - `AUTH_MODE=dev` on a non-loopback `BIND_HOST` without `ALLOW_INSECURE_AUTH=true`;
 - sandbox settings that are not plain http(s) origins, `SANDBOX_ORIGIN` without or equal to
   `APP_ORIGIN`, an http sandbox under an https app, `SANDBOX_PORT` outside 1–65535 or equal to

@@ -53,14 +53,15 @@ export interface LogoutView {
 const LONGEST_RETURN_TO = 512;
 
 /**
- * A place on this origin a sign-in may return to, or `/`. Only a rooted path survives: no scheme,
- * no authority (`//host`, `/\host`), no control characters, nothing under `/auth/` or `/api/` (a
- * return into the sign-in routes is a loop, into the proxy a download the page never asked for).
+ * A place on this origin a sign-in may return to, or `/`. Only a rooted path survives: printable
+ * ASCII only (anything else cannot be written into a `Location` header, so it would fail after the
+ * sign-in succeeded), no scheme, no authority (`//host`, `/\host`), nothing under `/auth/` or
+ * `/api/` (a return into the sign-in routes is a loop, into the proxy a download the page never
+ * asked for).
  */
 export function safeReturnTo(raw: string | null | undefined): string {
   if (!raw || raw.length > LONGEST_RETURN_TO) return '/';
-  // eslint-disable-next-line no-control-regex -- control characters are exactly what is refused.
-  if (/[\u0000-\u001f\u007f\\]/.test(raw)) return '/';
+  if (!/^[\u0021-\u007e]+$/.test(raw) || raw.includes('\\')) return '/';
   if (!raw.startsWith('/') || raw.startsWith('//')) return '/';
   const path = raw.split(/[?#]/, 1)[0] ?? '/';
   if (/^\/(auth|api)(\/|$)/.test(path)) return '/';

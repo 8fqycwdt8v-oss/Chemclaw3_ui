@@ -80,26 +80,28 @@ All runtime configuration is environment. A value the BFF cannot use is **refuse
 None of the `ENTRA_*` values, the scope or the secret is sent to the browser (`GET /config.js` carries
 `authMode` and nothing about the provider).
 
-| Variable                     | Default                                      | Required    | Meaning                                                                                                                                                                                                            |
-| ---------------------------- | -------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `AUTH_MODE`                  | `dev`                                        | yes         | `bff` (the BFF signs users in and holds the tokens, §8) or `dev` (no credential). Anything else is refused; `msal` is refused by name.                                                                             |
-| `APP_ORIGIN`                 | unset                                        | under `bff` | The origin the browser reaches the app at, exactly. It is the redirect URI's (`<APP_ORIGIN>/auth/callback`), the cookies' scheme, and the only `Origin` a state-changing request may carry. http only on loopback. |
-| `ENTRA_TENANT_ID`            | empty                                        | under `bff` | Tenant GUID (not `common`/`organizations`/`consumers`). Not needed when `ENTRA_AUTHORITY` is set.                                                                                                                  |
-| `ENTRA_CLIENT_ID`            | empty                                        | under `bff` | **This BFF's** app registration (platform: **Web**). Never set on the backend — it has no such setting and refuses unknown ones.                                                                                   |
-| `ENTRA_CLIENT_SECRET`        | empty                                        | under `bff` | That registration's client secret. Prefer `ENTRA_CLIENT_SECRET_FILE`: a path to a mounted Secret, which wins over the variable. Never logged, never served.                                                        |
-| `ENTRA_CLIENT_AUTH`          | `secret`                                     | no          | `none` makes the BFF a public client (PKCE alone, no secret): for a test tenant that issues no secret. Entra needs `secret`.                                                                                       |
-| `API_SCOPE`                  | empty                                        | under `bff` | `api://<api-client-id>/<scope>`, e.g. `…/Chat.Access`. Requested with `openid profile offline_access`.                                                                                                             |
-| `ENTRA_AUTHORITY`            | `https://login.microsoftonline.com/<tenant>` | no          | A sovereign cloud or a test tenant. https (loopback excepted). Discovery is read from `<authority>/v2.0/.well-known/openid-configuration`.                                                                         |
-| `ENTRA_ISSUER`               | unset                                        | no          | Pins the issuer discovery must report. Unset: the ID token's `iss` is held to the issuer discovery reports.                                                                                                        |
-| `ENTRA_END_SESSION`          | `true`                                       | no          | Offer the provider's end-session endpoint at sign-out. `false` ends only the BFF's session.                                                                                                                        |
-| `SESSION_IDLE_MINUTES`       | `480`                                        | no          | A session unused this long ends.                                                                                                                                                                                   |
-| `SESSION_MAX_AGE_HOURS`      | `24`                                         | no          | A session ends this long after sign-in, whatever it does; also the cookie's `Max-Age`.                                                                                                                             |
-| `SESSION_MAX_SESSIONS`       | `10000`                                      | no          | Sessions held in memory (~5 kB each); the least recently used is dropped over it.                                                                                                                                  |
-| `TOKEN_REFRESH_SKEW_SECONDS` | `120`                                        | no          | An access token with less than this left is renewed before it is used.                                                                                                                                             |
-| `LOGIN_STATE_TTL_SECONDS`    | `600`                                        | no          | A sign-in left unfinished is forgotten after this long.                                                                                                                                                            |
-| `OIDC_HTTP_TIMEOUT_MS`       | `10000`                                      | no          | Every call to the identity provider (discovery, keys, token, revocation) gives up after this.                                                                                                                      |
-| `AUTH_RATE_PER_MIN`          | `600`                                        | no          | Sign-ins this pod starts per minute; the rest get 429.                                                                                                                                                             |
-| `ALLOW_INSECURE_AUTH`        | `false`                                      | no          | Permits `AUTH_MODE=dev` on a non-loopback `BIND_HOST`. Never in a shared deployment.                                                                                                                               |
+| Variable                        | Default                                      | Required    | Meaning                                                                                                                                                                                                                                                             |
+| ------------------------------- | -------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AUTH_MODE`                     | `dev`                                        | yes         | `bff` (the BFF signs users in and holds the tokens, §8) or `dev` (no credential). Anything else is refused; `msal` is refused by name.                                                                                                                              |
+| `APP_ORIGIN`                    | unset                                        | under `bff` | The origin the browser reaches the app at, exactly. It is the redirect URI's (`<APP_ORIGIN>/auth/callback`), the cookies' scheme, and the only `Origin` a state-changing request may carry. http only on loopback.                                                  |
+| `ENTRA_TENANT_ID`               | empty                                        | under `bff` | Tenant GUID (not `common`/`organizations`/`consumers`). Not needed when `ENTRA_AUTHORITY` is set.                                                                                                                                                                   |
+| `ENTRA_CLIENT_ID`               | empty                                        | under `bff` | **This BFF's** app registration (platform: **Web**). Never set on the backend — it has no such setting and refuses unknown ones.                                                                                                                                    |
+| `ENTRA_CLIENT_SECRET`           | empty                                        | under `bff` | That registration's client secret. Prefer `ENTRA_CLIENT_SECRET_FILE`: a path to a mounted Secret, which wins over the variable. Never logged, never served.                                                                                                         |
+| `ENTRA_CLIENT_AUTH`             | `secret`                                     | no          | `none` makes the BFF a public client (PKCE alone, no secret): for a test tenant that issues no secret. Entra needs `secret`.                                                                                                                                        |
+| `API_SCOPE`                     | empty                                        | under `bff` | `api://<api-client-id>/<scope>`, e.g. `…/Chat.Access`. Requested with `openid profile offline_access`.                                                                                                                                                              |
+| `ENTRA_AUTHORITY`               | `https://login.microsoftonline.com/<tenant>` | no          | A sovereign cloud or a test tenant. https (loopback excepted). Discovery is read from `<authority>/v2.0/.well-known/openid-configuration`.                                                                                                                          |
+| `ENTRA_ISSUER`                  | unset                                        | no          | Pins the issuer discovery must report. Unset: the ID token's `iss` is held to the issuer discovery reports.                                                                                                                                                         |
+| `ENTRA_END_SESSION`             | `true`                                       | no          | Offer the provider's end-session endpoint at sign-out. `false` ends only the BFF's session.                                                                                                                                                                         |
+| `SESSION_IDLE_MINUTES`          | `480`                                        | no          | A session unused this long ends.                                                                                                                                                                                                                                    |
+| `SESSION_MAX_AGE_HOURS`         | `24`                                         | no          | A session ends this long after sign-in, whatever it does; also the cookie's `Max-Age`.                                                                                                                                                                              |
+| `SESSION_MAX_SESSIONS`          | `10000`                                      | no          | Sessions held in memory (~5 kB each); the least recently used is dropped over it.                                                                                                                                                                                   |
+| `TOKEN_REFRESH_SKEW_SECONDS`    | `120`                                        | no          | An access token with less than this left is renewed before it is used.                                                                                                                                                                                              |
+| `LOGIN_STATE_TTL_SECONDS`       | `600`                                        | no          | A sign-in left unfinished is forgotten after this long.                                                                                                                                                                                                             |
+| `OIDC_HTTP_TIMEOUT_MS`          | `10000`                                      | no          | Every call to the identity provider (discovery, keys, token, revocation) gives up after this.                                                                                                                                                                       |
+| `TOKEN_REFRESH_BACKOFF_SECONDS` | `5`                                          | no          | After a failed refresh the provider is left alone this long; inside it an expired token is answered 503 at once.                                                                                                                                                    |
+| `SESSION_KEY`                   | random per process                           | no          | At least 32 characters (or `SESSION_KEY_FILE`): the key the sign-in cookie is sealed under. Unset, a pod restart mid-sign-in simply restarts that sign-in. Set it identically on every replica only if a callback may reach a pod other than the one that began it. |
+| `ENTRA_ENDPOINTS_ORIGINS`       | empty                                        | no          | Comma-separated origins, besides the issuer's, that discovery may name endpoints on. Entra needs none (all its endpoints are on `login.microsoftonline.com`).                                                                                                       |
+| `ALLOW_INSECURE_AUTH`           | `false`                                      | no          | Permits `AUTH_MODE=dev` on a non-loopback `BIND_HOST`. Never in a shared deployment.                                                                                                                                                                                |
 
 ### Listeners and the HTML sandbox
 
@@ -391,11 +393,11 @@ access. This is the decision, what it does, and what a human verifies against a 
 
 ### What the browser holds
 
-| Where                                                                                          | What                                                                                                                                                          |
-| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Cookie `__Host-chemclaw_session`                                                               | 256 random bits. `HttpOnly; Secure; SameSite=Strict; Path=/`, **no `Domain`**. `Max-Age` = `SESSION_MAX_AGE_HOURS`.                                           |
-| Cookie `__Host-chemclaw_login`                                                                 | During a sign-in only (10 min): ties the `state` to the browser that began it. `HttpOnly; Secure; SameSite=Lax` (the provider's redirect back is cross-site). |
-| `localStorage`, `sessionStorage`, `document.cookie`, `/config.js`, any response body or header | **No token, ever.** `tests/bffFlow.test.ts` and `e2e/bff-auth.spec.ts` assert it.                                                                             |
+| Where                                                                                          | What                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cookie `__Host-chemclaw_session`                                                               | 256 random bits. `HttpOnly; Secure; SameSite=Strict; Path=/`, **no `Domain`**. `Max-Age` = `SESSION_MAX_AGE_HOURS`.                                                                                                                                     |
+| Cookie `__Host-chemclaw_login_<tag>`                                                           | During a sign-in only (`LOGIN_STATE_TTL_SECONDS`): the whole sign-in, sealed (AES-256-GCM), named for a hash of its `state`. `HttpOnly; Secure; SameSite=Lax` (the provider's redirect back is cross-site). One per tab signing in, at most three kept. |
+| `localStorage`, `sessionStorage`, `document.cookie`, `/config.js`, any response body or header | **No token, ever.** `tests/bffFlow.test.ts` and `e2e/bff-auth.spec.ts` assert it.                                                                                                                                                                       |
 
 `__Host-` and `Secure` apply exactly when `APP_ORIGIN` is https. A plain-http `APP_ORIGIN` is
 accepted for loopback only (local development), with unprefixed, non-`Secure` cookies, because
@@ -403,14 +405,18 @@ browsers differ on `Secure` over http; the startup log warns.
 
 ### The flow
 
-1. `GET /auth/login?returnTo=/path` mints `state`, `nonce` and a PKCE verifier, remembers them
-   server-side (single-use, 10 min, bounded in number), sets the login cookie and redirects to the
+1. `GET /auth/login?returnTo=/path` mints `state`, `nonce` and a PKCE verifier and keeps **nothing
+   on the server**: they travel in a sealed cookie (AES-256-GCM; the key is derived from
+   `SESSION_KEY`, or random per process), whose name carries a tag of the `state` and whose
+   authentication covers that tag, so a value cannot be moved to another name. It redirects to the
    authority with `code_challenge_method=S256`, `scope=openid profile offline_access <API_SCOPE>`
    and the one `redirect_uri` (`<APP_ORIGIN>/auth/callback`, never taken from the request).
-   `returnTo` survives only as a rooted path on this origin (no `//host`, scheme, backslash, control
-   character, nor anything under `/auth/` or `/api/`).
-2. `GET /auth/callback` takes the sign-in out of the table by `state` **and** the login cookie
-   (a callback replayed, or begun in another browser, finds nothing), exchanges the code with the
+   `returnTo` survives only as a rooted path on this origin: printable ASCII, at most 512
+   characters, no `//host`, scheme or backslash, nothing under `/auth/` or `/api/`.
+2. `GET /auth/callback` opens the cookie named for its `state` (one begun in another browser, damaged,
+   expired or sealed under another key finds nothing), marks the `state` spent in a bounded,
+   expiring set (a sealed cookie replayed within its life is refused; the provider's code is
+   single-use besides), exchanges the code with the
    client secret and the verifier, and validates the ID token with `jose`: an asymmetric signature
    against the provider's published keys (cached; re-read when an unknown `kid` arrives, so rotation
    needs no restart), `iss` equal to the issuer discovery reports (and to `ENTRA_ISSUER` when
@@ -443,10 +449,12 @@ browsers differ on `Secure` over http; the startup log warns.
 ### Cross-site requests
 
 `SameSite=Strict` is the first wall. The BFF also refuses, for every `/api` route, `/auth/session`
-and `/auth/logout`: a request the browser marks `Sec-Fetch-Site: cross-site` or `same-site`; and for
-any method but GET/HEAD/OPTIONS, an `Origin` other than `APP_ORIGIN` and any request without
-`X-Chemclaw-Csrf: 1` (a header no other origin can set without a CORS preflight, which this process
-never answers). The response is 403 `csrf`.
+and `/auth/logout`: a request the browser marks `Sec-Fetch-Site: cross-site` or `same-site`; for any
+method but GET/HEAD/OPTIONS, an `Origin` other than `APP_ORIGIN`; and every `/api` request,
+**GET included**, without `X-Chemclaw-Csrf: 1` (a header no other origin can set without a CORS
+preflight, which this process never answers; some reads consume what they return, and a plain
+`<img src>` in the sandbox host's HTML — the same site — cannot send it). The response is 403
+`csrf`. `GET /auth/session` alone is exempt from the header: it consumes nothing.
 
 ### The decision: where sessions live
 
@@ -478,8 +486,17 @@ with it; the router sends those browsers elsewhere and they sign in again.
 **Limits.** A session ends after `SESSION_IDLE_MINUTES` unused or `SESSION_MAX_AGE_HOURS` in all
 (both below the provider's refresh-token life, so these — not the provider — decide how often a
 chemist signs in). At most `SESSION_MAX_SESSIONS` are held; the least recently used is dropped.
-Unfinished sign-ins are capped (10 000) and expire after `LOGIN_STATE_TTL_SECONDS`; `/auth/login` is
-rate-limited per pod (`AUTH_RATE_PER_MIN`).
+A sign-in in progress costs the server nothing (it is the browser's cookie), so there is no cap to
+exhaust and no per-pod rate limit for an anonymous flood to spend: one host hammering `/auth/login`
+cannot stop anyone else signing in. Restarting a pod mid-sign-in invalidates its cookies (random
+key) and the person sees "Try again". With several replicas the router affinity this section
+already requires keeps the callback on the pod that began it; a shared `SESSION_KEY` is only for a
+deployment whose callback can land elsewhere (the _spent states_ set is still per pod, so a replay
+across pods is bounded by the provider's single-use code and the cookie's life alone).
+
+**Live requests end with their session.** Sign-out, expiry, eviction and a refused refresh end
+every request still running under the session — an open job stream included — and the request to
+the service is destroyed with it; a request not yet answered gets 401 `session_expired`.
 
 ### Network
 

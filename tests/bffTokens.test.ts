@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { startFixtureOidc } from '../e2e/fixture-oidc.ts';
 import { OidcClient } from '../server/auth/oidc.ts';
-import { PendingLogins, SessionStore } from '../server/auth/sessions.ts';
+import { SessionStore, SpentStates } from '../server/auth/sessions.ts';
 import { Browser, CLIENT_ID, CLIENT_SECRET, startStack } from './bffHarness.ts';
 import type { Stack } from './bffHarness.ts';
 
@@ -25,7 +25,7 @@ describe('renewal before expiry', () => {
   beforeAll(async () => {
     stack = await startStack({
       idp: { accessTtlSeconds: 2 },
-      env: { TOKEN_REFRESH_SKEW_SECONDS: '1' },
+      env: { TOKEN_REFRESH_SKEW_SECONDS: '1', TOKEN_REFRESH_BACKOFF_SECONDS: '1' },
     });
   });
   afterAll(async () => {
@@ -141,6 +141,7 @@ describe('renewal before expiry', () => {
     await stack.signIn('alice', '/', browser);
     await sleep(2_200);
     stack.idp.behaviour.refreshFails = 'unreachable';
+    const before = stack.idp.calls.refreshes;
 
     const res = await call(browser);
     expect(res.status).toBe(503);
@@ -150,8 +151,15 @@ describe('renewal before expiry', () => {
       authenticated: true,
     });
 
-    // The provider comes back: the very next request recovers, backoff or not (the token is dead).
+    // Inside the backoff the provider is not asked again, however many requests arrive: an outage
+    // costs one attempt per window, not one per wave.
+    const wave = await Promise.all(Array.from({ length: 8 }, () => call(browser)));
+    expect(wave.map((r) => r.status)).toEqual(Array(8).fill(503));
+    expect(stack.idp.calls.refreshes - before).toBe(1);
+
+    // The provider comes back and the window passes (1 s here): the next request recovers.
     stack.idp.behaviour.refreshFails = null;
+    await sleep(1_100);
     expect((await call(browser)).status).toBe(200);
   });
 
@@ -337,32 +345,83 @@ describe('the session store', () => {
   });
 });
 
-describe('pending sign-ins', () => {
-  const login = { verifier: 'v', nonce: 'n', returnTo: '/' };
-
-  it('are single-use, and only for the browser that began them', () => {
+describe('spent sign-in states', () => {
+  it('are spent once, and forgotten when their cookie would have expired', () => {
     let clock = 0;
-    const pending = new PendingLogins(1_000, 10, () => clock);
-    pending.add('state-1', login, 'binding-1');
-    expect(pending.take('state-1', 'someone-else')).toBeUndefined();
-    expect(pending.take('state-1', 'binding-1')).toBeUndefined(); // spent by the failed attempt
-    pending.add('state-2', login, 'binding-2');
-    expect(pending.take('state-2', 'binding-2')).toMatchObject({ nonce: 'n' });
-    expect(pending.take('state-2', 'binding-2')).toBeUndefined();
-    clock = 0;
+    const spent = new SpentStates(1_000, 10, () => clock);
+    expect(spent.spend('state-1')).toBe(true);
+    expect(spent.spend('state-1')).toBe(false);
+    expect(spent.spend('state-2')).toBe(true);
+    clock = 1_500;
+    expect(spent.spend('state-1')).toBe(true);
   });
 
-  it('expire, and are bounded in number', () => {
-    let clock = 0;
-    const pending = new PendingLogins(1_000, 3, () => clock);
-    pending.add('old', login, 'b');
-    clock = 1_500;
-    expect(pending.take('old', 'b')).toBeUndefined();
+  it('are bounded in number, oldest first', () => {
+    const spent = new SpentStates(60_000, 3, () => 0);
+    for (const state of ['s1', 's2', 's3', 's4']) spent.spend(state);
+    expect(spent.spend('s4')).toBe(false);
+    expect(spent.spend('s1')).toBe(true); // evicted
+  });
+});
 
-    for (const state of ['s1', 's2', 's3', 's4', 's5']) pending.add(state, login, 'b');
-    expect(pending.size).toBe(3);
-    expect(pending.take('s1', 'b')).toBeUndefined(); // evicted, oldest first
-    expect(pending.take('s5', 'b')).toBeDefined();
+describe('the live requests of a session', () => {
+  const limits = { idleMs: 1_000, maxAgeMs: 5_000, maxSessions: 2 };
+  const fresh = () => ({
+    account: { id: 'u', username: 'u', name: 'U', roles: [] },
+    accessToken: 't',
+    accessExpiresAt: 0,
+    refreshToken: null,
+  });
+
+  it('end when the session is deleted, expires, is swept, or is evicted — and not when it is merely used', () => {
+    let clock = 0;
+    const store = new SessionStore(limits, () => clock);
+    const ended: string[] = [];
+    const watch = (name: string, id: ReturnType<typeof store.create>) =>
+      store.watch(id, () => ended.push(name));
+
+    const deleted = store.create(fresh());
+    watch('deleted', deleted);
+    store.delete(deleted.id);
+
+    const expired = store.create(fresh());
+    watch('expired', expired);
+    const used = store.create(fresh());
+    watch('used', used);
+    clock = 400;
+    store.get(used.id); // touching re-inserts it; that is not an end
+    expect(ended).toEqual(['deleted']);
+    clock = 1_200;
+    store.get(expired.id);
+    expect(ended).toEqual(['deleted', 'expired']);
+
+    store.sweep(); // used: 800 idle, kept at 1200? it was last seen at 400 -> 800 < 1000
+    expect(ended).toEqual(['deleted', 'expired']);
+    clock = 1_500;
+    store.sweep();
+    expect(ended).toEqual(['deleted', 'expired', 'used']);
+
+    clock = 2_000;
+    const a = store.create(fresh());
+    watch('a', a);
+    store.create(fresh());
+    store.create(fresh()); // over the cap of two: the oldest goes
+    expect(ended.at(-1)).toBe('a');
+    store.stop();
+  });
+
+  it('can be withdrawn, and a watch on a session already gone ends at once', () => {
+    const store = new SessionStore(limits, () => 0);
+    const session = store.create(fresh());
+    const ended: string[] = [];
+    const withdraw = store.watch(session, () => ended.push('withdrawn'));
+    withdraw();
+    store.delete(session.id);
+    expect(ended).toEqual([]);
+
+    store.watch(session, () => ended.push('late'));
+    expect(ended).toEqual(['late']);
+    store.stop();
   });
 });
 
@@ -480,5 +539,69 @@ describe('the provider’s discovery document', () => {
       timeoutMs: 500,
     });
     await expect(oidc.discovery()).rejects.toMatchObject({ name: 'IdpUnavailable' });
+  });
+});
+
+describe('the endpoints discovery names', () => {
+  const issuer = 'https://login.example/tenant/v2.0';
+  const good = {
+    issuer,
+    authorization_endpoint: 'https://login.example/tenant/oauth2/v2.0/authorize',
+    token_endpoint: 'https://login.example/tenant/oauth2/v2.0/token',
+    jwks_uri: 'https://login.example/tenant/discovery/v2.0/keys',
+    end_session_endpoint: 'https://login.example/tenant/oauth2/v2.0/logout',
+  };
+  const clientFor = (doc: Record<string, unknown>, endpointOrigins: string[] = []) =>
+    new OidcClient({
+      authority: 'https://login.example/tenant',
+      clientId: CLIENT_ID,
+      clientSecret: CLIENT_SECRET,
+      scope: 'openid',
+      redirectUri: 'https://app.example/auth/callback',
+      postLogoutRedirectUri: 'https://app.example/',
+      endSession: true,
+      timeoutMs: 500,
+      endpointOrigins,
+      fetchImpl: () => Promise.resolve(Response.json(doc)),
+    });
+
+  it('are accepted on the issuer’s origin', async () => {
+    expect((await clientFor(good).discovery()).token_endpoint).toBe(good.token_endpoint);
+  });
+
+  it.each([
+    ['token_endpoint', 'https://evil.example/token'],
+    ['jwks_uri', 'https://evil.example/keys'],
+    ['authorization_endpoint', 'https://evil.example/authorize'],
+    ['end_session_endpoint', 'https://evil.example/logout'],
+    ['revocation_endpoint', 'https://evil.example/revoke'],
+  ])(
+    'refuse a %s on another origin, where the client secret and the code would be sent',
+    async (field, url) => {
+      await expect(clientFor({ ...good, [field]: url }).discovery()).rejects.toMatchObject({
+        name: 'IdpUnavailable',
+      });
+    },
+  );
+
+  it.each(['token_endpoint', 'jwks_uri'])('refuse a plain-http %s', async (field) => {
+    await expect(
+      clientFor({ ...good, [field]: 'http://login.example/x' }).discovery(),
+    ).rejects.toMatchObject({ name: 'IdpUnavailable' });
+  });
+
+  it('accept an origin the operator listed, and only that one', async () => {
+    const doc = { ...good, jwks_uri: 'https://keys.example/tenant/keys' };
+    expect((await clientFor(doc, ['https://keys.example']).discovery()).jwks_uri).toBe(
+      doc.jwks_uri,
+    );
+    await expect(clientFor(doc, ['https://other.example']).discovery()).rejects.toMatchObject({
+      name: 'IdpUnavailable',
+    });
+  });
+
+  it('are not checked when discovery does not name them (device code, userinfo and the like)', async () => {
+    const doc = { ...good, userinfo_endpoint: 'https://graph.example/oidc/userinfo' };
+    await expect(clientFor(doc).discovery()).resolves.toBeDefined();
   });
 });

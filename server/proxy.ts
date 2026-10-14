@@ -1,13 +1,8 @@
 /**
- * The streaming reverse proxy to the Chemclaw service. `node:http.request`, not `fetch`/undici:
- * undici's default 300 s body idle timeout would kill a legitimately silent event stream, and
- * `http.request` gives piped backpressure with no dependency.
- *
- * Credentials, by auth mode. Under `dev` there is none and the browser's `Authorization` header is
- * forwarded verbatim, never inspected. Under `bff` the caller passes the session's bearer
- * (`ProxyAuth`): the browser's own `Authorization` header is dropped, the BFF's is injected, and a
- * backend 401 renews the token once and replays the request — only while the whole request is in
- * memory, which is every route but the attachment upload.
+ * The streaming reverse proxy to the Chemclaw service (`node:http.request`: no body idle timeout,
+ * piped backpressure). Under `dev` the browser's `Authorization` is forwarded verbatim. Under `bff`
+ * the session's bearer (`ProxyAuth`) replaces it, a backend 401 renews and replays once, and a
+ * public probe goes out with no credential at all.
  */
 
 import http from 'node:http';
@@ -47,7 +42,15 @@ export interface ProxyAuth {
   renew: (refused: string) => Promise<string | null>;
   /** Whether the body may be held in memory so the request can be sent twice. False for uploads. */
   replayable: boolean;
+  /**
+   * Register how to end this request if its session ends first (sign-out, expiry, a refused
+   * refresh); returns how to withdraw it. A stream otherwise outlives the credential it started on.
+   */
+  watch: (end: () => void) => () => void;
 }
+
+/** A request that carries no credential: a public probe under `bff`, whatever the browser sent. */
+export type Anonymous = 'anonymous';
 
 const upstream = new URL(cfg.apiUrl);
 const transport = upstream.protocol === 'https:' ? https : http;
@@ -114,7 +117,7 @@ function bffOwnsResponseHeader(key: string): boolean {
  * `Forwarded`, `X-Real-IP`, `X-Original-URL`/`X-Rewrite-URL`, `X-Http-Method-Override`).
  */
 const FORWARDING_HEADERS =
-  /^(?:x-forwarded-|forwarded$|x-real-ip$|x-original-url$|x-rewrite-url$|x-http-method-override$)/;
+  /^(?:x-forwarded-|forwarded$|x-real-ip$|x-original-url$|x-rewrite-url$|x-http-method(?:-override)?$|x-method-override$)/;
 
 const isEventStream = (headers: IncomingHttpHeaders): boolean =>
   String(headers['content-type'] ?? '').includes('text/event-stream');
@@ -158,6 +161,7 @@ function buildUpstreamHeaders(
   req: IncomingMessage,
   correlationId: string,
   bearer: string | null,
+  anonymous: boolean,
 ): http.OutgoingHttpHeaders {
   const headers: http.OutgoingHttpHeaders = {};
   for (const [key, value] of Object.entries(req.headers)) {
@@ -168,8 +172,8 @@ function buildUpstreamHeaders(
     // this process's alone, and not forwarding any keeps it that way.
     if (key === 'cookie') continue;
     // Under `bff` the only credential upstream is the one injected below, never one a browser
-    // chose to send.
-    if (bearer !== null && key === 'authorization') continue;
+    // chose to send; an anonymous request carries none.
+    if (key === 'authorization' && (bearer !== null || anonymous)) continue;
     // The service's internal headers: a browser must not set them.
     if (key.startsWith('x-chemclaw-')) continue;
     // Identity and routing headers a browser could use to impersonate the edge; the BFF forwards
@@ -239,9 +243,11 @@ export function proxy(
   /** Filled in as the request runs; the access log reads it when the response finishes. */
   trace: RequestTrace,
   maxBodyBytes: number = cfg.maxBodyBytes,
-  /** The session's bearer under `AUTH_MODE=bff`; absent under `dev`. */
-  auth?: ProxyAuth,
+  /** Under `AUTH_MODE=bff`: the session's bearer, or `'anonymous'` for a public probe. */
+  credential?: ProxyAuth | Anonymous,
 ): void {
+  const auth = typeof credential === 'object' ? credential : undefined;
+  const anonymous = credential === 'anonymous';
   const startedAt = Date.now();
   // A declared length over the cap is refused before any upstream request.
   const declared = Number(req.headers['content-length']);
@@ -262,6 +268,22 @@ export function proxy(
     if (!res.writableFinished) current?.destroy();
   });
 
+  // The session ending ends this request, and the browser's end of it, so a stream does not go on
+  // under a bearer that was just revoked.
+  if (auth) {
+    const withdraw = auth.watch(() => {
+      current?.destroy();
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      // Nothing sent yet: say why rather than drop the connection.
+      res.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.end('{"detail":"session expired","code":"session_expired"}');
+    });
+    res.on('close', withdraw);
+  }
+
   /**
    * One attempt at the upstream. `body` is the request held in memory (a replayable request), or
    * `undefined` to stream it from the client. A 401 to a replayable request with a bearer is held
@@ -275,7 +297,7 @@ export function proxy(
         port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
         method: req.method,
         path: upstreamPath,
-        headers: buildUpstreamHeaders(req, trace.correlationId, bearer),
+        headers: buildUpstreamHeaders(req, trace.correlationId, bearer, anonymous),
         // Pool chosen by the route's declaration (the only fact known before the response).
         agent: expectSse ? streamAgent : agent,
       },

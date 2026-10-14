@@ -24,6 +24,7 @@ import { readEventStream } from '../lib/sse.ts';
 import { MAX_BACKOFF_MS, backoff, sleep } from '../lib/backoff.ts';
 import { createStreamLeader, type Note, type StreamLeader } from '../state/jobStreamLeader.ts';
 import { reconcileAfterTakeover } from '../state/jobReconcile.ts';
+import { CSRF_HEADER, CSRF_VALUE } from '../../shared/auth.ts';
 
 /**
  * Sessions watched at once, per account: the active conversation plus two recent ones, under the
@@ -277,6 +278,7 @@ async function openStream(
           cache: 'no-store',
           headers: {
             accept: 'text/event-stream',
+            [CSRF_HEADER]: CSRF_VALUE,
             ...(token ? { authorization: `Bearer ${token}` } : {}),
           },
         },

@@ -55,9 +55,10 @@ const LONGEST_RETURN_TO = 512;
 /**
  * A place on this origin a sign-in may return to, or `/`. Only a rooted path survives: printable
  * ASCII only (anything else cannot be written into a `Location` header, so it would fail after the
- * sign-in succeeded), no scheme, no authority (`//host`, `/\host`), nothing under `/auth/` or
- * `/api/` (a return into the sign-in routes is a loop, into the proxy a download the page never
- * asked for).
+ * sign-in succeeded), no scheme, no authority (`//host`, `/\host`), no empty or dot segment
+ * (`/.//host` and `/..//host` are normalised by a browser into `//host`; `%2e` spells a dot),
+ * nothing under `/auth/` or `/api/` (a return into the sign-in routes is a loop, into the proxy a
+ * download the page never asked for).
  */
 export function safeReturnTo(raw: string | null | undefined): string {
   if (!raw || raw.length > LONGEST_RETURN_TO) return '/';
@@ -65,5 +66,17 @@ export function safeReturnTo(raw: string | null | undefined): string {
   if (!raw.startsWith('/') || raw.startsWith('//')) return '/';
   const path = raw.split(/[?#]/, 1)[0] ?? '/';
   if (/^\/(auth|api)(\/|$)/.test(path)) return '/';
+  const segments = path.split('/').slice(1);
+  for (const [index, segment] of segments.entries()) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(segment);
+    } catch {
+      return '/';
+    }
+    if (decoded === '.' || decoded === '..') return '/';
+    // An empty segment is a `//`, except the one after a trailing slash.
+    if (segment === '' && index < segments.length - 1) return '/';
+  }
   return raw;
 }

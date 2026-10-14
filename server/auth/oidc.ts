@@ -30,6 +30,14 @@ export class IdpUnavailable extends Error {
   }
 }
 
+/** Too many exchanges with the provider are already running: try again shortly. */
+export class IdpBusy extends IdpUnavailable {
+  constructor(what: string) {
+    super(`${what} calls to the identity provider are at their limit`);
+    this.name = 'IdpBusy';
+  }
+}
+
 export interface OidcOptions {
   /** `https://login.microsoftonline.com/<tenant>`, or a test authority. No trailing slash. */
   authority: string;
@@ -46,8 +54,13 @@ export interface OidcOptions {
   timeoutMs: number;
   /** After a key id is not found, how long before the key set is fetched again. */
   jwksCooldownMs?: number;
-  /** Origins besides the issuer's that the discovery document may name endpoints on. */
+  /** Origins besides the authority's that the discovery document may name endpoints on. */
   endpointOrigins?: string[];
+  /**
+   * Token-endpoint calls in flight at once, separately for code exchanges and for refreshes. The
+   * BFF's client secret rides on each, and an anonymous caller can start an exchange for free.
+   */
+  maxInflight?: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -71,6 +84,9 @@ export interface TokenSet {
 /** How long a discovery document is trusted before it is read again. */
 const DISCOVERY_TTL_MS = 3_600_000;
 
+/** Token-endpoint calls in flight at once, per kind, when nothing says otherwise. */
+const DEFAULT_MAX_INFLIGHT = 16;
+
 /** A discovery document that could not be refreshed is asked for again after this. */
 const RETRY_STALE_DISCOVERY_MS = 60_000;
 
@@ -93,6 +109,7 @@ const str = (value: unknown): string | undefined =>
 export class OidcClient {
   private discovered: { at: number; doc: Discovery } | null = null;
   private discovering: Promise<Discovery> | null = null;
+  private readonly inflight = { code: 0, refresh: 0 };
   private jwks: { uri: string; keys: ReturnType<typeof createRemoteJWKSet> } | null = null;
   private readonly http: typeof fetch;
   private readonly options: OidcOptions;
@@ -128,15 +145,17 @@ export class OidcClient {
   }
 
   /**
-   * An endpoint discovery names must be https (loopback http excepted) on the issuer's origin or
-   * one the operator listed (`ENTRA_ENDPOINTS_ORIGINS`).
+   * An endpoint discovery names must be https (loopback http excepted) on the origin the operator
+   * configured the authority at, or one they listed (`ENTRA_ENDPOINTS_ORIGINS`). Anchored to the
+   * configuration, not to the document's own `issuer`: a document that is consistent about being
+   * somewhere else is still somewhere else.
    */
-  private checkEndpoint(endpoint: string, issuer: string): void {
+  private checkEndpoint(endpoint: string): void {
     let url: URL;
     let home: URL;
     try {
       url = new URL(endpoint);
-      home = new URL(issuer);
+      home = new URL(this.options.authority);
     } catch {
       throw new IdpUnavailable('discovery names an endpoint that is not a URL');
     }
@@ -145,7 +164,7 @@ export class OidcClient {
       throw new IdpUnavailable(`discovery names a non-https endpoint (${url.origin})`);
     }
     if (url.origin !== home.origin && !(this.options.endpointOrigins ?? []).includes(url.origin)) {
-      throw new IdpUnavailable(`discovery names an endpoint on ${url.origin}, not the issuer's`);
+      throw new IdpUnavailable(`discovery names an endpoint on ${url.origin}, not the authority's`);
     }
   }
 
@@ -196,7 +215,7 @@ export class OidcClient {
     // The client secret and the user's code are sent to these, so a document that points them
     // elsewhere is refused whole rather than followed.
     for (const endpoint of [authorize, token, jwks, endSession, revocation]) {
-      if (endpoint !== undefined) this.checkEndpoint(endpoint, issuer);
+      if (endpoint !== undefined) this.checkEndpoint(endpoint);
     }
     const doc: Discovery = {
       issuer,
@@ -227,7 +246,22 @@ export class OidcClient {
   }
 
   /** The token endpoint, with this client's credentials on the form. */
-  private async tokenRequest(form: Record<string, string>): Promise<TokenSet> {
+  private async tokenRequest(
+    kind: 'code' | 'refresh',
+    form: Record<string, string>,
+  ): Promise<TokenSet> {
+    if (this.inflight[kind] >= (this.options.maxInflight ?? DEFAULT_MAX_INFLIGHT)) {
+      throw new IdpBusy(kind === 'code' ? 'sign-in' : 'refresh');
+    }
+    this.inflight[kind] += 1;
+    try {
+      return await this.postToken(form);
+    } finally {
+      this.inflight[kind] -= 1;
+    }
+  }
+
+  private async postToken(form: Record<string, string>): Promise<TokenSet> {
     const doc = await this.discovery();
     const body = new URLSearchParams({ client_id: this.options.clientId, ...form });
     if (this.options.clientSecret) body.set('client_secret', this.options.clientSecret);
@@ -260,7 +294,7 @@ export class OidcClient {
   }
 
   exchangeCode(code: string, verifier: string): Promise<TokenSet> {
-    return this.tokenRequest({
+    return this.tokenRequest('code', {
       grant_type: 'authorization_code',
       code,
       redirect_uri: this.options.redirectUri,
@@ -270,7 +304,7 @@ export class OidcClient {
   }
 
   refresh(refreshToken: string): Promise<TokenSet> {
-    return this.tokenRequest({
+    return this.tokenRequest('refresh', {
       grant_type: 'refresh_token',
       refresh_token: refreshToken,
       scope: this.options.scope,

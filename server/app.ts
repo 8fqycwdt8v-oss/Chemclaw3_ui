@@ -226,6 +226,12 @@ function proxyAsSession(
           renew: (refused) => auth.custody.renewAfterRefusal(session, refused),
           replayable: !route.upload,
           watch: (end) => auth.sessions.watch(session, end),
+          touch: () => void auth.sessions.get(session.id),
+          touchEveryMs: Math.max(250, Math.min(60_000, cfg.sessionIdleMs / 4)),
+          endedSetCookie: clearCookie(cfg.sessionCookieName, {
+            secure: cfg.cookieSecure,
+            sameSite: 'Strict',
+          }),
         },
       ),
     )

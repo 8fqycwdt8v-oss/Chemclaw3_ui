@@ -14,7 +14,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { startFixtureOidc } from '../e2e/fixture-oidc.ts';
 import { OidcClient } from '../server/auth/oidc.ts';
 import { SessionStore, SpentStates } from '../server/auth/sessions.ts';
-import { Browser, CLIENT_ID, CLIENT_SECRET, startStack } from './bffHarness.ts';
+import { Browser, CLIENT_ID, CLIENT_SECRET, SID, startStack } from './bffHarness.ts';
 import type { Stack } from './bffHarness.ts';
 
 const CSRF = { 'x-chemclaw-csrf': '1' };
@@ -161,6 +161,36 @@ describe('renewal before expiry', () => {
     stack.idp.behaviour.refreshFails = null;
     await sleep(1_100);
     expect((await call(browser)).status).toBe(200);
+  });
+
+  it('does not send an upload for a session that ended while its bearer was being renewed', async () => {
+    const browser = new Browser();
+    await stack.signIn('alice', '/', browser);
+    await sleep(1_200); // inside the skew: the next request renews first
+    stack.idp.behaviour.tokenDelayMs = 600;
+
+    const upload = browser.request(`${stack.origin}/api/sessions/${SID}/attachments`, {
+      method: 'POST',
+      headers: { ...CSRF, origin: stack.origin },
+      // No body: the case where the stream is already at its end when the request is built.
+    });
+    await sleep(200);
+    // The person signs out while the renewal is still running.
+    const out = await browser.request(`${stack.origin}/auth/logout`, {
+      method: 'POST',
+      headers: { ...CSRF, origin: stack.origin },
+    });
+    expect(out.status).toBe(200);
+
+    const res = await upload;
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ code: 'session_expired' });
+    expect(res.headers.get('set-cookie')).toMatch(/^chemclaw_session=; .*Max-Age=0/);
+    // Nothing went upstream under the ended session (given time to arrive, were it going to), and
+    // the process is still serving.
+    await sleep(400);
+    expect(stack.core.seen.filter((s) => s.path.endsWith('/attachments'))).toHaveLength(0);
+    expect((await new Browser().request(`${stack.origin}/auth/session`)).status).toBe(200);
   });
 
   it('ends a session whose provider issued no refresh token when its access token runs out', async () => {
@@ -410,17 +440,17 @@ describe('the live requests of a session', () => {
     store.stop();
   });
 
-  it('can be withdrawn, and a watch on a session already gone ends at once', () => {
+  it('can be withdrawn, and a watch on a session already gone is refused rather than attached', () => {
     const store = new SessionStore(limits, () => 0);
     const session = store.create(fresh());
     const ended: string[] = [];
     const withdraw = store.watch(session, () => ended.push('withdrawn'));
-    withdraw();
+    withdraw?.();
     store.delete(session.id);
     expect(ended).toEqual([]);
 
-    store.watch(session, () => ended.push('late'));
-    expect(ended).toEqual(['late']);
+    expect(store.watch(session, () => ended.push('late'))).toBeNull();
+    expect(ended).toEqual([]);
     store.stop();
   });
 });
@@ -600,8 +630,47 @@ describe('the endpoints discovery names', () => {
     });
   });
 
+  it('are refused when a hostile document is consistent about being elsewhere', async () => {
+    // Issuer and every endpoint on the attacker's host: self-consistent, and still not the
+    // authority the operator configured.
+    const hostile = {
+      issuer: 'https://evil.example/tenant/v2.0',
+      authorization_endpoint: 'https://evil.example/tenant/authorize',
+      token_endpoint: 'https://evil.example/tenant/token',
+      jwks_uri: 'https://evil.example/tenant/keys',
+    };
+    await expect(clientFor(hostile).discovery()).rejects.toMatchObject({ name: 'IdpUnavailable' });
+  });
+
   it('are not checked when discovery does not name them (device code, userinfo and the like)', async () => {
     const doc = { ...good, userinfo_endpoint: 'https://graph.example/oidc/userinfo' };
     await expect(clientFor(doc).discovery()).resolves.toBeDefined();
   });
+});
+
+describe('a live stream is use of its session', () => {
+  it('keeps a session whose only traffic is an open stream from idling out', async () => {
+    const quiet = await startStack({ env: { SESSION_IDLE_MINUTES: '0.05' } }); // 3 s idle
+    try {
+      const browser = new Browser();
+      await quiet.signIn('alice', '/', browser);
+      const cookie = [...browser.cookies(quiet.origin)]
+        .map(([k, c]) => `${k}=${c.value}`)
+        .join('; ');
+      const res = await fetch(`${quiet.bffUrl}/api/sessions/${SID}/events`, {
+        headers: { cookie, accept: 'text/event-stream', ...CSRF },
+      });
+      const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+      await reader.read();
+
+      await sleep(5_000); // longer than the idle time, with no other request
+      expect(await (await browser.request(`${quiet.origin}/auth/session`)).json()).toMatchObject({
+        authenticated: true,
+      });
+      expect(quiet.core.openStreams).toBe(1);
+      await reader.cancel();
+    } finally {
+      await quiet.stop();
+    }
+  }, 20_000);
 });

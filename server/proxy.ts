@@ -44,9 +44,16 @@ export interface ProxyAuth {
   replayable: boolean;
   /**
    * Register how to end this request if its session ends first (sign-out, expiry, a refused
-   * refresh); returns how to withdraw it. A stream otherwise outlives the credential it started on.
+   * refresh); returns how to withdraw it, or `null` when the session is already gone, in which
+   * case `end` is not called and the request must not go out. A stream otherwise outlives the
+   * credential it started on.
    */
-  watch: (end: () => void) => () => void;
+  watch: (end: () => void) => (() => void) | null;
+  /** Mark the session in use (a live stream is use); called every `touchEveryMs` while one runs. */
+  touch: () => void;
+  touchEveryMs: number;
+  /** A `Set-Cookie` that clears the session cookie, sent with the 401 for an ended session. */
+  endedSetCookie: string;
 }
 
 /** A request that carries no credential: a public probe under `bff`, whatever the browser sent. */
@@ -271,18 +278,50 @@ export function proxy(
   // The session ending ends this request, and the browser's end of it, so a stream does not go on
   // under a bearer that was just revoked.
   if (auth) {
-    const withdraw = auth.watch(() => {
+    const endRequest = (): void => {
       current?.destroy();
+      if (res.writableEnded || res.destroyed) return;
       if (res.headersSent) {
         res.destroy();
         return;
       }
       // Nothing sent yet: say why rather than drop the connection.
-      res.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      res.writeHead(401, {
+        'content-type': 'application/json',
+        'cache-control': 'no-store',
+        'set-cookie': auth.endedSetCookie,
+      });
       res.end('{"detail":"session expired","code":"session_expired"}');
-    });
+    };
+    const withdraw = auth.watch(endRequest);
+    if (!withdraw) {
+      // The session ended while its bearer was being fetched: nothing may go upstream under it.
+      endRequest();
+      return;
+    }
     res.on('close', withdraw);
   }
+
+  /**
+   * Run a handler a socket or promise will call, containing its failure to this request: a throw
+   * there is not a programmer error in the process, and `server/index.ts` treats an uncaught one as
+   * fatal for every other user's streams.
+   */
+  const contained =
+    <Args extends unknown[]>(stage: string, handler: (...args: Args) => void) =>
+    (...args: Args): void => {
+      try {
+        handler(...args);
+      } catch (error) {
+        log.error('proxy handler failed', {
+          stage,
+          error: error instanceof Error ? error.message : String(error),
+          correlation_id: trace.correlationId,
+        });
+        current?.destroy();
+        res.destroy();
+      }
+    };
 
   /**
    * One attempt at the upstream. `body` is the request held in memory (a replayable request), or
@@ -290,6 +329,8 @@ export function proxy(
    * back while the bearer is renewed, then the request is sent again, once.
    */
   const attempt = (bearer: string | null, body: Buffer | undefined, retried: boolean): void => {
+    // Never send for somebody who is gone, or whose request already has its answer.
+    if (res.writableEnded || res.destroyed) return;
     const upstreamReq = transport.request(
       {
         protocol: upstream.protocol,
@@ -301,7 +342,11 @@ export function proxy(
         // Pool chosen by the route's declaration (the only fact known before the response).
         agent: expectSse ? streamAgent : agent,
       },
-      (upstreamRes) => {
+      contained('response', (upstreamRes: IncomingMessage) => {
+        if (res.writableEnded || res.destroyed) {
+          upstreamRes.destroy();
+          return;
+        }
         trace.upstreamMs = Date.now() - startedAt;
         if (upstreamRes.statusCode === 401 && auth && bearer !== null && body && !retried) {
           // Held, not read: if no fresh bearer exists, this very response is relayed below.
@@ -309,18 +354,20 @@ export function proxy(
           void auth
             .renew(bearer)
             .catch(() => null)
-            .then((fresh) => {
-              if (res.destroyed || res.writableEnded) return upstreamRes.destroy();
-              if (fresh && fresh !== bearer) {
-                upstreamRes.resume();
-                return attempt(fresh, body, true);
-              }
-              return relay(upstreamRes);
-            });
+            .then(
+              contained('renewal', (fresh: string | null) => {
+                if (res.destroyed || res.writableEnded) return upstreamRes.destroy();
+                if (fresh && fresh !== bearer) {
+                  upstreamRes.resume();
+                  return attempt(fresh, body, true);
+                }
+                return relay(upstreamRes);
+              }),
+            );
           return;
         }
         relay(upstreamRes);
-      },
+      }),
     );
     current = upstreamReq;
 
@@ -425,6 +472,10 @@ export function proxy(
 
   /** Send an upstream response on to the browser, owning the headers that are this process's. */
   const relay = (upstreamRes: IncomingMessage): void => {
+    if (res.writableEnded || res.destroyed || res.headersSent) {
+      upstreamRes.destroy();
+      return;
+    }
     // Prefer the service's correlation id when it sent one; `writeHead` overrides the minted
     // header.
     const fromUpstream = correlationFrom(upstreamRes.headers);
@@ -450,6 +501,12 @@ export function proxy(
     res.flushHeaders();
 
     if (streaming && cfg.sseHeartbeatMs > 0) attachHeartbeat(upstreamRes, res);
+    if (streaming && auth) {
+      // A stream is use of the session: without this its idle clock runs out under a live stream.
+      const timer = setInterval(auth.touch, auth.touchEveryMs);
+      timer.unref();
+      res.on('close', () => clearInterval(timer));
+    }
 
     upstreamRes.pipe(res);
   };

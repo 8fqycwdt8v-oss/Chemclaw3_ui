@@ -348,6 +348,14 @@ describe('where a sign-in may return to', () => {
     [`/${'a'.repeat(600)}`, '/'],
     // An encoded slash that decodes to an authority.
     ['%2F%2Fevil.example', '/'],
+    // Dot segments a browser collapses into an authority.
+    ['/.//evil.example', '/'],
+    ['/..//evil.example', '/'],
+    ['/%2e//evil.example', '/'],
+    ['/%2E%2e//evil.example', '/'],
+    ['/a/../..//evil.example', '/'],
+    ['/a//b', '/'],
+    ['/./x', '/'],
   ])('refuses %j and lands on the root', async (returnTo, expected) => {
     expect((await landing(returnTo)).startsWith(expected)).toBe(true);
     expect(await landing(returnTo)).toBe('/?signed_in=1');
@@ -469,15 +477,54 @@ describe('the sealed sign-in cookie', () => {
     expect(new URL(back.headers.get('location') ?? '', stack.origin).pathname).toBe('/one');
     const other = await browser.request(await callbackFor(two.authorize));
     expect(new URL(other.headers.get('location') ?? '', stack.origin).pathname).toBe('/two');
+  });
 
+  it('holds six at once, refuses a seventh rather than drop a sign-in younger than 30 s', async () => {
     const crowded = freshBrowser();
     const starts = [];
-    for (let i = 0; i < 5; i += 1) starts.push(await begin(crowded, `/${i}`));
-    expect(crowded.cookiesWithPrefix(stack.origin, PREFIX).length).toBeLessThanOrEqual(3);
-    // The oldest was dropped to make room, so its callback finds nothing; the newest works.
-    expect((await crowded.request(await callbackFor(starts[0]!.authorize))).status).toBe(400);
-    expect((await crowded.request(await callbackFor(starts[4]!.authorize))).status).toBe(302);
+    for (let i = 0; i < 6; i += 1) starts.push(await begin(crowded, `/${i}`));
+    expect(crowded.cookiesWithPrefix(stack.origin, PREFIX)).toHaveLength(6);
+
+    // A page forcing navigations to /auth/login cannot push the first one out from under its owner.
+    const seventh = await crowded.request(`${stack.origin}/auth/login`);
+    expect(seventh.status).toBe(429);
+    expect(seventh.headers.get('retry-after')).toBe('30');
+    expect(crowded.cookiesWithPrefix(stack.origin, PREFIX)).toHaveLength(6);
+    expect((await crowded.request(await callbackFor(starts[0]!.authorize))).status).toBe(302);
+
+    // One slot free again: a new sign-in is accepted.
+    expect((await crowded.request(`${stack.origin}/auth/login`)).status).toBe(302);
   });
+
+  it('keeps the whole Cookie header under 8 kB with six sign-ins of the longest return path', async () => {
+    const browser = freshBrowser();
+    for (let i = 0; i < 6; i += 1) await begin(browser, `/${'a'.repeat(511)}`);
+    const header = [...browser.cookies(stack.origin)].map(([k, c]) => `${k}=${c.value}`).join('; ');
+    expect(header.length).toBeLessThan(7_500);
+  });
+
+  it('drops the oldest once it is old enough, and clears expired ones', async () => {
+    const quick = await startStack({ env: { LOGIN_STATE_TTL_SECONDS: '4' } }); // minimum age 2 s
+    try {
+      const browser = freshBrowser();
+      const first = await browser.request(`${quick.origin}/auth/login`);
+      const firstName = browser.cookiesWithPrefix(quick.origin, PREFIX)[0]?.[0] ?? '';
+      expect(first.status).toBe(302);
+      for (let i = 0; i < 5; i += 1) await browser.request(`${quick.origin}/auth/login`);
+      expect(browser.cookiesWithPrefix(quick.origin, PREFIX)).toHaveLength(6);
+
+      await new Promise((resolve) => setTimeout(resolve, 2_300));
+      expect((await browser.request(`${quick.origin}/auth/login`)).status).toBe(302);
+      expect(browser.cookiesWithPrefix(quick.origin, PREFIX)).toHaveLength(6);
+      expect(browser.cookie(quick.origin, firstName)).toBeUndefined();
+
+      await new Promise((resolve) => setTimeout(resolve, 4_200)); // all expired now
+      await browser.request(`${quick.origin}/auth/login`);
+      expect(browser.cookiesWithPrefix(quick.origin, PREFIX)).toHaveLength(1);
+    } finally {
+      await quick.stop();
+    }
+  }, 20_000);
 });
 
 describe('an anonymous flood of sign-ins', () => {
@@ -569,6 +616,51 @@ describe('over https', () => {
       expect(cookie?.raw).not.toMatch(/Domain/i);
     } finally {
       await secure.stop();
+    }
+  });
+});
+
+describe('bogus callbacks against the provider’s token endpoint', () => {
+  it('never exceed the in-flight cap, are told to retry, and do not block a sign-in that comes after', async () => {
+    const capped = await startStack({ env: { OIDC_MAX_INFLIGHT: '4' } });
+    try {
+      capped.idp.behaviour.tokenDelayMs = 150;
+      const before = capped.idp.tokenRequests.length;
+
+      const attempts = Array.from({ length: 40 }, async () => {
+        const browser = freshBrowser();
+        const login = await browser.request(`${capped.origin}/auth/login`);
+        const state = new URL(login.headers.get('location') ?? '').searchParams.get('state') ?? '';
+        return browser.request(
+          `${capped.origin}/auth/callback?state=${state}&code=not-a-code-${Math.random()}`,
+        );
+      });
+      const answers = await Promise.all(attempts);
+
+      // Four at a time at the most reached the provider, however many arrived.
+      expect(capped.idp.calls.maxTokenConcurrency).toBeLessThanOrEqual(4);
+      const busy = answers.filter((r) => r.status === 503);
+      expect(busy.length).toBeGreaterThan(0);
+      expect(busy.every((r) => r.headers.get('retry-after') === '5')).toBe(true);
+      expect(answers.every((r) => r.status === 503 || r.status === 403)).toBe(true);
+      expect(capped.idp.tokenRequests.length - before).toBeLessThan(40);
+
+      // The flood is over; nobody is locked out.
+      capped.idp.behaviour.tokenDelayMs = 0;
+      const browser = freshBrowser();
+      const { res } = await capped.signIn('alice', '/', browser);
+      expect(res.status).toBe(200);
+      expect(browser.cookie(capped.origin, cookieName)).toBeDefined();
+
+      // And it is countable, by reason, without a label anyone can mint.
+      const metrics = await (await fetch(`${capped.bffUrl}/metrics`)).text();
+      expect(metrics).toMatch(/chemclaw_ui_login_failures_total\{reason="busy"\} [1-9]/);
+      expect(metrics).toMatch(
+        /chemclaw_ui_login_failures_total\{reason="exchange_rejected"\} [1-9]/,
+      );
+      expect(metrics).not.toContain('not-a-code');
+    } finally {
+      await capped.stop();
     }
   });
 });

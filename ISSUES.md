@@ -102,6 +102,15 @@ provider's session lasts), and more than one replica needs the router to keep a 
 sealed cookie, a core API and Postgres; revisit when releases are frequent enough that the silent
 re-sign-in is noticed, or a deployment needs replicas affinity cannot serve.
 
+### Issue 27: no cap on sessions per account
+
+`SESSION_MAX_SESSIONS` bounds a pod's sessions, evicting the least recently used, but nothing
+bounds one account's: a person (or an attacker holding valid credentials) who signs in repeatedly
+can push others' sessions out of a pod that is near its cap. Accepted because the cap is far above
+the pod's load (10,000 sessions for ~200 people), each sign-in needs the identity provider's
+consent, and the provider's own policy is where an account's session count is governed. Revisit
+if sessions move to a shared store (Issue 26), which can count per account cheaply.
+
 ### Issue 11: `canonicalSmiles` may answer "too complex" for a legal long chain
 
 The answer depends on the JavaScript stack at the moment of the call, not only on the input. Every

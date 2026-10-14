@@ -12,11 +12,12 @@ import { AUTH_PATHS, SIGNED_IN_MARKER, safeReturnTo } from '../../shared/auth.ts
 import type { LogoutView, SessionView } from '../../shared/auth.ts';
 import { cfg } from '../config.ts';
 import { log } from '../log.ts';
-import { authEventRecorded } from '../metrics.ts';
+import { authEventRecorded, loginFailureRecorded } from '../metrics.ts';
+import type { LoginFailure } from '../metrics.ts';
 import { clearCookie, cookieNames, readCookie, readSealedCookie, setCookie } from './cookies.ts';
 import { Custody } from './custody.ts';
 import { csrfRefusal } from './csrf.ts';
-import { IdpRejected, IdpUnavailable, OidcClient } from './oidc.ts';
+import { IdpBusy, IdpRejected, IdpUnavailable, OidcClient } from './oidc.ts';
 import { deriveKey, seal, tagOf, unseal } from './sealed.ts';
 import { SessionStore, SpentStates, randomToken, sameSecret } from './sessions.ts';
 import type { Session } from './sessions.ts';
@@ -24,8 +25,18 @@ import type { Session } from './sessions.ts';
 /** Callbacks remembered as taken; bounded, and each expires with the cookie that carried it. */
 const MAX_SPENT_STATES = 10_000;
 
-/** Sign-ins in progress per browser (one cookie each, so several tabs can sign in at once). */
-const MAX_LOGIN_COOKIES = 3;
+/**
+ * Sign-ins in progress per browser (one cookie each, so several tabs can sign in at once). Six at
+ * ~1 kB each (the longest return path allowed) is ~6.5 kB of `Cookie` header, inside the 8 kB
+ * common proxies accept (Node's own default is 16 kB).
+ */
+const MAX_LOGIN_COOKIES = 6;
+
+/**
+ * A sign-in cookie younger than this is never dropped to make room: otherwise a page that forces
+ * navigations to `/auth/login` could push a person's sign-in out from under them.
+ */
+const MIN_LOGIN_COOKIE_AGE_MS = 30_000;
 
 /** A backend 401 forces a refresh at most this often for one session. */
 const FORCED_REFRESH_MIN_INTERVAL_MS = 30_000;
@@ -73,6 +84,7 @@ export class AuthService {
       endSession: cfg.endSessionEnabled,
       timeoutMs: cfg.oidcHttpTimeoutMs,
       endpointOrigins: cfg.entraEndpointOrigins,
+      maxInflight: cfg.oidcMaxInflight,
     });
     this.custody = new Custody(this.sessions, this.oidc, {
       skewMs: cfg.tokenRefreshSkewMs,
@@ -125,11 +137,14 @@ export class AuthService {
   private loginCookieFlags = { secure: cfg.cookieSecure, sameSite: 'Lax' } as const;
 
   /**
-   * Set-Cookie values that clear this browser's expired sign-in cookies and, past
-   * `MAX_LOGIN_COOKIES`, its oldest, so a browser never accumulates them.
+   * Make room for one more sign-in cookie: clear this browser's expired ones, then — only while it
+   * holds `MAX_LOGIN_COOKIES` — its oldest, and never one younger than `MIN_LOGIN_COOKIE_AGE_MS`.
+   * `full` means every cookie it holds is that young: the new sign-in is refused instead.
    */
-  private tidyLoginCookies(req: IncomingMessage): string[] {
+  private makeRoom(req: IncomingMessage): { clear: string[]; full: boolean } {
     const prefix = `${cfg.loginCookieName}_`;
+    const now = Date.now();
+    const minAge = Math.min(MIN_LOGIN_COOKIE_AGE_MS, cfg.loginStateTtlMs / 2);
     const live: { name: string; expiresAt: number }[] = [];
     const clear: string[] = [];
     for (const name of cookieNames(req, prefix)) {
@@ -138,10 +153,17 @@ export class AuthService {
       else clear.push(name);
     }
     live.sort((a, b) => a.expiresAt - b.expiresAt);
-    clear.push(
-      ...live.slice(0, Math.max(0, live.length - (MAX_LOGIN_COOKIES - 1))).map((l) => l.name),
-    );
-    return clear.map((name) => clearCookie(name, this.loginCookieFlags));
+    let held = live.length;
+    for (const cookie of live) {
+      if (held < MAX_LOGIN_COOKIES) break;
+      if (now - (cookie.expiresAt - cfg.loginStateTtlMs) < minAge) continue;
+      clear.push(cookie.name);
+      held -= 1;
+    }
+    return {
+      clear: clear.map((name) => clearCookie(name, this.loginCookieFlags)),
+      full: held >= MAX_LOGIN_COOKIES,
+    };
   }
 
   private async login(
@@ -150,6 +172,12 @@ export class AuthService {
     query: URLSearchParams,
     correlationId: string,
   ): Promise<void> {
+    const room = this.makeRoom(req);
+    if (room.full) {
+      res.writeHead(429, { ...NO_STORE, 'content-type': 'application/json', 'retry-after': '30' });
+      res.end('{"detail":"too many sign-ins in progress in this browser"}');
+      return;
+    }
     const state = randomToken();
     const nonce = randomToken();
     const verifier = randomToken();
@@ -182,7 +210,7 @@ export class AuthService {
       ...NO_STORE,
       location,
       'set-cookie': [
-        ...this.tidyLoginCookies(req),
+        ...room.clear,
         // Lax: the provider's redirect back is a cross-site navigation and must carry it.
         setCookie(this.loginCookie(tagOf(state)), sealed, {
           ...this.loginCookieFlags,
@@ -211,7 +239,7 @@ export class AuthService {
         ? stored
         : undefined;
     if (!login) {
-      authEventRecorded('login_failed');
+      this.failed('state');
       this.fail(
         res,
         400,
@@ -226,7 +254,7 @@ export class AuthService {
     const providerError = query.get('error');
     const code = query.get('code');
     if (providerError || !code) {
-      authEventRecorded('login_failed');
+      this.failed('provider_error');
       this.fail(
         res,
         403,
@@ -238,7 +266,6 @@ export class AuthService {
       );
       return;
     }
-    let session: Session | undefined;
     try {
       const tokens = await this.oidc.exchangeCode(code, login.verifier);
       if (!tokens.idToken) throw new IdpRejected('invalid_id_token', 'no ID token was issued');
@@ -247,7 +274,7 @@ export class AuthService {
       // an id set by anyone else never becomes an authenticated one.
       const previous = readCookie(req, cfg.sessionCookieName);
       if (previous) this.sessions.delete(previous);
-      session = this.sessions.create({
+      const session = this.sessions.create({
         account,
         accessToken: tokens.accessToken,
         accessExpiresAt: tokens.expiresAt,
@@ -269,9 +296,15 @@ export class AuthService {
       });
       res.end();
     } catch (error) {
-      // A session created for a response that could not be written would sit unclaimed.
-      if (session) this.sessions.delete(session.id);
-      authEventRecorded('login_failed');
+      this.failed(
+        error instanceof IdpBusy
+          ? 'busy'
+          : error instanceof IdpUnavailable
+            ? 'idp_unavailable'
+            : error instanceof IdpRejected && error.oauthError === 'invalid_id_token'
+              ? 'id_token'
+              : 'exchange_rejected',
+      );
       const unavailable = error instanceof IdpUnavailable;
       this.fail(
         res,
@@ -285,6 +318,12 @@ export class AuthService {
         loginCookie,
       );
     }
+  }
+
+  /** Count a failed sign-in, in total and by reason. */
+  private failed(reason: LoginFailure): void {
+    authEventRecorded('login_failed');
+    loginFailureRecorded(reason);
   }
 
   private session(req: IncomingMessage, res: ServerResponse): void {
@@ -353,6 +392,7 @@ export class AuthService {
       `<p><small>Reference ${escapeHtml(correlationId)}</small></p></body></html>`;
     res.writeHead(status, {
       ...NO_STORE,
+      ...(status === 503 ? { 'retry-after': '5' } : {}),
       'content-type': 'text/html; charset=utf-8',
       ...(extraCookie ? { 'set-cookie': extraCookie } : {}),
     });

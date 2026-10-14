@@ -13,7 +13,6 @@ import http from 'node:http';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { vi } from 'vitest';
 import { startFixtureOidc } from '../e2e/fixture-oidc.ts';
@@ -22,14 +21,6 @@ import type { FixtureOidc, FixtureOidcOptions } from '../e2e/fixture-oidc.ts';
 export const CLIENT_ID = 'chemclaw-bff-test';
 export const CLIENT_SECRET = 'test-client-secret';
 export const SID = 'a'.repeat(32);
-
-export async function freePort(): Promise<number> {
-  const probe = net.createServer();
-  await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
-  const port = (probe.address() as AddressInfo).port;
-  await new Promise<void>((resolve) => probe.close(() => resolve()));
-  return port;
-}
 
 export interface Seen {
   method: string;
@@ -242,7 +233,11 @@ export interface StackOptions {
 }
 
 export async function startStack(options: StackOptions = {}): Promise<Stack> {
-  const port = await freePort();
+  // The listener is bound first, on a port the OS chose, and handed its handler once the module
+  // that needs the port in its environment has been imported: no port is ever freed and reused.
+  const server = http.createServer();
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as AddressInfo).port;
   const bffUrl = `http://127.0.0.1:${port}`;
   const origin = options.appOrigin ?? bffUrl;
 
@@ -277,8 +272,7 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
   for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
   vi.resetModules();
   const { createRequestListener } = await import('../server/app.ts');
-  const server = http.createServer(createRequestListener());
-  await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', resolve));
+  server.on('request', createRequestListener());
 
   const browser = new Browser();
   if (options.appOrigin) browser.hosts.set(new URL(options.appOrigin).host, `127.0.0.1:${port}`);

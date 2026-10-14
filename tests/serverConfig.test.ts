@@ -9,6 +9,7 @@
  * from `process.env` at module scope and there is only ever one of it per process.
  */
 
+import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isLoopbackHost, validateConfig, type BffConfig } from '../server/config.ts';
 
@@ -41,6 +42,7 @@ const base: BffConfig = {
   oidcHttpTimeoutMs: 10_000,
   tokenRefreshBackoffMs: 5_000,
   sessionKey: '',
+  oidcMaxInflight: 16,
   entraEndpointOrigins: [],
   sessionCookieName: 'chemclaw_session',
   loginCookieName: 'chemclaw_login',
@@ -526,7 +528,27 @@ describe('AUTH_MODE=bff', () => {
 
   it('holds the sign-in cookie key to a length worth the name, and the extra endpoint origins to origins', () => {
     expect(validateConfig(config({ ...bff, sessionKey: 'short' })).join()).toContain('SESSION_KEY');
-    expect(validateConfig(config({ ...bff, sessionKey: 'k'.repeat(32) }))).toEqual([]);
+    expect(validateConfig(config({ ...bff, sessionKey: 'k'.repeat(32) })).join()).toContain(
+      'openssl rand -base64 32',
+    );
+    for (const good of [
+      randomBytes(32).toString('base64'),
+      randomBytes(32).toString('base64url'),
+      randomBytes(32).toString('hex'),
+      randomBytes(48).toString('base64'),
+    ]) {
+      expect(validateConfig(config({ ...bff, sessionKey: good })), good).toEqual([]);
+    }
+    for (const bad of [
+      'a-long-passphrase-with-spaces and punctuation!!',
+      randomBytes(31).toString('base64'),
+      randomBytes(31).toString('hex'),
+      `${randomBytes(32).toString('base64')} `,
+    ]) {
+      expect(validateConfig(config({ ...bff, sessionKey: bad })).join(), bad).toContain(
+        'SESSION_KEY',
+      );
+    }
     expect(
       validateConfig(config({ ...bff, entraEndpointOrigins: ['https://sts.example/path'] })).join(),
     ).toContain('ENTRA_ENDPOINTS_ORIGINS');

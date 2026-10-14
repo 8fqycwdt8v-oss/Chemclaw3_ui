@@ -169,6 +169,18 @@ describe('the example OpenShift manifests', () => {
     );
   });
 
+  it('limits each client address at the router: the sign-in routes are open to anyone', () => {
+    const appRoute = routes.find((r) => routeSpec(r).port.targetPort === 'http');
+    const annotations = appRoute?.metadata.annotations ?? {};
+    expect(annotations['haproxy.router.openshift.io/rate-limit-connections']).toBe('true');
+    for (const name of ['concurrent-tcp', 'rate-tcp', 'rate-http']) {
+      expect(
+        Number(annotations[`haproxy.router.openshift.io/rate-limit-connections.${name}`]),
+        name,
+      ).toBeGreaterThan(0);
+    }
+  });
+
   it('boots, with this environment, with the sandbox on and nothing refused', async () => {
     // The file is the Secret's mount; here, a stand-in with the same name's contents.
     const secretFile = join(mkdtempSync(join(tmpdir(), 'oidc-')), 'client-secret');

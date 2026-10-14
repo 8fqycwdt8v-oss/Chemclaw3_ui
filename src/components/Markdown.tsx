@@ -129,12 +129,16 @@ const components: Components = {
   img({ src, alt, node: _node, ...props }) {
     // Images render only from sources the app produced (`data:image/`, a page-minted `blob:`, or a
     // same-origin path). Anything external becomes an inert placeholder, so a prompt-injected image
-    // URL cannot exfiltrate data.
+    // URL cannot exfiltrate data. The BFF's own routes are not image sources either: `/api` refuses
+    // a request without the CSRF header (an <img> cannot send it), and `/auth` would be a GET with
+    // side effects chosen by the model.
     const source = typeof src === 'string' ? src : '';
     const isLocal =
       source.startsWith('data:image/') ||
       source.startsWith('blob:') ||
-      (source.startsWith('/') && !source.startsWith('//'));
+      (source.startsWith('/') &&
+        !source.startsWith('//') &&
+        !/^\/(api|auth)(\/|\?|#|$)/i.test(source));
     if (isLocal) {
       return <img src={source} alt={alt ?? ''} {...props} />;
     }

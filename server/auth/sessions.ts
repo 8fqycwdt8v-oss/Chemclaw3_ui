@@ -110,13 +110,13 @@ export class SessionStore {
     return session;
   }
 
-  /** Register the end of a live request made under `session`; returns how to withdraw it. */
-  watch(session: Session, end: () => void): () => void {
-    // A session already gone ends the request at once rather than never.
-    if (this.sessions.get(session.id) !== session) {
-      end();
-      return () => undefined;
-    }
+  /**
+   * Register the end of a live request made under `session`; returns how to withdraw it, or `null`
+   * when the session is already gone.
+   */
+  watch(session: Session, end: () => void): (() => void) | null {
+    // A session already gone has nothing to attach to; the caller must not proceed under it.
+    if (this.sessions.get(session.id) !== session) return null;
     session.watchers.add(end);
     return () => session.watchers.delete(end);
   }
@@ -153,9 +153,10 @@ export class SessionStore {
 }
 
 /**
- * The states whose callback has been taken, so a sealed login cookie replayed within its life finds
- * its state spent. Bounded and expiring; evicting the oldest only matters to an attacker who
- * already holds a sealed cookie *and* the provider's single-use code.
+ * The states whose callback this pod has taken. Best effort, and said as such: it narrows the
+ * replay of a sealed login cookie within its life, on this pod, while the entry lasts (it is
+ * bounded, expires, and is lost on restart). The provider's single-use authorization code is the
+ * real guard against a replayed callback.
  */
 export class SpentStates {
   private readonly spent = new Map<string, number>();

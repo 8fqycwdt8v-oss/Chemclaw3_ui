@@ -97,6 +97,8 @@ export interface Calls {
   endSessions: number;
   jwks: number;
   discovery: number;
+  /** The most token-endpoint requests it has been handling at the same moment. */
+  maxTokenConcurrency: number;
 }
 
 export interface FixtureOidc {
@@ -161,7 +163,9 @@ export async function startFixtureOidc(options: FixtureOidcOptions): Promise<Fix
     endSessions: 0,
     jwks: 0,
     discovery: 0,
+    maxTokenConcurrency: 0,
   };
+  let tokenInflight = 0;
   const accessTokens: string[] = [];
   const tokenRequests: Record<string, string>[] = [];
   const revoked = new Set<string>();
@@ -363,6 +367,16 @@ export async function startFixtureOidc(options: FixtureOidcOptions): Promise<Fix
   };
 
   const tokenEndpoint = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    tokenInflight += 1;
+    calls.maxTokenConcurrency = Math.max(calls.maxTokenConcurrency, tokenInflight);
+    try {
+      await tokenEndpointInner(req, res);
+    } finally {
+      tokenInflight -= 1;
+    }
+  };
+
+  const tokenEndpointInner = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const form = await readForm(req);
     tokenRequests.push(form);
     if (behaviour.tokenDelayMs > 0) {

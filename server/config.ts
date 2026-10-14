@@ -296,8 +296,10 @@ export interface BffConfig {
    * empty means a random key per process.
    */
   sessionKey: string;
-  /** Origins besides the issuer's that discovery may point at (`ENTRA_ENDPOINTS_ORIGINS`). */
+  /** Origins besides the authority's that discovery may point at (`ENTRA_ENDPOINTS_ORIGINS`). */
   entraEndpointOrigins: string[];
+  /** Token-endpoint calls in flight at once, for sign-ins and for refreshes each (`OIDC_MAX_INFLIGHT`). */
+  oidcMaxInflight: number;
   /** The session cookie's name: `__Host-` prefixed exactly when `APP_ORIGIN` is https. */
   sessionCookieName: string;
   /** The cookie that ties a sign-in in progress to the browser that began it. */
@@ -427,6 +429,7 @@ export const cfg: BffConfig = {
   oidcHttpTimeoutMs: num('OIDC_HTTP_TIMEOUT_MS', 10_000),
   tokenRefreshBackoffMs: num('TOKEN_REFRESH_BACKOFF_SECONDS', 5) * 1_000,
   sessionKey: secret('SESSION_KEY'),
+  oidcMaxInflight: Math.floor(num('OIDC_MAX_INFLIGHT', 16)),
   entraEndpointOrigins: str('ENTRA_ENDPOINTS_ORIGINS')
     .split(',')
     .map((origin) => origin.trim())
@@ -589,6 +592,17 @@ export function validateConfig(c: BffConfig = cfg): string[] {
   return problems;
 }
 
+/**
+ * Whether `SESSION_KEY` is at least 32 bytes in a form that says so: 64 or more hex characters, or
+ * base64/base64url that decodes to 32 or more bytes. A word or a short string is refused rather
+ * than stretched into a key.
+ */
+export function isUsableSessionKey(raw: string): boolean {
+  // All hex digits reads as hex, and must then be long enough as hex.
+  if (/^[0-9a-f]+$/i.test(raw)) return raw.length >= 64;
+  return /^[A-Za-z0-9+/_-]+={0,2}$/.test(raw) && Buffer.from(raw, 'base64').length >= 32;
+}
+
 /** The tenants that name no single issuer: a sign-in cannot validate a token against them. */
 const MULTI_TENANT_AUTHORITIES = new Set(['common', 'organizations', 'consumers']);
 
@@ -652,8 +666,11 @@ function bffProblems(c: BffConfig): string[] {
         'can be clickjacked into acting as the person.',
     );
   }
-  if (c.sessionKey && c.sessionKey.length < 32) {
-    problems.push('SESSION_KEY must be at least 32 characters (try `openssl rand -base64 32`).');
+  if (c.sessionKey && !isUsableSessionKey(c.sessionKey)) {
+    problems.push(
+      'SESSION_KEY must be at least 32 random bytes written as 64 hex characters or as base64 ' +
+        '(generate one with `openssl rand -base64 32`).',
+    );
   }
   for (const origin of c.entraEndpointOrigins) {
     if (plainOrigin(origin) !== origin.replace(/\/+$/, '')) {
@@ -673,6 +690,7 @@ function bffProblems(c: BffConfig): string[] {
     ['SESSION_MAX_SESSIONS', c.maxSessions],
     ['LOGIN_STATE_TTL_SECONDS', c.loginStateTtlMs],
     ['OIDC_HTTP_TIMEOUT_MS', c.oidcHttpTimeoutMs],
+    ['OIDC_MAX_INFLIGHT', c.oidcMaxInflight],
   ];
   for (const [name, value] of positive) {
     if (!(value > 0)) problems.push(`${name} must be a number above zero.`);

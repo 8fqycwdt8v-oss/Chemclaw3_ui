@@ -21,7 +21,7 @@
  * ## What the lane is, and how the suite knows
  *
  *  - **Auth mode** is read from the BFF's own `/config.js` at the start of the run (`authMode`
- *    `msal` → the oidc-mock mode, alice and bob sign in at the mock tenant; `dev` → one dev
+ *    `bff` → the oidc-mock mode, alice and bob sign in at the mock tenant; `dev` → one dev
  *    principal, and the two-person parts skip with the reason on the line).
  *  - **Model gateway** cannot be read from the stack (the front door answers the same either way),
  *    so it comes from the environment by the rule core's `deploy/kind/up.sh` applies:
@@ -42,7 +42,7 @@ export interface KindLane {
   uiUrl: string;
   /** The front door, for what the BFF deliberately does not proxy (`/metrics`). */
   coreUrl: string;
-  /** The mock tenant's authority, as the SPA's MSAL config names it. */
+  /** The mock tenant's authority, as the BFF is configured with it (`ENTRA_AUTHORITY`). */
   authority: string;
   modelGateway: { kind: 'mock' | 'real'; reason: string };
 }

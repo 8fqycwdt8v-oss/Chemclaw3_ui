@@ -27,7 +27,7 @@ import { queryClient } from '../src/api/queryClient.ts';
 import { stubFetch } from './helpers.ts';
 import type { DurableJobStatus, JobRecordSummary } from '../src/api/client.ts';
 
-const mode = { current: 'dev' as 'dev' | 'msal', roles: [] as string[] };
+const mode = { current: 'dev' as 'dev' | 'bff', roles: [] as string[] };
 
 vi.mock('../src/auth/AuthContext.tsx', async () => {
   const { config } = await import('../src/env.ts');
@@ -379,7 +379,7 @@ describe('JobsPanel', () => {
   });
 
   it('does not offer cancellation to someone without the role', async () => {
-    mode.current = 'msal';
+    mode.current = 'bff';
     mode.roles = [];
     serve();
     mountJobs();

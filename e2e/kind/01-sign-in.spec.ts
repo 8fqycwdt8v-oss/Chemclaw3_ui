@@ -12,8 +12,6 @@ import {
   accountButton,
   ask,
   authModeOf,
-  bearerOf,
-  claimsOf,
   composer,
   expect,
   lane,
@@ -21,6 +19,7 @@ import {
   requireTwoPeople,
   runTag,
   say,
+  sessionOf,
   signIn,
   test,
 } from './lane.ts';
@@ -29,7 +28,7 @@ test('sign-in lands on a conversation you can type into, not on a missing one', 
   browser,
 }) => {
   // The landing is asserted *before* anything else touches the page. After the tenant hands the
-  // code back, `/auth/callback` sends the SPA to `/`, which picks (or creates) a conversation —
+  // code back, the BFF sends the browser to `/`, which picks (or creates) a conversation —
   // and a chemist's first sight of the product is whatever that resolves to.
   const { page, context, problems } = await signIn(browser, ALICE);
   await expect(page).toHaveURL(/\/c\/[0-9a-f-]+$/);
@@ -72,8 +71,8 @@ test('alice and bob each see and send their own identity, and the service accept
     await expect(page.getByText(other.upn)).toHaveCount(0);
     await page.keyboard.press('Escape');
 
-    const claims = claimsOf((await bearerOf(page))!);
-    expect(claims).toMatchObject({ oid: person.oid, aud: 'api://chemclaw', scp: 'Chat.Access' });
+    // The BFF holds the token; what the page can know is whom the session belongs to.
+    expect(await sessionOf(page)).toMatchObject({ id: person.oid, username: person.upn });
   }
 
   // And the front door, not just the page, takes each of them as themselves: one turn each, and
@@ -103,7 +102,7 @@ test('signing out ends the session at the authority; the next person sees nothin
   browser,
 }) => {
   const mode = await authModeOf(lane().uiUrl);
-  test.skip(mode !== 'msal', 'devauth has no sign-in to end');
+  test.skip(mode !== 'bff', 'devauth has no sign-in to end');
   const { page, context } = await signIn(browser, ALICE);
   const tag = runTag();
   await newConversation(page);

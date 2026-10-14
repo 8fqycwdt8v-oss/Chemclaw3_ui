@@ -18,9 +18,14 @@ import { serveConfigJs } from './runtimeConfig.ts';
 import { log } from './log.ts';
 import { handleClientEvents } from './clientEvents.ts';
 import { readiness } from './ready.ts';
-import { renderMetrics, requestFinished, requestStarted } from './metrics.ts';
+import { authEventRecorded, renderMetrics, requestFinished, requestStarted } from './metrics.ts';
 import { CORRELATION_HEADER, mintCorrelationId } from './correlation.ts';
 import type { RequestTrace } from './proxy.ts';
+import { AuthService } from './auth/service.ts';
+import { SessionEnded } from './auth/custody.ts';
+import { csrfRefusal } from './auth/csrf.ts';
+import { IdpUnavailable } from './auth/oidc.ts';
+import { clearCookie } from './auth/cookies.ts';
 import { createSandboxHandler } from './sandbox.ts';
 import { SANDBOX_FRAME_PATH } from '../shared/sandbox.ts';
 
@@ -181,8 +186,76 @@ function failRequest(
   res.end('{"detail":"internal error"}');
 }
 
+/**
+ * Send a proxied request upstream under the session's bearer, or answer why it cannot go. The
+ * session is the cookie's, the bearer is fetched (and renewed) here and handed to the proxy, and a
+ * session the provider has ended is a 401 the SPA answers by signing in again.
+ */
+function proxyAsSession(
+  auth: AuthService,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  route: { path: string; sse: boolean; upload: boolean },
+  query: string,
+  trace: RequestTrace,
+): void {
+  const refusal = csrfRefusal(req, cfg.appOrigin);
+  if (refusal) {
+    auth.refuse(res, refusal);
+    return;
+  }
+  const session = auth.sessionFor(req);
+  if (!session) {
+    authEventRecorded('session_missing');
+    res.writeHead(401, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end('{"detail":"sign-in required","code":"session_required"}');
+    return;
+  }
+  void auth.custody
+    .bearer(session)
+    .then((bearer) =>
+      proxy(
+        req,
+        res,
+        route.path + query,
+        route.sse,
+        trace,
+        route.upload ? cfg.maxUploadBytes : cfg.maxBodyBytes,
+        {
+          bearer,
+          renew: (refused) => auth.custody.renewAfterRefusal(session, refused),
+          replayable: !route.upload,
+        },
+      ),
+    )
+    .catch((error: unknown) => {
+      if (error instanceof SessionEnded) {
+        res.writeHead(401, {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+          'set-cookie': clearCookie(cfg.sessionCookieName, {
+            secure: cfg.cookieSecure,
+            sameSite: 'Strict',
+          }),
+        });
+        res.end('{"detail":"session expired","code":"session_expired"}');
+      } else if (error instanceof IdpUnavailable) {
+        res.writeHead(503, {
+          'content-type': 'application/json',
+          'retry-after': '5',
+          'cache-control': 'no-store',
+        });
+        res.end('{"detail":"identity provider unavailable","code":"idp_unavailable"}');
+      } else {
+        failRequest(res, trace, 'session', error);
+      }
+    });
+}
+
 export function createRequestListener(): http.RequestListener {
   const assets = createAssetHandler();
+  // Sessions live in this object, so exactly one per process, and only when the mode needs it.
+  const auth = cfg.authMode === 'bff' ? new AuthService() : null;
 
   return (req, res) => {
     const rawUrl = req.url ?? '/';
@@ -245,6 +318,15 @@ export function createRequestListener(): http.RequestListener {
       return;
     }
 
+    if (auth && AuthService.owns(path)) {
+      trace.route = path;
+      const params = new URLSearchParams(rawUrl.slice(path.length + 1));
+      void auth
+        .handle(req, res, path, params, trace.correlationId)
+        .catch((error: unknown) => failRequest(res, trace, 'auth', error));
+      return;
+    }
+
     if (path === '/api/client-events') {
       // Answered HERE, never forwarded: the service has no such route, so this pod's log is the
       // sink. It is not in `server/routes.ts` because that list is what gets proxied.
@@ -270,6 +352,10 @@ export function createRequestListener(): http.RequestListener {
       // Preserve the query string — the backend takes none today, but dropping it silently
       // would be a confusing bug the day it does.
       const query = rawUrl.slice(path.length);
+      if (auth && !route.public) {
+        proxyAsSession(auth, req, res, route, query, trace);
+        return;
+      }
       proxy(
         req,
         res,

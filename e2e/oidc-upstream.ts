@@ -10,9 +10,9 @@
  * request that fails any of them is a 401, as there, so a token the browser obtained but the
  * service would refuse fails the spec rather than passing it.
  *
- * **What it proves that the page alone cannot.** The page can show that MSAL signed someone in and
- * that it put a bearer on `/api/...`. Only something on the far side of the BFF can show the token
- * *arrived*, intact, and is one a resource server accepts. `GET /__oidc/seen` — on this port, not
+ * **What it proves that the page alone cannot.** The page holds no token, so it can show only that
+ * someone is signed in. Only something on the far side of the BFF can show the bearer the BFF
+ * injected *arrived*, intact, and is one a resource server accepts. `GET /__oidc/seen` — on this port, not
  * through the BFF, which would refuse an unlisted route anyway — answers who it has seen.
  *
  *   node --experimental-strip-types e2e/oidc-upstream.ts <port> <fixture-port>
@@ -24,6 +24,7 @@
 import { createPublicKey, verify, type JsonWebKey } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer, request as httpRequest } from 'node:http';
+import { get as httpGet } from 'node:http';
 import { get as httpsGet } from 'node:https';
 
 const port = Number(process.argv[2] ?? 4343);
@@ -44,7 +45,10 @@ const refused: { path: string; reason: string }[] = [];
 
 function fetchJwks(): Promise<{ keys: (JsonWebKey & { kid: string })[] }> {
   return new Promise((resolve, reject) => {
-    httpsGet(jwksUrl, { ca }, (res) => {
+    // https for a real or mock tenant (trusting its throwaway certificate), http for the fixture
+    // provider on loopback.
+    const get = jwksUrl.startsWith('https:') ? httpsGet : httpGet;
+    get(jwksUrl, { ca }, (res) => {
       let body = '';
       res.on('data', (chunk: Buffer) => (body += chunk.toString()));
       res.on('end', () => {

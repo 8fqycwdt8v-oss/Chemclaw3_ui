@@ -9,7 +9,7 @@
  * ## Why this file exists
  *
  * `.github/workflows/ci.yml` used to carry four assertions as inline shell — the `/config.js`
- * reference, the MSAL entry-chunk probe with its positive control, and running `dist/server.js`
+ * reference, the browser-OIDC-client probe, and running `dist/server.js`
  * from an empty temp directory — plus a whole `container` job of `curl`s. None of them had a name
  * a contributor could type. The only way to run them was to copy YAML into a terminal, which in
  * practice means they were run by the pipeline and by nobody else.
@@ -102,7 +102,7 @@ export const STEPS = [
   {
     name: 'bundle',
     run: 'check:bundle',
-    why: 'facts about the emitted chunks: /config.js survives, MSAL stays lazy',
+    why: 'facts about the emitted chunks: /config.js survives, no OIDC client in the browser',
   },
   {
     name: 'standalone',

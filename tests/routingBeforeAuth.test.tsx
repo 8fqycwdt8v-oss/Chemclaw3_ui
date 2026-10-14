@@ -1,13 +1,10 @@
 /**
  * No route element writes the URL on mount until auth has settled.
  *
- * The sign-in loop this pins: MSAL returns from `/auth/callback` to the page the sign-in started
- * on and redeems the code there only while the address bar still names that page. #126 made `/`
- * that page for a first sign-in, and `Bootstrap` at `/` pushed `/c/<new id>` before
- * `handleRedirectPromise()` had finished — so MSAL went back to `/`, Bootstrap pushed again, and a
- * real browser on kind measured 212 navigations in 4 s with the code never redeemed. The
- * end-to-end proof is `e2e/oidc-mock.spec.ts`; this is the same rule at the router, with the
- * auth promise held open by hand so "before it settles" is a state the test can sit in.
+ * Until the session is known the store holds the anonymous slot, so a route that created or adopted
+ * a conversation (`Bootstrap` at `/`, `/open/<id>`) before then would file it under nobody and the
+ * signed-in person would not find it. The auth promise is held open by hand so "before it settles"
+ * is a state the test can sit in.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -64,8 +61,8 @@ const renderAt = (path: string) =>
 
 const ALICE: AuthAccount = { id: 'oid-alice', username: 'alice@x', name: 'Alice', roles: [] };
 
-const msal = (account: AuthAccount | null, login = vi.fn(async () => {})): AuthProvider => ({
-  mode: 'msal',
+const provider = (account: AuthAccount | null, login = vi.fn(async () => {})): AuthProvider => ({
+  mode: 'bff',
   account,
   getAccessToken: async () => 'token',
   login,
@@ -109,12 +106,11 @@ describe('before auth has settled', () => {
     renderAt('/');
     await flush();
 
-    // The loop's first step was this navigation. Nothing moves and nothing is created while
-    // MSAL may still be comparing the address bar with the start page.
+    // Nothing moves and nothing is created while the session is still being read.
     expect(visited).toEqual(['/']);
     expect(useChatStore.getState().order).toEqual([]);
 
-    auth.resolve(msal(ALICE));
+    auth.resolve(provider(ALICE));
     await flush();
 
     const [landed] = useChatStore.getState().order;
@@ -130,7 +126,7 @@ describe('before auth has settled', () => {
     expect(visited).toEqual([`/open/${sessionId}`]);
     expect(useChatStore.getState().order).toEqual([]);
 
-    auth.resolve(msal(ALICE));
+    auth.resolve(provider(ALICE));
     await flush();
 
     const adopted = Object.values(useChatStore.getState().conversations).find(
@@ -145,7 +141,7 @@ describe('before auth has settled', () => {
     await flush();
     expect(visited).toEqual(['/no-such-page']);
 
-    auth.resolve(msal(ALICE));
+    auth.resolve(provider(ALICE));
     await flush();
     expect(visited.slice(0, 2)).toEqual(['/no-such-page', '/']);
   });
@@ -169,10 +165,10 @@ describe('a signed-out visitor on an /open/ link (#132)', () => {
     const sessionId = 'e'.repeat(32);
     const login = vi.fn(async () => {});
     renderAt(`/open/${sessionId}`);
-    auth.resolve(msal(null, login));
+    auth.resolve(provider(null, login));
     await flush();
 
-    // From here, so `signInStartPage` returns them to this same `/open/` link once signed in.
+    // From here, so the sign-in returns them to this same `/open/` link once signed in.
     expect(login).toHaveBeenCalledTimes(1);
     expect(visited).toEqual([`/open/${sessionId}`]);
     // Nothing in the anonymous slot: the conversation is adopted in their own once they are back.
@@ -184,17 +180,15 @@ describe('a signed-out visitor on an /open/ link (#132)', () => {
     const sessionId = 'a'.repeat(32);
     const login = vi
       .fn<() => Promise<void>>()
-      .mockRejectedValueOnce(
-        new Error('interaction_in_progress: Interaction is currently in progress.'),
-      )
+      .mockRejectedValueOnce(new Error('The sign-in could not be started.'))
       .mockResolvedValueOnce(undefined);
     renderAt(`/open/${sessionId}`);
-    auth.resolve(msal(null, login));
+    auth.resolve(provider(null, login));
     await flush();
 
     // Not a spinner for ever: the failure, in its own words, and a way out.
     expect(login).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('alert').textContent).toMatch(/interaction_in_progress/);
+    expect(screen.getByRole('alert').textContent).toMatch(/could not be started/);
     expect(screen.queryByText('Signing in to open the conversation…')).toBeNull();
     expect(visited).toEqual([`/open/${sessionId}`]);
     expect(useChatStore.getState().order).toEqual([]);

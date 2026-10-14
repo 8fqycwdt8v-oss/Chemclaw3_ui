@@ -1091,7 +1091,7 @@ const chatStorage: PersistStorage<PersistedState> = {
 
 /**
  * Forget every conversation, in memory and on disk — the other half of sign-out, since transcripts
- * live in `localStorage` while MSAL's credential is in `sessionStorage`. `clearAll` first (it
+ * live in `localStorage`, which sign-out must empty itself. `clearAll` first (it
  * writes through persist), then remove the key. Also used by "Reset app".
  */
 export function forgetLocalHistory(): void {

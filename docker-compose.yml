@@ -135,7 +135,7 @@ services:
         # Whether the no-token dev provider is compiled into the client bundle. It does NOT track
         # AUTH_MODE — this is a build arg and AUTH_MODE is a runtime env, so a `:-true` default here
         # would bake the dev provider into every image, including one an operator built with
-        # AUTH_MODE=msal expecting real sign-in. So it defaults to unset (the Dockerfile's own
+        # AUTH_MODE=bff expecting real sign-in. So it defaults to unset (the Dockerfile's own
         # `ARG ALLOW_DEV_AUTH=false` then decides), and running the dev stack is an explicit opt-in
         # in the same shape as ALLOW_INSECURE_AUTH below:
         #
@@ -161,6 +161,10 @@ services:
       ENTRA_TENANT_ID: ${ENTRA_TENANT_ID:-}
       ENTRA_CLIENT_ID: ${ENTRA_CLIENT_ID:-}
       ENTRA_AUTHORITY: ${ENTRA_AUTHORITY:-}
+      # Under AUTH_MODE=bff only; the dev stack ignores them. The secret comes from the environment
+      # of whoever runs compose — a deployment mounts it as a file instead (docs/operations.md).
+      ENTRA_CLIENT_SECRET: ${ENTRA_CLIENT_SECRET:-}
+      ENTRA_CLIENT_AUTH: ${ENTRA_CLIENT_AUTH:-secret}
       API_SCOPE: ${API_SCOPE:-}
       APP_VERSION: ${APP_VERSION:-compose}
       LOG_LEVEL: ${LOG_LEVEL:-info}

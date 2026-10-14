@@ -5,7 +5,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { configProblems } from './env.ts';
 import { useAuth } from './auth/AuthContext.tsx';
 import { useChatStore } from './state/chatStore.ts';
 import { api } from './api/client.ts';
@@ -26,24 +25,6 @@ import { transcriptToMessages } from './state/transcript.ts';
 import { resumeInterruptedTurn } from './state/sendMessage.ts';
 import { followSharedConversation } from './state/sharedSync.ts';
 import { useMembers } from './components/MembersPanel.tsx';
-
-function ConfigError({ problems }: { problems: string[] }): React.JSX.Element {
-  return (
-    <div className="flex h-full items-center justify-center p-8">
-      <div className="max-w-md rounded-xl border border-danger/40 bg-danger-soft p-5 shadow-sm">
-        <h1 className="mb-2 font-semibold text-danger-ink">Configuration error</h1>
-        <ul className="list-disc space-y-1 pl-5 text-sm">
-          {problems.map((problem) => (
-            <li key={problem}>{problem}</li>
-          ))}
-        </ul>
-        <p className="mt-3 text-xs text-ink-muted">
-          These come from the UI server’s environment and are served at <code>/config.js</code>.
-        </p>
-      </div>
-    </div>
-  );
-}
 
 /**
  * Pull a transcript the server has and this browser does not. Only for `sessionOrigin === 'server'`
@@ -362,9 +343,6 @@ export function AppShell({
     useChatStore.getState().setBanner(null);
     setRehydrateNonce((n) => n + 1);
   }, []);
-
-  const problems = configProblems();
-  if (problems.length > 0) return <ConfigError problems={problems} />;
 
   return (
     <div className="flex h-full">

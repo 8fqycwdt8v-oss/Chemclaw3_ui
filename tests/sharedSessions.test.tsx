@@ -32,7 +32,7 @@ const SID = 'c'.repeat(32);
 vi.mock('../src/auth/AuthContext.tsx', () => {
   const value = {
     auth: {
-      mode: 'msal',
+      mode: 'bff',
       account: { id: 'oid-me', username: 'me@example.com', name: 'Me', roles: [] },
       getAccessToken: async () => 'token',
       handleUnauthorized: async () => false,

@@ -58,7 +58,7 @@ export function TopBar({
    */
   conversationId?: string;
 }): React.JSX.Element {
-  const { auth, refresh } = useAuth();
+  const { auth, refresh, failure } = useAuth();
   const [drawer, setDrawer] = useState(false);
   const banner = useChatStore((s) => s.banner);
   const activeId = useChatStore((s) => s.activeId);
@@ -156,7 +156,7 @@ export function TopBar({
           <DrawStructuresToggle />
           <ThemeToggle />
 
-          {auth.mode === 'msal' && !account && (
+          {auth.mode === 'bff' && !account && (
             <Button
               size="xs"
               onClick={() => {
@@ -192,13 +192,36 @@ export function TopBar({
                   <DropdownMenuLabel className="font-normal text-ink">
                     {account.username}
                   </DropdownMenuLabel>
-                  <DropdownMenuItem onSelect={() => void auth.logout()}>Sign out</DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      void auth.logout().catch((err: unknown) =>
+                        useChatStore.getState().setBanner({
+                          kind: 'error',
+                          text: err instanceof Error ? err.message : 'Could not sign out.',
+                        }),
+                      )
+                    }
+                  >
+                    Sign out
+                  </DropdownMenuItem>
                 </>
               )}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
       </div>
+
+      {failure && (
+        <div
+          role="alert"
+          className="flex flex-wrap items-center gap-2 border-t border-border-subtle bg-danger-soft px-4 py-2"
+        >
+          <p className="text-sm text-danger-ink">{failure}</p>
+          <Button variant="outline-destructive" size="xs" onClick={() => void auth.login()}>
+            Sign in again
+          </Button>
+        </div>
+      )}
 
       {banner && (
         <div
@@ -216,6 +239,11 @@ export function TopBar({
               Retry
             </Button>
           )}
+          {banner.action === 'reauth' && (
+            <Button variant="outline-destructive" size="xs" onClick={() => void auth.login()}>
+              Sign in again
+            </Button>
+          )}
           {banner.action === 'reset' && activeId && (
             <Button
               variant="outline-destructive"
@@ -223,11 +251,6 @@ export function TopBar({
               onClick={() => void resetSession(activeId, auth)}
             >
               Start a fresh session
-            </Button>
-          )}
-          {banner.action === 'reauth' && (
-            <Button variant="outline-destructive" size="xs" onClick={() => void auth.login()}>
-              Sign in again
             </Button>
           )}
 

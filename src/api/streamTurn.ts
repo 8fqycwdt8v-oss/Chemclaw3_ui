@@ -19,6 +19,7 @@ import {
 } from './errors.ts';
 import { config } from '../env.ts';
 import { readEventStream } from '../lib/sse.ts';
+import { CSRF_HEADER, CSRF_VALUE } from '../../shared/auth.ts';
 
 /**
  * How long a turn may produce no frame before the reader is told the chain may be broken. Not an
@@ -118,7 +119,7 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
           method: 'GET',
           signal: opts.signal,
           cache: 'no-store',
-          headers: { accept: 'text/event-stream', ...authorization },
+          headers: { accept: 'text/event-stream', [CSRF_HEADER]: CSRF_VALUE, ...authorization },
         })
       : await fetch(`${config.apiBase}/sessions/${session}/messages`, {
           method: 'POST',
@@ -127,6 +128,7 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
           headers: {
             'content-type': 'application/json',
             accept: 'text/event-stream',
+            [CSRF_HEADER]: CSRF_VALUE,
             ...authorization,
           },
           // `exhibit_refs` always, `[]` when there are none: the contract's own default, and a

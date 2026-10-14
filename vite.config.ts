@@ -163,6 +163,8 @@ export default defineConfig({
         },
       },
       '/config.js': { target: `http://127.0.0.1:${BFF_PORT}` },
+      // The sign-in routes (`AUTH_MODE=bff`); under `dev` the BFF answers them with the SPA shell.
+      '/auth': { target: `http://127.0.0.1:${BFF_PORT}` },
     },
   },
 });

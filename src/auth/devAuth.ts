@@ -33,13 +33,12 @@ export function createDevAuth(): AuthProvider {
 
     async handleUnauthorized() {
       // A 401 in dev mode means the backend flipped CHEMCLAW_ENTRA_REQUIRED=true while this UI
-      // is still deployed with AUTH_MODE=dev. There is no in-browser recovery — no tenant, no
-      // client id, nothing to redirect to — so say precisely that instead of failing vaguely or
-      // bouncing the user through a redirect that cannot work.
+      // is still deployed with AUTH_MODE=dev. There is nothing to sign in to, so say precisely
+      // that instead of failing vaguely or bouncing the user through a redirect that cannot work.
       throw new ApiError(
         'unauthorized',
         'The Chemclaw service now requires sign-in, but this UI is running in dev auth mode. ' +
-          'Redeploy it with AUTH_MODE=msal and the tenant, client id, and API scope configured.',
+          'Redeploy it with AUTH_MODE=bff and the tenant, client id, client secret and API scope configured.',
       );
     },
   };

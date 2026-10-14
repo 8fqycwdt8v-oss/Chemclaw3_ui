@@ -1,15 +1,14 @@
 /**
- * Routing, by path (MSAL's redirect response uses the fragment).
+ * Routing, by path.
  *
  * - URLs carry the local conversation id (`/c/:id`), not the disposable server session id (see
  *   `src/state/types.ts`).
  * - `/open/:sessionId` adopts a server session into a local conversation and redirects. It is not a
  *   share link: the service 404s non-owners, and members find shared conversations under "Shared
  *   with me". `/s/:sessionId` (old links) renders an explanation and goes nowhere.
- * - `/auth/callback` is MSAL's `redirectUri`; it writes no URL.
- * - No element writes the URL on mount until auth has settled (`useAuth().settled`): MSAL redeems
- *   the code only if the address bar still names the page sign-in started from
- *   (`src/auth/AuthContext.tsx`). `e2e/oidc-mock.spec.ts` counts the navigations.
+ * - `/auth/*` is the BFF's (`server/auth/service.ts`), never a route here.
+ * - No element writes the URL on mount until auth has settled (`useAuth().settled`): a conversation
+ *   created for want of one belongs in the signed-in person's slot (`src/auth/AuthContext.tsx`).
  */
 
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
@@ -89,9 +88,8 @@ function Bootstrap(): React.JSX.Element {
   const navigate = useNavigate();
   const { settled } = useAuth();
 
-  // The only place a conversation is created for want of one. Not before auth settles: navigating
-  // away from `/` before MSAL redeems the code loops the sign-in, and before then the store holds
-  // the anonymous slot.
+  // The only place a conversation is created for want of one. Not before auth settles: before then
+  // the store holds the anonymous slot.
   useEffect(() => {
     if (!settled) return;
     const state = useChatStore.getState();
@@ -115,9 +113,9 @@ function SessionResolver(): React.JSX.Element {
   // The backend's session ids are 32 lowercase hex characters (`shared/events.ts`), so anything
   // else is a mistyped or truncated link rather than a session we have not seen.
   const valid = /^[0-9a-f]{32}$/.test(sessionId);
-  // Signed out under Entra on an `/open/` link: sign in from here, so the adoption runs in the
-  // user's own slot after the redirect returns to this path.
-  const mustSignIn = valid && ready && auth.mode === 'msal' && !auth.account;
+  // Signed out on an `/open/` link (a sign-in that stopped short): sign in from here, so the
+  // adoption runs in the user's own slot after the redirect returns to this path.
+  const mustSignIn = valid && ready && auth.mode === 'bff' && !auth.account;
   const signingIn = useRef(false);
   // A sign-in that could not start is shown with a way to retry, not left on "Signing in…".
   const [failure, setFailure] = useState<string | null>(null);
@@ -125,8 +123,7 @@ function SessionResolver(): React.JSX.Element {
 
   useEffect(() => {
     if (!mustSignIn || signingIn.current) return;
-    // Once per attempt: StrictMode runs effects twice, and a second `loginRedirect` while the first
-    // is navigating fails with `interaction_in_progress`.
+    // Once per attempt: StrictMode runs effects twice.
     signingIn.current = true;
     auth.login().catch((err: unknown) => {
       signingIn.current = false;
@@ -135,8 +132,8 @@ function SessionResolver(): React.JSX.Element {
   }, [mustSignIn, auth, attempt]);
 
   useEffect(() => {
-    // Not before auth has settled: this page can be where a sign-in returns to, and MSAL redeems
-    // the code only while the address bar still names it (see the module docstring).
+    // Not before auth has settled: this page can be where a sign-in returns to (see the module
+    // docstring).
     if (!valid || !settled || mustSignIn) return;
     const state = useChatStore.getState();
     const existing = Object.values(state.conversations).find((c) => c.sessionId === sessionId);
@@ -209,16 +206,6 @@ function SessionResolver(): React.JSX.Element {
       {mustSignIn ? 'Signing in to open the conversation…' : 'Opening the conversation…'}
     </Loading>
   );
-}
-
-/**
- * The MSAL landing path: waits for `handleRedirectPromise()` (already in flight) to settle, then
- * leaves for `/`. Must not touch the URL before then.
- */
-function AuthCallback(): React.JSX.Element {
-  const { settled } = useAuth();
-  if (!settled) return <Loading className="justify-center p-8">Completing sign-in…</Loading>;
-  return <Navigate to="/" replace />;
 }
 
 export function NotFound({
@@ -384,7 +371,6 @@ export function AppRoutes(): React.JSX.Element {
           </AppShell>
         }
       />
-      <Route path="/auth/callback" element={<AuthCallback />} />
       {/* Old `/s/` links: explain and go nowhere. Not a redirect (this was never a share link), and not the catch-all, which would mint an empty conversation. */}
       <Route
         path="/s/:sessionId"

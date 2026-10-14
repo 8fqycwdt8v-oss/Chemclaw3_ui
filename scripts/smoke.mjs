@@ -10,6 +10,11 @@
  *
  * Defaults to the BFF on http://127.0.0.1:8787. Point it at the UI container
  * (http://localhost:3000) to exercise the production path.
+ *
+ * Credentials, by the UI's auth mode: none under `dev`; under `bff` the BFF takes the browser's
+ * session cookie, not a bearer, so pass one signed-in browser's `chemclaw_session` value (or
+ * `__Host-chemclaw_session`, as named) as `SESSION_COOKIE=name=value`. `ACCESS_TOKEN` is for
+ * pointing this at the service directly.
  */
 
 import { EventSourceParserStream } from 'eventsource-parser/stream';
@@ -18,7 +23,12 @@ const base = (process.argv[2] ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
 const message = process.argv[3] ?? 'What is the pKa of acetic acid? Answer in one sentence.';
 const token = process.env.ACCESS_TOKEN;
 
-const authHeaders = token ? { authorization: `Bearer ${token}` } : {};
+const sessionCookie = process.env.SESSION_COOKIE;
+
+const authHeaders = {
+  ...(token ? { authorization: `Bearer ${token}` } : {}),
+  ...(sessionCookie ? { cookie: sessionCookie, 'x-chemclaw-csrf': '1' } : {}),
+};
 
 let failures = 0;
 const ok = (label, detail = '') => console.log(`  ✓ ${label}${detail ? ` — ${detail}` : ''}`);

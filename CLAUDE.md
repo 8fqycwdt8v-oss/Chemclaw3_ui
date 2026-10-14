@@ -17,23 +17,26 @@ repo is a PR there, not a workaround here.
 
 ## Where things go
 
-| Path              | What                                                                 |
-| ----------------- | -------------------------------------------------------------------- |
-| `server/`         | BFF: config (`config.ts`), route whitelist (`routes.ts`), proxy, CSP |
-| `src/api/`        | HTTP client, SSE turn stream, typed errors, query client             |
-| `src/state/`      | zustand stores and turn/job logic                                    |
-| `src/components/` | UI; `ui/` primitives, `chem/` composites, `exhibits/` artefact pane  |
-| `src/results/`    | tool-result renderers, keyed on payload shape                        |
-| `src/chem/`       | RDKit client/worker/engine, sketcher, entity extraction              |
-| `shared/`         | imported by SPA and BFF: wire types, event readings, constants       |
-| `contracts/`      | the pinned core API contract and its lock                            |
-| `tests/`, `e2e/`  | vitest unit tests; Playwright specs + `e2e/fixture-service.ts`       |
-| `scripts/`        | the gate (`ci.mjs`) and every check it runs; each has an npm script  |
-| `docs/`           | `operations.md`, `production-readiness.md`, `dependencies.md`        |
+| Path              | What                                                                |
+| ----------------- | ------------------------------------------------------------------- |
+| `server/`         | BFF: config, route whitelist (`routes.ts`), proxy, CSP, `auth/`     |
+| `src/api/`        | HTTP client, SSE turn stream, typed errors, query client            |
+| `src/state/`      | zustand stores and turn/job logic                                   |
+| `src/components/` | UI; `ui/` primitives, `chem/` composites, `exhibits/` artefact pane |
+| `src/results/`    | tool-result renderers, keyed on payload shape                       |
+| `src/chem/`       | RDKit client/worker/engine, sketcher, entity extraction             |
+| `shared/`         | imported by SPA and BFF: wire types, event readings, constants      |
+| `contracts/`      | the pinned core API contract and its lock                           |
+| `tests/`, `e2e/`  | vitest unit tests; Playwright specs + `e2e/fixture-service.ts`      |
+| `scripts/`        | the gate (`ci.mjs`) and every check it runs; each has an npm script |
+| `docs/`           | `operations.md`, `production-readiness.md`, `dependencies.md`       |
 
 A new `/api` route the browser needs is a pattern in `server/routes.ts` plus a test in
 `tests/routes.test.ts`. Runtime config is environment read in `server/config.ts` and served to the
 browser via `/config.js` — never `import.meta.env` for deploy-time values.
+
+The browser holds no token (`AUTH_MODE=bff`, `docs/operations.md` §8): the BFF keeps them and
+injects the bearer, so nothing in `src/` reads, stores or sends one.
 
 ## API types and the backend
 

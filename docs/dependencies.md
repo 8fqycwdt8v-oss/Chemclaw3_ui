@@ -21,6 +21,25 @@ Chosen over zod for size (~2–4 kB gz vs ~13 kB); `shared/` is bundled into the
 `src/env.ts` stays schema-free: `RuntimeConfig` is the only declaration, read once at boot, and a
 missing key is a default.
 
+### `jose` in the BFF's sign-in
+
+`server/auth/oidc.ts` validates the ID token with `jose`: signature against the provider's published
+keys (a cached remote key set that re-reads on an unknown `kid`, with a cooldown), `iss`, `aud`,
+`exp` and the algorithm allow-list. Token signature checking is the one piece of the sign-in not
+worth writing first-party; the rest of the flow (discovery, the code and refresh exchanges, PKCE,
+state, sessions) is about 700 lines of this repository's own code because a generic OIDC client
+would bring its own HTTP layer, configuration surface and session model for a flow with exactly one
+provider shape.
+
+- **No dependencies of its own, ESM, Web Crypto only**; the BFF bundle
+  inlines it, so the image still needs no `node_modules` (`npm run check:standalone`). The sign-in
+  code and `jose` together add ~68 kB to `dist/server.js` (112 kB to 180 kB) and nothing to the
+  browser bundle.
+- **Enforced.** Wrong signature, issuer, audience, expiry and nonce are each refused; a rotated key is
+  picked up without a restart (`tests/bffFlow.test.ts`, `tests/bffTokens.test.ts`).
+- **Enforced.** No browser chunk carries an OIDC client (`npm run check:bundle`).
+- It replaces `@azure/msal-browser`, which is gone: the browser holds no token.
+
 ### `openapi-typescript` for the wire types
 
 Dev only: `npm run generate:api` turns the pinned contract (`docs/api-contract.md`) into
@@ -56,6 +75,9 @@ triads, which got cancellation and StrictMode wrong.
 | A charting library                                               | `src/components/Sparkline.tsx`, `src/components/chem/Charts.tsx` | —                                                                 |
 | `rehype-raw`, `papaparse`, `file-saver`, `@tanstack/react-table` | their call sites                                                 | —                                                                 |
 | A web framework for the BFF; compression middleware              | `server/app.ts`                                                  | —                                                                 |
+| `openid-client`, `passport`, `express-session`                   | `server/auth/oidc.ts`                                            | `jose` plus the flow written out; their HTTP and session layers   |
+| `@azure/msal-browser`                                            | `server/auth/service.ts`                                         | The browser holds no token; the BFF does the exchange             |
+| A session store dependency (`connect-pg-simple`, Redis)          | `server/auth/sessions.ts`, `docs/operations.md` §8               | Memory with router affinity; revisit as §8 says                   |
 
 ## Where taken dependencies land
 
@@ -64,6 +86,7 @@ triads, which got cancellation and StrictMode wrong.
 
 | Dependency              | Lands in                                                       |
 | ----------------------- | -------------------------------------------------------------- |
+| `jose`                  | the BFF bundle only (`server/auth/oidc.ts`)                    |
 | `valibot`               | entry chunk (`shared/events.ts`)                               |
 | `@tanstack/react-query` | entry chunk                                                    |
 | `comlink`               | entry chunk (`src/chem/rdkit.client.ts`)                       |

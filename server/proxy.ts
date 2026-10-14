@@ -3,7 +3,11 @@
  * undici's default 300 s body idle timeout would kill a legitimately silent event stream, and
  * `http.request` gives piped backpressure with no dependency.
  *
- * The `Authorization` header is forwarded verbatim and never inspected; the backend validates it.
+ * Credentials, by auth mode. Under `dev` there is none and the browser's `Authorization` header is
+ * forwarded verbatim, never inspected. Under `bff` the caller passes the session's bearer
+ * (`ProxyAuth`): the browser's own `Authorization` header is dropped, the BFF's is injected, and a
+ * backend 401 renews the token once and replays the request — only while the whole request is in
+ * memory, which is every route but the attachment upload.
  */
 
 import http from 'node:http';
@@ -28,6 +32,21 @@ export interface RequestTrace {
   upstreamMs: number | null;
   /** This request's correlation id: minted at the front door, replaced by the service's own. */
   correlationId: string;
+}
+
+/**
+ * How the BFF authenticates one proxied request on behalf of a session. The bearer never leaves
+ * this process: it is written onto the upstream request and nowhere else.
+ */
+export interface ProxyAuth {
+  bearer: string;
+  /**
+   * Called with the bearer the backend refused; resolves to a fresh one, or `null` when none can
+   * be had (the backend's 401 is then relayed as it came).
+   */
+  renew: (refused: string) => Promise<string | null>;
+  /** Whether the body may be held in memory so the request can be sent twice. False for uploads. */
+  replayable: boolean;
 }
 
 const upstream = new URL(cfg.apiUrl);
@@ -138,15 +157,19 @@ function attachHeartbeat(upstreamRes: IncomingMessage, res: ServerResponse): voi
 function buildUpstreamHeaders(
   req: IncomingMessage,
   correlationId: string,
+  bearer: string | null,
 ): http.OutgoingHttpHeaders {
   const headers: http.OutgoingHttpHeaders = {};
   for (const [key, value] of Object.entries(req.headers)) {
     if (value === undefined) continue;
     if (HOP_BY_HOP.has(key)) continue;
     if (key === 'accept-encoding') continue;
-    // The backend sets allow_credentials=false and uses no cookies at all. Not forwarding them
-    // keeps it that way, so there is no CSRF surface to reason about.
+    // The backend sets allow_credentials=false and uses no cookies at all. The session cookie is
+    // this process's alone, and not forwarding any keeps it that way.
     if (key === 'cookie') continue;
+    // Under `bff` the only credential upstream is the one injected below, never one a browser
+    // chose to send.
+    if (bearer !== null && key === 'authorization') continue;
     // The service's internal headers: a browser must not set them.
     if (key.startsWith('x-chemclaw-')) continue;
     // Identity and routing headers a browser could use to impersonate the edge; the BFF forwards
@@ -161,6 +184,7 @@ function buildUpstreamHeaders(
   // Send the correlation id upstream; the service adopts a well-formed one, so one id spans both
   // logs.
   headers[CORRELATION_HEADER] = correlationId;
+  if (bearer !== null) headers['authorization'] = `Bearer ${bearer}`;
   return headers;
 }
 
@@ -215,6 +239,8 @@ export function proxy(
   /** Filled in as the request runs; the access log reads it when the response finishes. */
   trace: RequestTrace,
   maxBodyBytes: number = cfg.maxBodyBytes,
+  /** The session's bearer under `AUTH_MODE=bff`; absent under `dev`. */
+  auth?: ProxyAuth,
 ): void {
   const startedAt = Date.now();
   // A declared length over the cap is refused before any upstream request.
@@ -224,110 +250,8 @@ export function proxy(
     return;
   }
 
-  const upstreamReq = transport.request(
-    {
-      protocol: upstream.protocol,
-      hostname: upstream.hostname,
-      port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
-      method: req.method,
-      path: upstreamPath,
-      headers: buildUpstreamHeaders(req, trace.correlationId),
-      // Pool chosen by the route's declaration (the only fact known before the response).
-      agent: expectSse ? streamAgent : agent,
-    },
-    (upstreamRes) => {
-      trace.upstreamMs = Date.now() - startedAt;
-      // Prefer the service's correlation id when it sent one; `writeHead` overrides the minted
-      // header.
-      const fromUpstream = correlationFrom(upstreamRes.headers);
-      if (fromUpstream) trace.correlationId = fromUpstream;
-      const out: http.OutgoingHttpHeaders = {};
-      for (const [key, value] of Object.entries(upstreamRes.headers)) {
-        if (value === undefined || HOP_BY_HOP.has(key) || bffOwnsResponseHeader(key)) continue;
-        out[key] = value;
-      }
-
-      const streaming = expectSse && isEventStream(upstreamRes.headers);
-      if (streaming) {
-        delete out['content-length'];
-        out['cache-control'] = 'no-cache, no-transform';
-        // The standard opt-out from nginx's (and several cloud ingresses') response buffering,
-        // which would otherwise hold the whole stream until it completes. Harmless elsewhere.
-        out['x-accel-buffering'] = 'no';
-      }
-
-      res.writeHead(upstreamRes.statusCode ?? 502, out);
-      // Without this Node holds the header block until the first body write, so the browser's
-      // fetch() promise does not resolve and the client cannot tell "connecting" from "thinking".
-      res.flushHeaders();
-
-      if (streaming && cfg.sseHeartbeatMs > 0) attachHeartbeat(upstreamRes, res);
-
-      upstreamRes.pipe(res);
-    },
-  );
-
-  // No socket idle timeout (see the agents); response headers are bounded separately below.
-  upstreamReq.setTimeout(0);
-
-  /** No free socket: answer 503 with `Retry-After` (this process is full), not 502. */
-  const refuseSaturated = (): void => {
-    if (res.headersSent) return;
-    upstreamErrorRecorded();
-    log.warn('upstream pool saturated', {
-      method: req.method,
-      path: upstreamPath,
-      code: POOL_TIMEOUT_CODE,
-      pool: expectSse ? 'stream' : 'default',
-      waited_ms: cfg.upstreamQueueTimeoutMs,
-    });
-    res.writeHead(503, {
-      'content-type': 'application/json',
-      connection: 'close',
-      'retry-after': '5',
-    });
-    res.end(
-      JSON.stringify({ detail: 'no upstream connection available', code: POOL_TIMEOUT_CODE }),
-    );
-    // Same reason as the error path below: answering early and then waiting politely for the rest
-    // of a body nobody is sending is an unbounded hold.
-    if (!req.readableEnded) req.destroy();
-  };
-
-  boundQueueWait(upstreamReq, refuseSaturated);
-
-  /**
-   * Give up on an upstream that accepted the request but never sent response headers, so a hung
-   * backend cannot hold the pool. Bounding headers, not the body, is safe for SSE (a turn's headers
-   * arrive immediately).
-   */
-  const headersTimer =
-    cfg.upstreamHeadersTimeoutMs > 0
-      ? setTimeout(() => {
-          upstreamReq.destroy(new Error('upstream headers timeout'));
-        }, cfg.upstreamHeadersTimeoutMs)
-      : null;
-  const clearHeadersTimer = (): void => {
-    if (headersTimer) clearTimeout(headersTimer);
-  };
-  upstreamReq.on('response', clearHeadersTimer);
-  upstreamReq.on('error', clearHeadersTimer);
-  upstreamReq.on('close', clearHeadersTimer);
-
-  upstreamReq.on('socket', (socket) => {
-    // Token frames are a few bytes each; Nagle would batch them into visible stutter.
-    socket.setNoDelay(true);
-    socket.setKeepAlive(true, 15_000);
-    // Bound only the CONNECT phase — an unreachable backend should fail fast even though an
-    // established stream may then be silent indefinitely.
-    if (cfg.upstreamConnectTimeoutMs > 0 && socket.connecting) {
-      const connectTimer = setTimeout(() => {
-        upstreamReq.destroy(new Error('upstream connect timeout'));
-      }, cfg.upstreamConnectTimeoutMs);
-      socket.once('connect', () => clearTimeout(connectTimer));
-      upstreamReq.once('error', () => clearTimeout(connectTimer));
-    }
-  });
+  /** The upstream request in flight, which a client disconnect must cancel. */
+  let current: http.ClientRequest | null = null;
 
   /**
    * Propagate a client disconnect upstream. This detaches rather than cancels (cancelling is `POST
@@ -335,38 +259,202 @@ export function proxy(
    * process's socket.
    */
   res.on('close', () => {
-    if (!res.writableFinished) upstreamReq.destroy();
+    if (!res.writableFinished) current?.destroy();
   });
 
-  upstreamReq.on('error', (err: NodeJS.ErrnoException) => {
-    if (res.headersSent) {
-      // Unless the response already completed (e.g. our own 413), which destroying would truncate.
-      if (!res.writableEnded) res.destroy();
+  /**
+   * One attempt at the upstream. `body` is the request held in memory (a replayable request), or
+   * `undefined` to stream it from the client. A 401 to a replayable request with a bearer is held
+   * back while the bearer is renewed, then the request is sent again, once.
+   */
+  const attempt = (bearer: string | null, body: Buffer | undefined, retried: boolean): void => {
+    const upstreamReq = transport.request(
+      {
+        protocol: upstream.protocol,
+        hostname: upstream.hostname,
+        port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80),
+        method: req.method,
+        path: upstreamPath,
+        headers: buildUpstreamHeaders(req, trace.correlationId, bearer),
+        // Pool chosen by the route's declaration (the only fact known before the response).
+        agent: expectSse ? streamAgent : agent,
+      },
+      (upstreamRes) => {
+        trace.upstreamMs = Date.now() - startedAt;
+        if (upstreamRes.statusCode === 401 && auth && bearer !== null && body && !retried) {
+          // Held, not read: if no fresh bearer exists, this very response is relayed below.
+          upstreamRes.pause();
+          void auth
+            .renew(bearer)
+            .catch(() => null)
+            .then((fresh) => {
+              if (res.destroyed || res.writableEnded) return upstreamRes.destroy();
+              if (fresh && fresh !== bearer) {
+                upstreamRes.resume();
+                return attempt(fresh, body, true);
+              }
+              return relay(upstreamRes);
+            });
+          return;
+        }
+        relay(upstreamRes);
+      },
+    );
+    current = upstreamReq;
+
+    // No socket idle timeout (see the agents); response headers are bounded separately below.
+    upstreamReq.setTimeout(0);
+
+    /** No free socket: answer 503 with `Retry-After` (this process is full), not 502. */
+    const refuseSaturated = (): void => {
+      if (res.headersSent) return;
+      upstreamErrorRecorded();
+      log.warn('upstream pool saturated', {
+        method: req.method,
+        path: upstreamPath,
+        code: POOL_TIMEOUT_CODE,
+        pool: expectSse ? 'stream' : 'default',
+        waited_ms: cfg.upstreamQueueTimeoutMs,
+      });
+      res.writeHead(503, {
+        'content-type': 'application/json',
+        connection: 'close',
+        'retry-after': '5',
+      });
+      res.end(
+        JSON.stringify({ detail: 'no upstream connection available', code: POOL_TIMEOUT_CODE }),
+      );
+      // Same reason as the error path below: answering early and then waiting politely for the rest
+      // of a body nobody is sending is an unbounded hold.
+      if (!req.readableEnded) req.destroy();
+    };
+
+    boundQueueWait(upstreamReq, refuseSaturated);
+
+    /**
+     * Give up on an upstream that accepted the request but never sent response headers, so a hung
+     * backend cannot hold the pool. Bounding headers, not the body, is safe for SSE (a turn's
+     * headers arrive immediately).
+     */
+    const headersTimer =
+      cfg.upstreamHeadersTimeoutMs > 0
+        ? setTimeout(() => {
+            upstreamReq.destroy(new Error('upstream headers timeout'));
+          }, cfg.upstreamHeadersTimeoutMs)
+        : null;
+    const clearHeadersTimer = (): void => {
+      if (headersTimer) clearTimeout(headersTimer);
+    };
+    upstreamReq.on('response', clearHeadersTimer);
+    upstreamReq.on('error', clearHeadersTimer);
+    upstreamReq.on('close', clearHeadersTimer);
+
+    upstreamReq.on('socket', (socket) => {
+      // Token frames are a few bytes each; Nagle would batch them into visible stutter.
+      socket.setNoDelay(true);
+      socket.setKeepAlive(true, 15_000);
+      // Bound only the CONNECT phase — an unreachable backend should fail fast even though an
+      // established stream may then be silent indefinitely.
+      if (cfg.upstreamConnectTimeoutMs > 0 && socket.connecting) {
+        const connectTimer = setTimeout(() => {
+          upstreamReq.destroy(new Error('upstream connect timeout'));
+        }, cfg.upstreamConnectTimeoutMs);
+        socket.once('connect', () => clearTimeout(connectTimer));
+        upstreamReq.once('error', () => clearTimeout(connectTimer));
+      }
+    });
+
+    upstreamReq.on('error', (err: NodeJS.ErrnoException) => {
+      if (res.headersSent) {
+        // Unless the response already completed (e.g. our own 413), which destroying would
+        // truncate.
+        if (!res.writableEnded) res.destroy();
+        return;
+      }
+      upstreamErrorRecorded();
+      log.warn('upstream error', {
+        method: req.method,
+        path: upstreamPath,
+        code: err.code ?? 'EPROXY',
+        error: err.message,
+        // The id this request was sent upstream under.
+        correlation_id: trace.correlationId,
+      });
+      res.writeHead(502, { 'content-type': 'application/json', connection: 'close' });
+      res.end(JSON.stringify({ detail: 'upstream unavailable', code: err.code ?? 'EPROXY' }));
+      // Hang up on a body still arriving after we answered; `requestTimeout` no longer applies then.
+      if (!req.readableEnded) req.destroy();
+    });
+
+    if (body) {
+      upstreamReq.end(body);
       return;
     }
-    upstreamErrorRecorded();
-    log.warn('upstream error', {
-      method: req.method,
-      path: upstreamPath,
-      code: err.code ?? 'EPROXY',
-      error: err.message,
-      // The id this request was sent upstream under.
-      correlation_id: trace.correlationId,
+    // Count the body as it passes too: a chunked upload has no `content-length`.
+    let received = 0;
+    req.on('data', (chunk: Buffer) => {
+      received += chunk.length;
+      if (received <= maxBodyBytes) return;
+      upstreamReq.destroy();
+      refuseTooLarge(trace, req, res, maxBodyBytes);
     });
-    res.writeHead(502, { 'content-type': 'application/json', connection: 'close' });
-    res.end(JSON.stringify({ detail: 'upstream unavailable', code: err.code ?? 'EPROXY' }));
-    // Hang up on a body still arriving after we answered; `requestTimeout` no longer applies then.
-    if (!req.readableEnded) req.destroy();
-  });
+    req.pipe(upstreamReq);
+  };
 
-  // Count the body as it passes too: a chunked upload has no `content-length`.
+  /** Send an upstream response on to the browser, owning the headers that are this process's. */
+  const relay = (upstreamRes: IncomingMessage): void => {
+    // Prefer the service's correlation id when it sent one; `writeHead` overrides the minted
+    // header.
+    const fromUpstream = correlationFrom(upstreamRes.headers);
+    if (fromUpstream) trace.correlationId = fromUpstream;
+    const out: http.OutgoingHttpHeaders = {};
+    for (const [key, value] of Object.entries(upstreamRes.headers)) {
+      if (value === undefined || HOP_BY_HOP.has(key) || bffOwnsResponseHeader(key)) continue;
+      out[key] = value;
+    }
+
+    const streaming = expectSse && isEventStream(upstreamRes.headers);
+    if (streaming) {
+      delete out['content-length'];
+      out['cache-control'] = 'no-cache, no-transform';
+      // The standard opt-out from nginx's (and several cloud ingresses') response buffering, which
+      // would otherwise hold the whole stream until it completes. Harmless elsewhere.
+      out['x-accel-buffering'] = 'no';
+    }
+
+    res.writeHead(upstreamRes.statusCode ?? 502, out);
+    // Without this Node holds the header block until the first body write, so the browser's
+    // fetch() promise does not resolve and the client cannot tell "connecting" from "thinking".
+    res.flushHeaders();
+
+    if (streaming && cfg.sseHeartbeatMs > 0) attachHeartbeat(upstreamRes, res);
+
+    upstreamRes.pipe(res);
+  };
+
+  if (!auth?.replayable) {
+    attempt(auth?.bearer ?? null, undefined, false);
+    return;
+  }
+
+  // A replayable request is held whole first, so it can be sent a second time. The cap is the same
+  // one the streaming path enforces.
+  const chunks: Buffer[] = [];
   let received = 0;
   req.on('data', (chunk: Buffer) => {
     received += chunk.length;
-    if (received <= maxBodyBytes) return;
-    upstreamReq.destroy();
-    refuseTooLarge(trace, req, res, maxBodyBytes);
+    if (received > maxBodyBytes) {
+      chunks.length = 0;
+      refuseTooLarge(trace, req, res, maxBodyBytes);
+      return;
+    }
+    chunks.push(chunk);
   });
-
-  req.pipe(upstreamReq);
+  req.on('end', () => {
+    if (received > maxBodyBytes || res.destroyed || res.writableEnded) return;
+    attempt(auth.bearer, Buffer.concat(chunks), false);
+  });
+  req.on('error', () => {
+    /* A client that hung up mid-body has nothing to answer; `res`'s close handler cleans up. */
+  });
 }

@@ -17,6 +17,11 @@ metadata:
   name: chemclaw3-ui
   labels:
     app.kubernetes.io/name: chemclaw3-ui
+  annotations:
+    # Sessions live in one pod's memory, so the router must keep a browser on the pod that signed
+    # it in. The router's affinity cookie does exactly that and is on by default; this says so on
+    # purpose. `disable_cookies: 'true'` here would sign people out on every other request.
+    haproxy.router.openshift.io/disable_cookies: 'false'
 spec:
   host: chemclaw.apps.example.com
   to:

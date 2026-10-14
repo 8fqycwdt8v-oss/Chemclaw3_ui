@@ -1,0 +1,484 @@
+// @vitest-environment node
+
+/**
+ * Token custody over time: renewal before expiry, one refresh however many requests ask, what a
+ * refused or unreachable provider does to a session, and sign-out.
+ *
+ * Real clocks and short lifetimes (the fixture provider mints a 2-3 second access token and the BFF
+ * is told to renew with 1-2.5 seconds left), because the property is "the right thing happens as
+ * time passes" and a fake clock would test the test.
+ */
+
+import { createHash } from 'node:crypto';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { startFixtureOidc } from '../e2e/fixture-oidc.ts';
+import { OidcClient } from '../server/auth/oidc.ts';
+import { PendingLogins, SessionStore } from '../server/auth/sessions.ts';
+import { Browser, CLIENT_ID, CLIENT_SECRET, startStack } from './bffHarness.ts';
+import type { Stack } from './bffHarness.ts';
+
+const CSRF = { 'x-chemclaw-csrf': '1' };
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe('renewal before expiry', () => {
+  let stack: Stack;
+  beforeAll(async () => {
+    stack = await startStack({
+      idp: { accessTtlSeconds: 2 },
+      env: { TOKEN_REFRESH_SKEW_SECONDS: '1' },
+    });
+  });
+  afterAll(async () => {
+    await stack.stop();
+  });
+  afterEach(() => {
+    stack.idp.behaviour.refreshFails = null;
+    stack.idp.behaviour.tokenDelayMs = 0;
+    stack.idp.behaviour.rotateRefreshTokens = false;
+    stack.idp.behaviour.issueRefreshToken = true;
+    stack.core.seen.length = 0;
+  });
+
+  const call = (browser: Browser) =>
+    browser.request(`${stack.origin}/api/sessions`, { headers: CSRF });
+
+  it('uses the token it has while it has time, then renews and uses the new one', async () => {
+    const browser = new Browser();
+    await stack.signIn('alice', '/', browser);
+    const before = stack.idp.calls.refreshes;
+
+    expect((await call(browser)).status).toBe(200);
+    expect(stack.idp.calls.refreshes).toBe(before);
+    const first = stack.core.seen.at(-1)?.headers.authorization;
+
+    await sleep(1_200); // under a second left: inside the skew
+    expect((await call(browser)).status).toBe(200);
+    expect(stack.idp.calls.refreshes).toBe(before + 1);
+    const second = stack.core.seen.at(-1)?.headers.authorization;
+    expect(second).not.toBe(first);
+    expect(second).toBe(`Bearer ${stack.idp.accessTokens.at(-1)}`);
+  });
+
+  it('refreshes once for a burst of requests that all find the token about to expire', async () => {
+    const browser = new Browser();
+    await stack.signIn('alice', '/', browser);
+    await sleep(1_200);
+    const before = stack.idp.calls.refreshes;
+    stack.idp.behaviour.tokenDelayMs = 250; // long enough that all ten overlap with the first
+
+    const results = await Promise.all(Array.from({ length: 10 }, () => call(browser)));
+
+    expect(results.map((r) => r.status)).toEqual(Array(10).fill(200));
+    expect(stack.idp.calls.refreshes - before).toBe(1);
+    const bearers = new Set(
+      stack.core.seen.filter((s) => s.path === '/sessions').map((s) => s.headers.authorization),
+    );
+    expect(bearers.size).toBe(1);
+  });
+
+  it('shows the browser nothing of the renewal', async () => {
+    const browser = new Browser();
+    await stack.signIn('alice', '/', browser);
+    await sleep(1_200);
+    const res = await call(browser);
+    const seen = `${[...res.headers].join()}${await res.text()}`;
+    expect(seen).not.toContain(stack.idp.accessTokens.at(-1));
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('follows a provider that rotates refresh tokens', async () => {
+    stack.idp.behaviour.rotateRefreshTokens = true;
+    const browser = new Browser();
+    await stack.signIn('alice', '/', browser);
+    const before = stack.idp.tokenRequests.length;
+    for (let round = 0; round < 2; round += 1) {
+      await sleep(1_200);
+      expect((await call(browser)).status).toBe(200);
+    }
+    const refreshes = stack.idp.tokenRequests
+      .slice(before)
+      .filter((r) => r.grant_type === 'refresh_token');
+    expect(refreshes).toHaveLength(2);
+    // The second used the token the first one returned, not the original (which is now spent).
+    expect(refreshes[1]?.refresh_token).not.toBe(refreshes[0]?.refresh_token);
+  });
+
+  it('ends the session, with a 401 the page can act on, when the provider refuses the refresh token', async () => {
+    const browser = new Browser();
+    await stack.signIn('alice', '/', browser);
+    await sleep(1_200);
+    stack.idp.behaviour.refreshFails = 'invalid_grant';
+
+    const res = await call(browser);
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ code: 'session_expired' });
+    expect(res.headers.get('set-cookie')).toMatch(/^chemclaw_session=; .*Max-Age=0/);
+    expect(stack.core.seen.filter((s) => s.path === '/sessions')).toHaveLength(0);
+    expect(await (await browser.request(`${stack.origin}/auth/session`)).json()).toEqual({
+      authenticated: false,
+    });
+  });
+
+  it('keeps the session and the request going on a token with time left when the provider is down', async () => {
+    const browser = new Browser();
+    await stack.signIn('alice', '/', browser);
+    await sleep(1_200);
+    stack.idp.behaviour.refreshFails = 'server_error';
+    const before = stack.idp.calls.refreshes;
+
+    expect((await call(browser)).status).toBe(200);
+    // Inside the retry backoff the provider is left alone.
+    expect((await call(browser)).status).toBe(200);
+    expect((await call(browser)).status).toBe(200);
+    expect(stack.idp.calls.refreshes - before).toBe(1);
+    expect(await (await browser.request(`${stack.origin}/auth/session`)).json()).toMatchObject({
+      authenticated: true,
+    });
+  });
+
+  it('answers 503 and keeps the session when the token has run out and the provider is down', async () => {
+    const browser = new Browser();
+    await stack.signIn('alice', '/', browser);
+    await sleep(2_200);
+    stack.idp.behaviour.refreshFails = 'unreachable';
+
+    const res = await call(browser);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ code: 'idp_unavailable' });
+    expect(res.headers.get('retry-after')).toBe('5');
+    expect(await (await browser.request(`${stack.origin}/auth/session`)).json()).toMatchObject({
+      authenticated: true,
+    });
+
+    // The provider comes back: the very next request recovers, backoff or not (the token is dead).
+    stack.idp.behaviour.refreshFails = null;
+    expect((await call(browser)).status).toBe(200);
+  });
+
+  it('ends a session whose provider issued no refresh token when its access token runs out', async () => {
+    stack.idp.behaviour.issueRefreshToken = false;
+    const browser = new Browser();
+    await stack.signIn('alice', '/', browser);
+    expect((await call(browser)).status).toBe(200);
+
+    await sleep(2_200);
+    const res = await call(browser);
+    expect(res.status).toBe(401);
+    expect(await res.json()).toMatchObject({ code: 'session_expired' });
+  });
+});
+
+describe('sign-out', () => {
+  let stack: Stack;
+  beforeAll(async () => {
+    stack = await startStack();
+  });
+  afterAll(async () => {
+    await stack.stop();
+  });
+
+  const logout = (browser: Browser) =>
+    browser.request(`${stack.origin}/auth/logout`, {
+      method: 'POST',
+      headers: { ...CSRF, origin: stack.origin },
+    });
+
+  it('ends the session here, clears the cookie, and revokes the refresh token', async () => {
+    const browser = new Browser();
+    await stack.signIn('alice', '/', browser);
+    const cookie = browser.cookie(stack.origin, 'chemclaw_session')?.value ?? '';
+    const revoked = stack.idp.calls.revocations;
+
+    const res = await logout(browser);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('set-cookie')).toMatch(
+      /^chemclaw_session=; Path=\/; HttpOnly; SameSite=Strict; Max-Age=0$/,
+    );
+    expect(browser.cookie(stack.origin, 'chemclaw_session')).toBeUndefined();
+
+    for (let i = 0; i < 20 && stack.idp.calls.revocations === revoked; i += 1) await sleep(50);
+    expect(stack.idp.calls.revocations).toBe(revoked + 1);
+    expect([...stack.idp.revoked].some((t) => t.startsWith('rt-'))).toBe(true);
+
+    // The cookie it held is worth nothing now, wherever it is replayed.
+    const replay = new Browser();
+    replay.jar.set(
+      new URL(stack.origin).host,
+      new Map([['chemclaw_session', { value: cookie, raw: '' }]]),
+    );
+    expect(await (await replay.request(`${stack.origin}/auth/session`)).json()).toEqual({
+      authenticated: false,
+    });
+    expect((await replay.request(`${stack.origin}/api/sessions`, { headers: CSRF })).status).toBe(
+      401,
+    );
+  });
+
+  it('tells the page where to end the provider’s session, with no token in the URL', async () => {
+    const browser = new Browser();
+    await stack.signIn('alice', '/', browser);
+    const body = (await (await logout(browser)).json()) as { endSessionUrl: string };
+
+    const url = new URL(body.endSessionUrl);
+    expect(url.origin + url.pathname).toBe(`${stack.idp.authority}/oauth2/v2.0/logout`);
+    expect(url.searchParams.get('client_id')).toBe(CLIENT_ID);
+    expect(url.searchParams.get('post_logout_redirect_uri')).toBe(`${stack.origin}/`);
+    expect(body.endSessionUrl).not.toMatch(/eyJ|rt-|id_token_hint/);
+
+    // Following it ends the provider's session and comes back to the app.
+    const ended = stack.idp.calls.endSessions;
+    const { res, chain } = await browser.navigate(body.endSessionUrl);
+    expect(stack.idp.calls.endSessions).toBe(ended + 1);
+    expect(chain[chain.length - 1]).toBe(`${stack.origin}/`);
+    expect(res.status).toBe(200);
+  });
+
+  it('does not offer the provider’s end-session endpoint to an unknown redirect', async () => {
+    const res = await new Browser().request(
+      `${stack.idp.authority}/oauth2/v2.0/logout?client_id=${CLIENT_ID}&post_logout_redirect_uri=https://evil.example/`,
+    );
+    expect(res.status).toBe(200); // shown "signed out", never redirected
+  });
+
+  it('is harmless with no session, and still says where to go', async () => {
+    const res = await logout(new Browser());
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { endSessionUrl: string }).endSessionUrl).toContain(
+      '/oauth2/v2.0/logout',
+    );
+  });
+
+  it('offers no provider sign-out when ENTRA_END_SESSION=false', async () => {
+    const quiet = await startStack({ env: { ENTRA_END_SESSION: 'false' } });
+    try {
+      const browser = new Browser();
+      await quiet.signIn('alice', '/', browser);
+      const res = await browser.request(`${quiet.origin}/auth/logout`, {
+        method: 'POST',
+        headers: { ...CSRF, origin: quiet.origin },
+      });
+      expect(await res.json()).toEqual({ endSessionUrl: null });
+    } finally {
+      await quiet.stop();
+    }
+  });
+});
+
+describe('a public client (ENTRA_CLIENT_AUTH=none)', () => {
+  it('signs in with PKCE alone and sends no secret', async () => {
+    const stack = await startStack({
+      idp: { clientSecret: null },
+      env: { ENTRA_CLIENT_AUTH: 'none', ENTRA_CLIENT_SECRET: '' },
+    });
+    try {
+      const browser = new Browser();
+      const { res } = await stack.signIn('alice', '/', browser);
+      expect(res.status).toBe(200);
+      expect(stack.idp.tokenRequests.every((r) => r.client_secret === undefined)).toBe(true);
+    } finally {
+      await stack.stop();
+    }
+  });
+});
+
+describe('the session store', () => {
+  const limits = { idleMs: 1_000, maxAgeMs: 5_000, maxSessions: 3 };
+  const fresh = (token = 't') => ({
+    account: { id: 'u', username: 'u', name: 'U', roles: [] },
+    accessToken: token,
+    accessExpiresAt: 0,
+    refreshToken: null,
+  });
+  let clock = 0;
+  const make = () => {
+    clock = 0;
+    return new SessionStore(limits, () => clock);
+  };
+
+  it('ends a session unused for the idle time, and one older than the absolute time however used', () => {
+    const store = make();
+    const idle = store.create(fresh());
+    const busy = store.create(fresh());
+    clock = 900;
+    expect(store.get(busy.id)).toBeDefined();
+    clock = 1_500; // idle: 1500 since creation and last use; busy: 600 since last use
+    expect(store.get(idle.id)).toBeUndefined();
+    for (let t = 1_400; t <= 4_900; t += 500) {
+      clock = t;
+      expect(store.get(busy.id)).toBeDefined();
+    }
+    clock = 5_100; // used a moment ago, but past the absolute lifetime
+    expect(store.get(busy.id)).toBeUndefined();
+    store.stop();
+  });
+
+  it('drops the least recently used session over the cap', () => {
+    const store = make();
+    const [a, b, c] = [
+      store.create(fresh('a')),
+      store.create(fresh('b')),
+      store.create(fresh('c')),
+    ];
+    expect(store.get(a.id)).toBeDefined(); // a is now the most recent
+    const d = store.create(fresh('d'));
+    expect(store.size).toBe(3);
+    expect(store.get(b.id)).toBeUndefined();
+    for (const kept of [a, c, d]) expect(store.get(kept.id)).toBeDefined();
+    store.stop();
+  });
+
+  it('issues unguessable, distinct ids and never an empty one', () => {
+    const store = make();
+    const ids = new Set(Array.from({ length: 50 }, () => store.create(fresh()).id));
+    expect(ids.size).toBe(50);
+    for (const id of ids) expect(id).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(store.get('')).toBeUndefined();
+    store.stop();
+  });
+});
+
+describe('pending sign-ins', () => {
+  const login = { verifier: 'v', nonce: 'n', returnTo: '/' };
+
+  it('are single-use, and only for the browser that began them', () => {
+    let clock = 0;
+    const pending = new PendingLogins(1_000, 10, () => clock);
+    pending.add('state-1', login, 'binding-1');
+    expect(pending.take('state-1', 'someone-else')).toBeUndefined();
+    expect(pending.take('state-1', 'binding-1')).toBeUndefined(); // spent by the failed attempt
+    pending.add('state-2', login, 'binding-2');
+    expect(pending.take('state-2', 'binding-2')).toMatchObject({ nonce: 'n' });
+    expect(pending.take('state-2', 'binding-2')).toBeUndefined();
+    clock = 0;
+  });
+
+  it('expire, and are bounded in number', () => {
+    let clock = 0;
+    const pending = new PendingLogins(1_000, 3, () => clock);
+    pending.add('old', login, 'b');
+    clock = 1_500;
+    expect(pending.take('old', 'b')).toBeUndefined();
+
+    for (const state of ['s1', 's2', 's3', 's4', 's5']) pending.add(state, login, 'b');
+    expect(pending.size).toBe(3);
+    expect(pending.take('s1', 'b')).toBeUndefined(); // evicted, oldest first
+    expect(pending.take('s5', 'b')).toBeDefined();
+  });
+});
+
+describe('the provider’s signing keys', () => {
+  it('are re-read when a token arrives signed with a key not yet seen (rotation)', async () => {
+    const idp = await startFixtureOidc({
+      clientId: CLIENT_ID,
+      clientSecret: CLIENT_SECRET,
+      redirectUris: ['http://127.0.0.1/cb'],
+      postLogoutRedirectUris: [],
+    });
+    const oidc = new OidcClient({
+      authority: idp.authority,
+      clientId: CLIENT_ID,
+      clientSecret: CLIENT_SECRET,
+      scope: 'openid',
+      redirectUri: 'http://127.0.0.1/cb',
+      postLogoutRedirectUri: 'http://127.0.0.1/',
+      endSession: false,
+      timeoutMs: 2_000,
+      jwksCooldownMs: 0,
+    });
+    try {
+      const idTokenFrom = async (): Promise<string> => {
+        const verifier = 'v'.repeat(43);
+        const challenge = createHash('sha256').update(verifier).digest('base64url');
+        const url = new URL(await oidc.authorizeUrl({ state: 's', nonce: 'nonce-1', challenge }));
+        url.searchParams.set('person', 'alice');
+        const back = new URL(
+          (await fetch(url, { redirect: 'manual' })).headers.get('location') ?? '',
+        );
+        const tokens = await oidc.exchangeCode(back.searchParams.get('code') ?? '', verifier);
+        return tokens.idToken ?? '';
+      };
+
+      const first = await idTokenFrom();
+      expect((await oidc.verifyIdToken(first, 'nonce-1')).id).toBeTruthy();
+      const fetches = idp.calls.jwks;
+
+      await idp.rotateKey(); // the next token is signed with a key-2 the cached set lacks
+      const second = await idTokenFrom();
+      expect((await oidc.verifyIdToken(second, 'nonce-1')).name).toBe('Alice Chemist');
+      expect(idp.calls.jwks).toBeGreaterThan(fetches);
+
+      // And a nonce that is not this sign-in's is refused on a token that is otherwise perfect.
+      await expect(oidc.verifyIdToken(second, 'another-nonce')).rejects.toMatchObject({
+        oauthError: 'invalid_id_token',
+      });
+    } finally {
+      await idp.close();
+    }
+  });
+});
+
+describe('the provider’s discovery document', () => {
+  it('outlives a refresh the provider fails, and is asked for again a minute later, not per request', async () => {
+    const idp = await startFixtureOidc({
+      clientId: CLIENT_ID,
+      clientSecret: CLIENT_SECRET,
+      redirectUris: ['http://127.0.0.1/cb'],
+      postLogoutRedirectUris: [],
+    });
+    let clock = 0;
+    let broken = false;
+    let asked = 0;
+    const oidc = new OidcClient(
+      {
+        authority: idp.authority,
+        clientId: CLIENT_ID,
+        clientSecret: CLIENT_SECRET,
+        scope: 'openid',
+        redirectUri: 'http://127.0.0.1/cb',
+        postLogoutRedirectUri: 'http://127.0.0.1/',
+        endSession: false,
+        timeoutMs: 2_000,
+        fetchImpl: (input, init) => {
+          asked += 1;
+          return broken ? Promise.reject(new Error('down')) : fetch(input, init);
+        },
+      },
+      () => clock,
+    );
+    try {
+      const first = await oidc.discovery();
+      expect(asked).toBe(1);
+
+      clock = 3_700_000; // past the hour: due for a refresh, which fails
+      broken = true;
+      expect(await oidc.discovery()).toEqual(first);
+      expect(asked).toBe(2);
+
+      // Not again on every call while it is down...
+      expect(await oidc.discovery()).toEqual(first);
+      expect(asked).toBe(2);
+
+      // ...but after a minute, yes — and it recovers.
+      clock += 61_000;
+      broken = false;
+      await oidc.discovery();
+      expect(asked).toBe(3);
+    } finally {
+      await idp.close();
+    }
+  });
+
+  it('is an error, not a guess, when there has never been one', async () => {
+    const oidc = new OidcClient({
+      authority: 'http://127.0.0.1:9/nowhere',
+      clientId: CLIENT_ID,
+      clientSecret: null,
+      scope: 'openid',
+      redirectUri: 'http://127.0.0.1/cb',
+      postLogoutRedirectUri: 'http://127.0.0.1/',
+      endSession: false,
+      timeoutMs: 500,
+    });
+    await expect(oidc.discovery()).rejects.toMatchObject({ name: 'IdpUnavailable' });
+  });
+});

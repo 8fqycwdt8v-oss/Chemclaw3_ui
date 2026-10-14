@@ -71,14 +71,25 @@ server.listen(cfg.port, cfg.bindHost, () => {
     );
   }
 
-  if (cfg.authMode === 'msal' && cfg.rawEntraAuthority) {
-    // A non-default authority is legitimate but logged; the service still validates issuer and
-    // keys.
-    log.warn(
-      `ENTRA_AUTHORITY=${cfg.entraAuthority}: sign-in goes to this authority, not to ` +
-        'login.microsoftonline.com, and the CSP opens its origin instead. Chemclaw3 must trust ' +
-        'the same issuer (CHEMCLAW_ENTRA_ISSUER / CHEMCLAW_ENTRA_JWKS_URL).',
+  if (cfg.authMode === 'bff') {
+    // Sessions are in this process's memory: said at start so an operator scaling past one replica
+    // reads it before the first "why was I signed out".
+    log.info(
+      'auth bff: tokens are held server-side in memory; with more than one replica the router ' +
+        'must keep a browser on one pod (docs/operations.md, "Token custody")',
+      {
+        authority: cfg.entraAuthority,
+        redirect_uri: `${cfg.appOrigin}/auth/callback`,
+        client_auth: cfg.entraClientAuth,
+        cookie: cfg.sessionCookieName,
+      },
     );
+    if (!cfg.cookieSecure) {
+      log.warn(
+        `SECURITY: APP_ORIGIN ${cfg.appOrigin} is plain http, so the session cookie is not ` +
+          'Secure and has no __Host- prefix. Loopback development only.',
+      );
+    }
   }
 
   if (cfg.allowFraming) {

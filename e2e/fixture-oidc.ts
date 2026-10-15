@@ -59,6 +59,12 @@ export interface FixtureOidcOptions {
   audience?: string;
   accessTtlSeconds?: number;
   people?: Person[];
+  /**
+   * What the token endpoint demands of `Origin`. `spa`: a request must name a registered redirect
+   * URI's origin (the single-page platform's rule, which Chemclaw3_mock enforces). `web`: a request
+   * must carry none (Entra refuses a Web client's redemption that has one). `any`: not checked.
+   */
+  tokenOriginPolicy?: 'spa' | 'web' | 'any';
 }
 
 /** Everything a test may change while the provider runs. */
@@ -383,6 +389,23 @@ export async function startFixtureOidc(options: FixtureOidcOptions): Promise<Fix
       await new Promise((resolve) => setTimeout(resolve, behaviour.tokenDelayMs));
     }
     if (!clientOk(req, form)) return json(res, 401, { error: 'invalid_client' });
+    const policy = options.tokenOriginPolicy ?? 'any';
+    const origin = req.headers.origin;
+    if (policy === 'spa') {
+      const registered = options.redirectUris.map((uri) => new URL(uri).origin);
+      if (!origin)
+        return json(res, 400, {
+          error: 'invalid_request',
+          error_description: 'AADSTS9002327: only cross-origin',
+        });
+      if (!registered.includes(origin)) return json(res, 400, { error: 'invalid_request' });
+    }
+    if (policy === 'web' && origin) {
+      return json(res, 400, {
+        error: 'invalid_request',
+        error_description: 'AADSTS9002326: cross-origin redemption is for single-page clients',
+      });
+    }
 
     if (form.grant_type === 'authorization_code') {
       calls.codeExchanges += 1;

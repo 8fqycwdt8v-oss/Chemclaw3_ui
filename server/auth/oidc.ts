@@ -61,6 +61,13 @@ export interface OidcOptions {
    * BFF's client secret rides on each, and an anonymous caller can start an exchange for free.
    */
   maxInflight?: number;
+  /**
+   * Sent as `Origin` on token requests. Only for a public client against a registration of the
+   * single-page-application kind, whose codes the provider redeems only for a request that names a
+   * registered origin. Never set for a Web registration: Entra refuses that one *because* of it
+   * (`AADSTS9002326`).
+   */
+  tokenOrigin?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -267,7 +274,11 @@ export class OidcClient {
     if (this.options.clientSecret) body.set('client_secret', this.options.clientSecret);
     const { status, body: json } = await this.call(doc.token_endpoint, {
       method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        accept: 'application/json',
+        ...(this.options.tokenOrigin ? { origin: this.options.tokenOrigin } : {}),
+      },
       body,
     });
     if (status >= 500 || status === 429 || status === 0) {

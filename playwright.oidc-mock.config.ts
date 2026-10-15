@@ -112,7 +112,7 @@ export default defineConfig({
       // holds to containing no dev-auth path — not the `client-dev-auth` build the default suite
       // serves.
       // `ENTRA_CLIENT_AUTH=none`: the mock registers one client with PKCE and no secret, which is
-      // what the BFF presents. `NODE_EXTRA_CA_CERTS` is the throwaway certificate, trusted by
+      // what the BFF presents (with `Origin` set to the app's, which the mock's single-page rule requires). `NODE_EXTRA_CA_CERTS` is the throwaway certificate, trusted by
       // this process for the tenant's discovery, token and key endpoints and nothing else.
       command:
         `AUTH_MODE=bff ENTRA_CLIENT_AUTH=none NODE_EXTRA_CA_CERTS=${CERT} ` +

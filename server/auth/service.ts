@@ -85,6 +85,9 @@ export class AuthService {
       timeoutMs: cfg.oidcHttpTimeoutMs,
       endpointOrigins: cfg.entraEndpointOrigins,
       maxInflight: cfg.oidcMaxInflight,
+      // A public client is a single-page registration's shape, and the provider redeems those
+      // only for a request that names the app's origin; a secret-holding Web client sends none.
+      ...(cfg.entraClientAuth === 'none' ? { tokenOrigin: cfg.appOrigin } : {}),
     });
     this.custody = new Custody(this.sessions, this.oidc, {
       skewMs: cfg.tokenRefreshSkewMs,

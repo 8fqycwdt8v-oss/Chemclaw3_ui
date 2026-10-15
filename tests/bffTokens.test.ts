@@ -674,3 +674,51 @@ describe('a live stream is use of its session', () => {
     }
   }, 20_000);
 });
+
+describe('the token endpoint’s rule about Origin', () => {
+  const CSRF_ONLY = { 'x-chemclaw-csrf': '1' };
+
+  it('is met by a public client, which names the app’s origin (Chemclaw3_mock’s single-page rule)', async () => {
+    // The mock tenant redeems codes only for a request carrying a registered origin; a server
+    // sending none was refused, and every sign-in in the oidc-mock lane ended at "refused".
+    const stack = await startStack({
+      idp: { clientSecret: null, tokenOriginPolicy: 'spa', accessTtlSeconds: 2 },
+      env: { ENTRA_CLIENT_AUTH: 'none', ENTRA_CLIENT_SECRET: '', TOKEN_REFRESH_SKEW_SECONDS: '1' },
+    });
+    try {
+      const browser = new Browser();
+      const { res } = await stack.signIn('alice', '/', browser);
+      expect(res.status).toBe(200);
+      expect(browser.cookie(stack.origin, 'chemclaw_session')).toBeDefined();
+
+      // The refresh goes to the same endpoint under the same rule.
+      await sleep(1_200);
+      const before = stack.idp.calls.refreshes;
+      const api = await browser.request(`${stack.origin}/api/sessions`, { headers: CSRF_ONLY });
+      expect(api.status).toBe(200);
+      expect(stack.idp.calls.refreshes).toBe(before + 1);
+    } finally {
+      await stack.stop();
+    }
+  });
+
+  it('is met by a Web client, which names none (Entra refuses one that does)', async () => {
+    const stack = await startStack({
+      idp: { tokenOriginPolicy: 'web', accessTtlSeconds: 2 },
+      env: { TOKEN_REFRESH_SKEW_SECONDS: '1' },
+    });
+    try {
+      const browser = new Browser();
+      const { res } = await stack.signIn('alice', '/', browser);
+      expect(res.status).toBe(200);
+      await sleep(1_200);
+      const api = await browser.request(`${stack.origin}/api/sessions`, { headers: CSRF_ONLY });
+      expect(api.status).toBe(200);
+      expect(stack.idp.tokenRequests.every((r) => r.client_secret === 'test-client-secret')).toBe(
+        true,
+      );
+    } finally {
+      await stack.stop();
+    }
+  });
+});

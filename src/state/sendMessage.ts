@@ -291,8 +291,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
    * Stop the turn as the document unloads. Differs from `stop()`:
    *
    * - `keepalive`, since an ordinary `fetch` from `pagehide` dies with the page.
-   * - A token already in hand (`lastToken`): a silent MSAL refresh is impossible during unload, and
-   *   a bare getter declines the 401 retry.
+   * - A token already in hand (`lastToken`), and a bare getter that declines the 401 retry: nothing
+   *   may await a token during unload. (Under `bff` there is none; the cookie carries it.)
    * - Nothing local: no abort, banner or await.
    * - `reason: 'unload'`: a reload is also a `pagehide`, so the service defers the stop and drops
    *   it if `resumeInterruptedTurn` reattaches.

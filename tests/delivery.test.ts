@@ -253,7 +253,7 @@ describe('the four promises, driven against scripts/check-serving.mjs', () => {
     const healthy: Record<string, { status: number; body: string }> = {
       '/healthz': { status: 200, body: '{"status":"ok"}' },
       '/config.js': { status: 200, body: 'window.__CHEMCLAW_CONFIG__ = {};' },
-      '/auth/callback': { status: 200, body: '<!doctype html><title>ChemClaw3</title>' },
+      '/c/deep-link-check': { status: 200, body: '<!doctype html><title>ChemClaw3</title>' },
       '/api/metrics': { status: 404, body: 'not found' },
     };
 
@@ -300,7 +300,7 @@ describe('the four promises, driven against scripts/check-serving.mjs', () => {
     // lives in the loop as well as in the assertion.
     ['/healthz', { '/healthz': { body: '{"status":"broken"}' } }],
     ['/config.js', { '/config.js': { body: 'window.SOMETHING_ELSE = {};' } }],
-    ['SPA fallback', { '/auth/callback': { status: 404, body: 'not found' } }],
+    ['SPA fallback', { '/c/deep-link-check': { status: 404, body: 'not found' } }],
     ['the proxy whitelist', { '/api/metrics': { status: 200, body: '# HELP anything' } }],
   ])('fails when the image stops keeping %s', async (label, broken) => {
     const { status, output } = await serveWith(

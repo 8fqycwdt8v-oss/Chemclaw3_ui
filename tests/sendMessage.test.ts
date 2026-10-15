@@ -32,7 +32,7 @@ const devAuth: AuthProvider = {
  */
 function reauthingAuth(recovers: boolean): AuthProvider & { asked: number } {
   return {
-    mode: 'msal',
+    mode: 'bff',
     account: null,
     asked: 0,
     refreshed: false,
@@ -614,7 +614,7 @@ describe('sendMessage', () => {
   });
 
   /**
-   * A hard token-acquisition failure — `msalAuth.getAccessToken` rethrowing something other than
+   * A hard token-acquisition failure — a provider's `getAccessToken` rethrowing something other than
    * `InteractionRequiredAuthError` — is not a dropped connection, even though both used to reach
    * `sendMessage`'s outer catch as a bare rejection wrapped into `kind: 'stream'`. That misreading
    * sent a turn that was never opened into the ten-minute "the server may still be running it"
@@ -624,7 +624,7 @@ describe('sendMessage', () => {
    */
   describe('the token provider failing before any request is opened', () => {
     const failingAuth: AuthProvider = {
-      mode: 'msal',
+      mode: 'bff',
       account: null,
       getAccessToken: () => Promise.reject(new Error('acquireTokenSilent: network is down')),
       login: async () => undefined,

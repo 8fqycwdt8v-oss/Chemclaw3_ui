@@ -33,8 +33,8 @@ permissions:
 
 jobs:
   # One assertion step, because the gate is `scripts/ci.mjs` and this file no longer describes it.
-  # Everything that used to be inline shell here — the `/config.js` reference, the MSAL entry-chunk
-  # probe and its positive control, the standalone-bundle run — is a named npm script a contributor
+  # Everything that used to be inline shell here — the `/config.js` reference, the browser-OIDC-client
+  # probe, the standalone-bundle run — is a named npm script a contributor
   # can type, and `npm run ci` is the order they run in. `npm run ci -- --list` prints the list with
   # the reason for each. The steps around it are checkout, install and provisioning, which are this
   # runner's business and nobody's assertions.
@@ -130,11 +130,10 @@ jobs:
 
   oidc-mock:
     # The real browser sign-in, against Chemclaw3_mock's stand-in Entra tenant
-    # (`e2e/oidc-mock.spec.ts`; `playwright.oidc-mock.config.ts` has the four processes). Every
-    # other browser test runs `AUTH_MODE=dev`, so before this job nothing on a pull request drove
-    # MSAL at all — and #126 merged green while every first sign-in looped for ever between `/`
-    # and `/c/<id>` with the code never redeemed: 534 navigations and no token request in the
-    # spec's own count. This lane failed on that commit; it is here so the next one cannot merge.
+    # (`e2e/oidc-mock.spec.ts`; `playwright.oidc-mock.config.ts` has the four processes). The
+    # default browser suite signs in against a fixture provider (`e2e/bff-auth.spec.ts`) or not at
+    # all; this lane signs in against the tenant a deployment is modelled on, with two people in it,
+    # and fails if a first sign-in loops between `/` and `/c/<id>` instead of settling.
     #
     # Its own job rather than a step of `check`: it needs Python and a second repository, it builds
     # the production bundle the gate does not, and in parallel it costs the pull request no wall

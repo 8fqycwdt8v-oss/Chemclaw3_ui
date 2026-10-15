@@ -5,7 +5,6 @@
 
 import {
   ask,
-  bearerOf,
   expect,
   lastAnswer,
   newConversation,
@@ -120,13 +119,10 @@ test('a citation-only ELN record says its structure was not given by the source'
 
 test('a citation-only record, read through the BFF, discloses its tier', async ({ alice }) => {
   // The service half of the scenario above, which runs on every lane: the record a chip would open
-  // says "structure not given by the source". Read with the page's own bearer, through the BFF —
+  // says "structure not given by the source". Read under the page's own session, through the BFF —
   // the same request `CitationChip` → `NoteSheet` makes.
   const { page } = alice;
-  const bearer = await bearerOf(page);
-  const res = await page.request.get(`/api/notes/${CITATION_ONLY}`, {
-    headers: bearer ? { authorization: `Bearer ${bearer}` } : {},
-  });
+  const res = await page.request.get(`/api/notes/${CITATION_ONLY}`);
   expect(res.status(), `GET /notes/${CITATION_ONLY}`).toBe(200);
   const body = await res.text();
   expect(body).toMatch(/structure not given by the source/i);

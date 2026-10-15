@@ -19,7 +19,11 @@ must be configured with, verification and troubleshooting — is
 - **The two hosts** in `routes.yaml`, and `APP_ORIGIN` / `SANDBOX_ORIGIN` in `deployment.yaml` to
   `https://` plus exactly those hosts.
 - **`ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `API_SCOPE`, `REVIEWER_ROLES`** — the placeholders are
-  zeros and ones. The SPA's registration needs `https://<app host>/auth/callback` as a redirect URI.
+  zeros and ones. The BFF's registration is a **Web** application with a client secret and the
+  redirect URIs `https://<app host>/auth/callback` and `https://<app host>/`.
+- **The client secret** — `oc create secret generic chemclaw3-ui-oidc
+--from-literal=client-secret=<value>`; the Deployment mounts it read-only and names the file in
+  `ENTRA_CLIENT_SECRET_FILE`. It is not in this repository.
 - **`CHEMCLAW_API_URL`** — `http://chemclaw-service:8080` is Chemclaw3's chart Service under its
   default name in the **same namespace**; from another namespace use
   `http://chemclaw-service.<namespace>.svc:8080`. The service root only, never a path. The BFF
@@ -27,9 +31,10 @@ must be configured with, verification and troubleshooting — is
   NetworkPolicy on the backend must admit this Deployment's pods.
 - **The image** — anything; Jenkins replaces it by digest on the first release.
 
-Nothing here is secret (the bearer token comes from the browser), so there is no Secret, and the
-`env` block can equally be a ConfigMap. Before this UI is ready, the backend must answer its own
-`/readyz`, and under `AUTH_MODE=msal` it must refuse an anonymous `GET /sessions`
+Nothing in the manifests is secret (the client secret is the Secret above), so the `env` block can
+equally be a ConfigMap. The pod needs egress to the identity provider (`login.microsoftonline.com`
+by default). Before this UI is ready, the backend must answer its own `/readyz`, and under
+`AUTH_MODE=bff` it must refuse an anonymous `GET /sessions`
 (`CHEMCLAW_ENTRA_REQUIRED=true`) — otherwise `/readyz` here stays 503 with
 `"detail":"upstream accepts anonymous"`, by design.
 
@@ -38,6 +43,14 @@ Nothing here is secret (the bearer token comes from the browser), so there is no
 | `deployment.yaml` | the BFF with **two container ports** — `http` (`PORT`) and `sandbox` (`SANDBOX_PORT`) — and env |
 | `service.yaml`    | one Service, two named ports, `http` and `sandbox`                                              |
 | `routes.yaml`     | two Routes on two hosts, both edge TLS with http redirected                                     |
+
+## Sessions are in the pod, which is why the app Route keeps affinity
+
+The BFF holds each signed-in person's tokens in its own memory (`docs/operations.md`, "Token
+custody"), and this Deployment runs two replicas. The app Route therefore keeps the router's
+affinity cookie (`haproxy.router.openshift.io/disable_cookies: 'false'`, the default, stated on
+purpose). A release replaces the pods and people sign in again, silently while the identity
+provider's session lasts.
 
 ## The HTML sandbox, which is why there are two of everything
 
@@ -80,7 +93,8 @@ needed. Raise one only if you also raise the heartbeat above it.
 ## What holds this file to the code
 
 `tests/openshiftManifests.test.ts` parses these YAML files and checks every env name against
-`server/config.ts`, the container ports against `PORT`/`SANDBOX_PORT`, the Service's and Routes'
+`server/config.ts`, that the client secret is mounted from a Secret and not set as a value, that the
+app Route keeps affinity, the container ports against `PORT`/`SANDBOX_PORT`, the Service's and Routes'
 port names, both origins against the Routes' hosts, the names against `Jenkinsfile`, and — booting
 `server/config.ts` with this Deployment's environment — that the BFF would start with the sandbox
 on and no refusal.

@@ -28,8 +28,8 @@ import { sseFrames, stubFetch } from './helpers.ts';
 
 const SESSION = 'g'.repeat(32);
 
-const msalAuth: AuthProvider = {
-  mode: 'msal',
+const bffAuth: AuthProvider = {
+  mode: 'bff',
   account: null,
   getAccessToken: async () => 'the-turn-token',
   login: async () => undefined,
@@ -129,7 +129,7 @@ describe('a tab that goes away mid-turn', () => {
   it('cancels the turn on the server', async () => {
     startAnUnfinishedTurn();
     const cid = useChatStore.getState().createConversation();
-    void sendMessage({ conversationId: cid, text: 'pKa?', auth: msalAuth });
+    void sendMessage({ conversationId: cid, text: 'pKa?', auth: bffAuth });
     await turnIsRunning();
 
     pagehide(false);
@@ -142,7 +142,7 @@ describe('a tab that goes away mid-turn', () => {
   it('sends it with keepalive, or the navigation cancels the cancellation', async () => {
     startAnUnfinishedTurn();
     const cid = useChatStore.getState().createConversation();
-    void sendMessage({ conversationId: cid, text: 'pKa?', auth: msalAuth });
+    void sendMessage({ conversationId: cid, text: 'pKa?', auth: bffAuth });
     await turnIsRunning();
 
     pagehide(false);
@@ -155,7 +155,7 @@ describe('a tab that goes away mid-turn', () => {
   it('says it is an unload, so a reload can keep the turn (Chemclaw3_ui#131)', async () => {
     startAnUnfinishedTurn();
     const cid = useChatStore.getState().createConversation();
-    void sendMessage({ conversationId: cid, text: 'pKa?', auth: msalAuth });
+    void sendMessage({ conversationId: cid, text: 'pKa?', auth: bffAuth });
     await turnIsRunning();
 
     pagehide(false);
@@ -170,7 +170,7 @@ describe('a tab that goes away mid-turn', () => {
   it('leaves the turn alone when the page is only going into the back/forward cache', async () => {
     startAnUnfinishedTurn();
     const cid = useChatStore.getState().createConversation();
-    void sendMessage({ conversationId: cid, text: 'pKa?', auth: msalAuth });
+    void sendMessage({ conversationId: cid, text: 'pKa?', auth: bffAuth });
     await turnIsRunning();
 
     pagehide(true);

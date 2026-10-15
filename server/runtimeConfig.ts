@@ -7,15 +7,11 @@ import type { ServerResponse } from 'node:http';
 import { cfg } from './config.ts';
 
 export interface RuntimeConfig {
-  authMode: 'dev' | 'msal';
-  entraTenantId: string;
   /**
-   * The resolved MSAL authority (`entraAuthority` in `server/config.ts`), so the SPA and this
-   * process's CSP share one value.
+   * Who completes the sign-in. `bff` is the whole of what the browser needs to know: the tenant,
+   * client id, scope and secret are this process's and never leave it.
    */
-  entraAuthority: string;
-  entraClientId: string;
-  apiScope: string;
+  authMode: 'dev' | 'bff';
   apiBase: string;
   appVersion: string;
   /** See `warmSessions` in src/env.ts — a kill switch for pre-creating backend sessions. */
@@ -67,10 +63,6 @@ const clientLogLevel = (): RuntimeConfig['logLevel'] =>
 export function runtimeConfig(): RuntimeConfig {
   return {
     authMode: cfg.authMode,
-    entraTenantId: cfg.entraTenantId,
-    entraAuthority: cfg.entraAuthority,
-    entraClientId: cfg.entraClientId,
-    apiScope: cfg.apiScope,
     apiBase: '/api',
     appVersion: cfg.appVersion,
     warmSessions: cfg.warmSessions,

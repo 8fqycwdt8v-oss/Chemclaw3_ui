@@ -188,21 +188,20 @@ describe('turning the sandbox on', () => {
     expect(frameSrc(off.csp)).toBe("frame-src 'none'");
   });
 
-  it('keeps MSAL’s authority in frame-src beside the sandbox', async () => {
-    const msal = await configFrom({
-      AUTH_MODE: 'msal',
+  it('adds nothing for the sign-in beside the sandbox: signing in is a navigation, not a frame', async () => {
+    const bff = await configFrom({
+      AUTH_MODE: 'bff',
       ENTRA_TENANT_ID: 't',
       ENTRA_CLIENT_ID: 'c',
+      ENTRA_CLIENT_SECRET: 's',
       API_SCOPE: 'api://c/x',
       SANDBOX_ORIGIN: 'https://sandbox.example',
       APP_ORIGIN: 'https://app.example',
     });
-    expect(frameSrc(msal.csp)).toBe(
-      'frame-src https://login.microsoftonline.com https://sandbox.example',
-    );
+    expect(frameSrc(bff.csp)).toBe('frame-src https://sandbox.example');
   });
 
-  it('never lets the app frame anything but the sandbox and the sign-in authority', async () => {
+  it('never lets the app frame anything but the sandbox', async () => {
     // frame-src is what bounds the sandbox frame's own navigation (README, "HTML sandbox"): a page
     // that navigates its frame elsewhere is refused only because nothing else is listed. Widening
     // it — a wildcard, a scheme, `'self'`, a second host — re-opens that exit, so it fails here.
@@ -210,20 +209,21 @@ describe('turning the sandbox on', () => {
       SANDBOX_ORIGIN: 'https://sandbox.example',
       APP_ORIGIN: 'https://app.example',
     };
-    const msal = {
-      AUTH_MODE: 'msal',
+    const bff = {
+      AUTH_MODE: 'bff',
       ENTRA_TENANT_ID: 't',
       ENTRA_CLIENT_ID: 'c',
+      ENTRA_CLIENT_SECRET: 's',
       API_SCOPE: 'api://c/x',
     };
     const cases: [Record<string, string>, string[]][] = [
       [{}, ["'none'"]],
       [sandbox, ['https://sandbox.example']],
-      [msal, ['https://login.microsoftonline.com']],
-      [{ ...msal, ...sandbox }, ['https://login.microsoftonline.com', 'https://sandbox.example']],
+      [{ ...bff, APP_ORIGIN: 'https://app.example' }, ["'none'"]],
+      [{ ...bff, ...sandbox }, ['https://sandbox.example']],
       [
-        { ...msal, ...sandbox, ENTRA_AUTHORITY: 'https://login.example.us/t' },
-        ['https://login.example.us', 'https://sandbox.example'],
+        { ...bff, ...sandbox, ENTRA_AUTHORITY: 'https://login.example.us/t' },
+        ['https://sandbox.example'],
       ],
     ];
     for (const [env, allowed] of cases) {

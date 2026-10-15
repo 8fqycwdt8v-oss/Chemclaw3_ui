@@ -73,7 +73,7 @@ function requestStatus(path: string): Promise<number> {
 }
 
 /**
- * Under `msal`, check the backend is still an auth boundary: an anonymous `GET /sessions` must be
+ * Under `bff`, check the backend is still an auth boundary: an anonymous `GET /sessions` must be
  * refused (401/403). Any other response means it accepts anonymous callers, so the pod is not
  * ready. A network error is left to the reachability check.
  */
@@ -92,9 +92,9 @@ async function probe(): Promise<Readiness> {
     };
   }
 
-  // The backend is up. In `msal` mode, also insist it is still enforcing identity — otherwise a
+  // The backend is up. In `bff` mode, also insist it is still enforcing identity — otherwise a
   // pod that answers `/readyz` happily is serving every `/api` route to anyone who can reach it.
-  if (cfg.authMode === 'msal' && (await upstreamAcceptsAnonymous())) {
+  if (cfg.authMode === 'bff' && (await upstreamAcceptsAnonymous())) {
     return { ready: false, upstreamStatus: status, detail: 'upstream accepts anonymous' };
   }
 

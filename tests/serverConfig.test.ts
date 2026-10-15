@@ -9,6 +9,7 @@
  * from `process.env` at module scope and there is only ever one of it per process.
  */
 
+import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isLoopbackHost, validateConfig, type BffConfig } from '../server/config.ts';
 
@@ -27,7 +28,25 @@ const base: BffConfig = {
   entraAuthority: 'https://login.microsoftonline.com/',
   rawEntraAuthority: '',
   entraClientId: '',
+  entraClientSecret: '',
+  entraClientAuth: 'secret',
+  rawEntraClientAuth: 'secret',
+  entraIssuer: '',
   apiScope: '',
+  endSessionEnabled: true,
+  sessionIdleMs: 480 * 60_000,
+  sessionMaxAgeMs: 24 * 3_600_000,
+  maxSessions: 10_000,
+  tokenRefreshSkewMs: 120_000,
+  loginStateTtlMs: 600_000,
+  oidcHttpTimeoutMs: 10_000,
+  tokenRefreshBackoffMs: 5_000,
+  sessionKey: '',
+  oidcMaxInflight: 16,
+  entraEndpointOrigins: [],
+  sessionCookieName: 'chemclaw_session',
+  loginCookieName: 'chemclaw_login',
+  cookieSecure: false,
   appVersion: 'test',
   sseHeartbeatMs: 15_000,
   upstreamConnectTimeoutMs: 10_000,
@@ -70,6 +89,19 @@ const base: BffConfig = {
 
 const config = (over: Partial<BffConfig> = {}): BffConfig => ({ ...base, ...over });
 
+/** A `bff` configuration with nothing wrong with it. */
+const bff: Partial<BffConfig> = {
+  authMode: 'bff',
+  rawAuthMode: 'bff',
+  entraTenantId: 't',
+  entraClientId: 'c',
+  entraClientSecret: 's',
+  apiScope: 'api://a/b',
+  rawAppOrigin: 'https://app.example',
+  appOrigin: 'https://app.example',
+  cookieSecure: true,
+};
+
 afterEach(() => {
   vi.unstubAllEnvs();
   vi.resetModules();
@@ -77,14 +109,14 @@ afterEach(() => {
 
 describe('an unrecognised AUTH_MODE', () => {
   it('is refused rather than treated as dev', async () => {
-    // The whole bug in one line: `AUTH_MODE=MSAL` used to boot with no sign-in required.
-    vi.stubEnv('AUTH_MODE', 'MSAL');
+    // The whole bug in one line: `AUTH_MODE=BFF` used to boot with no sign-in required.
+    vi.stubEnv('AUTH_MODE', 'BFF');
     vi.resetModules();
     const fresh = await import('../server/config.ts');
 
     expect(fresh.cfg.authModeIsValid).toBe(false);
     const problems = fresh.validateConfig(fresh.cfg);
-    expect(problems.some((p) => p.includes('AUTH_MODE') && p.includes('MSAL'))).toBe(true);
+    expect(problems.some((p) => p.includes('AUTH_MODE') && p.includes('BFF'))).toBe(true);
   });
 
   it('names the value it was given, so the typo is findable', () => {
@@ -102,13 +134,27 @@ describe('an unrecognised AUTH_MODE', () => {
   });
 
   it('accepts the two real modes', async () => {
-    for (const mode of ['dev', 'msal']) {
+    for (const mode of ['dev', 'bff']) {
       vi.stubEnv('AUTH_MODE', mode);
       vi.resetModules();
       const fresh = await import('../server/config.ts');
       expect(fresh.cfg.authModeIsValid).toBe(true);
       expect(fresh.cfg.authMode).toBe(mode);
     }
+  });
+
+  it('refuses msal by name, and says what replaced it', async () => {
+    // The browser-held-token mode is gone. An unchanged deployment must stop at boot with the
+    // way forward in the message, not fall back to any other mode.
+    vi.stubEnv('AUTH_MODE', 'msal');
+    vi.resetModules();
+    const fresh = await import('../server/config.ts');
+    expect(fresh.cfg.authModeIsValid).toBe(false);
+    const problems = fresh.validateConfig(fresh.cfg);
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('AUTH_MODE=msal no longer exists');
+    expect(problems[0]).toContain('AUTH_MODE=bff');
+    expect(problems[0]).toContain('ENTRA_CLIENT_SECRET');
   });
 
   it('an unset AUTH_MODE is still dev, and still valid', async () => {
@@ -137,16 +183,7 @@ describe('dev auth on a reachable bind', () => {
   });
 
   it('does not fire for an authenticated mode on the same bind', () => {
-    const problems = validateConfig(
-      config({
-        authMode: 'msal',
-        rawAuthMode: 'msal',
-        bindHost: '0.0.0.0',
-        entraTenantId: 't',
-        entraClientId: 'c',
-        apiScope: 's',
-      }),
-    );
+    const problems = validateConfig(config({ ...bff, bindHost: '0.0.0.0' }));
     expect(problems).toEqual([]);
   });
 });
@@ -175,9 +212,17 @@ describe('the checks that were already there still work', () => {
     expect(problems.some((p) => p.includes('CHEMCLAW_API_URL must be http(s)'))).toBe(true);
   });
 
-  it('requires the Entra settings under msal', () => {
-    const problems = validateConfig(config({ authMode: 'msal', rawAuthMode: 'msal' }));
-    expect(problems).toHaveLength(3);
+  it('requires the sign-in settings under bff', () => {
+    const problems = validateConfig(config({ authMode: 'bff', rawAuthMode: 'bff' }));
+    const names = [
+      'ENTRA_TENANT_ID',
+      'ENTRA_CLIENT_ID',
+      'API_SCOPE',
+      'ENTRA_CLIENT_SECRET',
+      'APP_ORIGIN',
+    ];
+    expect(problems).toHaveLength(names.length);
+    for (const name of names) expect(problems.join('\n')).toContain(name);
   });
 });
 
@@ -331,19 +376,12 @@ describe('SHARED_POLL_MS', () => {
 
 /**
  * `ENTRA_AUTHORITY`: unset is the production default and changes nothing; set, it must be a URL
- * MSAL can use, because the alternative is a process that boots and a sign-in that fails in every
- * browser with an MSAL error code.
+ * the BFF can discover a provider from, because the alternative is a process that boots and a
+ * sign-in that fails for everyone.
  */
 describe('ENTRA_AUTHORITY', () => {
-  const msal = {
-    authMode: 'msal' as const,
-    entraTenantId: 't',
-    entraClientId: 'c',
-    apiScope: 'a/b',
-  };
-
-  it('defaults to Entra public cloud for the tenant, exactly the string MSAL used to hardcode', async () => {
-    vi.stubEnv('AUTH_MODE', 'msal');
+  it('defaults to Entra public cloud for the tenant', async () => {
+    vi.stubEnv('AUTH_MODE', 'bff');
     vi.stubEnv('ENTRA_TENANT_ID', 'tenant-guid');
     vi.resetModules();
     const fresh = await import('../server/config.ts');
@@ -358,44 +396,209 @@ describe('ENTRA_AUTHORITY', () => {
     expect(fresh.cfg.entraAuthority).toBe('https://127.0.0.1:8443/entra/mock-tenant');
   });
 
-  it('accepts an https authority on any host', () => {
-    const raw = 'https://127.0.0.1:8443/entra/mock-tenant';
-    expect(
-      validateConfig(config({ ...msal, rawEntraAuthority: raw, entraAuthority: raw })),
-    ).toEqual([]);
+  it.each([
+    'https://127.0.0.1:8443/entra/mock-tenant',
+    'https://login.microsoftonline.us/t',
+    // Plain http, but loopback: a test authority on this machine. Nothing leaves it.
+    'http://127.0.0.1:8090/entra/mock-tenant',
+    'http://localhost:9000/t',
+  ])('accepts %s', (raw) => {
+    expect(validateConfig(config({ ...bff, rawEntraAuthority: raw, entraAuthority: raw }))).toEqual(
+      [],
+    );
   });
 
-  it.each(['http://127.0.0.1:8090/entra/mock-tenant', 'http://localhost/t'])(
-    'refuses %s, loopback included: MSAL itself refuses a non-https authority',
+  it.each(['http://login.example/t', 'http://10.0.0.5/t'])(
+    'refuses %s: the client secret and the sign-in code would travel in the clear',
     (raw) => {
       const problems = validateConfig(
-        config({ ...msal, rawEntraAuthority: raw, entraAuthority: raw }),
+        config({ ...bff, rawEntraAuthority: raw, entraAuthority: raw }),
       );
       expect(problems).toHaveLength(1);
       expect(problems[0]).toContain('ENTRA_AUTHORITY must be https');
-      expect(problems[0]).toContain('authority_uri_insecure');
     },
   );
 
   it('is not relaxed by ALLOW_INSECURE_AUTH, which is about dev mode and nothing else', () => {
-    const raw = 'http://127.0.0.1:8090/entra/mock-tenant';
+    const raw = 'http://login.example/t';
     const problems = validateConfig(
-      config({ ...msal, rawEntraAuthority: raw, entraAuthority: raw, allowInsecureAuth: true }),
+      config({ ...bff, rawEntraAuthority: raw, entraAuthority: raw, allowInsecureAuth: true }),
     );
     expect(problems.some((p) => p.includes('ENTRA_AUTHORITY'))).toBe(true);
   });
 
-  it.each([
-    'not a url',
-    'https://login.example/t?x=1',
-    'https://login.example/t#frag',
-    'https://*/t',
-    'https://*.microsoftonline.com/t',
-    'https://x;frame-ancestors/t',
-  ])('refuses %s', (raw) => {
+  it.each(['not a url', 'https://login.example/t?x=1', 'https://login.example/t#frag'])(
+    'refuses %s',
+    (raw) => {
+      const problems = validateConfig(
+        config({ ...bff, rawEntraAuthority: raw, entraAuthority: raw }),
+      );
+      expect(problems.some((p) => p.includes('ENTRA_AUTHORITY'))).toBe(true);
+    },
+  );
+
+  it('is not checked outside bff mode, where nothing reads it', () => {
+    const raw = 'http://login.example/t';
+    expect(validateConfig(config({ rawEntraAuthority: raw, entraAuthority: raw }))).toEqual([]);
+  });
+});
+
+/** What the token handler needs, and refuses to start without. */
+describe('AUTH_MODE=bff', () => {
+  it('is valid with everything set', () => {
+    expect(validateConfig(config(bff))).toEqual([]);
+  });
+
+  it('needs APP_ORIGIN: the redirect URI and the one Origin a state-changing request may carry', () => {
+    const problems = validateConfig(config({ ...bff, rawAppOrigin: '', appOrigin: '' }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('APP_ORIGIN is required');
+  });
+
+  it('refuses an http app origin off loopback, whose cookie could not be Secure', () => {
     const problems = validateConfig(
-      config({ ...msal, rawEntraAuthority: raw, entraAuthority: raw }),
+      config({
+        ...bff,
+        rawAppOrigin: 'http://app.example',
+        appOrigin: 'http://app.example',
+        cookieSecure: false,
+      }),
     );
-    expect(problems.some((p) => p.includes('ENTRA_AUTHORITY'))).toBe(true);
+    expect(problems.join('\n')).toContain('could not be Secure');
+  });
+
+  it.each(['http://127.0.0.1:5173', 'http://localhost:5173'])(
+    'allows %s, the development fallback',
+    (origin) => {
+      expect(
+        validateConfig(
+          config({ ...bff, rawAppOrigin: origin, appOrigin: origin, cookieSecure: false }),
+        ),
+      ).toEqual([]);
+    },
+  );
+
+  it('needs a client secret unless the registration is a public client', () => {
+    expect(validateConfig(config({ ...bff, entraClientSecret: '' })).join()).toContain(
+      'ENTRA_CLIENT_SECRET',
+    );
+    expect(
+      validateConfig(
+        config({
+          ...bff,
+          entraClientSecret: '',
+          entraClientAuth: 'none',
+          rawEntraClientAuth: 'none',
+        }),
+      ),
+    ).toEqual([]);
+  });
+
+  it('names a client-auth mode it does not know', () => {
+    const problems = validateConfig(config({ ...bff, rawEntraClientAuth: 'cert' }));
+    expect(problems.join()).toContain('"cert"');
+  });
+
+  it.each(['common', 'organizations', 'consumers', 'Common'])(
+    'refuses the %s tenant, which names no single issuer',
+    (tenant) => {
+      expect(validateConfig(config({ ...bff, entraTenantId: tenant })).join()).toContain(
+        'names no single issuer',
+      );
+    },
+  );
+
+  it('refuses to be framed: a signed-in app any origin can frame can be clickjacked', () => {
+    const problems = validateConfig(config({ ...bff, allowFraming: true }));
+    expect(problems).toHaveLength(1);
+    expect(problems[0]).toContain('ALLOW_FRAMING');
+  });
+
+  it.each([
+    'https://login.microsoftonline.com/common',
+    'https://login.microsoftonline.com/organizations/',
+    'https://login.microsoftonline.com/consumers',
+    'https://login.example/Common/v2.0',
+  ])('refuses the authority %s, which names no single tenant', (raw) => {
+    const problems = validateConfig(
+      config({ ...bff, rawEntraAuthority: raw, entraAuthority: raw.replace(/\/+$/, '') }),
+    );
+    expect(problems.join()).toContain('names no single tenant');
+  });
+
+  it('holds the sign-in cookie key to a length worth the name, and the extra endpoint origins to origins', () => {
+    expect(validateConfig(config({ ...bff, sessionKey: 'short' })).join()).toContain('SESSION_KEY');
+    expect(validateConfig(config({ ...bff, sessionKey: 'k'.repeat(32) })).join()).toContain(
+      'openssl rand -base64 32',
+    );
+    for (const good of [
+      randomBytes(32).toString('base64'),
+      randomBytes(32).toString('base64url'),
+      randomBytes(32).toString('hex'),
+      randomBytes(48).toString('base64'),
+    ]) {
+      expect(validateConfig(config({ ...bff, sessionKey: good })), good).toEqual([]);
+    }
+    for (const bad of [
+      'a-long-passphrase-with-spaces and punctuation!!',
+      randomBytes(31).toString('base64'),
+      randomBytes(31).toString('hex'),
+      `${randomBytes(32).toString('base64')} `,
+    ]) {
+      expect(validateConfig(config({ ...bff, sessionKey: bad })).join(), bad).toContain(
+        'SESSION_KEY',
+      );
+    }
+    expect(
+      validateConfig(config({ ...bff, entraEndpointOrigins: ['https://sts.example/path'] })).join(),
+    ).toContain('ENTRA_ENDPOINTS_ORIGINS');
+    expect(
+      validateConfig(config({ ...bff, entraEndpointOrigins: ['https://sts.example'] })),
+    ).toEqual([]);
+  });
+
+  it('refuses a scope that is an App ID URI, which yields a token the backend rejects', () => {
+    expect(validateConfig(config({ ...bff, apiScope: 'api-client-id' })).join()).toContain(
+      'looks like an App ID URI',
+    );
+  });
+
+  it.each([
+    ['sessionIdleMs', 'SESSION_IDLE_MINUTES'],
+    ['sessionMaxAgeMs', 'SESSION_MAX_AGE_HOURS'],
+    ['maxSessions', 'SESSION_MAX_SESSIONS'],
+    ['loginStateTtlMs', 'LOGIN_STATE_TTL_SECONDS'],
+    ['oidcHttpTimeoutMs', 'OIDC_HTTP_TIMEOUT_MS'],
+  ] as const)('refuses a %s of zero, naming %s', (field, name) => {
+    expect(validateConfig(config({ ...bff, [field]: 0 })).join()).toContain(name);
+  });
+
+  it('reads the secret from a file when told to, the file winning over the variable', async () => {
+    const { mkdtempSync, writeFileSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'secret-'));
+    const file = join(dir, 'client-secret');
+    writeFileSync(file, 'from-a-mounted-secret\n');
+    vi.stubEnv('AUTH_MODE', 'bff');
+    vi.stubEnv('ENTRA_CLIENT_SECRET', 'from-the-environment');
+    vi.stubEnv('ENTRA_CLIENT_SECRET_FILE', file);
+    vi.resetModules();
+    const fresh = await import('../server/config.ts');
+    // The file wins, and the trailing newline a mounted Secret carries is not part of it.
+    expect(fresh.cfg.entraClientSecret).toBe('from-a-mounted-secret');
+  });
+
+  it('derives the cookie names from the app origin’s scheme', async () => {
+    for (const [origin, expected] of [
+      ['https://app.example', '__Host-chemclaw_session'],
+      ['http://127.0.0.1:5173', 'chemclaw_session'],
+    ] as const) {
+      vi.stubEnv('APP_ORIGIN', origin);
+      vi.resetModules();
+      const fresh = await import('../server/config.ts');
+      expect(fresh.cfg.sessionCookieName).toBe(expected);
+      expect(fresh.cfg.cookieSecure).toBe(origin.startsWith('https'));
+    }
   });
 });

@@ -65,12 +65,15 @@ built (`src/state/sharedSync.ts`). Upstream asks: a `turn_started` frame (or `ru
 token; a push hint instead of the 5 s queue poll; and an explicit "queued turn started" event
 (Chemclaw3 #503 item 9) so Withdraw does not race the hand-over.
 
-### Issue 23: the OIDC browser lane's limits
+### Issue 23: the OIDC browser lanes' limits
 
-`e2e/oidc-mock.spec.ts` (the `oidc-mock` CI job) signs in against Chemclaw3_mock's tenant. Open:
-`e2e/oidc-upstream.ts` is a stand-in for core's token validator, not core; silent renewal is not
-exercised in a browser; and a signed-out first load logs a burst of `interaction_in_progress`
-warnings because several panels request a token at once — one shared in-flight sign-in would fix it.
+`e2e/bff-auth.spec.ts` (default suite) signs in against a fixture provider and `e2e/oidc-mock.spec.ts`
+(the `oidc-mock` CI job) against Chemclaw3_mock's tenant. Open: `e2e/oidc-upstream.ts` is a stand-in
+for core's token validator, not core; the mock lane signs in as a public client
+(`ENTRA_CLIENT_AUTH=none`) and so does not exercise the client-secret exchange of a Web
+registration; both lanes run on one site (`127.0.0.1`), so a browser's cross-site cookie rule for
+the redirect back from the provider is checked by hand (`docs/operations.md`, "What a human
+verifies").
 
 ### An HTTP surface for subscriptions
 
@@ -90,14 +93,23 @@ cancel a standing query. Needs routes in Chemclaw3 before this UI can show them.
 
 ## Accepted risks
 
-### Issue 8: the access token lives in the browser
+### Issue 26: sessions live in one pod's memory
 
-Any script on this origin can read the MSAL token, and silent refresh uses a hidden iframe that
-third-party-cookie blocking breaks ("people keep getting logged out", Safari/Firefox first). BFF
-token custody is built (PR #11, closed, branch retained) and not adopted: it needs a
-confidential-client registration (Web platform, client secret, `<origin>/auth/callback`) and two
-managed secrets with a rotation owner. The tenant administrator and this app's operations owner
-decide; reopen PR #11 rather than rebuild.
+The BFF holds each signed-in person's tokens in its own memory (`AUTH_MODE=bff`, `docs/operations.md`
+§8). A release or a dead pod forgets them, so people sign in again (silently while the identity
+provider's session lasts), and more than one replica needs the router to keep a browser on one pod
+(OpenShift's default cookie affinity does; `deploy/openshift/routes.yaml` states it). Chosen over a
+sealed cookie, a core API and Postgres; revisit when releases are frequent enough that the silent
+re-sign-in is noticed, or a deployment needs replicas affinity cannot serve.
+
+### Issue 27: no cap on sessions per account
+
+`SESSION_MAX_SESSIONS` bounds a pod's sessions, evicting the least recently used, but nothing
+bounds one account's: a person (or an attacker holding valid credentials) who signs in repeatedly
+can push others' sessions out of a pod that is near its cap. Accepted because the cap is far above
+the pod's load (10,000 sessions for ~200 people), each sign-in needs the identity provider's
+consent, and the provider's own policy is where an account's session count is governed. Revisit
+if sessions move to a shared store (Issue 26), which can count per account cheaply.
 
 ### Issue 11: `canonicalSmiles` may answer "too complex" for a legal long chain
 

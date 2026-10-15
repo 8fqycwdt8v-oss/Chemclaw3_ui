@@ -87,6 +87,7 @@ import type {
 import { keys, queryClient } from './queryClient.ts';
 import { CALC_ARTIFACT_REF } from '../../shared/exhibitConstants.ts';
 import { SESSION_ID_RE } from '../../shared/events.ts';
+import { CSRF_HEADER, CSRF_VALUE } from '../../shared/auth.ts';
 
 /**
  * The artefact decoders (`shared/exhibits.ts`), loaded on the first artefact body rather than in
@@ -138,6 +139,8 @@ async function send(path: string, auth: TokenGetter, init: RequestInit): Promise
       cache: init.cache ?? 'no-store',
       headers: {
         accept: 'application/json',
+        // Answered by the BFF's cross-site check, never forwarded (`server/auth/csrf.ts`).
+        [CSRF_HEADER]: CSRF_VALUE,
         ...(init.body && !(init.body instanceof FormData)
           ? { 'content-type': 'application/json' }
           : {}),
@@ -190,8 +193,8 @@ async function request<T>(path: string, auth: TokenGetter, init: RequestInit = {
  */
 async function requestPage<T>(path: string, auth: TokenGetter): Promise<{ body: T; next: string }> {
   let res = await send(path, auth, {});
-  // Under MSAL `recoverFrom` triggers the sign-in redirect, so listings must call it like every
-  // other route.
+  // `recoverFrom` re-checks the session (and may start a sign-in), so listings must call it like
+  // every other route.
   if (res.status === 401 && (await recoverFrom(auth))) {
     res = await send(path, auth, {});
   }
@@ -328,6 +331,7 @@ function upload(
     xhr.open('POST', `${config.apiBase}/sessions/${encodeURIComponent(sessionId)}/attachments`);
     xhr.responseType = 'json';
     xhr.setRequestHeader('accept', 'application/json');
+    xhr.setRequestHeader(CSRF_HEADER, CSRF_VALUE);
     if (token) xhr.setRequestHeader('authorization', `Bearer ${token}`);
 
     xhr.upload.onprogress = (e) => {

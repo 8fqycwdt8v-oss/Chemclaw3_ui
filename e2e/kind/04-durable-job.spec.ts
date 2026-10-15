@@ -148,7 +148,7 @@ test('the cancel control is offered to a privileged user', async ({ alice }) => 
       (window as unknown as { __CHEMCLAW_CONFIG__: { authMode: string; reviewerRoles: string[] } })
         .__CHEMCLAW_CONFIG__,
   );
-  test.skip(config.authMode !== 'msal', 'devauth opens the gate for everyone');
+  test.skip(config.authMode !== 'bff', 'devauth opens the gate for everyone');
   if (!realModel()) notOnThisLane('cancelling a running job (see the real-model scenario)');
   expect(
     config.reviewerRoles,

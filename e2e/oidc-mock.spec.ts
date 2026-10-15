@@ -2,22 +2,20 @@
  * Two people sign in through a real authority, in two browsers, and each is who they said.
  *
  * Runs only under `playwright.oidc-mock.config.ts` (see there for the four processes and why the
- * tenant is https). The default suite ignores this file.
+ * tenant is https). The default suite ignores this file; `e2e/bff-auth.spec.ts` covers the same
+ * hops against a fixture provider on every run.
  *
- * What one sign-in proves, hop by hop: the SPA (production bundle, `AUTH_MODE=msal`) builds its
- * MSAL authority from `ENTRA_AUTHORITY` and is let through the CSP to it; the tenant's login page
- * issues a code; MSAL redeems it with its PKCE verifier and accepts the id_token's nonce; the
- * account MSAL reports is the person chosen; the page's `/api` calls carry a bearer; the BFF
- * forwards it; and a validator applying Chemclaw3's four checks accepts it as that person.
- * Two contexts rather than one, because "each sees their own identity" is only a claim about
- * isolation when there is someone else to be confused with.
+ * What one sign-in proves, hop by hop: the BFF (`AUTH_MODE=bff`, a public client against the mock)
+ * sends the browser to the tenant, is let through to its login page, and takes the code back on
+ * `/auth/callback`; the BFF redeems it with its PKCE verifier and accepts the id_token's nonce; the
+ * account the SPA shows is the person chosen; the page's `/api` calls carry no bearer, yet the
+ * validator on the far side of the BFF accepts the one the BFF injected as that person. Two
+ * contexts rather than one, because "each sees their own identity" is only a claim about isolation
+ * when there is someone else to be confused with.
  *
- * The last three tests are about the round trip itself rather than who comes out of it. #126 made
- * `/` the page a first sign-in returns to, and `Bootstrap` there pushed `/c/<new id>` before
- * `handleRedirectPromise()` had finished; MSAL redeems the code only while the address bar still
- * names the start page, so it went back to `/` and tried again, for ever — 534 navigations and no
- * token request in 20 s, measured here. Every test above failed on it too, as a timeout waiting for
- * the account name; these say *why*, and pin the deep-link and `/open/` cases besides.
+ * The last tests are about the round trip itself: a first sign-in from `/`, from a deep link, from
+ * an `/open/` link and from a conversation link each settle on the page they should after exactly
+ * one callback, and do not keep navigating.
  */
 
 import { expect, test, type Browser, type Page } from '@playwright/test';
@@ -43,13 +41,6 @@ const BOB: Person = {
   oid: '00000000-0000-0000-0000-000000000b0b',
 };
 
-/** The claims of a JWT, unverified — what the page *sent*, checked against what the upstream saw. */
-const claimsOf = (bearer: string): Record<string, unknown> =>
-  JSON.parse(Buffer.from(bearer.split('.')[1] ?? '', 'base64url').toString()) as Record<
-    string,
-    unknown
-  >;
-
 /** Open a fresh browser context and sign `person` in through the mock tenant's login page. */
 async function signIn(browser: Browser, person: Person): Promise<Page> {
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
@@ -59,9 +50,8 @@ async function signIn(browser: Browser, person: Person): Promise<Page> {
     if (message.type() === 'error') problems.push(message.text());
   });
 
-  // No click: a signed-out visitor is sent to the authority by the SPA's first `/api` call
-  // (`getAccessToken` -> `loginRedirect`). The "Sign in" button is visible for that moment too,
-  // which is why waiting for it and clicking it races the navigation.
+  // No click: a signed-out visitor is sent to the BFF's `/auth/login` by the SPA's first load,
+  // and from there to the authority.
   await page.goto('/');
   const loginPage = page.getByTestId(`mock-login-${person.key}`);
   await expect(loginPage).toBeVisible({ timeout: 20_000 });
@@ -76,17 +66,6 @@ async function signIn(browser: Browser, person: Person): Promise<Page> {
     timeout: 20_000,
   });
   return page;
-}
-
-/** The bearer the page puts on its next `/api` request. */
-async function nextBearer(page: Page): Promise<string> {
-  const request = page.waitForRequest(
-    (r) => r.url().includes('/api/') && !!r.headers().authorization,
-  );
-  await page.reload();
-  const authorization = (await request).headers().authorization ?? '';
-  expect(authorization).toMatch(/^Bearer /);
-  return authorization.slice('Bearer '.length);
 }
 
 test('alice and bob sign in separately, and each sees and sends their own identity', async ({
@@ -108,23 +87,19 @@ test('alice and bob sign in separately, and each sees and sends their own identi
     await page.keyboard.press('Escape');
   }
 
-  // What each page sends: a token for the API, naming its own person.
-  const aliceBearer = claimsOf(await nextBearer(alice));
-  const bobBearer = claimsOf(await nextBearer(bob));
-  expect(aliceBearer).toMatchObject({ oid: ALICE.oid, aud: 'api://chemclaw', scp: 'Chat.Access' });
-  expect(bobBearer).toMatchObject({ oid: BOB.oid, aud: 'api://chemclaw', scp: 'Chat.Access' });
-  expect(aliceBearer.roles).toEqual(['chemist', 'reviewer']);
-  expect(bobBearer.roles).toEqual(['chemist']);
-
   // What arrived on the far side of the BFF, validated the way Chemclaw3's front door validates:
-  // both people, as themselves, and nothing refused.
+  // both people, as themselves, with their own roles, and nothing refused. The pages sent no
+  // bearer of their own; this is the one the BFF injected.
   const { seen, refused } = (await (await fetch(`${UPSTREAM}/__oidc/seen`)).json()) as {
-    seen: { oid: string; upn: string }[];
+    seen: { oid: string; upn: string; roles: string[] }[];
     refused: { path: string; reason: string }[];
   };
   expect(refused).toEqual([]);
-  expect(seen.some((s) => s.oid === ALICE.oid && s.upn === ALICE.upn)).toBe(true);
-  expect(seen.some((s) => s.oid === BOB.oid && s.upn === BOB.upn)).toBe(true);
+  expect(seen.find((s) => s.oid === ALICE.oid)).toMatchObject({
+    upn: ALICE.upn,
+    roles: ['chemist', 'reviewer'],
+  });
+  expect(seen.find((s) => s.oid === BOB.oid)).toMatchObject({ upn: BOB.upn, roles: ['chemist'] });
 });
 
 test('signing out ends the session at the authority, and the next visit asks again', async ({
@@ -151,31 +126,26 @@ test('signing out ends the session at the authority, and the next visit asks aga
  * What one sign-in did to the page, recorded from before the first navigation.
  *
  * `navigations` is every main-frame navigation, same-document ones included (a router push is
- * one), so a redirect loop shows up as a list that keeps growing. `redemptions` is every
- * authorization-code POST to the tenant's token endpoint: MSAL redeems a code exactly once, on the
- * start page, and only when the address bar still names that page — which is the comparison the
- * loop kept failing.
+ * one), so a redirect loop shows up as a list that keeps growing. `callbacks` is every arrival at
+ * the BFF's `/auth/callback`: the code is redeemed there, server-side, exactly once per sign-in.
  */
 interface SignInTrace {
   page: Page;
   navigations: string[];
-  redemptions: number;
+  callbacks: number;
 }
 
 async function signInFrom(browser: Browser, person: Person, path: string): Promise<SignInTrace> {
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   const page = await context.newPage();
-  const trace: SignInTrace = { page, navigations: [], redemptions: 0 };
+  const trace: SignInTrace = { page, navigations: [], callbacks: 0 };
   page.on('framenavigated', (frame) => {
     if (frame === page.mainFrame()) trace.navigations.push(frame.url());
   });
   page.on('request', (request) => {
-    if (
-      request.method() === 'POST' &&
-      request.url().startsWith(`${AUTHORITY}/oauth2/v2.0/token`) &&
-      /(^|&)grant_type=authorization_code(&|$)/.test(request.postData() ?? '')
-    )
-      trace.redemptions += 1;
+    if (request.isNavigationRequest() && request.url().startsWith(`${BFF}/auth/callback?`)) {
+      trace.callbacks += 1;
+    }
   });
 
   await page.goto(path);
@@ -191,8 +161,8 @@ async function signInFrom(browser: Browser, person: Person, path: string): Promi
     // A loop never shows the account at all, so say what the page was doing instead.
     const tail = trace.navigations.slice(-4).join(' -> ');
     throw new Error(
-      `never signed in: ${trace.navigations.length} navigations, ${trace.redemptions} codes ` +
-        `redeemed; last: ${tail}\n${String(error)}`,
+      `never signed in: ${trace.navigations.length} navigations, ${trace.callbacks} callbacks; ` +
+        `last: ${tail}\n${String(error)}`,
     );
   }
   return trace;
@@ -200,8 +170,7 @@ async function signInFrom(browser: Browser, person: Person, path: string): Promi
 
 /**
  * The page has stopped moving: the URL matches, and stays put — with no further navigation — for
- * a while longer than any redirect MSAL or the router would make. The loop this guards against ran
- * at ~50 navigations a second, so two seconds of stillness is not a close call either way.
+ * a while longer than any redirect the BFF or the router would make.
  */
 async function expectSettledAt(trace: SignInTrace, url: RegExp): Promise<string> {
   await expect(trace.page).toHaveURL(url, { timeout: 20_000 });
@@ -216,17 +185,10 @@ async function expectSettledAt(trace: SignInTrace, url: RegExp): Promise<string>
   return at;
 }
 
-/** Exactly one code back on `/auth/callback`, and that one redeemed, for one sign-in. */
+/** Exactly one arrival at the callback for one sign-in, and a handful of navigations in all. */
 function expectOneRoundTrip(trace: SignInTrace): void {
-  // Distinct URLs, because one arrival there is several navigation events: the document carrying
-  // `#code=…`, then MSAL clearing the fragment from it in place.
-  const codes = new Set(
-    trace.navigations.filter((url) => url.startsWith(`${BFF}/auth/callback#code=`)),
-  );
-  expect([...codes], `navigations: ${trace.navigations.join(' -> ')}`).toHaveLength(1);
-  expect(trace.redemptions, 'authorization codes redeemed').toBe(1);
+  expect(trace.callbacks, `navigations: ${trace.navigations.join(' -> ')}`).toBe(1);
   // Out to the tenant, back through the callback, to the start page, to where it leads: a handful.
-  // The loop that shipped in #126 made 212 in 4 s.
   expect(
     trace.navigations.length,
     `navigations: ${trace.navigations.join(' -> ')}`,

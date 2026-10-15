@@ -48,12 +48,16 @@ spec:
             # The service ROOT, never a path under it (refused at boot).
             - name: CHEMCLAW_API_URL
               value: http://chemclaw-service:8080
+            # The BFF signs users in and holds their tokens (docs/operations.md, "Token custody").
+            # Its registration is a WEB application with a client secret, mounted below.
             - name: AUTH_MODE
-              value: msal
+              value: bff
             - name: ENTRA_TENANT_ID
               value: 00000000-0000-0000-0000-000000000000
             - name: ENTRA_CLIENT_ID
               value: 11111111-1111-1111-1111-111111111111
+            - name: ENTRA_CLIENT_SECRET_FILE
+              value: /var/run/chemclaw-oidc/client-secret
             - name: API_SCOPE
               value: api://22222222-2222-2222-2222-222222222222/Chat.Access
             - name: REVIEWER_ROLES
@@ -106,6 +110,10 @@ spec:
               port: sandbox
             periodSeconds: 5
             failureThreshold: 12
+          volumeMounts:
+            - name: oidc
+              mountPath: /var/run/chemclaw-oidc
+              readOnly: true
           resources:
             requests:
               cpu: 50m
@@ -118,3 +126,10 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
+      volumes:
+        # Created by the operator, never committed: `oc create secret generic chemclaw3-ui-oidc
+        # --from-literal=client-secret=<value>`. Rotating it is a new key here and a restart.
+        - name: oidc
+          secret:
+            secretName: chemclaw3-ui-oidc
+            defaultMode: 0440

@@ -1,12 +1,12 @@
 /**
  * The real browser sign-in, end to end, against Chemclaw3_mock's stand-in Entra tenant.
  *
- * Every other browser test here runs `AUTH_MODE=dev`: no sign-in, one shared principal. So the
- * production auth path — MSAL redirecting to an authority, the code coming back on
- * `/auth/callback`, PKCE redemption, the bearer on every `/api` call, the BFF forwarding it — had
- * no browser coverage at all, and a system test with two distinct people in it was impossible.
- * This lane runs that path with the **production** bundle (`dist/client`, not the dev-auth one)
- * behind the real BFF, against the mock tenant's authorize/token/logout endpoints.
+ * The default suite signs in against a fixture provider (`e2e/bff-auth.spec.ts`); this lane signs
+ * in against the stand-in tenant a deployment is modelled on, with two distinct people in it. It
+ * runs the production path — the BFF redirecting to an authority, the code coming back on
+ * `/auth/callback` and redeemed server-side with PKCE, the bearer injected on every `/api` call —
+ * with the **production** bundle (`dist/client`, not the dev-auth one) behind the real BFF,
+ * against the mock tenant's authorize/token/logout endpoints.
  *
  * **Not part of `npm run ci` and not in the default suite** (`playwright.config.ts` ignores the
  * spec): it needs a Chemclaw3_mock checkout with its venv, and Python on the runner. It runs on
@@ -16,15 +16,14 @@
  *   npm run build
  *   MOCK_DIR=../Chemclaw3_mock npm run test:e2e:oidc-mock
  *
- * **Why the tenant is served over https with a throwaway certificate.** `@azure/msal-browser`
- * refuses an authority that is not https (`authority_uri_insecure`), loopback included, so there
- * is no http variant of this lane to run. The certificate is generated per run by `openssl`, and
- * only the browser contexts (`ignoreHTTPSErrors`) and the validating upstream (which trusts that
- * one certificate) ever see it.
+ * **Why the tenant is served over https with a throwaway certificate.** It is the shape a real
+ * tenant has, and the BFF takes an `http` authority only on loopback. The certificate is generated
+ * per run by `openssl`, and only the browser contexts (`ignoreHTTPSErrors`), the validating upstream
+ * and the BFF (`NODE_EXTRA_CA_CERTS`) trust it.
  *
  * Four processes, one per hop: the mock tenant (https), `e2e/fixture-service.ts` (the canned
  * service), `e2e/oidc-upstream.ts` (validates each forwarded bearer the way Chemclaw3's front door
- * does, then hands the request to the fixture), and the BFF in `AUTH_MODE=msal` with
+ * does, then hands the request to the fixture), and the BFF in `AUTH_MODE=bff` with
  * `ENTRA_AUTHORITY` pointed at the tenant.
  */
 
@@ -112,8 +111,12 @@ export default defineConfig({
       // The production client bundle — `dist/client`, which `scripts/assert-no-dev-auth.mjs`
       // holds to containing no dev-auth path — not the `client-dev-auth` build the default suite
       // serves.
+      // `ENTRA_CLIENT_AUTH=none`: the mock registers one client with PKCE and no secret, which is
+      // what the BFF presents (with `Origin` set to the app's, which the mock's single-page rule requires). `NODE_EXTRA_CA_CERTS` is the throwaway certificate, trusted by
+      // this process for the tenant's discovery, token and key endpoints and nothing else.
       command:
-        `AUTH_MODE=msal ENTRA_TENANT_ID=${TENANT} ENTRA_CLIENT_ID=${CLIENT_ID} ` +
+        `AUTH_MODE=bff ENTRA_CLIENT_AUTH=none NODE_EXTRA_CA_CERTS=${CERT} ` +
+        `ENTRA_TENANT_ID=${TENANT} ENTRA_CLIENT_ID=${CLIENT_ID} ` +
         `API_SCOPE=${AUDIENCE}/Chat.Access ENTRA_AUTHORITY=${AUTHORITY} ` +
         `CHEMCLAW_API_URL=${UPSTREAM} PORT=${BFF_PORT} BIND_HOST=127.0.0.1 LOG_LEVEL=error ` +
         `APP_ORIGIN=${BFF} SANDBOX_ORIGIN=http://127.0.0.1:${SANDBOX_PORT} SANDBOX_PORT=${SANDBOX_PORT} ` +

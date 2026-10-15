@@ -79,11 +79,25 @@ that holds it.
 
 - **Enforced.** An unknown `AUTH_MODE` is refused; dev auth on a non-loopback bind needs
   `ALLOW_INSECURE_AUTH` (`tests/serverConfig.test.ts`).
-- **Enforced.** Under `msal`, a backend that serves anonymous `/sessions` makes the pod unready
+- **Enforced.** Under `bff`, a backend that serves anonymous `/sessions` makes the pod unready
   (`tests/upstreamPosture.test.ts`).
-- **Enforced.** The MSAL cache is `sessionStorage` (`tests/msalAuth.test.ts`).
-- **Accepted.** The access token is readable by script on this origin, and silent refresh depends on
-  third-party cookies. `ISSUES.md` Issue 8.
+- **Enforced.** The browser holds no token: the session is an `HttpOnly; SameSite=Strict` cookie, no
+  response body, header, storage or `/config.js` carries a credential, and a browser-supplied
+  `Authorization` is dropped (`tests/bffFlow.test.ts`, `tests/bffProxy.test.ts`,
+  `e2e/bff-auth.spec.ts`).
+- **Enforced.** The ID token is validated (signature, issuer, audience, expiry, nonce), `state` is
+  single-use and bound to the browser, and a session id is never reused across a sign-in
+  (`tests/bffFlow.test.ts`).
+- **Enforced.** One refresh per session at a time, a refused refresh ends the session, a backend 401
+  renews once and replays (`tests/bffTokens.test.ts`, `tests/bffProxy.test.ts`).
+- **Enforced.** A sign-in in progress is a sealed cookie, not server state, so an anonymous flood of
+  `/auth/login` cannot lock anyone out; tamper, replay and expiry of that cookie are refused
+  (`tests/bffFlow.test.ts`, `tests/bffSealed.test.ts`).
+- **Enforced.** Every `/api` request, GET included, carries `X-Chemclaw-Csrf`; sign-out, expiry and
+  a refused refresh end the session's live streams (`tests/bffProxy.test.ts`).
+- **Accepted.** Sessions are in each pod's memory: a release signs people in again (silently), and
+  more than one replica needs router affinity. `ISSUES.md` Issue 26.
+- **Not verified here.** A real Entra tenant. `docs/operations.md`, "What a human verifies".
 
 ## 6. One tab holds the job streams
 

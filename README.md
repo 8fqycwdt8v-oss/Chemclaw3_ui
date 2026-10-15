@@ -9,7 +9,9 @@ browser ──▶ chemclaw3-ui (Node BFF)  ──▶ chemclaw3 (FastAPI)
 ```
 
 The browser never calls the service directly. The BFF proxies a whitelist of `/api` routes
-server-to-server, so the backend needs no CORS and there is one place the bearer token passes.
+server-to-server, so the backend needs no CORS. Sign-in is the BFF's too: it completes the OIDC
+exchange, holds the tokens, and puts the bearer on each proxied request — the browser holds one
+`HttpOnly` session cookie and never sees a token.
 
 Operators: building, configuring, deploying, verifying and troubleshooting are in
 [`docs/operations.md`](docs/operations.md). What is enforced, bounded and accepted is in
@@ -38,7 +40,9 @@ Operators: building, configuring, deploying, verifying and troubleshooting are i
   `POST /sessions/{id}/plan/decision`, bound to the hash of the plan shown.
 - **Shared conversations**: an owner adds members; each message runs as its sender, only a plan's
   author can decide it, and members follow each other's turns live.
-- **Entra SSO** (auth code + PKCE in the browser) with `AUTH_MODE=msal`, switched at runtime.
+- **Entra SSO through a token handler** (`AUTH_MODE=bff`): the BFF does the auth-code + PKCE
+  exchange and refreshes tokens; the browser has an `HttpOnly; SameSite=Strict` cookie and nothing
+  else (`docs/operations.md`, "Token custody").
 
 ## Quick start
 
@@ -84,10 +88,13 @@ Browser-facing values are served at runtime by `GET /config.js`, so one image ru
 `validateConfig` (`server/config.ts`) logs one `config:` line per problem and exits 1 for:
 
 - `CHEMCLAW_API_URL` not an http(s) URL, or carrying a path (put a prefix in the ingress);
-- `AUTH_MODE` other than `dev` or `msal`;
+- `AUTH_MODE` other than `dev` or `bff` (`msal` is refused by name: it no longer exists);
 - `MAX_MESSAGE_CHARS` not a whole number above zero;
-- under `msal`: missing `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID` or `API_SCOPE`; an `ENTRA_AUTHORITY`
-  that is not an https URL or carries a query, fragment or userinfo;
+- under `bff`: missing `ENTRA_TENANT_ID`, `ENTRA_CLIENT_ID`, `API_SCOPE`, `ENTRA_CLIENT_SECRET` (or
+  `ENTRA_CLIENT_AUTH=none`) or `APP_ORIGIN`; a plain-http `APP_ORIGIN` off loopback; an
+  `ENTRA_AUTHORITY` that is not https (loopback excepted), names `common`/`organizations`/
+  `consumers`, or carries a query, fragment or userinfo; `ALLOW_FRAMING=true`; a `SESSION_KEY`
+  under 32 characters;
 - `AUTH_MODE=dev` on a non-loopback `BIND_HOST` without `ALLOW_INSECURE_AUTH=true`;
 - sandbox settings that are not plain http(s) origins, `SANDBOX_ORIGIN` without or equal to
   `APP_ORIGIN`, an http sandbox under an https app, `SANDBOX_PORT` outside 1–65535 or equal to
@@ -98,24 +105,27 @@ A listener that cannot bind exits 1 with one line naming the address.
 
 ### Enabling Entra SSO
 
-Set `AUTH_MODE=msal` when the backend has `CHEMCLAW_ENTRA_REQUIRED=true`, plus:
+Set `AUTH_MODE=bff` when the backend has `CHEMCLAW_ENTRA_REQUIRED=true`, plus (none of it is sent
+to the browser):
 
-| Variable          | Value                                                                      |
-| ----------------- | -------------------------------------------------------------------------- |
-| `ENTRA_TENANT_ID` | tenant GUID                                                                |
-| `ENTRA_CLIENT_ID` | **this SPA's** app registration (platform: Single-page application)        |
-| `API_SCOPE`       | `api://<api-client-id>/<scope>`                                            |
-| `REVIEWER_ROLES`  | the backend's `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`, comma-separated           |
-| `ENTRA_AUTHORITY` | optional; default `https://login.microsoftonline.com/<tenant>`; https only |
+| Variable              | Value                                                                                  |
+| --------------------- | -------------------------------------------------------------------------------------- |
+| `ENTRA_TENANT_ID`     | tenant GUID                                                                            |
+| `ENTRA_CLIENT_ID`     | **this BFF's** app registration (platform: Web, redirect `<APP_ORIGIN>/auth/callback`) |
+| `ENTRA_CLIENT_SECRET` | its client secret (or `ENTRA_CLIENT_SECRET_FILE`, a mounted Secret)                    |
+| `APP_ORIGIN`          | the origin the browser reaches the app at, exactly                                     |
+| `API_SCOPE`           | `api://<api-client-id>/<scope>`                                                        |
+| `REVIEWER_ROLES`      | the backend's `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`, comma-separated                       |
+| `ENTRA_AUTHORITY`     | optional; default `https://login.microsoftonline.com/<tenant>`; https only             |
 
 The usual causes of "token looks fine, API returns 401": the scope is not the API's (an ID token's
 `aud` is the SPA); the API registration does not issue v2 tokens (`accessTokenAcceptedVersion: 2`);
 or `CHEMCLAW_ENTRA_AUDIENCE` does not match. The backend has no `CHEMCLAW_ENTRA_CLIENT_ID`.
 
-The CSP depends on `AUTH_MODE`: silent refresh needs a hidden iframe to the authority, so
-`connect-src`, `frame-src` and `form-action` open the authority's origin. A non-default
-`ENTRA_AUTHORITY` (sovereign cloud, Chemclaw3_mock's tenant) replaces `login.microsoftonline.com`
-there.
+The CSP does not depend on `AUTH_MODE`: the browser never talks to the authority (sign-in is a
+top-level navigation the BFF starts), so no origin of the identity provider is opened. The
+registration, the session store and what a human must verify against a real tenant are in
+`docs/operations.md`, "Token custody".
 
 The RDKit worker script (`/assets/rdkit.worker-<hash>.js`) is served with `RDKIT_WORKER_CSP`, the
 only policy containing `'unsafe-eval'` (Embind needs `Function(...)`). A proxy or CDN must pass
@@ -195,7 +205,7 @@ npm test               # vitest
 npm run typecheck
 npm run lint
 npm run test:e2e       # Playwright against the real BFF and e2e/fixture-service.ts
-npm run test:e2e:oidc-mock   # real MSAL sign-in against Chemclaw3_mock (CI's oidc-mock job)
+npm run test:e2e:oidc-mock   # real sign-in through the BFF against Chemclaw3_mock (CI's oidc-mock job)
 npm run check:live     # smoke + the served contract vs the pin; needs a live service, operator-run
 npm run contract:check # the committed API contract is core's file at the pinned commit
 ```

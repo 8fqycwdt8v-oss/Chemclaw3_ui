@@ -126,6 +126,11 @@ export interface Route {
    */
   labels?: readonly string[];
   /**
+   * True for the two probes, which carry no credential and need no sign-in: they answer for the
+   * service, not for a person.
+   */
+  public?: boolean;
+  /**
    * A validator for the query string, for the routes whose id travels there; absent means the query
    * is forwarded for the service to validate.
    */
@@ -133,8 +138,20 @@ export interface Route {
 }
 
 export const ROUTES: readonly Route[] = [
-  { method: 'GET', pattern: /^\/api\/healthz$/, target: () => '/healthz', sse: false },
-  { method: 'GET', pattern: /^\/api\/readyz$/, target: () => '/readyz', sse: false },
+  {
+    method: 'GET',
+    pattern: /^\/api\/healthz$/,
+    target: () => '/healthz',
+    sse: false,
+    public: true,
+  },
+  {
+    method: 'GET',
+    pattern: /^\/api\/readyz$/,
+    target: () => '/readyz',
+    sse: false,
+    public: true,
+  },
 
   // Sessions.
   { method: 'POST', pattern: /^\/api\/sessions$/, target: () => '/sessions', sse: false },
@@ -468,6 +485,8 @@ export interface ResolvedRoute {
   path: string;
   sse: boolean;
   upload: boolean;
+  /** See `Route.public`. */
+  public: boolean;
   /**
    * The route's shape (`/sessions/{id}/messages`), used as the log/metrics label so ids never
    * become series.
@@ -515,6 +534,7 @@ export function resolveRoute(method: string, path: string, search = ''): Resolve
         path: route.target(match),
         sse: route.sse,
         upload: route.upload === true,
+        public: route.public === true,
         template: route.target(templateGroups(route)),
       };
     }

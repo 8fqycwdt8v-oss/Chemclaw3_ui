@@ -47,9 +47,9 @@ if (!container) throw new Error('#root is missing from index.html');
 createRoot(container).render(
   <StrictMode>
     <ErrorBoundary fallback={(error) => <CrashScreen error={error} />}>
-      {/* Router above auth: `/auth/callback` has to be a route, and nothing about routing
-          depends on being signed in. TooltipProvider above the routes rather than inside the
-          shell, or it remounts on every navigation and drops its delay-group timer. */}
+      {/* Router above auth: nothing about routing depends on being signed in. TooltipProvider
+          above the routes rather than inside the shell, or it remounts on every navigation and
+          drops its delay-group timer. */}
       <BrowserRouter>
         <TooltipProvider>
           <AuthGate>

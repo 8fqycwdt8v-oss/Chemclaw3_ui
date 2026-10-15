@@ -3,7 +3,7 @@
  *
  * The entire application talks to this interface and nothing else — in particular, `streamTurn`
  * and `api` take only a `() => Promise<string | null>`. Switching between the disabled-auth dev
- * posture and real Entra SSO is therefore one factory call in `createAuthProvider`, not a rewrite.
+ * posture and signing in through the BFF is therefore one factory call in `createAuthProvider`, not a rewrite.
  *
  * `getAccessToken` resolving to `null` means "send no Authorization header". That is exactly what
  * the backend expects while `CHEMCLAW_ENTRA_REQUIRED=false`, where every request is attributed to
@@ -21,14 +21,14 @@ export interface AuthAccount {
 }
 
 export interface AuthProvider {
-  readonly mode: 'dev' | 'msal';
+  readonly mode: 'dev' | 'bff';
   readonly account: AuthAccount | null;
   getAccessToken(): Promise<string | null>;
   login(): Promise<void>;
   logout(): Promise<void>;
   /**
-   * Called when the API returns 401. Returns true if a fresh token is now available and the
-   * caller should retry; false if an interactive redirect is in flight or re-auth was suppressed.
+   * Called when the API returns 401. Returns true if the session is still alive and the caller
+   * should retry once; false if the browser is being sent to sign in again.
    */
   handleUnauthorized(): Promise<boolean>;
 }

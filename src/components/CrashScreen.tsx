@@ -28,8 +28,8 @@ export function CrashScreen({ error }: { error: Error }): React.JSX.Element {
    * crashes a renderer (e.g. after a version rollback). The sidebar's reset is unreachable here,
    * since this screen replaces the app.
    *
-   * Uses `localStorage` directly rather than the store, which may be what failed. `sessionStorage`
-   * (MSAL tokens) is left alone so the chemist stays signed in.
+   * Uses `localStorage` directly rather than the store, which may be what failed. The sign-in is
+   * an `HttpOnly` cookie, which this cannot touch, so the chemist stays signed in.
    */
   const forget = (): void => {
     try {

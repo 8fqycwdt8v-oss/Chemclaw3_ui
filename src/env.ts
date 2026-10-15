@@ -9,18 +9,14 @@ import { MAX_MESSAGE_CHARS, isUsableMessageCap } from '../shared/events.ts';
 import { DEFAULT_DOCS_BASE_URL } from '../shared/sandbox.ts';
 import { SHARED_POLL_MS, isUsablePollInterval } from '../shared/sharedPoll.ts';
 
-export type AuthMode = 'dev' | 'msal';
+export type AuthMode = 'dev' | 'bff';
 
 export interface RuntimeConfig {
-  authMode: AuthMode;
-  entraTenantId: string;
   /**
-   * The MSAL authority URL; empty means Entra's public cloud for `entraTenantId` (`msalAuthority`
-   * in `src/auth/msalAuth.ts`).
+   * `bff`: the BFF holds the tokens and the browser holds an `HttpOnly` cookie it cannot read;
+   * nothing about the identity provider is configured here. `dev`: no sign-in.
    */
-  entraAuthority: string;
-  entraClientId: string;
-  apiScope: string;
+  authMode: AuthMode;
   apiBase: string;
   appVersion: string;
   /**
@@ -30,7 +26,7 @@ export interface RuntimeConfig {
   warmSessions: boolean;
   /**
    * App roles that may take privileged actions (the backend's `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`),
-   * used only to hide controls; the service enforces. Empty under MSAL offers them to nobody;
+   * used only to hide controls; the service enforces. Empty offers them to nobody once signed in;
    * irrelevant under dev auth.
    */
   reviewerRoles: string[];
@@ -75,11 +71,6 @@ const fromWindow = (): Partial<RuntimeConfig> =>
 const fromVite = (): Partial<RuntimeConfig> => {
   const env = import.meta.env ?? {};
   return {
-    authMode: env.VITE_AUTH_MODE === 'msal' ? 'msal' : undefined,
-    entraTenantId: env.VITE_ENTRA_TENANT_ID,
-    entraAuthority: env.VITE_ENTRA_AUTHORITY,
-    entraClientId: env.VITE_ENTRA_CLIENT_ID,
-    apiScope: env.VITE_API_SCOPE,
     apiBase: env.VITE_API_BASE,
   };
 };
@@ -99,11 +90,7 @@ function resolve(): RuntimeConfig {
   const w = fromWindow();
   const v = fromVite();
   return {
-    authMode: w.authMode === 'msal' || v.authMode === 'msal' ? 'msal' : 'dev',
-    entraTenantId: pick(w.entraTenantId, v.entraTenantId),
-    entraAuthority: pick(w.entraAuthority, v.entraAuthority),
-    entraClientId: pick(w.entraClientId, v.entraClientId),
-    apiScope: pick(w.apiScope, v.apiScope),
+    authMode: w.authMode === 'bff' ? 'bff' : 'dev',
     apiBase: pick(w.apiBase, v.apiBase, '/api'),
     appVersion: pick(w.appVersion, 'dev'),
     warmSessions: w.warmSessions !== false,
@@ -120,33 +107,5 @@ function resolve(): RuntimeConfig {
 }
 
 export const config: RuntimeConfig = resolve();
-
-/**
- * Problems that make the app unusable, shown as a configuration screen rather than a half-working
- * login.
- */
-export function configProblems(c: RuntimeConfig = config): string[] {
-  const problems: string[] = [];
-  if (c.authMode === 'msal') {
-    if (!c.entraTenantId) problems.push('ENTRA_TENANT_ID is not set.');
-    if (!c.entraClientId) problems.push('ENTRA_CLIENT_ID is not set (the SPA app registration).');
-    // The BFF refuses this at boot; repeated here for a bare `vite dev`, where nothing else would
-    // catch it before MSAL throws `authority_uri_insecure` from inside its constructor.
-    if (c.entraAuthority && !c.entraAuthority.startsWith('https://')) {
-      problems.push(`ENTRA_AUTHORITY "${c.entraAuthority}" is not https, which MSAL refuses.`);
-    }
-    if (!c.apiScope) {
-      problems.push('API_SCOPE is not set (expected api://<api-client-id>/<scope>).');
-    } else if (!c.apiScope.includes('/')) {
-      // A bare App ID URI yields an ID token, whose `aud` is the SPA client id — which the
-      // backend's audience check rejects. Worth catching before the first sign-in.
-      problems.push(
-        `API_SCOPE "${c.apiScope}" looks like an App ID URI rather than a scope. ` +
-          'It must include the scope name, e.g. api://<api-client-id>/Chat.Access',
-      );
-    }
-  }
-  return problems;
-}
 
 export const isDevAuth = (): boolean => config.authMode === 'dev';

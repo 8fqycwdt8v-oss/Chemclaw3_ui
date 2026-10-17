@@ -38,6 +38,9 @@ const CLIENT_EVENT_BUDGET = 80;
 
 let bff: http.Server;
 let port = 0;
+/** The same process's metrics listener (`METRICS_PORT` in production). */
+let metricsServer: http.Server;
+let metricsPort = 0;
 
 /** What the upstream was asked for, so "never forwarded" is an assertion and not a hope. */
 const upstreamPaths: string[] = [];
@@ -113,13 +116,17 @@ beforeAll(async () => {
   // Small, so the oversize-refusal line below is testable without moving two megabytes. Nothing
   // else in this file posts a proxied body at all.
   process.env.MAX_BODY_BYTES = String(MAX_BODY_BYTES);
-  const { createBffServer } = await import('../server/app.ts');
+  const { createBffServer, createMetricsServer } = await import('../server/app.ts');
   bff = createBffServer();
   await new Promise<void>((resolve) => bff.listen(0, '127.0.0.1', resolve));
   port = (bff.address() as AddressInfo).port;
+  metricsServer = createMetricsServer();
+  await new Promise<void>((resolve) => metricsServer.listen(0, '127.0.0.1', resolve));
+  metricsPort = (metricsServer.address() as AddressInfo).port;
 });
 
 afterAll(async () => {
+  await new Promise<void>((resolve) => metricsServer.close(() => resolve()));
   await new Promise<void>((resolve) => bff.close(() => resolve()));
   await new Promise<void>((resolve) => upstream.close(() => resolve()));
 });
@@ -141,6 +148,13 @@ beforeEach(async () => {
 
 const get = (path: string, init?: RequestInit): Promise<Response> =>
   fetch(`http://127.0.0.1:${port}${path}`, init);
+
+/** A request to the metrics listener rather than the app's. */
+const getMetricsPort = (path: string, init?: RequestInit): Promise<Response> =>
+  fetch(`http://127.0.0.1:${metricsPort}${path}`, init);
+
+/** One scrape, the way Prometheus asks for it. */
+const scrape = async (): Promise<string> => (await getMetricsPort('/metrics')).text();
 
 /** The access line for `route`, parsed, or `undefined`. */
 const accessLine = (route: string): Record<string, unknown> | undefined => {
@@ -279,7 +293,7 @@ describe('the correlation id', () => {
     // Asserted first, or the containment below is vacuously true for the empty string this test
     // exists on the other side of.
     expect(id).toMatch(/^[0-9a-f]{32}$/);
-    expect(await (await get('/metrics')).text()).not.toContain(String(id));
+    expect(await scrape()).not.toContain(String(id));
   });
 });
 
@@ -319,7 +333,7 @@ describe('a body over the cap', () => {
 describe('/metrics', () => {
   it('exposes a request count and a duration histogram for this pod', async () => {
     await get('/healthz');
-    const body = await (await get('/metrics')).text();
+    const body = await scrape();
     expect(body).toContain(
       'chemclaw_ui_requests_total{route="/healthz",method="GET",status="200"}',
     );
@@ -332,7 +346,7 @@ describe('/metrics', () => {
   it('takes no session, actor or correlation id as a label', async () => {
     const sid = 'b'.repeat(32);
     await get(`/api/sessions/${sid}/messages`, { method: 'POST', body: '{}' });
-    const body = await (await get('/metrics')).text();
+    const body = await scrape();
     expect(body).toContain('route="/api/sessions/{id}/messages"');
     expect(body).not.toContain(sid);
     expect(body).not.toContain('corr-from-service');
@@ -342,6 +356,61 @@ describe('/metrics', () => {
     // `/api/metrics` is deliberately not whitelisted; the container test in `delivery.test.ts`
     // asserts the same thing from the other side.
     expect((await get('/api/metrics')).status).toBe(404);
+    expect(upstreamPaths).toEqual([]);
+  });
+});
+
+/**
+ * `/metrics` lives on a listener of its own, because the exposition says how busy the pod is and how
+ * many people are signed in, and the app's port is the one a public Route forwards. So the app's
+ * listener must never serve it, under any spelling, and the metrics listener must serve nothing else.
+ */
+describe('the metrics listener', () => {
+  it('is the only place /metrics is served: the app listener answers 404 and forwards nothing', async () => {
+    for (const path of ['/metrics', '/metrics?format=text', '/api/metrics']) {
+      for (const method of ['GET', 'HEAD']) {
+        const res = await get(path, { method });
+        expect(res.status, `${method} ${path}`).toBe(404);
+        expect(await res.text(), `${method} ${path}`).not.toContain('chemclaw_ui_');
+      }
+    }
+    expect(upstreamPaths).toEqual([]);
+  });
+
+  it('serves the exposition there, with the sessions gauge and no label on it', async () => {
+    await get('/healthz');
+    const res = await getMetricsPort('/metrics');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/plain; version=0.0.4; charset=utf-8');
+    const body = await res.text();
+    expect(body).toContain(
+      'chemclaw_ui_requests_total{route="/healthz",method="GET",status="200"}',
+    );
+    expect(body).toContain('# TYPE chemclaw_ui_sessions gauge');
+    expect(body).toMatch(/^chemclaw_ui_sessions 0$/m);
+  });
+
+  it('serves nothing else, and forwards nothing', async () => {
+    for (const path of [
+      '/',
+      '/index.html',
+      '/healthz',
+      '/readyz',
+      '/config.js',
+      '/api/healthz',
+      `/api/sessions/${'a'.repeat(32)}/messages`,
+      '/auth/login',
+      '/sandbox/frame',
+      '/metrics/',
+      '/metrics/x',
+    ]) {
+      const res = await getMetricsPort(path);
+      expect(res.status, path).toBe(404);
+      expect(await res.text(), path).toBe('Not Found');
+    }
+    for (const method of ['POST', 'PUT', 'DELETE']) {
+      expect((await getMetricsPort('/metrics', { method })).status, method).toBe(404);
+    }
     expect(upstreamPaths).toEqual([]);
   });
 });
@@ -457,7 +526,7 @@ describe('/api/client-events', () => {
     expect(await refused.json()).toMatchObject({ detail: 'too many client event batches' });
 
     // And the refusals are already counted, because every response is: no metric of its own.
-    const body = await (await get('/metrics')).text();
+    const body = await scrape();
     expect(body).toContain('route="/api/client-events",method="POST",status="429"');
   }, 30_000);
 
@@ -474,7 +543,7 @@ describe('/api/client-events', () => {
 
 /** `chemclaw_ui_requests_in_flight` right now. */
 const inFlight = async (): Promise<number> => {
-  const body = await (await get('/metrics')).text();
+  const body = await scrape();
   return Number(/chemclaw_ui_requests_in_flight (\d+)/.exec(body)?.[1] ?? -1);
 };
 
@@ -521,7 +590,7 @@ describe('a response the client walked away from', () => {
     expect(abandoned).toHaveLength(5);
     expect(abandoned[0]?.fields).toMatchObject({ status: 499, aborted: true, sent_status: 200 });
 
-    const body = await (await get('/metrics')).text();
+    const body = await scrape();
     expect(body).toContain('route="/api/sessions/{id}/events",method="GET",status="499"');
   }, 20_000);
 });

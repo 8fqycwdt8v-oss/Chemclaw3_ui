@@ -38,11 +38,16 @@ by default). Before this UI is ready, the backend must answer its own `/readyz`,
 (`CHEMCLAW_ENTRA_REQUIRED=true`) — otherwise `/readyz` here stays 503 with
 `"detail":"upstream accepts anonymous"`, by design.
 
-| File              | What it is                                                                                      |
-| ----------------- | ----------------------------------------------------------------------------------------------- |
-| `deployment.yaml` | the BFF with **two container ports** — `http` (`PORT`) and `sandbox` (`SANDBOX_PORT`) — and env |
-| `service.yaml`    | one Service, two named ports, `http` and `sandbox`                                              |
-| `routes.yaml`     | two Routes on two hosts, both edge TLS with http redirected                                     |
+| File              | What it is                                                                                                                    |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `deployment.yaml` | the BFF with **three container ports** — `http` (`PORT`), `sandbox` (`SANDBOX_PORT`) and `metrics` (`METRICS_PORT`) — and env |
+| `service.yaml`    | one Service, three named ports, `http`, `sandbox` and `metrics`                                                               |
+| `routes.yaml`     | two Routes on two hosts, both edge TLS with http redirected; none targets `metrics`                                           |
+
+**`metrics` is for an in-cluster scraper only.** `GET /metrics` has no authentication and says how
+many people are signed in, so it is served on its own port (the `http` port answers it 404) and no
+Route may target that port. Point a `ServiceMonitor` at the Service's `metrics` port
+(`docs/operations.md` §6).
 
 ## Sessions are in the pod, which is why the app Route keeps affinity
 
@@ -94,7 +99,7 @@ needed. Raise one only if you also raise the heartbeat above it.
 
 `tests/openshiftManifests.test.ts` parses these YAML files and checks every env name against
 `server/config.ts`, that the client secret is mounted from a Secret and not set as a value, that the
-app Route keeps affinity, the container ports against `PORT`/`SANDBOX_PORT`, the Service's and Routes'
-port names, both origins against the Routes' hosts, the names against `Jenkinsfile`, and — booting
+app Route keeps affinity, the container ports against `PORT`/`SANDBOX_PORT`/`METRICS_PORT`, the
+Service's and Routes' port names (no Route on `metrics`), both origins against the Routes' hosts, the names against `Jenkinsfile`, and — booting
 `server/config.ts` with this Deployment's environment — that the BFF would start with the sandbox
 on and no refusal.

@@ -109,14 +109,19 @@ export const loginFailureRecorded = (reason: LoginFailure): void => {
 
 const escape = (value: string): string => value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
-/** Levels read from the object that owns them at scrape time, so no second count can drift. */
-export interface Levels {
-  /** Signed-in sessions this process holds: `AUTH_MODE=bff`'s store, 0 in any other mode. */
-  sessions: number;
-}
+/**
+ * Signed-in sessions this process holds, read from the store at scrape time so no second count can
+ * drift. 0 until a store registers, which is every mode but `AUTH_MODE=bff`.
+ */
+let countSessions: () => number = () => 0;
 
-/** The Prometheus text exposition for everything above, and `levels`. */
-export function renderMetrics(levels: Levels): string {
+/** Called once by the request listener that owns the session store. */
+export const sessionsCountedBy = (count: () => number): void => {
+  countSessions = count;
+};
+
+/** The Prometheus text exposition for everything above. */
+export function renderMetrics(): string {
   const lines: string[] = [
     '# HELP chemclaw_ui_requests_total Requests served by the UI server.',
     '# TYPE chemclaw_ui_requests_total counter',
@@ -148,7 +153,7 @@ export function renderMetrics(levels: Levels): string {
     `chemclaw_ui_requests_in_flight ${inFlight}`,
     '# HELP chemclaw_ui_sessions Signed-in sessions this pod holds.',
     '# TYPE chemclaw_ui_sessions gauge',
-    `chemclaw_ui_sessions ${levels.sessions}`,
+    `chemclaw_ui_sessions ${countSessions()}`,
     '# HELP chemclaw_ui_upstream_errors_total Upstream requests that failed before a response.',
     '# TYPE chemclaw_ui_upstream_errors_total counter',
     `chemclaw_ui_upstream_errors_total ${upstreamErrors}`,

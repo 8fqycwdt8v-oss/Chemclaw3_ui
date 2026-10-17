@@ -302,7 +302,7 @@ describe('sign-out', () => {
   });
 });
 
-describe('the sessions gauge on /metrics', () => {
+describe('the sessions gauge on the metrics listener', () => {
   let stack: Stack;
   beforeAll(async () => {
     stack = await startStack();
@@ -312,7 +312,7 @@ describe('the sessions gauge on /metrics', () => {
   });
 
   const gauge = async (): Promise<number> => {
-    const body = await (await fetch(`${stack.bffUrl}/metrics`)).text();
+    const body = await (await fetch(`${stack.metricsUrl}/metrics`)).text();
     return Number(/^chemclaw_ui_sessions (\d+)$/m.exec(body)?.[1]);
   };
 
@@ -328,6 +328,13 @@ describe('the sessions gauge on /metrics', () => {
       headers: { ...CSRF, origin: stack.origin },
     });
     expect(await gauge()).toBe(1);
+  });
+
+  it('is not on the app listener, which has a shell to fall back to and must not use it', async () => {
+    const res = await fetch(`${stack.bffUrl}/metrics`);
+    expect(res.status).toBe(404);
+    expect(await res.text()).not.toContain('chemclaw_ui_sessions');
+    expect((await fetch(`${stack.bffUrl}/`)).status).toBe(200);
   });
 });
 

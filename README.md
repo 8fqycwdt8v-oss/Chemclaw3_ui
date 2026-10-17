@@ -158,6 +158,7 @@ source with "The sandbox did not answer". The help link resolves this section ag
 | `APP_ORIGIN`           | origin the browser reaches the app at; required with `SANDBOX_ORIGIN`       |
 | `SANDBOX_PORT`         | second listener's port (default `8081`), not `PORT`                         |
 | `SANDBOX_BIND_HOST`    | its bind address (default `BIND_HOST`)                                      |
+| `METRICS_PORT`         | the metrics listener's port (default `8082`), never routed                  |
 | `HTML_SCRIPTS_DEFAULT` | `on` (default) or `off`                                                     |
 | `DOCS_BASE_URL`        | where the app links to this README (default: this repository on github.com) |
 
@@ -182,7 +183,7 @@ through untouched, ideally a separate registrable domain); see
 
 ```
 server/   the BFF — route whitelist, streaming proxy, static host, /config.js, access log,
-          /metrics, /readyz, the browser log sink, the sandbox listener
+          /readyz, the browser log sink, the sandbox and metrics listeners
 src/      the SPA — api/ auth/ state/ hooks/ chem/ components/ results/ lib/
 shared/   imported by SPA and BFF: wire types generated from the pinned core contract
           (generated/, wire.ts, protocols.ts, events.ts, exhibits.ts) and shared constants

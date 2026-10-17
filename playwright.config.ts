@@ -43,6 +43,10 @@ const SCRIPTS_OFF_SANDBOX_PORT = 4325;
  * and renewal window make the renewal happen inside the spec rather than an hour later.
  */
 const BFF_PORT = 4330;
+/** Each BFF's metrics listener (`METRICS_PORT`), so three on one host do not share 8082. */
+const METRICS_PORT = 4326;
+const SCRIPTS_OFF_METRICS_PORT = 4327;
+const BFF_METRICS_PORT = 4331;
 const IDP_PORT = 4332;
 const FRONT_DOOR_PORT = 4333;
 const BFF_CLIENT_ID = 'chemclaw-bff-e2e';
@@ -109,7 +113,7 @@ export default defineConfig({
       // a non-loopback bind, and this suite runs unauthenticated. Binding loopback is the honest way
       // to satisfy that — the server really is only reachable from this machine — rather than
       // setting ALLOW_INSECURE_AUTH and teaching the test harness to wave the check through.
-      command: `node --experimental-strip-types e2e/fixture-service.ts ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 APP_ORIGIN=http://127.0.0.1:${PORT} SANDBOX_ORIGIN=http://127.0.0.1:${SANDBOX_PORT} SANDBOX_PORT=${SANDBOX_PORT} CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
+      command: `node --experimental-strip-types e2e/fixture-service.ts ${FIXTURE_PORT} & CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${PORT} BIND_HOST=127.0.0.1 APP_ORIGIN=http://127.0.0.1:${PORT} SANDBOX_ORIGIN=http://127.0.0.1:${SANDBOX_PORT} SANDBOX_PORT=${SANDBOX_PORT} METRICS_PORT=${METRICS_PORT} CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
       url: `http://127.0.0.1:${PORT}/api/healthz`,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
@@ -118,7 +122,7 @@ export default defineConfig({
       // The kill switch, beside the default. Its own `/healthz` (not `/api/healthz`) as the
       // readiness URL: that one is the BFF's own, so this server does not wait on the fixture the
       // first command starts.
-      command: `CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${SCRIPTS_OFF_PORT} BIND_HOST=127.0.0.1 APP_ORIGIN=http://127.0.0.1:${SCRIPTS_OFF_PORT} SANDBOX_ORIGIN=http://127.0.0.1:${SCRIPTS_OFF_SANDBOX_PORT} SANDBOX_PORT=${SCRIPTS_OFF_SANDBOX_PORT} HTML_SCRIPTS_DEFAULT=off CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
+      command: `CHEMCLAW_API_URL=http://127.0.0.1:${FIXTURE_PORT} PORT=${SCRIPTS_OFF_PORT} BIND_HOST=127.0.0.1 APP_ORIGIN=http://127.0.0.1:${SCRIPTS_OFF_PORT} SANDBOX_ORIGIN=http://127.0.0.1:${SCRIPTS_OFF_SANDBOX_PORT} SANDBOX_PORT=${SCRIPTS_OFF_SANDBOX_PORT} METRICS_PORT=${SCRIPTS_OFF_METRICS_PORT} HTML_SCRIPTS_DEFAULT=off CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
       url: `http://127.0.0.1:${SCRIPTS_OFF_PORT}/healthz`,
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
@@ -134,7 +138,7 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
     },
     {
-      command: `AUTH_MODE=bff ENTRA_TENANT_ID=fixture-tenant ENTRA_AUTHORITY=${BFF_AUTH.idp}/fixture-tenant ENTRA_CLIENT_ID=${BFF_CLIENT_ID} ENTRA_CLIENT_SECRET=fixture-secret API_SCOPE=api://chemclaw/Chat.Access TOKEN_REFRESH_SKEW_SECONDS=2 CHEMCLAW_API_URL=${BFF_AUTH.frontDoor} PORT=${BFF_PORT} BIND_HOST=127.0.0.1 APP_ORIGIN=${BFF_AUTH.app} LOG_LEVEL=error CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
+      command: `AUTH_MODE=bff ENTRA_TENANT_ID=fixture-tenant ENTRA_AUTHORITY=${BFF_AUTH.idp}/fixture-tenant ENTRA_CLIENT_ID=${BFF_CLIENT_ID} ENTRA_CLIENT_SECRET=fixture-secret API_SCOPE=api://chemclaw/Chat.Access TOKEN_REFRESH_SKEW_SECONDS=2 CHEMCLAW_API_URL=${BFF_AUTH.frontDoor} PORT=${BFF_PORT} METRICS_PORT=${BFF_METRICS_PORT} BIND_HOST=127.0.0.1 APP_ORIGIN=${BFF_AUTH.app} LOG_LEVEL=error CLIENT_DIR=${CLIENT_DIR} node dist/server.js`,
       // The BFF's own `/healthz`: it must not wait on the front door's backend.
       url: `${BFF_AUTH.app}/healthz`,
       reuseExistingServer: !process.env.CI,

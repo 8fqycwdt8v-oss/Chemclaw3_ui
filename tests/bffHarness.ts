@@ -212,6 +212,8 @@ export interface Stack {
   origin: string;
   /** Where requests are really sent. */
   bffUrl: string;
+  /** The same process's metrics listener (`METRICS_PORT` in production). */
+  metricsUrl: string;
   idp: FixtureOidc;
   core: Core;
   browser: Browser;
@@ -271,8 +273,11 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
   };
   for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
   vi.resetModules();
-  const { createRequestListener } = await import('../server/app.ts');
+  const { createMetricsServer, createRequestListener } = await import('../server/app.ts');
   server.on('request', createRequestListener());
+  const metrics = createMetricsServer();
+  await new Promise<void>((resolve) => metrics.listen(0, '127.0.0.1', resolve));
+  const metricsUrl = `http://127.0.0.1:${(metrics.address() as AddressInfo).port}`;
 
   const browser = new Browser();
   if (options.appOrigin) browser.hosts.set(new URL(options.appOrigin).host, `127.0.0.1:${port}`);
@@ -296,6 +301,7 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
   return {
     origin,
     bffUrl,
+    metricsUrl,
     idp,
     core,
     browser,
@@ -305,6 +311,8 @@ export async function startStack(options: StackOptions = {}): Promise<Stack> {
       vi.resetModules();
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      metrics.closeAllConnections();
+      await new Promise<void>((resolve) => metrics.close(() => resolve()));
       await core.close();
       await idp.close();
     },

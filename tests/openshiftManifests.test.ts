@@ -95,6 +95,7 @@ describe('the example OpenShift manifests', () => {
       'SANDBOX_PORT',
       'SANDBOX_BIND_HOST',
       'HTML_SCRIPTS_DEFAULT',
+      'METRICS_PORT',
       // The token handler: what it signs in against, and where it finds its client secret.
       'AUTH_MODE',
       'ENTRA_CLIENT_SECRET_FILE',
@@ -110,15 +111,25 @@ describe('the example OpenShift manifests', () => {
     expect(pipeline).toMatch(new RegExp(`'${container.name}=\\$\\{params\\.IMAGE_REGISTRY\\}`));
   });
 
-  it('opens the app and the sandbox on the ports the BFF listens on, by name', () => {
+  it('opens the app, the sandbox and the metrics on the ports the BFF listens on, by name', () => {
     const ports = Object.fromEntries(container.ports.map((p) => [p.name, p.containerPort]));
-    expect(ports).toEqual({ http: Number(env.PORT), sandbox: Number(env.SANDBOX_PORT) });
-    expect(ports.http).not.toBe(ports.sandbox);
+    expect(ports).toEqual({
+      http: Number(env.PORT),
+      sandbox: Number(env.SANDBOX_PORT),
+      metrics: Number(env.METRICS_PORT),
+    });
+    expect(new Set(Object.values(ports)).size).toBe(3);
     const servicePorts = service.spec.ports as { name: string; targetPort: string }[];
     expect(servicePorts.map((p) => [p.name, p.targetPort])).toEqual([
       ['http', 'http'],
       ['sandbox', 'sandbox'],
+      ['metrics', 'metrics'],
     ]);
+  });
+
+  it('routes nothing to the metrics port: the exposition is for an in-cluster scraper', () => {
+    // How busy the pod is and how many people are signed in is not for anyone who can reach a host.
+    expect(routes.map((route) => routeSpec(route).port.targetPort)).not.toContain('metrics');
   });
 
   it('probes the app port for readiness and liveness, and the sandbox port for its page', () => {
@@ -195,5 +206,6 @@ describe('the example OpenShift manifests', () => {
     expect(cfg.htmlScriptsDefault).toBe(true);
     expect(cfg.port).toBe(Number(env.PORT));
     expect(cfg.sandboxPort).toBe(Number(env.SANDBOX_PORT));
+    expect(cfg.metricsPort).toBe(Number(env.METRICS_PORT));
   });
 });

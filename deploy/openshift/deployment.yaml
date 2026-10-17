@@ -5,10 +5,11 @@
 # container names below are the ones `Jenkinsfile` names. Copy, change the hosts and the tenant,
 # apply once; every later release is that one `oc set image`.
 #
-# Two container ports, because the sandbox is a different ORIGIN, and a port is the smallest unit
-# of one this process can offer: `http` (PORT) serves the app and never `/sandbox/frame`;
+# Three container ports. Two because the sandbox is a different ORIGIN, and a port is the smallest
+# unit of one this process can offer: `http` (PORT) serves the app and never `/sandbox/frame`;
 # `sandbox` (SANDBOX_PORT) serves `GET /sandbox/frame` and nothing else. Each gets its own Route on
-# its own host (routes.yaml). `tests/openshiftManifests.test.ts` parses these files and holds every
+# its own host (routes.yaml). The third, `metrics` (METRICS_PORT), serves `GET /metrics` and
+# nothing else, for an in-cluster scraper: no Route targets it, and `http` answers `/metrics` 404. `tests/openshiftManifests.test.ts` parses these files and holds every
 # env name, port and origin here to `server/config.ts` and to the Routes.
 apiVersion: apps/v1
 kind: Deployment
@@ -76,6 +77,8 @@ spec:
               value: '8081'
             - name: SANDBOX_BIND_HOST
               value: 0.0.0.0
+            - name: METRICS_PORT
+              value: '8082'
             # On by the owner's decision of 2026-10-03; `off` is the kill switch that puts back
             # "Run scripts" (README, "HTML sandbox").
             - name: HTML_SCRIPTS_DEFAULT
@@ -85,6 +88,8 @@ spec:
               containerPort: 8080
             - name: sandbox
               containerPort: 8081
+            - name: metrics
+              containerPort: 8082
           # Both on the APP port. /readyz asks the service's own /readyz and fails while draining;
           # /healthz is liveness and consults nothing upstream.
           readinessProbe:

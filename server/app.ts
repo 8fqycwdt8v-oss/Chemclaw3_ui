@@ -3,9 +3,9 @@
  * point), so tests can drive real sockets.
  *
  * Proxies a fixed route list, serves `/config.js` and static assets with SPA fallback, answers
- * `/healthz`, `/readyz`, `/metrics`, and accepts browser logs on `/api/client-events`. Bare
- * `node:http`: compression middleware breaks SSE. Every response gets one access-log line and
- * metrics, labelled by route pattern.
+ * `/healthz` and `/readyz`, and accepts browser logs on `/api/client-events`; `/metrics` is a
+ * listener of its own (`createMetricsServer`). Bare `node:http`: compression middleware breaks
+ * SSE. Every response gets one access-log line and metrics, labelled by route pattern.
  */
 
 import http from 'node:http';
@@ -18,7 +18,13 @@ import { serveConfigJs } from './runtimeConfig.ts';
 import { log } from './log.ts';
 import { handleClientEvents } from './clientEvents.ts';
 import { readiness } from './ready.ts';
-import { authEventRecorded, renderMetrics, requestFinished, requestStarted } from './metrics.ts';
+import {
+  authEventRecorded,
+  renderMetrics,
+  requestFinished,
+  requestStarted,
+  sessionsCountedBy,
+} from './metrics.ts';
 import { CORRELATION_HEADER, mintCorrelationId } from './correlation.ts';
 import type { RequestTrace } from './proxy.ts';
 import { AuthService } from './auth/service.ts';
@@ -263,6 +269,7 @@ export function createRequestListener(): http.RequestListener {
   const assets = createAssetHandler();
   // Sessions live in this object, so exactly one per process, and only when the mode needs it.
   const auth = cfg.authMode === 'bff' ? new AuthService() : null;
+  if (auth) sessionsCountedBy(() => auth.sessions.live());
 
   return (req, res) => {
     const rawUrl = req.url ?? '/';
@@ -307,15 +314,11 @@ export function createRequestListener(): http.RequestListener {
     }
 
     if (path === '/metrics') {
-      // This pod's metrics. Unauthenticated, so no actor, session or path labels. `/api/metrics` is
-      // never whitelisted.
+      // Served on `METRICS_PORT` only (`createMetricsServer`), never on the port the Route reaches;
+      // answered here so the SPA fallback does not hand back the shell under this name.
       trace.route = '/metrics';
-      const body = renderMetrics({ sessions: auth?.sessions.live() ?? 0 });
-      res.writeHead(200, {
-        'content-type': 'text/plain; version=0.0.4; charset=utf-8',
-        'content-length': Buffer.byteLength(body),
-      });
-      res.end(body);
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('Not Found');
       return;
     }
 
@@ -419,6 +422,32 @@ export function createSandboxServer(appOrigin: string = cfg.appOrigin): http.Ser
     };
     observe(req, res, trace);
     trace.route = handle(req, res);
+  });
+  server.maxConnections = cfg.maxConnections;
+  return server;
+}
+
+/**
+ * The metrics listener, started by `index.ts` on `METRICS_PORT`: `GET /metrics` and nothing else.
+ * The exposition says how busy the pod is and how many people are signed in, so it is for an
+ * in-cluster scraper, not for anyone who can reach the app's host. Scrapes are not counted or
+ * access-logged: they are not the app's traffic.
+ */
+export function createMetricsServer(): http.Server {
+  const server = http.createServer(serverOptions(), (req, res) => {
+    const path = (req.url ?? '/').split('?', 1)[0];
+    if (path !== '/metrics' || (req.method !== 'GET' && req.method !== 'HEAD')) {
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('Not Found');
+      return;
+    }
+    // No actor, session, correlation id or path is ever a label (`metrics.ts`).
+    const body = renderMetrics();
+    res.writeHead(200, {
+      'content-type': 'text/plain; version=0.0.4; charset=utf-8',
+      'content-length': Buffer.byteLength(body),
+    });
+    res.end(body);
   });
   server.maxConnections = cfg.maxConnections;
   return server;

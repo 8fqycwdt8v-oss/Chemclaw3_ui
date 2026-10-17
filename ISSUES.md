@@ -68,11 +68,6 @@ is re-measured on the new build. The bump also needs `Mol` / `MainModule` for `J
 `npm ci` fails with ERESOLVE until typescript-eslint's peer range admits TypeScript 7. The
 migration is its own PR, not a lockfile bump.
 
-### Issue 21: two unit tests time out on a loaded machine
-
-`tests/turnStall.test.tsx` and `tests/serverLimits.test.ts` fail under heavy host load and pass
-alone. Make the first assert order rather than elapsed time.
-
 ### Issue 22: shared sessions — what still needs the service
 
 Queued turns, withdraw, `stream_lagged` reattach and live following of another member's turn are

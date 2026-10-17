@@ -7,7 +7,7 @@
  * inlined `sirv`. Anything it failed to inline would surface only as a crash on deploy, so this
  * proves it here: `dist/` is copied into a temp directory (a copy rather than deleting
  * `node_modules` in place, so the check stays order-independent), the bundle is started from
- * there, and `/healthz` must answer.
+ * there, and `/healthz` must answer — and `/metrics` must be on the metrics listener alone.
  *
  * Was inline shell in `.github/workflows/ci.yml`. The one behavioural difference from that version
  * is that this one reports *why* it failed — the old `curl | grep` swallowed the server's own
@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const PORT = Number(process.env.STANDALONE_PORT ?? 8788);
+const METRICS_PORT = Number(process.env.STANDALONE_METRICS_PORT ?? 8790);
 
 const workdir = mkdtempSync(join(tmpdir(), 'chemclaw-ui-standalone-'));
 try {
@@ -38,6 +39,7 @@ const server = spawn(process.execPath, ['dist/server.js'], {
   env: {
     ...process.env,
     PORT: String(PORT),
+    METRICS_PORT: String(METRICS_PORT),
     BIND_HOST: '127.0.0.1',
     CLIENT_DIR: 'dist/client',
     // Deliberately a port nothing listens on: this check is about the bundle starting, not about
@@ -73,7 +75,18 @@ for (let attempt = 0; attempt < 40; attempt += 1) {
     const res = await fetch(`http://127.0.0.1:${PORT}/healthz`);
     const body = await res.text();
     if (res.ok && body.includes('"ok"')) {
-      console.log(`  ✓ dist/server.js serves /healthz with no node_modules — ${body.trim()}\n`);
+      console.log(`  ✓ dist/server.js serves /healthz with no node_modules — ${body.trim()}`);
+      const scrape = await fetch(`http://127.0.0.1:${METRICS_PORT}/metrics`).catch(() => null);
+      const exposition = scrape?.ok ? await scrape.text() : '';
+      if (!exposition.includes('# TYPE chemclaw_ui_sessions gauge')) {
+        fail(
+          `METRICS_PORT ${METRICS_PORT} did not serve /metrics (${scrape?.status ?? 'no answer'})`,
+        );
+      }
+      const onApp = await fetch(`http://127.0.0.1:${PORT}/metrics`);
+      if (onApp.status !== 404)
+        fail(`the app port answered /metrics with ${onApp.status}, not 404`);
+      console.log(`  ✓ /metrics is served on METRICS_PORT and refused on PORT\n`);
       stop();
       process.exit(0);
     }

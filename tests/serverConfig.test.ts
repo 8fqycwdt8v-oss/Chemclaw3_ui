@@ -17,6 +17,8 @@ import { isLoopbackHost, validateConfig, type BffConfig } from '../server/config
 const base: BffConfig = {
   port: 8080,
   bindHost: '127.0.0.1',
+  metricsPort: 8082,
+  rawMetricsPort: '',
   clientDir: 'dist/client',
   apiUrl: 'http://127.0.0.1:8000',
   authMode: 'dev',
@@ -339,6 +341,45 @@ describe('an unusable MAX_MESSAGE_CHARS', () => {
       config({ rawMaxMessageChars: '0', maxMessageCharsIsValid: false }),
     );
     expect(problems.join('\n')).toContain('"0"');
+  });
+});
+
+/**
+ * `METRICS_PORT`: the metrics listener's own port. Refused when it is not a port, and when it is
+ * the app's or the sandbox's, because a shared listener would put `/metrics` back where a Route
+ * can reach it.
+ */
+describe('METRICS_PORT', () => {
+  const metricsProblems = (over: Partial<BffConfig>): string[] =>
+    validateConfig(config(over)).filter((p) => p.includes('METRICS_PORT'));
+
+  it('defaults to 8082, beside the app and the sandbox', async () => {
+    vi.stubEnv('METRICS_PORT', '');
+    vi.resetModules();
+    const fresh = await import('../server/config.ts');
+    expect(fresh.cfg.metricsPort).toBe(8082);
+    expect(fresh.validateConfig(fresh.cfg).filter((p) => p.includes('METRICS_PORT'))).toEqual([]);
+  });
+
+  it('is refused when it is not a port, naming what it was given', async () => {
+    for (const raw of ['0', '65536', '80a', '-1']) {
+      vi.stubEnv('METRICS_PORT', raw);
+      vi.resetModules();
+      const fresh = await import('../server/config.ts');
+      const problems = fresh.validateConfig(fresh.cfg).filter((p) => p.includes('METRICS_PORT'));
+      expect(problems, raw).toHaveLength(1);
+      expect(problems[0]).toContain(JSON.stringify(raw));
+    }
+  });
+
+  it("is refused on the app's port, and on the sandbox's while the sandbox runs", () => {
+    expect(metricsProblems({ metricsPort: 8080 })[0]).toContain('is also PORT');
+    expect(metricsProblems({ metricsPort: 8081, sandboxEnabled: true })[0]).toContain(
+      'is also SANDBOX_PORT',
+    );
+    // A sandbox that is off holds no port.
+    expect(metricsProblems({ metricsPort: 8081, sandboxEnabled: false })).toEqual([]);
+    expect(metricsProblems({ metricsPort: 9464 })).toEqual([]);
   });
 });
 

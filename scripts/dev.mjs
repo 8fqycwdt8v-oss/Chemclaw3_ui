@@ -20,6 +20,7 @@ console.log(`\n  Chemclaw3 UI — development`);
 console.log(`  BFF        http://127.0.0.1:${BFF_PORT}`);
 console.log(`  UI         http://127.0.0.1:5173`);
 console.log(`  sandbox    http://127.0.0.1:${process.env.SANDBOX_PORT ?? '8788'}`);
+console.log(`  metrics    http://127.0.0.1:${process.env.METRICS_PORT ?? '8789'}/metrics`);
 console.log(`  backend    ${API_URL}\n`);
 
 const children = [];
@@ -56,6 +57,7 @@ start('bff', process.execPath, ['--watch', 'server/index.ts'], {
   PORT: BFF_PORT,
   BIND_HOST: '127.0.0.1',
   SANDBOX_PORT,
+  METRICS_PORT: process.env.METRICS_PORT ?? '8789',
   APP_ORIGIN: process.env.APP_ORIGIN ?? 'http://127.0.0.1:5173',
   SANDBOX_ORIGIN: process.env.SANDBOX_ORIGIN ?? `http://127.0.0.1:${SANDBOX_PORT}`,
   CHEMCLAW_API_URL: API_URL,

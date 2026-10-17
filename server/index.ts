@@ -5,7 +5,7 @@
  */
 
 import { cfg, isLoopbackHost, validateConfig } from './config.ts';
-import { createBffServer, createSandboxServer } from './app.ts';
+import { createBffServer, createMetricsServer, createSandboxServer } from './app.ts';
 import { log } from './log.ts';
 import { beginDraining } from './ready.ts';
 
@@ -144,6 +144,19 @@ if (sandbox) {
   });
 }
 
+/** The metrics listener, on its own port so the app's Route never reaches it; bound like the app. */
+const metrics = createMetricsServer();
+metrics.on('error', (error: NodeJS.ErrnoException) => {
+  die('metrics server error', {
+    code: error.code ?? 'EUNKNOWN',
+    error: error.message,
+    address: `${cfg.bindHost}:${cfg.metricsPort}`,
+  });
+});
+metrics.listen(cfg.metricsPort, cfg.bindHost, () => {
+  log.info('metrics on', { address: `http://${cfg.bindHost}:${cfg.metricsPort}/metrics` });
+});
+
 /**
  * How long to wait after `server.close()` before exiting: open SSE streams would otherwise hold it
  * for up to 600 s.
@@ -158,8 +171,9 @@ const CLOSE_GRACE_MS = 5_000;
  */
 const closeAndExit = (signal: string): void => {
   log.info('closing listener', { signal });
-  // The sandbox serves one static page and holds no stream, so it closes without a drain.
+  // The sandbox and metrics listeners hold no stream, so they close without a drain.
   sandbox?.close();
+  metrics.close();
   server.close(() => process.exit(0));
   // Open SSE streams hold the server open indefinitely; don't wait forever on them.
   setTimeout(() => process.exit(0), CLOSE_GRACE_MS).unref();

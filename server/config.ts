@@ -249,6 +249,13 @@ const cookiePrefix = cookieSecure ? '__Host-' : '';
 export interface BffConfig {
   port: number;
   bindHost: string;
+  /**
+   * The metrics listener's port: `GET /metrics` and nothing else, on `bindHost`. A port of its own
+   * so the exposition reaches an in-cluster scraper and never the app's Route, which targets `PORT`.
+   */
+  metricsPort: number;
+  /** `METRICS_PORT` as given, so a port that is not one can be quoted in the refusal. */
+  rawMetricsPort: string;
   clientDir: string;
   apiUrl: string;
   authMode: AuthMode;
@@ -389,6 +396,8 @@ export interface BffConfig {
 export const cfg: BffConfig = {
   port: num('PORT', 8080),
   bindHost: str('BIND_HOST', '0.0.0.0'),
+  metricsPort: num('METRICS_PORT', 8082),
+  rawMetricsPort: str('METRICS_PORT'),
   clientDir: str('CLIENT_DIR', new URL('./client', import.meta.url).pathname),
   // The Chemclaw3 service. In compose this is the service name; locally, a uvicorn on :8080.
   apiUrl: str('CHEMCLAW_API_URL', 'http://127.0.0.1:8080'),
@@ -575,6 +584,25 @@ export function validateConfig(c: BffConfig = cfg): string[] {
         'visitor drives the agent as a shared principal with all authorization gates open. Set ' +
         'AUTH_MODE=bff, bind to 127.0.0.1, or set ALLOW_INSECURE_AUTH=true to say this is ' +
         'deliberate.',
+    );
+  }
+
+  // Like `SANDBOX_PORT`: whole digits, 1–65535, and a port of its own, since a shared one would put
+  // `/metrics` back on a listener a Route can reach.
+  if (
+    (c.rawMetricsPort && !/^\d+$/.test(c.rawMetricsPort)) ||
+    !Number.isInteger(c.metricsPort) ||
+    c.metricsPort < 1 ||
+    c.metricsPort > 65_535
+  ) {
+    problems.push(
+      `METRICS_PORT ${JSON.stringify(c.rawMetricsPort || String(c.metricsPort))} is not a port ` +
+        '(expected a whole number from 1 to 65535).',
+    );
+  } else if (c.metricsPort === c.port || (c.sandboxEnabled && c.metricsPort === c.sandboxPort)) {
+    problems.push(
+      `METRICS_PORT ${c.metricsPort} is also ${c.metricsPort === c.port ? 'PORT' : 'SANDBOX_PORT'}. ` +
+        "Metrics have a listener of their own, kept off the app's Route; give it a port of its own.",
     );
   }
 

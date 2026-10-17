@@ -1,5 +1,6 @@
-# One Service, two named ports — `http` for the app Route and `sandbox` for the sandbox Route.
-# The Routes target these by NAME (routes.yaml), so renumbering a port is a change here only.
+# One Service, three named ports — `http` for the app Route, `sandbox` for the sandbox Route, and
+# `metrics` for an in-cluster scraper (a ServiceMonitor names it; docs/operations.md §6), which no
+# Route may target. The Routes target ports by NAME (routes.yaml), so renumbering is a change here.
 apiVersion: v1
 kind: Service
 metadata:
@@ -16,3 +17,6 @@ spec:
     - name: sandbox
       port: 8081
       targetPort: sandbox
+    - name: metrics
+      port: 8082
+      targetPort: metrics

@@ -78,10 +78,8 @@ export interface StreamTurnOptions {
    * recovery on it, since a failure before this point never reached the service.
    */
   onAccepted?: () => void;
-  /** The stream went quiet for `stallAfterMs` (and later `false`). Reported, never acted on. */
+  /** The stream went quiet for `TURN_STALL_MS` (and later `false`). Reported, never acted on. */
   onStall?: (stalled: boolean) => void;
-  /** Overrides `TURN_STALL_MS`; `0` switches the detector off. Tests use it; nothing else does. */
-  stallAfterMs?: number;
   /**
    * A frame this build could not use (malformed or unknown type), so a version skew is visible
    * rather than silent.
@@ -206,19 +204,18 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
 
   // The idle watch. One timer, re-armed by each frame, so a quiet turn costs nothing until it has
   // actually been quiet — and cleared in the `finally`, so it cannot outlive the turn.
-  const stallAfterMs = opts.stallAfterMs ?? TURN_STALL_MS;
   let lastFrameAt = Date.now();
   let stalled = false;
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
 
   const armStall = (delay: number): void => {
-    if (stallAfterMs <= 0 || !opts.onStall) return;
+    if (!opts.onStall) return;
     stallTimer = setTimeout(() => {
       const idle = Date.now() - lastFrameAt;
       // Re-arm for the remainder: a frame that arrived while the timer was pending resets the
       // clock.
-      if (idle < stallAfterMs) {
-        armStall(stallAfterMs - idle);
+      if (idle < TURN_STALL_MS) {
+        armStall(TURN_STALL_MS - idle);
         return;
       }
       stalled = true;
@@ -233,7 +230,7 @@ export async function streamTurn(opts: StreamTurnOptions): Promise<AnswerEvent> 
       stalled = false;
       opts.onStall?.(false);
     }
-    armStall(stallAfterMs);
+    armStall(TURN_STALL_MS);
   };
 
   markFrame();

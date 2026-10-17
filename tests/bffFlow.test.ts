@@ -653,7 +653,7 @@ describe('bogus callbacks against the provider’s token endpoint', () => {
       expect(browser.cookie(capped.origin, cookieName)).toBeDefined();
 
       // And it is countable, by reason, without a label anyone can mint.
-      const metrics = await (await fetch(`${capped.bffUrl}/metrics`)).text();
+      const metrics = await (await fetch(`${capped.metricsUrl}/metrics`)).text();
       expect(metrics).toMatch(/chemclaw_ui_login_failures_total\{reason="busy"\} [1-9]/);
       expect(metrics).toMatch(
         /chemclaw_ui_login_failures_total\{reason="exchange_rejected"\} [1-9]/,

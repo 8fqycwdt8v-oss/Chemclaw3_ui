@@ -15,9 +15,11 @@ One Node process, the **BFF** (`server/`, bundled to `dist/server.js`):
 - proxies a **whitelist** of `/api/*` routes (`server/routes.ts`) to the Chemclaw3 FastAPI service
   at `CHEMCLAW_API_URL`, stripping the `/api` prefix — the browser never talks to the backend, so
   the backend needs **no CORS** (`CHEMCLAW_SERVICE_CORS_ORIGINS` stays empty) and is never exposed;
-- answers its own `GET /healthz`, `GET /readyz`, `GET /metrics` and `POST /api/client-events`;
+- answers its own `GET /healthz`, `GET /readyz` and `POST /api/client-events`;
 - runs a **second listener** on `SANDBOX_PORT` (default 8081) that serves `GET /sandbox/frame` and
-  nothing else, when the HTML sandbox is configured (README, "HTML sandbox (artefacts)").
+  nothing else, when the HTML sandbox is configured (README, "HTML sandbox (artefacts)");
+- runs a **metrics listener** on `METRICS_PORT` (default 8082) that serves `GET /metrics` and
+  nothing else, for an in-cluster scraper (§6). The app listener answers `/metrics` 404.
 
 Under `AUTH_MODE=bff` the BFF also **signs users in and holds their tokens** (§8): it does the OIDC
 authorization-code + PKCE exchange, keeps the access and refresh tokens in its own memory, gives
@@ -115,6 +117,7 @@ None of the `ENTRA_*` values, the scope or the secret is sent to the browser (`G
 | `APP_ORIGIN`           | unset                                                       | The origin the **browser** reaches the app at, exactly. Required with `SANDBOX_ORIGIN`, and must differ from it. |
 | `SANDBOX_PORT`         | `8081`                                                      | The sandbox listener's port; 1–65535 (always checked), not `PORT`.                                               |
 | `SANDBOX_BIND_HOST`    | `BIND_HOST`                                                 | The sandbox listener's address.                                                                                  |
+| `METRICS_PORT`         | `8082`                                                      | The metrics listener's port, on `BIND_HOST`; 1–65535, not `PORT` or `SANDBOX_PORT`. Never put a Route on it.     |
 | `HTML_SCRIPTS_DEFAULT` | `on`                                                        | Whether an HTML artefact's script runs without a click. `off` is the kill switch.                                |
 | `ALLOW_FRAMING`        | `false`                                                     | Lets any origin frame the app (a preview host). Also turns the sandbox **off**.                                  |
 | `DOCS_BASE_URL`        | `https://github.com/8fqycwdt8v-oss/Chemclaw3_ui/blob/main/` | Where the app links to the README; point it at an internal mirror when air-gapped.                               |
@@ -276,22 +279,48 @@ image to a kind cluster at `http://127.0.0.1:15173`.
 | sign-in starts            | `GET /auth/login`                                                | `302` to the authority's authorize endpoint, with `state`, `nonce`, S256 `code_challenge`              |
 | sandbox listener          | `GET https://<sandbox host>/sandbox/frame`                       | 200 with its own CSP; `GET https://<app host>/sandbox/frame` is 404                                    |
 | whitelist                 | `GET /api/metrics`                                               | 404 (never forwarded)                                                                                  |
+| metrics stay in-cluster   | `GET https://<app host>/metrics`                                 | 404; `GET http://<pod>:8082/metrics` from inside the cluster is the exposition                         |
 | the image's four promises | `npm run check:serving -- https://<app host>`                    | four ✓                                                                                                 |
 | served contract = pin     | `npm run check:live-contract <service url>`                      | `ok`; drift names pinned vs served `info.version` (needs the service directly)                         |
 | a real streamed turn      | `SESSION_COOKIE=<name>=<value> npm run smoke https://<app host>` | frames arrive **incrementally**; a signed-in browser's session cookie under `bff`, nothing under `dev` |
 
-The startup log says what the process decided: one `listening` line (upstream, auth mode, version)
-and one `html sandbox on: …` or `html sandbox off: <reason>` line. `GET /metrics` exposes
-`chemclaw_ui_requests_total`, `chemclaw_ui_request_duration_seconds`,
-`chemclaw_ui_requests_in_flight` and `chemclaw_ui_upstream_errors_total`, labelled by route
-pattern only.
+The startup log says what the process decided: one `listening` line (upstream, auth mode, version),
+one `html sandbox on: …` or `html sandbox off: <reason>` line, and one `metrics on` line with the
+metrics listener's address.
+
+**Metrics.** `GET /metrics` on `METRICS_PORT` exposes `chemclaw_ui_requests_total`,
+`chemclaw_ui_request_duration_seconds`, `chemclaw_ui_requests_in_flight` and
+`chemclaw_ui_upstream_errors_total`, labelled by route pattern only; the sign-in counters (§7); and
+`chemclaw_ui_sessions`, the signed-in sessions the pod holds (0 unless `AUTH_MODE=bff`, no labels).
+It has no authentication, and says how busy the pod is and how many people are signed in, so it is
+served on a port of its own that no Route targets: the app's port answers `/metrics` 404, so a
+scrape aimed at the app host or the `http` port gets 404. Scrape the Service's `metrics` port from
+inside the cluster. On OpenShift user-workload monitoring that is a `ServiceMonitor`:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: chemclaw3-ui
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chemclaw3-ui
+  endpoints:
+    - port: metrics
+      path: /metrics
+```
+
+Elsewhere, any scrape config that targets port 8082 of the pods (or `METRICS_PORT`) does the same.
+A NetworkPolicy that admits only the monitoring namespace to that port narrows it further.
 
 ---
 
 ## 7. Troubleshoot
 
 **The pod exits at once.** Read the `config: …` lines — each names the variable and why it was
-refused. `EADDRINUSE` on `PORT` or `SANDBOX_PORT` is one structured line naming the address.
+refused. `EADDRINUSE` on `PORT`, `SANDBOX_PORT` or `METRICS_PORT` is one structured line naming the
+address.
 
 **`/readyz` is 503.** Its body says why:
 
@@ -492,6 +521,8 @@ with it; the router sends those browsers elsewhere and they sign in again.
 **Limits.** A session ends after `SESSION_IDLE_MINUTES` unused or `SESSION_MAX_AGE_HOURS` in all
 (both below the provider's refresh-token life, so these — not the provider — decide how often a
 chemist signs in). At most `SESSION_MAX_SESSIONS` are held; the least recently used is dropped.
+`chemclaw_ui_sessions` on `/metrics` is how many a pod holds now, so its distance from the cap (and
+the drop at a release) can be watched.
 A sign-in in progress costs the server nothing (it is the browser's cookie), so there is no cap to
 exhaust and no shared counter for an anonymous flood to spend: one host hammering `/auth/login`
 cannot stop anyone else signing in. Restarting a pod mid-sign-in invalidates its cookies (random

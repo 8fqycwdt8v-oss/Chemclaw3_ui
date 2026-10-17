@@ -99,17 +99,32 @@ export function firstLoadFiles(html) {
  *
  * Not a dependency taken but the framework growing, and holding React at 19.2 to stay under a
  * number would be the ratchet this file argues against. The headroom is re-set to the same ~6%.
+ *
+ * **Re-set on 2026-10-17**, from 240,000 / 770,000, by the npm minor/patch group that superseded
+ * Dependabot #160. That headroom went to the product, not to dependencies: `main` (`5d7d7b9`), after
+ * the 27 merges since #119 (the artefact pane, shared conversations, interrupted turns, the BFF
+ * sign-in), measured 0.2% under the raw bound. The group's own cost, each bump reverted alone:
+ *
+ *     main                                   768,826 raw   236,001 gzip
+ *     radix-ui 1.7.0                          +1,783 raw      +527 gzip
+ *     vite 8.3.4                                +137 raw       +49 gzip
+ *     the other eight                     a few bytes either way
+ *     after                                  770,745 raw   236,581 gzip   (+1,919 / +580)
+ *
+ * radix-ui 1.7.0 fixes layers this app uses (a portalled layer inside a modal Dialog, which every
+ * sheet is; Popover); holding it back to stay under the number would be the same ratchet. The
+ * headroom is re-set to ~6%.
  */
 export const BUDGET = {
-  firstLoadGzip: 240_000,
-  firstLoadRaw: 770_000,
+  firstLoadGzip: 252_000,
+  firstLoadRaw: 820_000,
 };
 
 /** The measurement this budget was set from, so the headroom is checkable rather than asserted. */
 export const MEASURED = {
-  at: '2026-10-01',
-  firstLoadGzip: 226_780,
-  firstLoadRaw: 723_873,
+  at: '2026-10-17',
+  firstLoadGzip: 236_581,
+  firstLoadRaw: 770_745,
 };
 
 const kb = (bytes) => `${(bytes / 1024).toFixed(1)} kB`;

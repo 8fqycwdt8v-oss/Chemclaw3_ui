@@ -310,7 +310,7 @@ export function createRequestListener(): http.RequestListener {
       // This pod's metrics. Unauthenticated, so no actor, session or path labels. `/api/metrics` is
       // never whitelisted.
       trace.route = '/metrics';
-      const body = renderMetrics();
+      const body = renderMetrics({ sessions: auth?.sessions.live() ?? 0 });
       res.writeHead(200, {
         'content-type': 'text/plain; version=0.0.4; charset=utf-8',
         'content-length': Buffer.byteLength(body),

@@ -284,7 +284,8 @@ The startup log says what the process decided: one `listening` line (upstream, a
 and one `html sandbox on: …` or `html sandbox off: <reason>` line. `GET /metrics` exposes
 `chemclaw_ui_requests_total`, `chemclaw_ui_request_duration_seconds`,
 `chemclaw_ui_requests_in_flight` and `chemclaw_ui_upstream_errors_total`, labelled by route
-pattern only.
+pattern only, and `chemclaw_ui_sessions`, the signed-in sessions the pod holds (0 unless
+`AUTH_MODE=bff`).
 
 ---
 
@@ -492,6 +493,8 @@ with it; the router sends those browsers elsewhere and they sign in again.
 **Limits.** A session ends after `SESSION_IDLE_MINUTES` unused or `SESSION_MAX_AGE_HOURS` in all
 (both below the provider's refresh-token life, so these — not the provider — decide how often a
 chemist signs in). At most `SESSION_MAX_SESSIONS` are held; the least recently used is dropped.
+`chemclaw_ui_sessions` on `/metrics` is how many a pod holds now, so its distance from the cap (and
+the drop at a release) can be watched.
 A sign-in in progress costs the server nothing (it is the browser's cookie), so there is no cap to
 exhaust and no shared counter for an anonymous flood to spend: one host hammering `/auth/login`
 cannot stop anyone else signing in. Restarting a pod mid-sign-in invalidates its cookies (random

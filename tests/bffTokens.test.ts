@@ -302,6 +302,35 @@ describe('sign-out', () => {
   });
 });
 
+describe('the sessions gauge on /metrics', () => {
+  let stack: Stack;
+  beforeAll(async () => {
+    stack = await startStack();
+  });
+  afterAll(async () => {
+    await stack.stop();
+  });
+
+  const gauge = async (): Promise<number> => {
+    const body = await (await fetch(`${stack.bffUrl}/metrics`)).text();
+    return Number(/^chemclaw_ui_sessions (\d+)$/m.exec(body)?.[1]);
+  };
+
+  it('is the number of people signed in on this pod, down again as they sign out', async () => {
+    expect(await gauge()).toBe(0);
+    const [alice, bob] = [new Browser(), new Browser()];
+    await stack.signIn('alice', '/', alice);
+    await stack.signIn('bob', '/', bob);
+    expect(await gauge()).toBe(2);
+
+    await alice.request(`${stack.origin}/auth/logout`, {
+      method: 'POST',
+      headers: { ...CSRF, origin: stack.origin },
+    });
+    expect(await gauge()).toBe(1);
+  });
+});
+
 describe('a public client (ENTRA_CLIENT_AUTH=none)', () => {
   it('signs in with PKCE alone and sends no secret', async () => {
     const stack = await startStack({
@@ -362,6 +391,18 @@ describe('the session store', () => {
     expect(store.size).toBe(3);
     expect(store.get(b.id)).toBeUndefined();
     for (const kept of [a, c, d]) expect(store.get(kept.id)).toBeDefined();
+    store.stop();
+  });
+
+  it('counts as live only what is within both lifetimes, and ends nothing by counting', () => {
+    const store = make();
+    store.create(fresh());
+    clock = 600;
+    store.create(fresh());
+    expect(store.live()).toBe(2);
+    clock = 1_500; // the first is past the idle time; the sweep has not run
+    expect(store.live()).toBe(1);
+    expect(store.size).toBe(2);
     store.stop();
   });
 

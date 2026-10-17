@@ -11,9 +11,9 @@
  * coming, which is the mistake this codebase already avoided once with `loop_cap_reached`.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
-import { streamTurn } from '../src/api/streamTurn.ts';
+import { streamTurn, TURN_STALL_MS } from '../src/api/streamTurn.ts';
 import { useChatStore } from '../src/state/chatStore.ts';
 import { MessageList } from '../src/components/MessageList.tsx';
 import { answerEvent, sseFrames, stubFetch } from './helpers.ts';
@@ -24,109 +24,91 @@ let restore: (() => void) | null = null;
 afterEach(() => {
   restore?.();
   restore = null;
+  vi.useRealTimers();
   cleanup();
 });
 
-/** A stream that sends `head`, goes quiet for `gapMs`, then sends `tail` and ends. */
-function pausingStream(head: string, gapMs: number, tail: string): ReadableStream<Uint8Array> {
-  const encode = (text: string) => new TextEncoder().encode(text);
-  let sent = 0;
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      if (sent === 0) {
-        sent = 1;
-        controller.enqueue(encode(head));
-        return;
-      }
-      if (sent === 1) {
-        sent = 2;
-        await new Promise((r) => setTimeout(r, gapMs));
-        controller.enqueue(encode(tail));
-        return;
-      }
-      controller.close();
+/** A stream the test writes to: nothing arrives until `send`, so a gap is the test's choice. */
+function feed(): { body: ReadableStream<Uint8Array>; send: (text: string) => void } {
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
     },
   });
+  return { body, send: (text) => controller?.enqueue(new TextEncoder().encode(text)) };
 }
 
 const respond = (body: ReadableStream<Uint8Array>): Response =>
   new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
 
+/**
+ * A turn over `stream` that logs its events and stall reports in one list, in the order they
+ * happened. The clock is fake, so the only time that passes is what a test advances: a loaded
+ * machine can delay a frame, but not move it past a stall bound.
+ */
+function watchedTurn(stream: ReturnType<typeof feed>) {
+  vi.useFakeTimers();
+  restore = stubFetch(() => respond(stream.body)).restore;
+  const seen: string[] = [];
+  const answer = streamTurn({
+    sessionId: SESSION,
+    message: 'hi',
+    signal: new AbortController().signal,
+    getToken: async () => null,
+    onEvent: (event) => seen.push(event.type),
+    onStall: (stalled) => seen.push(stalled ? 'stalled' : 'resumed'),
+  });
+  /** Resolves once `entry` has been logged; frames travel by microtasks, so no timer has to run. */
+  const logged = (entry: string) => vi.waitUntil(() => seen.includes(entry), { interval: 0 });
+  return { seen, answer, logged };
+}
+
 describe('a stream that goes quiet', () => {
   it('is reported as stalled, and reported again when it comes back', async () => {
-    const stub = stubFetch(() =>
-      respond(
-        pausingStream(
-          sseFrames([{ type: 'token', text: 'thinking' }]),
-          80,
-          sseFrames([answerEvent({ text: 'done' })]),
-        ),
-      ),
-    );
-    restore = stub.restore;
+    const stream = feed();
+    const turn = watchedTurn(stream);
 
-    const stalls: boolean[] = [];
-    const answer = await streamTurn({
-      sessionId: SESSION,
-      message: 'hi',
-      signal: new AbortController().signal,
-      getToken: async () => null,
-      onEvent: () => {},
-      stallAfterMs: 20,
-      onStall: (stalled) => stalls.push(stalled),
-    });
+    stream.send(sseFrames([{ type: 'token', text: 'thinking' }]));
+    await turn.logged('token');
+    await vi.advanceTimersByTimeAsync(TURN_STALL_MS);
+    stream.send(sseFrames([answerEvent({ text: 'done' })]));
 
-    // Reported, then withdrawn — and the turn still delivered its answer, which is the whole
-    // point of not aborting.
-    expect(stalls).toEqual([true, false]);
-    expect(answer.text).toBe('done');
+    // Reported after the quiet began and withdrawn by the next frame — and the turn still
+    // delivered its answer, which is the whole point of not aborting.
+    expect((await turn.answer).text).toBe('done');
+    expect(turn.seen).toEqual(['token', 'stalled', 'resumed', 'answer']);
   });
 
   it('says nothing about a turn that keeps producing frames', async () => {
-    const stub = stubFetch(() =>
-      respond(
-        pausingStream(
-          sseFrames([{ type: 'token', text: 'a' }]),
-          5,
-          sseFrames([answerEvent({ text: 'done' })]),
-        ),
-      ),
-    );
-    restore = stub.restore;
+    const stream = feed();
+    const turn = watchedTurn(stream);
 
-    const stalls: boolean[] = [];
-    await streamTurn({
-      sessionId: SESSION,
-      message: 'hi',
-      signal: new AbortController().signal,
-      getToken: async () => null,
-      onEvent: () => {},
-      stallAfterMs: 200,
-      onStall: (stalled) => stalls.push(stalled),
-    });
+    // Each gap is inside the bound and the turn as a whole is well past it: the clock is idle
+    // time, re-armed by every frame, not the turn's age.
+    for (let i = 0; i < 3; i += 1) {
+      stream.send(sseFrames([{ type: 'token', text: String(i) }]));
+      await vi.waitUntil(() => turn.seen.length === i + 1, { interval: 0 });
+      await vi.advanceTimersByTimeAsync(TURN_STALL_MS - 1);
+    }
+    stream.send(sseFrames([answerEvent({ text: 'done' })]));
 
-    expect(stalls).toEqual([]);
+    await turn.answer;
+    expect(turn.seen).toEqual(['token', 'token', 'token', 'answer']);
   });
 
   it('leaves no timer running once the turn has settled', async () => {
     // The detector is a re-arming timer, so a turn that ended while it was armed would keep the
     // page awake and could report a stall on a turn nobody is watching any more.
-    const stub = stubFetch(() => respond(pausingStream(sseFrames([answerEvent()]), 5, '')));
-    restore = stub.restore;
+    const stream = feed();
+    const turn = watchedTurn(stream);
 
-    const stalls: boolean[] = [];
-    await streamTurn({
-      sessionId: SESSION,
-      message: 'hi',
-      signal: new AbortController().signal,
-      getToken: async () => null,
-      onEvent: () => {},
-      stallAfterMs: 10,
-      onStall: (stalled) => stalls.push(stalled),
-    });
+    stream.send(sseFrames([answerEvent()]));
+    await turn.answer;
 
-    await new Promise((r) => setTimeout(r, 60));
-    expect(stalls).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(TURN_STALL_MS * 2);
+    expect(turn.seen).toEqual(['answer']);
   });
 });
 

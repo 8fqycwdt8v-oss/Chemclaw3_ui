@@ -68,6 +68,14 @@ export class SessionStore {
     return this.sessions.size;
   }
 
+  /** Sessions still within both lifetimes, counted without ending any (the sweep does that). */
+  live(): number {
+    const at = this.now();
+    let count = 0;
+    for (const session of this.sessions.values()) if (!this.expired(session, at)) count += 1;
+    return count;
+  }
+
   /** A new session under a fresh id. Never reuses an id the caller supplied (fixation). */
   create(fresh: NewSession): Session {
     const at = this.now();

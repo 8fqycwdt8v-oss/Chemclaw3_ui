@@ -18,6 +18,12 @@
  *
  * The numbers below are the same measurement with the timeout turned down, because a test cannot
  * wait 60 s to watch a socket die.
+ *
+ * Every wait ends on an event (a close or a status line), never on a window of wall time, and
+ * a request that must be served goes to a listener with bounds no stall reaches: Node starts a
+ * connection's first clock at accept and checks it on a sweep, so on a starved process a tight
+ * bound answers a well-formed request 408 before reading it. Neither clock can be faked — the sweep
+ * takes its timer from `node:timers` at load, and the deadline is libuv's.
  */
 
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -39,8 +45,6 @@ const bytesFor = (probe: string): number[] =>
   received.filter((r) => r.probe === probe).map((r) => r.bytes);
 
 let upstream: http.Server;
-let bff: http.Server;
-let port = 0;
 
 /** Short enough for a test, and the point of the knob: it is a bound, whatever its value. */
 const REQUEST_TIMEOUT_MS = 500;
@@ -62,110 +66,180 @@ beforeAll(async () => {
     });
   });
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
-
-  vi.resetModules();
-  process.env.CHEMCLAW_API_URL = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
-  process.env.REQUEST_TIMEOUT_MS = String(REQUEST_TIMEOUT_MS);
-  process.env.MAX_BODY_BYTES = String(MAX_BODY_BYTES);
-  process.env.CLIENT_DIR = '/nonexistent-client-dir';
-  const { createBffServer } = await import('../server/app.ts');
-
-  bff = createBffServer();
-  await new Promise<void>((resolve) => bff.listen(0, '127.0.0.1', resolve));
-  port = (bff.address() as AddressInfo).port;
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => bff.close(() => resolve()));
   await new Promise<void>((resolve) => upstream.close(() => resolve()));
 });
+
+interface Listener {
+  server: http.Server;
+  port: number;
+}
+
+/**
+ * A BFF over the stand-in upstream, with `env` on top of the shared settings. The BFF reads its
+ * configuration once, at import, so each listener is a fresh import of the module graph.
+ */
+async function startBff(env: Record<string, string>): Promise<Listener> {
+  const settings: Record<string, string> = {
+    CHEMCLAW_API_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+    MAX_BODY_BYTES: String(MAX_BODY_BYTES),
+    CLIENT_DIR: '/nonexistent-client-dir',
+    ...env,
+  };
+  for (const [key, value] of Object.entries(settings)) vi.stubEnv(key, value);
+  vi.resetModules();
+  try {
+    const { createBffServer } = await import('../server/app.ts');
+    const server = createBffServer();
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return { server, port: (server.address() as AddressInfo).port };
+  } finally {
+    vi.unstubAllEnvs();
+  }
+}
+
+const stop = ({ server }: Listener): Promise<void> =>
+  new Promise<void>((resolve) => {
+    server.closeAllConnections();
+    server.close(() => resolve());
+  });
+
+/**
+ * The status codes of every response in a raw HTTP/1.1 byte stream, read from the status lines.
+ *
+ * Never a scan of the whole response for a code: every response carries
+ * `x-chemclaw-correlation-id`, a uuid4 with the dashes taken out, whose index 12 is a fixed `4`, so
+ * `408` turns up in about 1% of correct responses' ids (2% across the keep-alive case's two).
+ */
+const statuses = (response: string): number[] =>
+  [...response.matchAll(/^HTTP\/1\.1 (\d{3})\b/gm)].map((match) => Number(match[1]));
+
+/**
+ * One raw connection: what it was sent back, and its close, both as events. Raw, because a
+ * declared `Content-Length` the sender does not honour is precisely the request an HTTP client
+ * library refuses to construct — and it is the case here.
+ */
+class Raw {
+  readonly socket: net.Socket;
+  readonly closed: Promise<void>;
+  received = '';
+  private readonly changed = new Set<() => void>();
+
+  private constructor(port: number) {
+    this.socket = net.connect(port, '127.0.0.1');
+    // Read the response, or do not expect to notice the disconnection: a `net.Socket` with no
+    // reader stays paused, so it never sees the server's FIN and never emits 'close'.
+    this.socket.on('data', (chunk: Buffer) => {
+      this.received += chunk.toString();
+      for (const wake of this.changed) wake();
+    });
+    this.socket.on('error', () => this.socket.destroy());
+    this.closed = new Promise<void>((resolve) => this.socket.on('close', () => resolve()));
+    void this.closed.then(() => {
+      for (const wake of this.changed) wake();
+    });
+  }
+
+  /** Connected (or failed to), with `request` written. */
+  static open(port: number, request = ''): Promise<Raw> {
+    const raw = new Raw(port);
+    return new Promise((resolve) => {
+      raw.socket.on('connect', () => {
+        if (request) raw.socket.write(request);
+        resolve(raw);
+      });
+      void raw.closed.then(() => resolve(raw));
+    });
+  }
+
+  /** The status codes once `count` responses have begun, or the connection has closed. */
+  responses(count: number): Promise<number[]> {
+    return new Promise((resolve) => {
+      const check = (): void => {
+        const seen = statuses(this.received);
+        if (seen.length < count && !this.socket.destroyed) return;
+        this.changed.delete(check);
+        resolve(seen);
+      };
+      this.changed.add(check);
+      check();
+    });
+  }
+}
 
 /**
  * A POST that announces a body it is entitled to send, sends one byte of it, and stops — the
  * cheapest way to hold a connection, and the shape of the measured outage. The declared length
  * sits *under* the body cap on purpose: this is the request the cap cannot refuse.
  */
-function slowPost(): Promise<net.Socket> {
-  return new Promise((resolve) => {
-    const socket = net.connect(port, '127.0.0.1', () => {
-      // Read the response, or do not expect to notice the disconnection: a `net.Socket` with no
-      // reader stays paused, so it never sees the server's FIN and never emits 'close'.
-      socket.resume();
-      socket.write(
-        'POST /api/sessions HTTP/1.1\r\n' +
-          'Host: 127.0.0.1\r\n' +
-          'Content-Type: application/json\r\n' +
-          `Content-Length: ${MAX_BODY_BYTES - 1}\r\n\r\n` +
-          'A',
-      );
-      resolve(socket);
-    });
-    socket.on('error', () => resolve(socket));
-  });
-}
+const SLOW_POST =
+  'POST /api/sessions HTTP/1.1\r\n' +
+  'Host: 127.0.0.1\r\n' +
+  'Content-Type: application/json\r\n' +
+  `Content-Length: ${MAX_BODY_BYTES - 1}\r\n\r\n` +
+  'A';
 
-/** `GET /api/healthz` through the proxy, the same legitimate request the audit used. */
-async function healthz(timeoutMs: number): Promise<number> {
-  const res = await fetch(`http://127.0.0.1:${port}/api/healthz`, {
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  return res.status;
-}
+const GET_HEALTHZ = 'GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n';
 
 describe('a client that never finishes sending', () => {
-  it('is disconnected rather than held for ever', async () => {
-    const socket = await slowPost();
-    const closed = new Promise<boolean>((resolve) => {
-      socket.on('close', () => resolve(true));
-      setTimeout(() => resolve(false), REQUEST_TIMEOUT_MS * 8).unref?.();
-    });
-
-    // Before: still open after 151 s having sent 29 body bytes.
-    expect(await closed).toBe(true);
-    socket.destroy();
+  let tight: Listener;
+  let loose: Listener;
+  beforeAll(async () => {
+    tight = await startBff({ REQUEST_TIMEOUT_MS: String(REQUEST_TIMEOUT_MS) });
+    loose = await startBff({});
+  });
+  afterAll(async () => {
+    await stop(tight);
+    await stop(loose);
   });
 
+  it('is disconnected rather than held for ever', async () => {
+    // Before: still open after 151 s having sent 29 body bytes. "For ever" is this test's
+    // timeout: the wait is for the close itself, however late a loaded machine runs the sweep.
+    const slow = await Raw.open(tight.port, SLOW_POST);
+    await slow.closed;
+    expect(statuses(slow.received)).toEqual([408]);
+  }, 20_000);
+
   it('cannot take the whole /api surface down by holding the upstream pool', async () => {
-    // 129 is the measured threshold: 120 answered in 11 ms, 129 was a total outage.
-    const sockets = await Promise.all(Array.from({ length: 129 }, slowPost));
+    // 129 is the measured threshold: 120 answered in 11 ms, 129 was a total outage. Held on a
+    // listener whose request bound no test reaches, so every one of them is still in flight when
+    // the probe is answered: the upstream pool has room for ordinary calls beside them.
+    const slow = await Promise.all(
+      Array.from({ length: 129 }, () => Raw.open(loose.port, SLOW_POST)),
+    );
     try {
-      // Generous relative to the 500 ms bound, tight relative to "never".
-      await expect(healthz(REQUEST_TIMEOUT_MS * 10)).resolves.toBe(200);
+      const res = await fetch(`http://127.0.0.1:${loose.port}/api/healthz`);
+      expect(res.status).toBe(200);
+      expect(slow.filter((raw) => raw.socket.destroyed).length).toBe(0);
     } finally {
-      for (const socket of sockets) socket.destroy();
+      for (const raw of slow) raw.socket.destroy();
     }
   }, 20_000);
 });
 
-/**
- * Raw request/response, because a declared `Content-Length` that the sender does not honour is
- * precisely the case an HTTP client library refuses to construct — and it is the case here.
- */
-function rawRequest(head: string, body: string): Promise<string> {
-  return new Promise((resolve) => {
-    let response = '';
-    const socket = net.connect(port, '127.0.0.1', () => socket.write(head + body));
-    socket.on('data', (chunk: Buffer) => {
-      response += chunk.toString();
-    });
-    socket.on('close', () => resolve(response));
-    socket.on('error', () => resolve(response));
-    setTimeout(() => socket.destroy(), REQUEST_TIMEOUT_MS * 6).unref?.();
-  });
-}
-
 describe('a body larger than the BFF will carry', () => {
+  let loose: Listener;
+  beforeAll(async () => {
+    loose = await startBff({});
+  });
+  afterAll(() => stop(loose));
+
   it('is refused before the upstream is contacted', async () => {
-    const response = await rawRequest(
+    const oversize = await Raw.open(
+      loose.port,
       'POST /api/sessions HTTP/1.1\r\n' +
         'Host: 127.0.0.1\r\n' +
         'X-Probe: oversize\r\n' +
         'Content-Type: application/json\r\n' +
-        `Content-Length: ${100 * 1024 * 1024}\r\n\r\n`,
-      'x'.repeat(1_024),
+        `Content-Length: ${100 * 1024 * 1024}\r\n\r\n` +
+        'x'.repeat(1_024),
     );
 
-    expect(response.split('\r\n')[0]).toContain('413');
+    expect(await oversize.responses(1)).toEqual([413]);
+    await oversize.closed;
     // Before: the backend received all 104,857,600 bytes, in 0.9 s, with no credential.
     expect(bytesFor('oversize')).toEqual([]);
   });
@@ -179,7 +253,7 @@ describe('a body larger than the BFF will carry', () => {
       },
     });
 
-    const status = await fetch(`http://127.0.0.1:${port}/api/sessions`, {
+    const status = await fetch(`http://127.0.0.1:${loose.port}/api/sessions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-probe': 'chunked' },
       body,
@@ -208,8 +282,8 @@ describe('a body larger than the BFF will carry', () => {
  * byte of the request now, so the pin was buying nothing and costing the header phase a bound 250×
  * looser than it needs — a request line and no more held a connection for two minutes, free.
  *
- * A separate server, because the one above sets `REQUEST_TIMEOUT_MS=500` and the whole question
- * here is what the header bound does when it is much *tighter* than the request bound.
+ * Listeners of their own, because the whole question here is what the header bound does when it is
+ * much *tighter* than the request bound.
  */
 describe('the header phase and the connection count', () => {
   const HEADERS_TIMEOUT_MS = 500;
@@ -217,72 +291,35 @@ describe('the header phase and the connection count', () => {
   const REQUEST_TIMEOUT_MS_LOOSE = 20_000;
   const MAX_CONNECTIONS = 4;
 
-  let server: http.Server;
-  let serverPort = 0;
-
+  let headers: Listener;
+  let ceiling: Listener;
   beforeAll(async () => {
-    vi.resetModules();
-    process.env.HEADERS_TIMEOUT_MS = String(HEADERS_TIMEOUT_MS);
-    process.env.REQUEST_TIMEOUT_MS = String(REQUEST_TIMEOUT_MS_LOOSE);
-    process.env.MAX_CONNECTIONS = String(MAX_CONNECTIONS);
-    const { createBffServer } = await import('../server/app.ts');
-    server = createBffServer();
-    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-    serverPort = (server.address() as AddressInfo).port;
-  });
-
-  afterAll(async () => {
-    delete process.env.HEADERS_TIMEOUT_MS;
-    delete process.env.MAX_CONNECTIONS;
-    process.env.REQUEST_TIMEOUT_MS = String(REQUEST_TIMEOUT_MS);
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  });
-
-  /** One raw connection, resolved with what came back and how long it took. */
-  const raw = (write: (socket: net.Socket) => void, waitMs: number) =>
-    new Promise<{ response: string; ms: number }>((resolve) => {
-      const startedAt = Date.now();
-      let response = '';
-      const socket = net.connect(serverPort, '127.0.0.1', () => write(socket));
-      socket.on('data', (chunk: Buffer) => {
-        response += chunk.toString();
-      });
-      socket.on('close', () => resolve({ response, ms: Date.now() - startedAt }));
-      socket.on('error', () => resolve({ response, ms: Date.now() - startedAt }));
-      setTimeout(() => {
-        socket.destroy();
-        resolve({ response, ms: Date.now() - startedAt });
-      }, waitMs).unref?.();
+    headers = await startBff({
+      HEADERS_TIMEOUT_MS: String(HEADERS_TIMEOUT_MS),
+      REQUEST_TIMEOUT_MS: String(REQUEST_TIMEOUT_MS_LOOSE),
     });
-
-  /** The status codes of every response in a raw HTTP/1.1 byte stream, read from the status lines.
-   *
-   * Scanning the whole response for a code is what these assertions used to do, and the response
-   * carries a header this server generates: `x-chemclaw-correlation-id` is `mintCorrelationId()`,
-   * which is `randomUUID()` with the dashes taken out. That is a **uuid4**, not 32 uniform hex
-   * characters, and the difference is the mechanism worth carrying away: index 12 is a fixed `4`
-   * — the first character of `408` — so that one three-character window alone runs at 1/256
-   * rather than at the 1/4096 a uniform id would give it. Over the generator's own distribution
-   * the chance a correct response's id contains `408` is **1.07%**, and **2.13%** for the
-   * keep-alive case's two; both are exact for a uuid4 rather than sampled. So
-   * `.not.toContain('408')` failed a correct server about one CI run in forty-seven, and
-   * `.toContain('408')` would credit a code the server never sent at the same rate. Neither
-   * direction is about a status code, and a uniform-hex model of an id this system mints is
-   * wrong for every one of them — it is the model that produced the 0.71% this comment used
-   * to carry.
-   */
-  const statuses = (response: string): number[] =>
-    [...response.matchAll(/^HTTP\/1\.1 (\d{3})\b/gm)].map((match) => Number(match[1]));
+    // The ceiling alone: held connections that send nothing must outlast the test, so no tight
+    // bound may sweep them away and make room.
+    ceiling = await startBff({ MAX_CONNECTIONS: String(MAX_CONNECTIONS) });
+  });
+  afterAll(async () => {
+    await stop(headers);
+    await stop(ceiling);
+  });
 
   it('cuts a request whose headers never arrive, long before the request timeout', async () => {
     // A request line and then silence — sixteen bytes, and under the old pin it held a connection
     // for 125 s. Now it is bounded by the header timeout plus one sweep, and the sweep is derived
     // from the *tighter* of the two bounds precisely so it does not become the bound itself.
-    const outcome = await raw((s) => s.write('GET /healthz HTTP/1.1\r\n'), 5_000);
+    const startedAt = Date.now();
+    const partial = await Raw.open(headers.port, 'GET /healthz HTTP/1.1\r\n');
+    await partial.closed;
 
-    expect(outcome.ms).toBeLessThan(REQUEST_TIMEOUT_MS_LOOSE / 4);
-    expect(statuses(outcome.response)).toContain(408);
-  }, 20_000);
+    expect(statuses(partial.received)).toEqual([408]);
+    // Only the request bound could have cut it at or after this, and only a stall as long as the
+    // bound itself could delay the header cut that far.
+    expect(Date.now() - startedAt).toBeLessThan(REQUEST_TIMEOUT_MS_LOOSE);
+  }, 30_000);
 
   it('still serves a keep-alive connection idled far past the header timeout', async () => {
     // This one passes before the change as well, and it is here for what it pins rather than for
@@ -291,20 +328,22 @@ describe('the header phase and the connection count', () => {
     // not of this repository. A Node that went back to connection-based timing would serve the
     // first request, then kill the second — and the comment in `config.ts` would be wrong again
     // with nothing to say so.
-    const outcome = await raw(
-      (s) => {
-        const request =
-          'GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n';
-        s.write(request);
-        // Three times the header bound, and well inside the 120 s keep-alive.
-        setTimeout(() => {
-          if (!s.destroyed) s.write(request);
-        }, HEADERS_TIMEOUT_MS * 3);
-      },
-      HEADERS_TIMEOUT_MS * 3 + 1_500,
-    );
-
-    expect(statuses(outcome.response)).toEqual([200, 200]);
+    const request = 'GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n';
+    let kept = await Raw.open(headers.port, request);
+    // A connection's FIRST clock does start at accept, so a starved process can cut that request
+    // before reading it: the bound at work, not the property here. A fresh connection then.
+    while ((await kept.responses(1))[0] !== 200) {
+      kept.socket.destroy();
+      kept = await Raw.open(headers.port, request);
+    }
+    try {
+      // Three times the header bound, and well inside the 120 s keep-alive.
+      await new Promise((r) => setTimeout(r, HEADERS_TIMEOUT_MS * 3));
+      kept.socket.write(request);
+      expect(await kept.responses(2)).toEqual([200, 200]);
+    } finally {
+      kept.socket.destroy();
+    }
   }, 20_000);
 
   it('sheds a connection over the ceiling instead of holding it', async () => {
@@ -312,37 +351,36 @@ describe('the header phase and the connection count', () => {
     // use was whatever a caller decided to open. What this does NOT buy is stated in `config.ts`:
     // running out of descriptors at accept() is silent on this runtime rather than fatal, so the
     // value here is a ceiling this process picked, not a crash avoided.
+    const { server, port } = ceiling;
     const connections = promisify(server.getConnections.bind(server));
-    const held: net.Socket[] = [];
-    try {
-      for (let i = 0; i < MAX_CONNECTIONS; i += 1) {
-        held.push(
-          await new Promise<net.Socket>((resolve) => {
-            const socket = net.connect(serverPort, '127.0.0.1', () => resolve(socket));
-            socket.resume();
-            socket.on('error', () => resolve(socket));
-          }),
-        );
-      }
-      await new Promise((r) => setTimeout(r, 100));
-      expect(await connections()).toBe(MAX_CONNECTIONS);
+    const accepted: Promise<void>[] = [];
+    const allAccepted = new Promise<void>((resolve) => {
+      const onConnection = (socket: net.Socket): void => {
+        accepted.push(new Promise((closed) => socket.on('close', () => closed())));
+        if (accepted.length < MAX_CONNECTIONS) return;
+        server.off('connection', onConnection);
+        resolve();
+      };
+      server.on('connection', onConnection);
+    });
+    const held: Raw[] = [];
+    for (let i = 0; i < MAX_CONNECTIONS; i += 1) held.push(await Raw.open(port));
+    await allAccepted;
+    expect(await connections()).toBe(MAX_CONNECTIONS);
 
-      // Before: served 200 like any other request, and the count kept climbing.
-      const over = await raw(
-        (s) => s.write('GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n'),
-        2_000,
-      );
-      expect(over.response).toBe('');
+    try {
+      // Before: served 200 like any other request, and the count kept climbing. Either way the
+      // connection closes (dropped, or `Connection: close` after the answer), so that is the wait.
+      const over = await Raw.open(port, GET_HEALTHZ);
+      await over.closed;
+      expect(over.received).toBe('');
     } finally {
-      for (const socket of held) socket.destroy();
+      for (const raw of held) raw.socket.destroy();
     }
 
-    // And it comes back on its own: shedding is not a latch.
-    await new Promise((r) => setTimeout(r, 300));
-    const after = await raw(
-      (s) => s.write('GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n'),
-      2_000,
-    );
-    expect(statuses(after.response)).toContain(200);
+    // And it comes back on its own once those connections are gone: shedding is not a latch.
+    await Promise.all(accepted);
+    const after = await Raw.open(port, GET_HEALTHZ);
+    expect(await after.responses(1)).toEqual([200]);
   }, 20_000);
 });

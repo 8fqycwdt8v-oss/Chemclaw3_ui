@@ -325,6 +325,8 @@ describe('/metrics', () => {
     );
     expect(body).toContain('chemclaw_ui_request_duration_seconds_bucket');
     expect(body).toContain('chemclaw_ui_requests_in_flight');
+    // This mode holds no sessions; the gauge says so rather than vanishing.
+    expect(body).toMatch(/^chemclaw_ui_sessions 0$/m);
   });
 
   it('takes no session, actor or correlation id as a label', async () => {

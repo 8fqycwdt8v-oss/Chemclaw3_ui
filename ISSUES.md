@@ -47,6 +47,22 @@ Found by typing the UI from the pinned document; each is a request to core, not 
   `PendingRequestOut.reminders`, and `DesignListOut.total` / `.truncated` (the protocols panel has no
   copy for a truncated listing; its owner decides).
 
+### Issue 28: ESLint 10 waits on eslint-plugin-jsx-a11y
+
+`@eslint/js` 10 requires `eslint` 10, and `eslint-plugin-jsx-a11y` (6.10.2, its latest) admits
+`eslint` up to 9, so `npm ci` fails with ERESOLVE. `typescript-eslint` and
+`eslint-plugin-react-hooks` already admit 10. Move `eslint` and `@eslint/js` together once it does.
+
+### Issue 29: RDKit 2026.9 breaks its own drawing after a long chain
+
+`@rdkit/rdkit` 2026.9.1 canonicalises a chain of ~590 carbons (inside `MAX_PARSED_SMILES_CHARS`)
+where 2025.3.4 throws a `RangeError` (`too-complex`), and afterwards every depiction in that runtime
+fails (`table index is out of bounds`, or a `WebAssembly.Exception`) while `get_mol` still parses,
+so `stillAlive` does not poison it and each structure on the page draws as nothing. Held at
+2025.3.4 until upstream fixes it, or the engine's liveness probe draws as well as parses and the cap
+is re-measured on the new build. The bump also needs `Mol` / `MainModule` for `JSMol` /
+`RDKitModule`, and the binary from the exported subpath `@rdkit/rdkit/RDKit_minimal.wasm`.
+
 ### Issue 20: TypeScript 7 waits on typescript-eslint
 
 `npm ci` fails with ERESOLVE until typescript-eslint's peer range admits TypeScript 7. The

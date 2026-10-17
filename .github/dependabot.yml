@@ -39,6 +39,11 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: 'deps'
+    # Node's types follow the oldest Node this runs on (`engines`, the Dockerfile and CI are on 22):
+    # a newer major's types admit APIs the image does not have. They move with the runtime, by hand.
+    ignore:
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
     groups:
       npm-minor-and-patch:
         applies-to: version-updates

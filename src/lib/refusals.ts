@@ -1,26 +1,12 @@
 /**
- * A refused tool call, said as the thing the chemist can do about it.
+ * A refused tool call, said as what the chemist can do about it.
  *
- * The service distinguishes five gates from an ordinary fault (`agent/audit.refusal_reason`), and
- * the distinction is the point: **a refusal is the control working.** Rendering one in the same red
- * as an unreachable pod reports a correctly-governed turn as a broken one — the mistake the
- * backend's own live evaluation made before `tool_failed.reason` existed, and the mistake this UI
- * made for four of the five reasons for as long as the wire only carried `plan_gate`.
- *
- * Two things live here, and neither belongs in a component:
- *
- *  - **`isRefusal`** — the predicate `TracePanel` and `state/turnActivity` both ask. They used to
- *    ask it as `reason === 'plan_gate'`, separately, which is how a widened set would have reached
- *    the badge and not the counter (or the other way round) and left a turn reading "1 failure" and
- *    "needs approval" about the same row.
- *  - **`refusalCopy`** — the badge and the remedy. The remedy is the reason this is a table rather
- *    than a formatted enum: "the plan gate refused `submit_qm_job`" is a fact about the system, and
- *    "approve the plan above to let this step run" is the same fact said to the person who has to
- *    act on it. `AnswerBadges`' `capabilityLoss` is written under exactly this rule.
- *
- * Deliberately no entry for `null`. That is not a sixth kind of refusal, it is the absence of one —
- * an ordinary failure — and giving it a row here would invite a caller to render a remedy for a
- * database outage.
+ * The service distinguishes five refusal gates from ordinary faults (`agent/audit.refusal_reason`);
+ * a refusal is the control working and must not render like a broken pod.
+ * - **`isRefusal`**: the one predicate `TracePanel` and `state/turnActivity` share, so badge and
+ *   counter agree.
+ * - **`refusalCopy`**: the badge and the remedy, phrased as the reader's action (as
+ *   `capabilityLoss` is). No entry for `null`: that is an ordinary failure, not a refusal.
  */
 
 import type { RefusalReason } from '../../shared/events.ts';
@@ -34,22 +20,16 @@ export interface RefusalCopy {
 }
 
 /**
- * Whether this failure was a decision rather than a fault.
- *
- * Takes the whole `reason` — including `null`/`undefined` — so a caller never has to remember which
- * absent value the stream uses for "ordinary failure".
+ * Whether this failure was a decision rather than a fault. Accepts `null`/`undefined` so callers
+ * need not know which absent value the stream uses.
  */
 export function isRefusal(reason: RefusalReason | null | undefined): reason is RefusalReason {
   return reason != null;
 }
 
 /**
- * The copy for one refusal.
- *
- * A `Record` over the union rather than a `switch` with a default: adding a sixth member to
- * `RefusalReason` fails the typecheck here, which is the one place that should have to change.
- * Every remedy names what the *reader* does, never which module raised — a chemist cannot act on
- * "UndeclaredWriteRefusal", and the tool's own name is already on the row beside this.
+ * Copy per refusal. A `Record` over the union, so a new `RefusalReason` fails the typecheck here.
+ * Remedies name what the reader does, never the raising module.
  */
 const COPY: Record<RefusalReason, RefusalCopy> = {
   plan_gate: {

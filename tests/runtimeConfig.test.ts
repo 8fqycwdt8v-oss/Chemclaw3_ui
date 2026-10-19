@@ -45,12 +45,13 @@ const clientToServer: Assignable<ClientRuntimeConfig, ServerRuntimeConfig> = tru
  * becoming `''`). A fixture of defaults would pass with the bridge unplugged.
  */
 const ENV: Record<string, string> = {
-  AUTH_MODE: 'msal',
+  AUTH_MODE: 'bff',
+  // Everything the BFF needs to sign users in is set, and none of it may cross the seam: the
+  // browser is told the mode and nothing about the provider (asserted below).
   ENTRA_TENANT_ID: 'tenant-from-the-server',
-  // Not the public-cloud URL `src/env.ts`'s consumer falls back to, so an authority that failed to
-  // cross the seam would read as that fallback — the sign-in going to Entra rather than here.
   ENTRA_AUTHORITY: 'https://authority-from-the-server.example/tenant-from-the-server',
   ENTRA_CLIENT_ID: 'client-from-the-server',
+  ENTRA_CLIENT_SECRET: 'secret-from-the-server',
   API_SCOPE: 'api://api-client-id/Chat.Access',
   APP_VERSION: '9.9.9-from-the-server',
   WARM_SESSIONS: 'false',
@@ -125,18 +126,12 @@ describe('what /config.js actually delivers', () => {
   it('delivers the values a rename would silently turn into defaults', async () => {
     // Spelled out one by one as well, because `toEqual` above names the whole object when it fails
     // and each of these has a deployment-wide consequence: an empty `reviewerRoles` hides the
-    // approve/reject controls from every reviewer, a wrong `apiScope` 401s every request with a
-    // valid-looking token, and a wrong `entraTenantId` points MSAL at the wrong tenant.
+    // approve/reject controls from every reviewer.
     const { script } = await renderFromEnv();
     const client = await loadClientConfig(script);
 
     expect(client.reviewerRoles).toEqual(['Chemclaw.Reviewer', 'Chemclaw.Approver']);
-    expect(client.apiScope).toBe('api://api-client-id/Chat.Access');
-    expect(client.entraTenantId).toBe('tenant-from-the-server');
-    expect(client.entraAuthority).toBe(
-      'https://authority-from-the-server.example/tenant-from-the-server',
-    );
-    expect(client.authMode).toBe('msal');
+    expect(client.authMode).toBe('bff');
     // The switch support turns on for one tenant. A `logLevel` that silently defaulted would leave
     // a deployment believing its browsers were reporting when they were not.
     expect(client.logLevel).toBe('debug');
@@ -160,11 +155,24 @@ describe('what /config.js actually delivers', () => {
     expect(client.warmSessions).toBe(false);
   });
 
-  it('does not fall back to dev auth when the server said msal', async () => {
+  it('tells the browser nothing about the identity provider, the client or its secret', async () => {
+    const { script } = await renderFromEnv();
+    for (const value of [
+      'tenant-from-the-server',
+      'authority-from-the-server',
+      'client-from-the-server',
+      'secret-from-the-server',
+      'api://api-client-id',
+    ]) {
+      expect(script).not.toContain(value);
+    }
+  });
+
+  it('does not fall back to dev auth when the server said bff', async () => {
     // `scripts/assert-no-dev-auth.mjs` greps the bundle, not this script, so the only thing
     // standing between a mis-emitted `authMode` and an unauthenticated production SPA is here.
     const { script } = await renderFromEnv();
-    expect(script).toContain('"authMode":"msal"');
+    expect(script).toContain('"authMode":"bff"');
     const client = await loadClientConfig(script);
     expect(client.authMode).not.toBe('dev');
   });
@@ -177,12 +185,8 @@ describe('what /config.js actually delivers', () => {
     const { renderConfigScript } = await import('../server/runtimeConfig.ts');
     const script = renderConfigScript({
       authMode: 'dev',
-      entraTenantId: '</script><script>window.pwned=1</script>',
-      entraAuthority: '',
-      entraClientId: '',
-      apiScope: '',
       apiBase: '/api',
-      appVersion: 'dev',
+      appVersion: '</script><script>window.pwned=1</script>',
       warmSessions: true,
       reviewerRoles: [],
       logLevel: 'info',
@@ -199,7 +203,7 @@ describe('what /config.js actually delivers', () => {
 
     // And it still round-trips: escaping must not corrupt the value it protects.
     const client = await loadClientConfig(script);
-    expect(client.entraTenantId).toBe('</script><script>window.pwned=1</script>');
+    expect(client.appVersion).toBe('</script><script>window.pwned=1</script>');
     expect((window as unknown as { pwned?: number }).pwned).toBeUndefined();
   });
 });

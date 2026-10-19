@@ -1,34 +1,17 @@
 /**
  * Auth bootstrap and context.
  *
- * The shell renders immediately against a placeholder provider and swaps to the real one when it
- * resolves. Blocking the whole app on authentication was costing a full MSAL round-trip before
- * first paint, for a transcript that lives in localStorage and needs no token at all.
- *
- * What still must not happen is React navigating before `handleRedirectPromise()` has finished.
- * That is handled per route rather than by blocking the app: `/auth/callback` is a route whose
- * element writes no URL, the URL-sync effects live inside the `/c/:id` element, and every route
- * element that writes the URL *on mount* — `/`, `/open/:id`, the catch-all — waits for `settled`
- * first (see `src/routes.tsx`).
- *
- * The fragment is not the only thing at stake, and that is what PR #126 ran into. With
- * `navigateToLoginRequestUrl` on, MSAL returns from `/auth/callback` to the page the sign-in started
- * on, carrying the response in sessionStorage, and only redeems the code there **if the address
- * bar still names that page** when `handleRedirectPromise()` gets to compare. Any other URL and it
- * navigates back to the start page and tries again. So a route that rewrites the URL on mount
- * before auth has settled — `Bootstrap` pushing `/c/<new id>` over `/` — loops forever: measured on
- * kind against the mock tenant, 212 navigations in 4 s, a conversation minted every cycle and the
- * code never redeemed. `e2e/oidc-mock.spec.ts` drives that sign-in in a real browser.
- *
- * `ready` is what consumers gate on. Anything that needs a token — sending, uploading, the session
- * list, the transcript read, the job streams — must wait for it. Anything that does not — theme,
- * sidebar, drafts, the unauthenticated health poll — must not.
+ * The shell renders immediately against a placeholder provider and swaps in the real one when it
+ * resolves. URL-writing route elements wait for `settled` (`src/routes.tsx`), so none navigates
+ * before the session is known: a conversation created for want of one belongs in the signed-in
+ * person's slot, not the anonymous one. `ready` gates anything that calls the API (send, upload,
+ * session list, transcript, job streams); everything else must not wait.
  */
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
 import { authReady } from './bootstrap.ts';
 import { pendingAuth } from './pendingAuth.ts';
-import { useChatStore, hydrateChatForAccount } from '../state/chatStore.ts';
+import { hydrateChatForAccount } from '../state/chatStore.ts';
 import { hydrateExhibitPaneForAccount } from '../state/exhibitPane.ts';
 import { config } from '../env.ts';
 import type { AuthProvider } from './types.ts';
@@ -37,11 +20,11 @@ interface AuthContextValue {
   auth: AuthProvider;
   /** False until the real provider has replaced the placeholder. */
   ready: boolean;
+  /** Why signing in did not complete, shown with a way to try again; `null` otherwise. */
+  failure: string | null;
   /**
-   * True once authentication has finished, either way: the provider resolved (`ready`) or it
-   * failed (and said so in the banner). Until then MSAL may still be comparing the address bar
-   * against the page a sign-in started on, so nothing may write the URL. Gating on `ready` alone
-   * would leave a failed sign-in on a spinner forever with its banner never rendered.
+   * True once authentication finished either way (resolved or failed). Until then nothing may write
+   * the URL. Gating on `ready` alone would leave a failed sign-in on a spinner with no banner.
    */
   settled: boolean;
   /** Bumped on sign-in/out so consumers re-read `auth.account`, which is a getter. */
@@ -56,35 +39,30 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
   const [ready, setReady] = useState(false);
   const [settled, setSettled] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [failure, setFailure] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     authReady
       .then((provider) => {
         if (cancelled) return;
-        // Identity is now known, so load persisted history from THIS account's slot — not before,
-        // and not from the global key that used to serve one chemist's transcript to the next on a
-        // shared workstation. The store deferred its own hydration (`skipHydration`) for exactly
-        // this call.
+        // Identity is known: hydrate history from this account's slot (the store defers hydration
+        // via `skipHydration` for this call).
         hydrateChatForAccount(provider.account?.id);
         // The artefact pane's width is the reader's too, keyed the same way and for the same reason.
         hydrateExhibitPaneForAccount(provider.account?.id);
         setAuth(provider);
         setReady(true);
         setSettled(true);
-        // `account` is a getter on the MSAL provider, so consumers are told to re-read it rather
-        // than relying on a value comparison.
+        // Consumers are told to re-read the account rather than relying on a value comparison.
         setRevision((r) => r + 1);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
-        // A banner, not a full-screen takeover. Blocking the app on this is exactly the behaviour
-        // this change removes, and with the composer disabled nothing harmful is reachable.
-        useChatStore.getState().setBanner({
-          kind: 'error',
-          text: err instanceof Error ? err.message : 'Authentication failed.',
-          action: 'reauth',
-        });
+        // Kept here, not in the chat store's banner: opening a conversation clears that, and this
+        // is the one message the person must not lose. Not a full-screen takeover either — with
+        // the composer disabled nothing harmful is reachable.
+        setFailure(err instanceof Error ? err.message : 'Authentication failed.');
         setSettled(true);
       });
     return () => {
@@ -94,7 +72,14 @@ export function AuthGate({ children }: { children: ReactNode }): React.JSX.Eleme
 
   return (
     <AuthContext.Provider
-      value={{ auth, ready, settled, revision, refresh: () => setRevision((r) => r + 1) }}
+      value={{
+        auth,
+        ready,
+        settled,
+        failure,
+        revision,
+        refresh: () => setRevision((r) => r + 1),
+      }}
     >
       {children}
     </AuthContext.Provider>
@@ -108,23 +93,16 @@ export function useAuth(): AuthContextValue {
 }
 
 /**
- * Whether this caller may cancel a durable job or take another privileged action.
+ * Whether this caller may cancel a durable job or take another privileged action. A UI hint, not
+ * enforcement: the service decides and will 403 regardless.
  *
- * **This is not enforcement and must never be treated as any.** The service decides, and it will
- * 403 whatever this returns. What it buys is that a chemist without the role is not offered a
- * button that fails — learning your own permissions from an error message is a bad way to learn
- * them, and worse on a decision the reader has already formed a judgement about.
- *
- * The dev branch mirrors the service exactly: with `entra_required` off it has no real roles and
- * `_is_reviewer` returns true for everyone, so hiding the controls here would hide a capability
- * the service is offering. Under MSAL, an empty `reviewerRoles` yields false for everyone — which
- * is also the service's posture, since a deployment that enables identity and names no privileged
- * role fails closed. A control nobody can use is a misconfiguration to notice, not to paper over.
+ * Dev mode (`entra_required` off) returns true for everyone, as the service does; signed in, an
+ * empty `reviewerRoles` returns false for everyone, matching the service's fail-closed posture.
  */
 export function useIsReviewer(): boolean {
   const { auth, revision } = useAuth();
-  // `revision` is not unused: `account` is a getter on the MSAL provider, so this has to re-read
-  // it on sign-in rather than memoising against a value that never changes identity.
+  // `revision` is not unused: this has to re-read the account on sign-in rather than memoising
+  // against a provider object whose identity never changes.
   void revision;
   if (auth.mode === 'dev') return true;
   const held = new Set(auth.account?.roles ?? []);

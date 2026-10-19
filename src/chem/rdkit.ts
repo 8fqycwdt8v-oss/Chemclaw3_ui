@@ -1,128 +1,22 @@
 /**
- * RDKit, loaded into the browser.
+ * RDKit, loaded into the browser — the seam every caller imports. RDKit (not a JS drawing library)
+ * because the app needs canonical identity (the entity rail keys compounds on canonical SMILES),
+ * validation before drawing (the recogniser is deliberately loose), and molblock parsing — from one
+ * toolkit, so "can this be drawn" has one answer.
  *
- * This replaces `smiles-drawer`, and reversing that choice needs an argument rather than a
- * preference, because `Molecule.tsx` had written the old one down and it was right for what the
- * UI then did: smiles-drawer is pure JS, ~190 kB, and draws a SMILES string to SVG with no
- * initialisation — ideal when the only structures on screen came from a job summary and an
- * opt-in toggle on inline code spans. Three things this codebase now needs have no
- * smiles-drawer answer at all:
+ * Reached only through a dynamic `import()`, so nothing chemical is in the entry chunk
+ * (`tests/entryChunk.test.ts`). The WASM runs on a worker: `rdkit.engine.ts` holds every call,
+ * `rdkit.worker.ts` runs it, `rdkit.client.ts` picks the placement, and this module keeps the
+ * drawing cache on the calling thread. `scripts/measure-rdkit-placement.mjs` measures the
+ * main-thread cost.
  *
- *  - **Canonical identity.** `COc1ccc(Br)cc1` and `BrC1=CC=C(OC)C=C1` are the same molecule and
- *    different strings. `src/chem/entities.ts` keys the conversation's subject index on the
- *    compound, so the two must collapse to one row — and no amount of string handling gets there.
- *    smiles-drawer parses; it does not canonicalise.
- *  - **Validation.** The recogniser in `recognise.ts` is deliberately looser than the rule it
- *    replaced, because that rule rejected ethanol. That is only safe if something can say "this is
- *    not a molecule" *before* it is drawn. smiles-drawer's parser can refuse a string, but it
- *    refuses a different set from RDKit's and it is the same object that draws — so a validation
- *    failure and a rendering failure are one event, and the recogniser has no arbiter.
- *  - **Molblock parsing.** `StructureInput` reads a dropped `.mol`/`.sdf`. smiles-drawer reads
- *    SMILES and nothing else, so the whole file path needs a toolkit that speaks MDL.
+ * The document CSP never grants `'unsafe-eval'`; the worker's script gets `RDKIT_WORKER_CSP`
+ * (`server/config.ts`), which Embind needs. Behind the BFF the in-process fallback therefore cannot
+ * load the toolkit (it says so), and a worker stack exhaustion is reported as `too-complex` instead
+ * of retried on the page. Verify behind the BFF; the Vite dev server sends no CSP.
  *
- * The cost is real and the mitigation is structural rather than hopeful: this module is reached
- * only through a dynamic `import()`, so the WASM lands in its own chunk and **nothing chemical is
- * in the entry bundle or preloaded from index.html** — a page that shows no chemistry pays nothing.
- *
- * Measured across the swap alone, which is the number that tests the claim: the entry chunk went
- * 485.86 kB → 485.78 kB, with RDKit emitted as a 74 kB loader and a 6.9 MB `.wasm` beside it, both
- * fetched the first time a structure appears.
- *
- * **That delta is the claim; the absolute figure beside it was not, and this paragraph used to
- * publish one anyway.** It said the entry "ends this branch at 509 kB" while the same sentence in
- * `Molecule.tsx` said 485 kB — two numbers for one chunk, both stale.
- *
- * **No replacement number is written here, deliberately.** Measured twice within one afternoon on
- * 2026-09-05 the entry chunk read 505.90 kB and then 510.24 kB, moved by branches touching modules
- * it imports and by nothing in this file; splitting `routes.tsx` had moved it further still. A
- * byte count in prose is a claim about one commit, this file has now been wrong about it twice,
- * and the third attempt would go stale on the next merge. What is actually load-bearing is
- * structural — the only mention of this module or of Ketcher in the entry is the dynamic-import
- * reference to their chunks — so that is what `tests/entryChunk.test.ts` asserts, and `npm run
- * build:client` is where a current size comes from.
- *
- * What that trade buys back is one toolkit deciding what a molecule is. Keeping smiles-drawer for
- * depiction beside RDKit for identity was the other option on the table, and it was rejected for
- * that reason: a page with a rail has already fetched RDKit, so the 190 kB is duplicate
- * capability, and two parsers means two answers to "can this be drawn" that will disagree on some
- * string nobody has typed yet.
- *
- * **Loaded lazily and once, in a worker.** The WASM is fetched the first time a structure actually
- * appears and never again — and since W28.7 it is instantiated on a worker thread rather than on
- * the page. That is the whole shape of this module now: `rdkit.engine.ts` is every call that
- * touches the toolkit, `rdkit.worker.ts` runs it off the main thread, `rdkit.client.ts` decides
- * which of the two placements a call gets, and what is left here is the seam every caller imports
- * plus the one thing that must stay on this thread — the drawing cache, where a hit has to cost
- * nothing at all rather than a round trip.
- *
- * **The number that forced it, and it is one script rather than a sentence.** The 600-character
- * cap (`MAX_PARSED_SMILES_CHARS`, in the engine) bounds the *unrecoverable* failure and was never
- * able to bound the slow one. `scripts/measure-rdkit-placement.mjs` drives this seam in real
- * Chromium and reports the **main thread** rather than the wall clock, because a worker makes the
- * second bigger and the first zero and only the first stops a frame painting. Run against the
- * commit before W28.7 and against this one:
- *
- * | chain | call | blocked main thread | long tasks | widest frame |
- * | --- | --- | --- | --- | --- |
- * | 200 | canonicalSmiles | 72 ms → **0 ms** | 1 → 0 | 72.6 ms → 16.7 ms |
- * | 200 | moleculeSvg | 97 ms → **0 ms** | 1 → 0 | 97.5 ms → 17.6 ms |
- * | 600 | moleculeSvg | 587 ms → **0 ms** | 1 → 0 | 587 ms → 19.1 ms |
- *
- * The wall clock of that last one barely moved — 586.8 ms to 585.8 ms — which is the whole point:
- * parsing and depicting a 300-bond chain is work, and it is not a bug to be fixed. It moved.
- *
- * **It was measured where the CSP is not.** The script drives this seam through the Vite dev
- * server, which serves `index.html` itself and sends none of the BFF's headers. Until
- * `ISSUES.md` Issue 10 was closed nothing was drawn behind the BFF at all, so this win was
- * unobservable in every shipped deployment; it is observable now, because the worker is the one
- * place the production CSP lets RDKit load (see the CSP paragraph below).
- *
- * **These figures shipped twice, from two runs, and disagreed** — `129 ms / 558 ms` in three
- * source files against `111 ms / 552 ms` in three others, a claim about somebody's afternoon
- * rather than about a commit. Neither pair reproduced. Every site now names the script instead,
- * and a number here that the script contradicts is the number that is wrong.
- *
- * **The draw is the win; canonicalisation above ~400 characters is not, and the record said it
- * was.** The worker's call stack is smaller than the page's, RDKit's canonical ranking recurses,
- * and `rdkit.client.ts` answers a `RangeError` by re-running the call *here* — so the block comes
- * straight back. Measured across 300–600 characters on this commit: `moleculeSvg` is **0 ms
- * blocked at every length**, while `canonicalSmiles` is 0 ms at 300 and **59, 72, 94, 88, 103, 107
- * and 118 ms, one long task each**, at 400, 450, 480, 500, 520, 560 and 600. So the boundary is
- * between 300 and 400 characters, not "500 up" as this change recorded, and above it the wall
- * clock is *worse* than before — the worker attempt is paid before the page does the work anyway.
- * `ISSUES.md` Issue 11 has it, including the part that is not deterministic.
- *
- * **And when the page's stack runs out too, this seam now says so instead of saying "not a
- * molecule".** That was Issue 11's own worst consequence and it is closed: `readCanonicalSmiles`
- * is three-valued, `canonicalSmiles` narrows it back to a key or nothing, and
- * `rdkit.engine.ts`'s `Refused` carries the argument for threading one value here when every other
- * negative in this module is a predicate. What it did **not** do is make a long chain nameable —
- * the stack is the stack. Run `node scripts/measure-rdkit-rangeerror.mjs`: the refusal is still
- * there, at the same lengths, and the same string asked a second time still answers, which is the
- * part of this that is about a call rather than about a molecule.
- *
- * **The CSP allows it in the worker, and only there.** Instantiating WASM needs `script-src
- * 'wasm-unsafe-eval'`, and that is necessary rather than sufficient: Embind builds this package's
- * invokers with `Function(...)`, which needs `'unsafe-eval'`. The document's policy never grants
- * it — the page holds the bearer token and injects RDKit's SVG as markup — so the BFF sends the
- * worker's script with a policy of its own (`RDKIT_WORKER_CSP`, `server/config.ts`), which a
- * network-served dedicated worker takes instead of the document's. `ISSUES.md` Issue 10 has the
- * measurement, and `e2e/rdkit.spec.ts` draws a structure behind the real BFF.
- *
- * Two consequences a reader of this seam should know. **The in-process fallback cannot load the
- * toolkit behind the BFF** — a browser with no worker, or a worker that died, degrades to "the
- * structure toolkit could not be loaded", which is honest. And **the worker's stack exhaustion can
- * no longer escalate to the page there**: `rdkit.client.ts` answers `too-complex` instead of
- * re-running where the answer would be "not a molecule". Measured behind the BFF, the worker named
- * chains of 300 to 580 characters on the first ask in fresh pages, so that is the edge, not the
- * common case. Verify against the BFF, not `:5173` — the dev server applies no CSP at all.
- *
- * **Every JSMol must be deleted.** They are C++ objects behind an Emscripten heap pointer, not
- * garbage-collected values, so a forgotten one leaks for the life of whichever thread owns the
- * heap. Nothing anywhere returns a JSMol; each helper in the engine owns its handles and frees
- * them in a `finally`. That is the whole reason these are functions over strings rather than a
- * "get me a molecule" API — and it is also what makes the worker possible at all, since a handle
- * could not have crossed a `postMessage` in the first place.
+ * Every `JSMol` must be deleted; none ever leaves the engine, which is also why a worker is
+ * possible.
  */
 
 import { call } from './rdkit.client.ts';
@@ -132,64 +26,27 @@ export { MAX_PARSED_SMILES_CHARS, tooLongToParse } from './rdkit.engine.ts';
 export type { CanonicalRead, DrawOptions, NotAChemicalVerdict, Refused } from './rdkit.engine.ts';
 
 /**
- * Is the toolkit actually here?
- *
- * The helpers below all answer chemistry questions, and `null`/`false` is their answer for "not a
- * molecule". That is the right shape for them and the wrong shape for "RDKit never loaded", which
- * is not a fact about the string at all. Collapsing the two is how the panel came to tell a
- * chemist that `CCO` is not a molecule, and how the composer's paste check went silent for the
- * page's lifetime.
- *
- * So the distinction lives here, and the rule is: **anything about to make a chemical claim on a
- * negative answer asks this first.** Not the helpers themselves — threading this through every one
- * of them puts a question at every call site instead of at the three that make a claim, and
- * `entities.ts` would have to handle a case it can do nothing about. The one exception is
- * `readCanonicalSmiles` below, and it is an exception for a reason this shape cannot cover: a
- * stack exhaustion is a fact about one string on one thread, so there is no cheap predicate to ask
- * about it afterwards.
- *
- * It reports on the attempt that has already been made rather than commissioning another one,
- * which is what makes it cheap enough to ask from a render path. A caller that wants a *retry*
- * wants a molecule, and asks for one.
+ * Whether the toolkit loaded. Helpers answer `null`/`false` for "not a molecule", so anything about
+ * to make a chemical claim on a negative asks this first. Reports the last attempt (cheap on a
+ * render path); ask for a molecule to retry.
  */
 export async function rdkitAvailable(): Promise<boolean> {
   return call('available');
 }
 
 /**
- * What RDKit made of `smiles`: its canonical name, or why there is none.
- *
- * The seam's only three-valued answer. `rdkit.engine.ts`'s `Refused` carries what the third value
- * is and why it could not be a predicate; what belongs here is what it costs the boundary, which
- * is nothing — the union is plain data and clones.
- *
- * **This said "the two surfaces that make a claim about a string are the only callers", and it was
- * false about its own commit.** Three things call it: `StructureInput.tsx`, which is one of those
- * surfaces; `src/chem/structure.ts`, which turns the union into `ReadStructure` for the *other*
- * one and for `Molecule.tsx`; and `canonicalSmiles` four lines below, which narrows it back to
- * `string | null` for everybody else. The claim the sentence was reaching for is the one that is
- * actually true and worth keeping: the third value is threaded exactly as far as the two surfaces
- * that make a claim, and no further — `canonicalSmiles` drops it, and every caller of *that* is a
- * caller that wants a key or nothing.
+ * What RDKit made of `smiles`: its canonical SMILES, or a `Refused` reason (`rdkit.engine.ts`). The
+ * third value is threaded only to the surfaces that make a claim (`StructureInput.tsx`,
+ * `structure.ts`); `canonicalSmiles` narrows it for everyone else.
  */
 export async function readCanonicalSmiles(smiles: string): Promise<CanonicalRead> {
   return call('readCanonicalSmiles', smiles);
 }
 
 /**
- * The canonical SMILES for `smiles`, or `null` if there is no name for it.
- *
- * This is the entity key. Two spellings of one molecule must collapse to one string here or the
- * entity rail shows the same compound twice and can never join a computed value to the structure
- * it was computed for.
- *
- * **Both refusals are `null` here, and that is the invariant rather than a loss of information.**
- * A `too-complex` chain has no canonical form on this thread, so there is nothing to key it by —
- * and the failure to avoid is not the missing row, it is the *raw spelling* becoming a key, which
- * would file one compound under a string nothing else can match and would never merge with the
- * later success. Every caller but two wants a key or nothing, gets exactly that, and needs no line
- * changed; `tests/rdkitUnavailable.test.tsx` and `tests/rdkitTooComplex.test.tsx` hold it from
- * both directions.
+ * The canonical SMILES for `smiles` (the entity key), or `null`. Both refusals are `null`: the raw
+ * spelling must never become a key (`tests/rdkitUnavailable.test.tsx`,
+ * `tests/rdkitTooComplex.test.tsx`).
  */
 export async function canonicalSmiles(smiles: string): Promise<string | null> {
   const read = await readCanonicalSmiles(smiles);
@@ -203,57 +60,26 @@ export async function isMolecule(smiles: string): Promise<boolean> {
 }
 
 /**
- * What RDKit made of an MDL molblock — a `.mol` file's contents, or one record of an `.sdf` — as
- * its canonical name, or why there is none. `readCanonicalSmiles`, for a molblock.
- *
- * The same entry point as for SMILES; RDKit sniffs the format. So this is not here to reach a
- * different parser, it is here because **nothing outside the engine may hold a `JSMol`** and a
- * component that wanted to read a dropped file would otherwise have to. It also names the intent
- * at the call site, where "is this a molblock or a SMILES" is a question the caller has already
- * answered and the reader should not have to re-derive.
- *
- * The 2D coordinates in the block are deliberately dropped. The entity key and the text inserted
- * into a message are both SMILES, and `moleculeSvg` recomputes a depiction anyway — keeping the
- * drawn coordinates would mean two spellings of one compound again, this time geometric.
- *
- * Three-valued for the reason the engine's copy gives: a record that is a molecule and could not
- * be *named* on this thread is not a record RDKit could not read, and the surfaces that count
- * records or refuse a drawing say so. There is no `string | null` narrowing of this beside it, as
- * `canonicalSmiles` is for SMILES: every caller of a molblock read is a surface that makes a claim
- * off the answer, and the one that used to exist was how all four of them lost the difference.
+ * A molblock (`.mol` or one `.sdf` record) as canonical SMILES, or a `Refused` reason. 2D
+ * coordinates are dropped. Every caller makes a claim off the answer, so there is no narrowed
+ * variant.
  */
 export async function readCanonicalSmilesFromMolblock(molblock: string): Promise<CanonicalRead> {
   return call('readCanonicalSmilesFromMolblock', molblock);
 }
 
 /**
- * `smiles` as an MDL molblock, for an SDF built in this browser — or `null` when RDKit cannot read
- * it or never loaded. The caller says which of those it was by asking `rdkitAvailable()`, the same
- * way every other surface here does before it reports a negative.
+ * `smiles` as an MDL molblock for an SDF built here, or `null`; callers ask `rdkitAvailable()` to
+ * say why.
  */
 export async function molblockOf(smiles: string): Promise<string | null> {
   return call('molblock', smiles);
 }
 
 /**
- * Drawings already made, newest use last.
- *
- * A depiction is a pure function of its four inputs, and nothing here memoised it, so every
- * *mount* re-parsed and redrew. Measured against the shipped binary over ten drug-like structures
- * (caffeine → atorvastatin): a mean of 5.40 ms and 12.5 kB of SVG each, from 2.81 ms/5.5 kB for
- * 4-bromoanisole to 9.71 ms/24 kB for atorvastatin. That is main-thread WASM time in a `useEffect`
- * with nothing between the calls, and this application redraws for reasons that have nothing to do
- * with chemistry: flipping the theme redraws everything visible, switching conversations remounts
- * the entity rail, and one molecule shown in three places is drawn three times. Measured on 20
- * structures — the rail plus a result grid — a theme toggle costs **111.6 ms** of blocked main
- * thread and, flipped back, another 108.7 ms; served from here the same 20 cost **0.02 ms**.
- *
- * **Bounded by characters, not by entries**, because the entries are not the same size: an SVG
- * here ranges from 2.0 kB for ethanol to 304 kB for the 600-character chain `MAX_PARSED_SMILES_CHARS`
- * still admits, so a count of 200 would admit anywhere between 0.4 MB and 60 MB. At the measured
- * 12.5 kB mean this budget holds ~160 drawings — both themes for ~80 distinct structures, which
- * covers the 50-hit structure grid and the rail together with room over — and 2 MB is small beside
- * the 6.9 MB heap this module is already holding open.
+ * Drawings already made, least recently used first. A depiction is a pure function of its inputs
+ * and the app redraws often (theme toggles, remounts, one molecule in several places), so a hit
+ * must cost nothing. Bounded by characters, not entries: an SVG ranges from ~2 kB to ~300 kB.
  */
 const SVG_CACHE_BUDGET_CHARS = 2_000_000;
 
@@ -266,30 +92,18 @@ const svgKey = (smiles: string, opts: DrawOptions): string =>
   `${opts.width}x${opts.height}|${opts.dark ? 'dark' : 'light'}|${smiles}`;
 
 /**
- * Keep `svg`, evicting least-recently-used drawings until the budget is met again.
- *
- * **The replaced entry's length is subtracted.** `svgCacheChars` is the size of the map and this is
- * the only function that writes either, so keeping the two agreeing across a `set` that replaces is
- * this function's own job rather than a promise it extracts from its caller. Without it a key
- * written twice bills twice, the budget is understated by a whole drawing, and the cache evicts
- * entries it still has room for — which is the 111.6 ms this cache exists to end, coming back
- * quietly. Today no caller can reach that: `moleculeSvg` answers a hit before drawing and the
- * in-flight table below collapses concurrent misses on one key, which is exactly the pair that
- * used to reach it.
+ * Keep `svg`, evicting least-recently-used drawings until within budget. A replaced entry's length
+ * is subtracted so the count stays exact.
  */
 function remember(key: string, svg: string): void {
   const replaced = svgCache.get(key);
   if (replaced !== undefined) svgCacheChars -= replaced.length;
   svgCache.set(key, svg);
   svgCacheChars += svg.length;
-  // A `Map` iterates in insertion order and a hit re-inserts (see below), so the first key is the
-  // least recently *used* rather than merely the oldest drawn. Deleting during iteration is
-  // defined behaviour here — the iterator skips what has gone.
+  // Insertion order plus re-insert on hit makes the first key the least recently used.
   for (const [oldest, drawn] of svgCache) {
     if (svgCacheChars <= SVG_CACHE_BUDGET_CHARS) return;
-    // One drawing larger than the whole budget is kept anyway rather than evicted the instant it
-    // arrives: the cache is then a cache of one, which is still the right answer for a page
-    // showing that one structure.
+    // A single drawing larger than the budget is kept anyway.
     if (oldest === key) return;
     svgCache.delete(oldest);
     svgCacheChars -= drawn.length;
@@ -297,33 +111,22 @@ function remember(key: string, svg: string): void {
 }
 
 /**
- * `smiles` drawn as an SVG, or `null` if it is not a molecule.
- *
- * The cache and the in-flight table are on **this** thread on purpose. A hit is the common case —
- * a theme toggle redraws everything visible, switching conversations remounts the rail — and the
- * whole value of a hit is that it costs nothing; answering one over a `postMessage` would put a
- * round trip and a 300 kB structured clone in front of a string this thread already holds.
+ * `smiles` as an SVG, or `null`. The cache and in-flight table live on this thread so a hit avoids
+ * a worker round trip.
  */
 export async function moleculeSvg(smiles: string, opts: DrawOptions): Promise<string | null> {
   const key = svgKey(smiles, opts);
   const hit = svgCache.get(key);
   if (hit !== undefined) {
-    // Re-inserted, which is what makes the eviction order above least-recently-used. Answered
-    // before the toolkit is consulted on purpose: a drawing already made is a correct drawing of
-    // that molecule whatever has happened to the runtime since, and withholding it because the
-    // heap has died would replace a picture with a fallback for no gain.
+    // Re-inserted for LRU order, and answered before consulting the toolkit: a finished drawing
+    // stays correct even if the runtime has since died.
     svgCache.delete(key);
     svgCache.set(key, hit);
     return hit;
   }
 
-  // A drawing already under way is joined rather than started again. The cache above only helps
-  // once a draw has *finished*, and the case this application actually produces is the other one:
-  // one compound in the rail, the answer and a result card mounts three effects in the same tick,
-  // all three miss, and all three ask for the same depiction — which is now one worker doing the
-  // same work three times in series, so the waste is if anything worse than when it blocked here.
-  // Keyed on the same four inputs as the cache, so two sizes or two themes of one structure are
-  // still two drawings.
+  // Join a drawing already under way (the same compound often mounts in several places in one
+  // tick). Keyed on all four inputs.
   const drawing = inFlight.get(key);
   if (drawing) return drawing;
   const started = drawOnce(key, smiles, opts);
@@ -343,44 +146,26 @@ const inFlight = new Map<string, Promise<string | null>>();
 async function drawOnce(key: string, smiles: string, opts: DrawOptions): Promise<string | null> {
   const drawn = await call('drawSvg', smiles, opts);
 
-  // Only a drawing is kept. A `null` here is one of three different things — not a molecule, past
-  // the length cap, or a runtime that has just died under the engine — and only the first is a
-  // property of the input. Caching the other two would be the memoised-failure defect the loader
-  // refuses, one layer up.
+  // Only drawings are cached; a `null` may be a transient failure rather than a property of the
+  // input.
   if (drawn !== null) remember(key, drawn);
   return drawn;
 }
 
 /**
- * The structures in a `.mol` or `.sdf` file.
- *
- * **What a multi-record SDF does here, and why.** An SDF is a concatenation of molblocks separated
- * by a `$$$$` line, and a chemist's screening file routinely holds hundreds. Three options were on
- * the table: take the first record, refuse the file, or read them all. The first is the trap — it
- * silently discards data, and "silently dropped a reagent is a wrong table" is a failure this
- * codebase already names elsewhere. Refusing is defensible but unhelpful: the common case is a
- * two-record file where the chemist wants the second one.
- *
- * So every record is read and returned, and the caller shows one at a time with the count visible.
- * The composer inserts **one** structure per accept because one SMILES is what a message means;
- * a chemist who wants all of them steps through and inserts each. That keeps the "this is what I
- * understood you to mean" confirmation intact, which pasting a hundred structures in one action
- * would not.
- *
- * Records RDKit refuses are not returned — they cannot be drawn or compared — but they are counted,
- * because "12 of 15 records were readable" and "12 records" are different facts about a file. And
- * they are counted by *reason*: a record RDKit read as a molecule and ran out of stack naming is
- * not one it could not read, and "3 unreadable" about three molecules is the claim
- * `NotAChemicalVerdict` exists to keep off every surface.
+ * The structures in a `.mol` or `.sdf` file. Every record is read and returned; the caller shows
+ * one at a time with the count and inserts one per accept. Refused records are not returned but are
+ * counted by reason, since "too complex" is not "unreadable".
  */
 export interface MolfileRecords {
   /** Canonical SMILES, in file order. */
   smiles: string[];
   /** Records present in the file that RDKit could not read. */
   unreadable: number;
-  /** Records RDKit read as molecules and could not name on this thread — `too-complex`, not a
-   *  verdict about the record. Counted apart from `unreadable` so no sentence built off this calls
-   *  a molecule unreadable. */
+  /**
+   * Records RDKit read but could not name on this thread (`too-complex`), counted apart from
+   * `unreadable`.
+   */
   tooComplex: number;
   /** Records past `MAX_SDF_RECORDS`, which were not read at all. */
   skipped: number;
@@ -390,35 +175,17 @@ export interface MolfileRecords {
 }
 
 /**
- * The most records read from one file.
- *
- * Each one is a synchronous WASM parse — measured at ~0.9 ms after warm-up — and a screening
- * `.sdf` routinely holds tens of thousands, which is ~45 s of a frozen tab with "Reading …" as the
- * only feedback and no way to cancel. The cap is high enough for the files this panel is for (a
- * chemist steps through the records one at a time) and low enough that the wait stays about a
- * second. What is past it is counted and named rather than dropped in silence.
+ * The most records read from one file (each parse is ~1 ms; screening files can hold tens of
+ * thousands). What is past it is counted and named.
  */
 export const MAX_SDF_RECORDS = 1000;
 
-/** Records parsed between two turns of the event loop.
- *
- *  It used to be load-bearing: the `await` between records drained microtasks only, so without a
- *  real yield the browser could not paint for the whole file. Every parse is now a worker round
- *  trip, which is a macrotask on its own, so this no longer decides whether the tab paints — it
- *  decides how often. Kept rather than deleted because it costs one `setTimeout` per 25 records
- *  and is the only thing standing between this loop and a browser that coalesces message
- *  deliveries. */
+/** Records parsed between two turns of the event loop, so the page keeps painting. */
 const YIELD_EVERY = 25;
 
 export async function moleculesFromMolfile(text: string): Promise<MolfileRecords> {
-  // Asked once, up front. Without it every record comes back unreadable and the count becomes a
-  // claim about the file rather than about the page.
-  //
-  // A real load attempt rather than `rdkitAvailable`, because this is a gate and not a
-  // post-mortem: a
-  // chemist dropping a file after an earlier load failed is exactly the retry the engine's catch
-  // exists to allow, and `rdkitAvailable` deliberately answers from the last attempt instead of
-  // making one.
+  // Ask once whether the toolkit loads, or every record would read as unreadable. A real attempt
+  // (not `rdkitAvailable`), so a drop after a failed load retries.
   if (!(await call('toolkitLoads'))) {
     return { smiles: [], unreadable: 0, tooComplex: 0, skipped: 0, unavailable: true };
   }
@@ -463,23 +230,9 @@ export async function moleculesFromMolfile(text: string): Promise<MolfileRecords
 }
 
 /**
- * Split SDF text into its records.
- *
- * Pure string handling, no RDKit: the delimiter is a line containing exactly `$$$$`, which is the
- * SDF spec and cannot appear inside a molblock's fixed-width atom or bond table. A plain `.mol`
- * file has no delimiter at all and comes back as a single record, which is why the caller does not
- * need to know which of the two it was handed.
- *
- * **A record's leading structure is load-bearing and must survive.** A molblock's header is four
- * *fixed* lines — title, program, comment, counts — and the title is routinely **blank**: that is
- * what `Chem.MolToMolBlock` writes by default, and what ChemDraw and most exporters write. This
- * used to `.trim()` each record, which ate the empty title line *and* the leading spaces of the
- * program line, so the counts line moved from index 3 to index 2, the parser read a program banner
- * as the atom/bond counts, and a perfectly valid `.mol` file was reported as "No structure found".
- *
- * So the delimiter is consumed together with the newline that ends it — that newline belongs to the
- * separator, not to the record after it — and only *trailing* whitespace is stripped. A leading
- * newline that is left is the record's own empty title line.
+ * Split SDF text into records on `$$$$` lines; a `.mol` file is one record. Only trailing
+ * whitespace is stripped: a molblock's header is four fixed lines and the title is often blank, so
+ * trimming the start would shift the counts line.
  */
 export function splitSdfRecords(text: string): string[] {
   return text

@@ -1,28 +1,11 @@
 /**
- * A 3D structure, as data: read an XYZ block, perceive its bonds, turn it, and project it flat.
+ * A 3D structure as data: read an XYZ block, perceive bonds, rotate, and project — the pure half of
+ * `src/components/chem/GeometryViewer.tsx`, free of React and the DOM so it is unit-testable.
  *
- * The pure half of the geometry viewer (`src/components/chem/GeometryViewer.tsx`), kept free of
- * React and the DOM so every number the viewer draws is a number a unit test can check — the same
- * split `rdkit.ts` keeps between a structure and its depiction.
- *
- * ## Why hand-written, rather than 3Dmol.js or NGL
- *
- * A molecular-graphics library is hundreds of kilobytes and a WebGL context, and this application
- * ships through a pharma dependency review that costs more than the code does (`docs/dependencies.md`:
- * the charts and the pane resizer are hand-written for the same reason). What an artefact needs is
- * modest and bounded — one semiempirical structure of at most `exhibit_max_atoms` (500) atoms, ball
- * and stick, turned by hand — and every piece of that is a few lines of arithmetic: an XYZ reader,
- * covalent-radius bond perception, a rotation matrix and an orthographic projection with a
- * painter's sort. None of it is a place a library's maturity buys correctness this file cannot test.
- *
- * ## What is deliberately not here
- *
- * - **No bond orders.** An XYZ block carries positions only, and inferring double bonds from
- *   distances is a heuristic that is wrong exactly where a chemist looks hardest (conjugation,
- *   metal complexes). Every bond is drawn the same, which is what the data supports.
- * - **No perspective.** Orthographic, because a structure being *measured by eye* — is this
- *   contact short, is that ring planar — reads honestly only when distance from the viewer does not
- *   change apparent size. Depth is conveyed by draw order and by fading instead.
+ * Hand-written rather than 3Dmol.js/NGL: one structure of at most `exhibit_max_atoms` atoms, ball
+ * and stick, needs only a few lines of arithmetic. No bond orders (XYZ carries positions only) and
+ * no perspective (orthographic, so distances read honestly; depth is shown by draw order and
+ * fading).
  */
 
 /** One atom: its element symbol, normalised (`CL` → `Cl`), and its position in ångström. */
@@ -37,12 +20,7 @@ export interface Atom {
 export interface Geometry {
   atoms: Atom[];
   comment: string;
-  /**
-   * How many frames the text held. Only the first is read. An inline artefact block is a single
-   * frame by the service's validation, but a cited calc artifact is the calc store's bytes, which
-   * nothing validated on the way out — an optimisation trajectory is a plausible thing to cite, and
-   * the viewer says "first of N" rather than silently showing one frame as if it were the file.
-   */
+  /** How many frames the text held; only the first is read, and the viewer says "first of N". */
   frames: number;
 }
 
@@ -52,12 +30,8 @@ export class XyzError extends Error {
 }
 
 /**
- * Covalent radii in ångström — Cordero et al., *Dalton Trans.* 2008, 2832 — the table every
- * mainstream bond-perception routine (Open Babel, RDKit's `DetermineConnectivity`) starts from.
- * Carbon is the sp3 value; Mn, Fe and Co are low-spin, which is the common case in the
- * organometallic catalysts this system is asked about.
- *
- * Laid out as rows (and kept from the formatter) because a table of elements is read as one.
+ * Covalent radii in ångström (Cordero et al., *Dalton Trans.* 2008, 2832), as used by Open Babel
+ * and RDKit; C is sp3, Mn/Fe/Co low-spin.
  */
 // prettier-ignore
 const COVALENT_RADIUS: Readonly<Record<string, number>> = {
@@ -70,12 +44,7 @@ const COVALENT_RADIUS: Readonly<Record<string, number>> = {
   Re: 1.51, Os: 1.44, Ir: 1.41, Pt: 1.36, Au: 1.36, Hg: 1.32, Tl: 1.45, Pb: 1.46, Bi: 1.48,
 };
 
-/**
- * CPK colours, in the Jmol palette every chemist has seen — carbon grey, nitrogen blue, oxygen red.
- *
- * Colour is never the only carrier of an element (`Charts.tsx`'s rule): the atom table names each
- * one, and the drawing's accessible summary counts them by symbol.
- */
+/** CPK colours (Jmol palette). Colour is never the only carrier of an element. */
 // prettier-ignore
 const CPK: Readonly<Record<string, string>> = {
   H: '#ffffff', He: '#d9ffff', Li: '#cc80ff', Be: '#c2ff00', B: '#ffb5b5', C: '#909090',
@@ -98,11 +67,8 @@ const UNKNOWN_COLOUR = '#ff1493';
 const UNKNOWN_RADIUS = 1.5;
 
 /**
- * How far past the sum of two covalent radii a contact still counts as a bond, in ångström.
- *
- * Open Babel's `ConnectTheDots` constant. A semiempirical geometry stretches a bond by a few
- * hundredths at most, so the margin is generous for organics; what it must not do is bond two
- * non-bonded hydrogens 1.5 Å apart (0.31 + 0.31 + 0.45 = 1.07 < 1.5), and it does not.
+ * Tolerance past the sum of covalent radii that still counts as a bond (Open Babel's
+ * `ConnectTheDots`); two non-bonded H 1.5 Å apart are not bonded.
  */
 export const BOND_TOLERANCE_A = 0.45;
 /** Closer than this is two atoms on one spot — an input error, never a bond. */
@@ -119,15 +85,10 @@ const normaliseSymbol = (raw: string): string =>
   raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
 
 /**
- * Read the first frame of an XYZ block: atom count, comment, then `El x y z` per atom in ångström.
+ * Read the first frame of an XYZ block (count, comment, `El x y z` per atom, ångström). Extra
+ * columns are ignored; numeric element symbols are refused.
  *
- * Tolerant where the format's writers vary and strict where a wrong reading would be a wrong
- * structure. Columns after the fourth are ignored (extended XYZ writes forces and charges there),
- * a leading isotope or atom-number on the symbol is not guessed at, and a symbol that is a number
- * (`6` for carbon, which some programs write) is refused rather than mapped — because a block
- * whose elements are numbers is one whose other columns this reader cannot vouch for either.
- *
- * @throws XyzError naming the line, as the service's validator does.
+ * @throws XyzError naming the line.
  */
 export function parseXyz(text: string): Geometry {
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
@@ -184,13 +145,8 @@ export function parseXyz(text: string): Geometry {
 export type Bond = readonly [number, number];
 
 /**
- * Every pair of atoms close enough to be bonded: `d ≤ rᵢ + rⱼ + BOND_TOLERANCE_A`.
- *
- * A sweep over the atoms sorted by `x` rather than every pair: a pair further apart along `x` than
- * the largest cut-off any pair could have cannot bond, so each atom is compared only with the
- * neighbours inside that window. For a 500-atom structure that is a few thousand distance checks
- * instead of 124,750 — irrelevant for the inline cap, and the reason a cited calc artifact with no
- * cap does not stall the pane.
+ * Every pair of atoms within `rᵢ + rⱼ + BOND_TOLERANCE_A`, via a sweep over atoms sorted by `x` so
+ * large uncapped structures stay fast.
  */
 export function perceiveBonds(atoms: readonly Atom[]): Bond[] {
   const order = atoms.map((_, i) => i).sort((a, b) => atoms[a]!.x - atoms[b]!.x);
@@ -255,11 +211,8 @@ export const rotationX = (radians: number): Matrix => {
 };
 
 /**
- * Turn the view by a drag of `(dx, dy)` radians, in *screen* axes.
- *
- * Pre-multiplied, so a horizontal drag always turns the molecule about the vertical axis of the
- * screen, wherever earlier drags left it — the trackball behaviour every viewer has, and the one a
- * post-multiplied rotation gets wrong after the first quarter turn.
+ * Rotate the view by a drag of `(dx, dy)` radians in screen axes (pre-multiplied: trackball
+ * behaviour).
  */
 export const turn = (view: Matrix, dx: number, dy: number): Matrix =>
   multiply(multiply(rotationX(dy), rotationY(dx)), view);
@@ -284,11 +237,8 @@ export interface ProjectedAtom {
 }
 
 /**
- * The drawn radius of a ball, in ångström: a fraction of the covalent radius plus a floor.
- *
- * Ball-and-stick rather than space-filling, so the bonds stay visible: hydrogen comes out at
- * ~0.27 Å and carbon at ~0.39 Å, both well under half a C–H bond, so a bond is never hidden by the
- * two balls it joins.
+ * Ball radius in ångström: a fraction of the covalent radius plus a floor, small enough that bonds
+ * stay visible.
  */
 export const ballRadius = (element: string): number => 0.18 + 0.28 * covalentRadius(element);
 
@@ -296,11 +246,8 @@ export const ballRadius = (element: string): number => 0.18 + 0.28 * covalentRad
 const FRAME_MARGIN = 0.08;
 
 /**
- * Project every atom orthographically into a `width × height` frame centred on the centroid.
- *
- * The scale is fixed by the structure's *radius about its centroid*, not by its extent on screen,
- * so turning the molecule never rescales it — a zoom that breathed as you rotated would read as
- * the molecule changing size.
+ * Project orthographically into a `width × height` frame centred on the centroid, scaled by the
+ * radius about the centroid so rotation never rescales.
  */
 export function project(
   atoms: readonly Atom[],
@@ -344,13 +291,7 @@ export function project(
   }));
 }
 
-/**
- * How opaque a mark at `nearness` is drawn: the depth cue.
- *
- * Fading toward the background rather than darkening, so the cue reads the same in both themes,
- * and never below 0.35 — the back of a molecule is still part of it, and a mark faded to nothing
- * would be an atom the drawing silently dropped.
- */
+/** Opacity for depth: fades toward the background (same in both themes), never below 0.35. */
 export const depthOpacity = (nearness: number): number => 0.35 + 0.65 * nearness;
 
 /** One thing to draw: a ball, or half a bond (coloured by the atom it leaves). */
@@ -369,13 +310,8 @@ export type Mark =
     };
 
 /**
- * Every mark, furthest first: the painter's algorithm.
- *
- * A bond is two halves, each starting at the *surface* of its own ball rather than its centre, and
- * each sorted by its own midpoint's depth. Starting at the centre is what makes a naive painter
- * draw a stick through the front of a ball that sits behind it; starting at the surface, the only
- * overlap left is with the other ball, which the sort gets right. A bond whose projection is
- * shorter than its two balls is end-on to the viewer and is hidden behind them, so it is not drawn.
+ * Every mark, furthest first (painter's algorithm). Each bond is two halves starting at their
+ * balls' surfaces, sorted by midpoint depth; an end-on bond hidden behind its balls is not drawn.
  */
 export function paint(projected: readonly ProjectedAtom[], bonds: readonly Bond[]): Mark[] {
   const marks: Mark[] = projected.map((atom) => ({ kind: 'atom', atom, depth: atom.depth }));

@@ -1,42 +1,13 @@
 /**
- * Getting a structure into a message.
+ * Getting a structure into a message: paste or type SMILES, drop a `.mol`/`.sdf`, or draw it. All
+ * three write canonical SMILES into one field, so there is one validation path.
  *
- * Every chemistry tool on this backend takes SMILES. A bench chemist has a structure — on paper, in
- * a MOL file, in ChemDraw, or as a compound they can name — and until this component existed the
- * only way in was to type SMILES into the message box by hand and hope. That is the wrong way round
- * for the person this whole effort is aimed at.
+ * Nothing is inserted until RDKit has read and drawn it: Insert is bound to the drawing, never to
+ * unaccepted text.
  *
- * Three ways in, **one** result. Paste or type SMILES, drop a `.mol`/`.sdf`, or draw it: the file
- * reader and the sketcher both write canonical SMILES into the same field, so there is a single
- * validation path and a single thing on screen to check. A structure that arrived three different
- * ways cannot be trusted three different amounts.
- *
- * ## The confirmation is the point
- *
- * Nothing is inserted until RDKit has read it and drawn it back. "This is what I understood you to
- * mean" is the entire affordance — a chemist must never send a structure they have not seen. So the
- * Insert control is bound to the *drawing*, not to the text: while the field says something RDKit
- * has not accepted, there is nothing to insert and no picture to mislead anyone. `Molecule.tsx`
- * holds up its end (it will show the string it refused rather than an empty box), and this file
- * never hands it anything but a canonicalised string that already round-tripped.
- *
- * ## A name is not a structure
- *
- * `4-bromoanisole` is the single most likely thing to be typed into a SMILES box, and the backend
- * genuinely can resolve it — `resolve_compound` is RDKit plus a vendored dataset. But it is an
- * *agent tool*: reachable inside a turn, with no HTTP route behind it. So this panel cannot look a
- * name up, and the two tempting fixes are both worse than saying so. Inventing an endpoint puts a
- * capability in the BFF whitelist that the service does not expose; shipping a name table to the
- * browser means a second, smaller, drifting copy of the dataset answering questions the agent would
- * answer differently.
- *
- * There is a third option, and it is the one taken here. The agent can answer, and this app already
- * knows how to make it answer: `chemclaw:prefill` composes a message on the chemist's behalf, which
- * is what a citation chip does when a note will not resolve. So the panel offers the question as a
- * button instead of instructing a chemist to retype it. That is not a name lookup — the agent still
- * does the resolving, and the answer still comes back in the conversation — it just stops charging
- * the chemist a sentence for it. The return leg is the `Use in my message` control on the structure
- * the answer draws (`src/components/chem/UseStructure.tsx`).
+ * A compound name cannot be looked up here (`resolve_compound` is an agent tool with no HTTP
+ * route), so the panel offers to ask the agent via `chemclaw:prefill`; the answer's structure comes
+ * back with "Use in my message" (`src/components/chem/UseStructure.tsx`).
  */
 
 import { useEffect, useRef, useState } from 'react';
@@ -62,21 +33,15 @@ import { Loading } from '@/components/chem/Feedback';
 import { Molecule } from './Molecule.tsx';
 
 /**
- * What RDKit said about one particular string.
- *
- * It carries the text it is about (`of`), and "checking" is *derived* from that not matching what
- * is in the field rather than being written into state when a keystroke arrives. Two reasons, and
- * the second is the one that would bite: a verdict that did not name its subject could be shown
- * beside text it was not about for as long as the debounce lasts, and setting state synchronously
- * from an effect is exactly what the hooks lint forbids — it is a second render pass per keystroke
- * that computing the value would have avoided.
+ * What RDKit said about one particular string (`of`). "Checking" is derived from `of` not matching
+ * the field, so a verdict is never shown beside text it is not about.
  */
 interface Verdict {
   of: string;
-  /** The last member is `NotAChemicalVerdict` rather than a literal, so a refusal added in
-   *  `rdkit.engine.ts` is one declaration rather than a fourth copy of `'too-complex'` — see
-   *  `Refused` there, and the `never` binding in the effect that is what actually refuses to
-   *  compile when one is not answered. */
+  /**
+   * The last member is `NotAChemicalVerdict`, so a new refusal in `rdkit.engine.ts` must be handled
+   * (see the `never` binding below).
+   */
   status: 'ok' | 'name' | 'invalid' | 'unavailable' | 'too-large' | NotAChemicalVerdict;
   canonical?: string;
 }
@@ -90,14 +55,12 @@ type Check =
   | { status: 'invalid' }
   /** RDKit never loaded. Not a refusal: nothing here read the string at all. */
   | { status: 'unavailable' }
-  /** Past `MAX_PARSED_SMILES_CHARS`. Also not a refusal about the chemistry — `src/chem/rdkit.ts`
-   *  declines to hand the parser a string long enough to trap the WASM, and the range it declines
-   *  starts well below the one that actually traps. */
+  /** Past `MAX_PARSED_SMILES_CHARS`: declined before parsing, not a chemical refusal. */
   | { status: 'too-large' }
-  /** Inside the cap, read as a molecule, and RDKit ran out of stack producing its canonical name.
-   *  The third refusal that is not about the chemistry, and the only one that could not be
-   *  predicted from the string: see `Refused` in `src/chem/rdkit.engine.ts`. Derived from there
-   *  rather than restated, for the reason `NotAChemicalVerdict` gives. */
+  /**
+   * Inside the cap, read as a molecule, but RDKit ran out of stack naming it (`Refused` in
+   * `src/chem/rdkit.engine.ts`).
+   */
   | { status: NotAChemicalVerdict };
 
 function checkOf(raw: string, verdict: Verdict | null): Check {
@@ -108,40 +71,16 @@ function checkOf(raw: string, verdict: Verdict | null): Check {
   return { status: verdict.status };
 }
 
-/** Long enough that a paste is checked in one go rather than character by character, short enough
- *  that it feels like typing. The first check also waits on a 6.9 MB WASM download, which dwarfs
- *  this either way. */
+/** Long enough that a paste is checked once, short enough to feel like typing. */
 const DEBOUNCE_MS = 180;
 
 export const FIELD_PLACEHOLDER = 'Paste SMILES, drop a .mol or .sdf, or draw it';
 
 /**
- * What both surfaces say about a molecule RDKit read and could not name.
- *
- * **Exported because the claim that they "say the same words" was prose, and it was false.**
- * `Composer.tsx`'s own comment said one string must not get two different sentences from the two
- * surfaces that check pastes — while the two diverged in both tails, and
- * `tests/rdkitTooComplex.test.tsx` matched a 25-character fragment of the head, which is the
- * shape of guard this repository already refuses elsewhere. One constant is the reconciliation;
- * each surface then appends the one clause that is genuinely its own (this panel has nothing to
- * file it under, the composer is sending the spelling on regardless), which is a difference about
- * the surface rather than about the string. Same argument as `SKETCHER_ALTERNATIVE` below.
- *
- * **"at the moment of the check" is load-bearing and replaced "this is running in".** The
- * measurement behind this sentence (`scripts/measure-rdkit-rangeerror.mjs`, Issue 11) is that the
- * *same string at the same length* refused through the seam and answered from a shallower stack in
- * the same page milliseconds later — so the limit is the JavaScript stack at the instant of the
- * call, not a property of the browser that a chemist could reason about. Copy that named the
- * browser read as a stable verdict and asserted the opposite of what was measured.
- *
- * **The last clause is the decision about the retry, and there is deliberately no button.** A
- * second check of the same string can answer where the first refused — measured, and the reason
- * this sentence exists — so a chemist who pastes it twice can get two answers to one question. A
- * "try again" control would present that as a flaky app the second time it worked, and an
- * automatic re-ask would hide the non-determinism instead of naming it. So the sentence says it
- * plainly and offers nothing to press (`ISSUES.md` _Known gaps_, closed 2026-09-26). The wording
- * is held whole by `tests/rdkitTooComplex.test.tsx`, and through a real RDKit in a real browser by
- * `e2e/rdkit-too-complex.spec.ts`.
+ * What both checking surfaces say about a molecule RDKit read and could not name; each appends one
+ * clause of its own. The limit is the JS stack at the moment of the call, so a second check may
+ * differ — said plainly, with no retry button (`scripts/measure-rdkit-rangeerror.mjs`;
+ * `tests/rdkitTooComplex.test.tsx`, `e2e/rdkit-too-complex.spec.ts`).
  */
 export const TOO_COMPLEX_EXPLANATION =
   'RDKit read this as a molecule and then ran out of stack naming it, so it is too complex to ' +
@@ -153,15 +92,8 @@ export const TOO_COMPLEX_EXPLANATION =
 const recordCount = (n: number): string => `${n} record${n === 1 ? '' : 's'}`;
 
 /**
- * What a read file that produced **no** structure says about its records.
- *
- * Two refusals, counted apart, because only one of them is about the file: `unreadable` is RDKit
- * reading a record and finding no molecule, `tooComplex` is RDKit reading a molecule and running
- * out of stack naming it (`NotAChemicalVerdict`). Folded together — which is what this sentence
- * did until the count carried the difference — a `.sdf` of long chains was reported as holding
- * records "none of which RDKit could read as a structure", about molecules.
- *
- * Exported so the wording is driven rather than read (`tests/rdkitTooComplex.test.tsx`).
+ * The note for a file that produced no structure, counting unreadable and too-complex records apart
+ * (the latter are molecules). Exported for tests.
  */
 export function noStructureNote(fileName: string, unreadable: number, tooComplex: number): string {
   if (tooComplex === 0) {
@@ -179,11 +111,8 @@ export function noStructureNote(fileName: string, unreadable: number, tooComplex
 }
 
 /**
- * The summary line for a read file that produced at least one structure.
- *
- * `too complex to name here` is its own clause rather than part of the `unreadable` one for the
- * reason `noStructureNote` gives, and the "past the first N" clause counts every record that was
- * *read* — named, unreadable and too complex alike — because that is what the cap bounds.
+ * The summary line for a file that produced at least one structure. "Past the first N" counts every
+ * record read.
  */
 export function recordsNote(
   fileName: string,
@@ -202,38 +131,22 @@ export function recordsNote(
 }
 
 /**
- * What the sketcher dialog says it is not.
- *
- * The canvas is a third-party WASM editor driven by a pointer. Nothing in this repository can make
- * it navigable by keyboard or legible to a screen reader — that is the editor's own markup, not
- * ours — so the honest thing is to say out loud that drawing is one of three doors and the other
- * two are text. This is the dialog's `aria-description`, so it is announced on open rather than
- * being a sentence somebody has to go looking for, and it is visible for the same reason.
- *
- * Exported because two tests assert on it and a string typed twice is a string that drifts once.
+ * What the sketcher dialog says it is not: the canvas (third-party) is not keyboard- or
+ * screen-reader-accessible, so the dialog's `aria-description` names the text alternatives.
+ * Exported for tests.
  */
 export const SKETCHER_ALTERNATIVE =
   'Drawing needs a pointer. Cancel to paste SMILES or drop a MOL or SDF file instead — every route ends at the same structure, confirmed the same way.';
 
 /**
- * What this panel can read.
- *
- * Exported because the composer routes a dropped file by the same rule — anything else is a
- * working file for the attachment route — and two lists of extensions would be one rule with two
- * spellings, of which the stale one is free to drift.
- *
- * The check belongs here rather than on the controls: the picker's `accept=` filters the picker
- * only, and the panel takes anything dropped on it.
+ * Structure file extensions this panel reads; shared with the composer's drop routing. Checked here
+ * because the picker's `accept=` does not filter drops.
  */
 export const STRUCTURE_FILE = /\.(mol|sdf|mdl)$/i;
 
 /**
- * The most a structure file may weigh.
- *
- * The whole file is materialised as a string and every record is parsed in WASM on this thread —
- * there is no worker and nothing cancels it — so an unbounded read is an unbounded freeze. The
- * bound is stated to the chemist rather than enforced silently, because "split it" is a thing they
- * can act on and a hung tab is not.
+ * The largest structure file read; the whole file is parsed, so the bound is stated to the chemist
+ * ("split it") rather than risking a frozen tab.
  */
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 
@@ -251,9 +164,7 @@ function fileRefusal(file: File): string | null {
   return null;
 }
 
-/** The three ways reading a structure file can end. Named rather than collapsed into `| null`,
- *  because "this is not a file I read", "I could not read it" and "here is what was in it" are
- *  three different sentences to a chemist. */
+/** The three ways reading a structure file can end: not ours, unreadable, or its contents. */
 type FileOutcome =
   | { kind: 'records'; records: MolfileRecords }
   | { kind: 'refused'; why: string }
@@ -263,18 +174,13 @@ type FileOutcome =
 export interface AcceptedStructure {
   /** What goes into the message and what keys the entity. RDKit's, always. */
   canonical: string;
-  /** What was in the field — the chemist's own spelling when they typed one, and the canonical
-   *  form when a file or the sketcher put it there. Carried so the rail can show a chemist the
-   *  string they recognise beside the one RDKit prefers. */
+  /**
+   * What was in the field (the chemist's spelling, or canonical from a file or the sketcher), so
+   * the rail can show the string they recognise.
+   */
   raw: string;
   source: UserStructureSource;
-  /**
-   * The file this came from holds more than one structure, so the panel should stay open.
-   *
-   * Carried out with the structure rather than left for the composer to work out, because the
-   * composer has no idea a file was involved. Inserting record 2 of 12 used to cost a full reopen
-   * — hexagon, re-drop, step, Insert — once per record.
-   */
+  /** The file holds more structures, so the panel should stay open after Insert. */
   moreRecords: boolean;
 }
 
@@ -282,10 +188,8 @@ interface StructureInputProps {
   onAccept: (structure: AcceptedStructure) => void;
   onClose: () => void;
   /**
-   * A structure file dropped on the composer, to be read as if it had been dropped here.
-   *
-   * Wrapped with the drop it arrived on rather than passed bare: two drops of the same `File`
-   * object are two intentions, and an effect keyed on the file alone would ignore the second.
+   * A structure file dropped on the composer, read as if dropped here; wrapped with its drop so the
+   * same file twice is read twice.
    */
   initialFile?: { at: number; file: File } | null;
 }
@@ -301,40 +205,26 @@ export function StructureInput({
   const [dragging, setDragging] = useState(false);
   const [fileNote, setFileNote] = useState<string | null>(null);
   /**
-   * The records of a multi-structure SDF, held so the chemist can step through them.
-   *
-   * Carries the load it came in on. `RecordStepper` keeps its position in component state, so a
-   * second file has to *remount* it — otherwise the index survives and a three-record file dropped
-   * after a ten-record one reads "8 / 3" while showing record 1. Two files can hold identical
-   * structures, so the identity of the load is the counter and not the contents.
+   * The records of a multi-structure SDF, with the load counter so a new file remounts
+   * `RecordStepper` and resets its position.
    */
   const [records, setRecords] = useState<{ load: number; smiles: string[] } | null>(null);
   /** Canonical strings already inserted from the record set on screen. See `accept`. */
   const [inserted, setInserted] = useState<string[]>([]);
   const loads = useRef(0);
   /**
-   * Which claim on the field is the newest one.
-   *
-   * Every source that writes the field takes a number first — typing, the picker, either drop, a
-   * pasted molblock — and an asynchronous one drops its result when the number has moved on. A
-   * file read is a file-system round trip plus a full RDKit pass, and nothing cancelled it: drop a
-   * large `.sdf`, get bored, type your own structure, and the read landed on top of it. The field
-   * is the confirmation surface, so a write from a source the chemist has moved on from replaces
-   * the structure under review.
+   * Which claim on the field is newest. Every source that writes the field takes a number, and an
+   * async result is dropped once the number has moved on.
    */
   const claim = useRef(0);
 
-  // How the current candidate arrived. A ref rather than state because it never affects the
-  // rendering — it is carried out with the accepted structure so the rail can say where it came
-  // from — and making it state would re-render the panel on every keystroke for nothing.
+  // How the current candidate arrived (a ref: it never affects rendering).
   const source = useRef<UserStructureSource>('paste');
   const fileRef = useRef<HTMLInputElement | null>(null);
   const fieldRef = useRef<HTMLInputElement | null>(null);
 
-  // Focus moved in an effect rather than with `autoFocus`. The attribute is linted out of this
-  // codebase because it steals focus wherever a component happens to mount; here the panel only
-  // exists because the chemist just asked for it, so moving focus once on mount is what they
-  // expect, and doing it explicitly keeps that a decision rather than a default.
+  // Focus moved once on mount: the panel exists because the chemist just opened it (`autoFocus` is
+  // linted out).
   useEffect(() => {
     fieldRef.current?.focus();
   }, []);
@@ -355,10 +245,8 @@ export function StructureInput({
           case 'named':
             setVerdict({ of: text, status: 'ok', canonical: read.canonical });
             return;
-          // Asked before `tooLongToParse` and before the toolkit, because it is the narrowest of
-          // the three and the only one the other two would answer wrongly: the string is inside
-          // the cap and the toolkit is right here, so both of those checks pass and the panel
-          // would fall through to "not a molecule" about a molecule.
+          // Checked first: the string is inside the cap and the toolkit is present, so the later
+          // checks would wrongly say "not a molecule".
           case 'too-complex':
             setVerdict({ of: text, status: 'too-complex' });
             return;
@@ -366,20 +254,14 @@ export function StructureInput({
           case 'unreadable':
             break;
           default: {
-            // **Exhaustiveness, and this is the surface it protects.** Everything past this switch
-            // ends in "RDKit could not read this as a molecule" or in one of the three sentences
-            // that qualify it — so a refusal added to `Refused` and not answered above would be
-            // shown to a chemist as a claim about their string that nothing here made. `never` is
-            // what makes that fail to compile; driven before it, a third member built clean.
+            // Exhaustiveness: an unhandled refusal must fail to compile rather than be shown as
+            // "not a molecule".
             const unanswered: never = read;
             return unanswered;
           }
         }
-        // "Not a molecule" is a claim about the string, and it is only ours to make if the toolkit
-        // that would have read it is here at all. It was not, once, and this panel told a chemist
-        // that `CCO` is not a molecule. The same applies to a string we declined to parse: the
-        // length cap starts at 600 and the WASM trap it avoids is at ~1,100, so this panel used to
-        // call a perfectly readable 700-character polymer not a molecule.
+        // "Not a molecule" is only ours to say if the toolkit loaded and the string was within the
+        // parse cap.
         if (tooLongToParse(text)) {
           setVerdict({ of: text, status: 'too-large' });
           return;
@@ -407,15 +289,8 @@ export function StructureInput({
   };
 
   /**
-   * Everything a molfile turns into, worked out without touching state.
-   *
-   * Split from applying it so the dropped-file effect below can `await` this before it writes
-   * anything — an effect whose body calls setState synchronously is a cascading render, and the
-   * React Compiler lint is right to refuse it. The split earns its place twice over: the reading
-   * is the part worth testing, and it has no React in it.
-   *
-   * Async all the way through, including the refusals, for the same reason: a caller that got an
-   * answer without suspending would be back to writing state inside the effect body.
+   * Everything a molfile turns into, computed without touching state, so the drop effect can await
+   * it before writing (no setState in an effect body). Async throughout for the same reason.
    */
   const readMolfile = async (file: File): Promise<FileOutcome> => {
     const why = fileRefusal(file);
@@ -429,9 +304,7 @@ export function StructureInput({
     try {
       return { kind: 'records', records: await moleculesFromMolfile(text) };
     } catch {
-      // A file that got past the size bound can still exhaust the heap in WASM. `file.text()` was
-      // guarded and this was not, so the failure arrived as an unhandled rejection and the panel
-      // sat on "Reading …" for ever.
+      // WASM can still exhaust the heap on a large file; report unreadable rather than hang.
       return { kind: 'unreadable' };
     }
   };
@@ -458,10 +331,8 @@ export function StructureInput({
     }
 
     if (smiles.length === 0) {
-      // Clear the field only if a *file* put the current candidate there. Otherwise a chemist who
-      // typed a SMILES and then dropped the wrong file loses their own input; leaving it would
-      // instead park a structure from an earlier file next to this file's failure note, which
-      // reads as "here is what I found in it".
+      // Clear the field only if a file put the current candidate there, so a typed SMILES survives
+      // a bad drop.
       if (source.current === 'file') setRaw('');
       // Named rather than generic: a `.csv` dropped on a molfile target and a corrupt `.mol` are
       // different mistakes, and the count is what distinguishes them.
@@ -488,12 +359,8 @@ export function StructureInput({
   };
 
   /**
-   * A molblock pasted into the field.
-   *
-   * The field is an `<input type="text">`, so a browser strips the newlines out of a multi-line
-   * paste and leaves one unparseable line of MDL. That made the second door a dead end for exactly
-   * the payload ChemDraw, Ketcher and Marvin put on the clipboard — while the drop path reads
-   * byte-identical content happily — so the paste is taken over rather than allowed through.
+   * A molblock pasted into the field: a text input would strip its newlines, so the paste is taken
+   * over and parsed.
    */
   const takeMolblock = async (molblock: string): Promise<void> => {
     const mine = (claim.current += 1);
@@ -527,12 +394,8 @@ export function StructureInput({
     setFileNote('Read the pasted molfile.');
   };
 
-  // A file dropped on the composer, read as if it had been dropped here. Keyed on the drop's
-  // timestamp rather than the File, so dropping the same file twice reads it twice — the second
-  // drop is a second intention, usually after the chemist changed their mind about a record.
-  //
-  // The read is awaited before anything is written, which is why `readMolfile` and `applyMolfile`
-  // are two functions: `takeFile` would set three pieces of state in this effect's body.
+  // Read a composer drop, keyed on the drop's timestamp so the same file dropped twice is re-read.
+  // Awaited before any state is written.
   const dropAt = initialFile?.at ?? null;
   const dropFile = initialFile?.file ?? null;
   useEffect(() => {
@@ -545,8 +408,7 @@ export function StructureInput({
     return () => {
       cancelled = true;
     };
-    // Only the drop. The two helpers are redeclared every render and listing them would re-read
-    // the file on every keystroke; nothing else about a drop changes after it has happened.
+    // Only the drop; the helpers are recreated every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dropAt]);
 
@@ -559,9 +421,7 @@ export function StructureInput({
       source: source.current,
       moreRecords,
     });
-    // Only meaningful while the panel survives the insert, which is exactly when `moreRecords`
-    // is true. It tells a chemist stepping through a screening file which records they have
-    // already taken, because the field alone cannot — record 3 looks identical before and after.
+    // Track records already inserted, since the field looks identical before and after.
     if (moreRecords) setInserted((taken) => [...new Set([...taken, check.canonical])]);
   };
 
@@ -639,8 +499,7 @@ export function StructureInput({
         {check.status === 'checking' && <span className="text-ink-muted">Checking…</span>}
         {check.status === 'ok' && (
           <span className="text-ok-ink">
-            {/* The canonical form is shown even when it matches what was typed: the chemist is
-                about to send this string, and it is not always the one they wrote. */}
+            {/* The canonical form is shown even when it matches what was typed: it is what will be sent. */}
             RDKit read this as <span className="font-mono">{check.canonical}</span>
           </span>
         )}
@@ -667,11 +526,8 @@ export function StructureInput({
           </span>
         )}
         {check.status === 'too-complex' && (
-          // Warn rather than danger, and the wording is about this thread rather than about the
-          // molecule: RDKit read it, and then ran out of stack working out its canonical name.
-          // "Too complex to name here" is the honest scope — a claim about the renderer. The
-          // sentence itself is `TOO_COMPLEX_EXPLANATION`, shared verbatim with the composer's paste
-          // strip; what follows it is this panel's own consequence and nobody else's.
+          // Warn, not danger: this is about the thread, not the molecule. The shared
+          // `TOO_COMPLEX_EXPLANATION` comes first, then this panel's own consequence.
           <span className="text-warn-ink">
             {TOO_COMPLEX_EXPLANATION} Without that name there is nothing to file it under.
           </span>
@@ -694,8 +550,7 @@ export function StructureInput({
       {check.status === 'ok' && (
         <div className="mt-1 flex items-start gap-3">
           <div className="rounded-lg border border-border-subtle bg-surface p-1">
-            {/* Drawn from the canonical string, never from what was typed — this picture is the
-                confirmation, so it has to depict the thing that will actually be sent. */}
+            {/* Drawn from the canonical string, never the typed one: this picture is the confirmation. */}
             <Molecule smiles={check.canonical} maxWidth={200} />
           </div>
           <div className="flex flex-col items-start gap-1">
@@ -711,9 +566,7 @@ export function StructureInput({
 
       {(fileNote || records) && (
         <div className="mt-1.5 flex flex-wrap items-center gap-2">
-          {/* Outside the preview block on purpose: stepping to the next record puts the field back
-              into "checking" for a moment, and a stepper that unmounted there would lose its place
-              on every press. */}
+          {/* Outside the preview so stepping (which briefly re-checks) does not unmount the stepper. */}
           {records && (
             <RecordStepper
               key={records.load}
@@ -752,10 +605,7 @@ export function StructureInput({
       <SketcherDialog
         open={drawing}
         onOpenChange={setDrawing}
-        // What the panel has already confirmed, so "draw, insert, notice a missing methyl, press
-        // Draw" continues the drawing instead of starting a second one. Correcting one bond in a
-        // thirty-atom molecule used to mean redrawing it from scratch, and two drawings are two
-        // independent chances to get it wrong.
+        // Start the sketcher from the confirmed structure, so a correction continues the drawing.
         initial={check.status === 'ok' ? check.canonical : undefined}
         onDrawn={(smiles) => {
           claim.current += 1;
@@ -771,15 +621,8 @@ export function StructureInput({
 }
 
 /**
- * Step through the structures of a multi-record SDF.
- *
- * The whole file is parsed (see `moleculesFromMolfile` for why taking only the first record was
- * rejected), but one structure goes into a message at a time — a message that carried forty SMILES
- * would defeat the confirmation this panel exists to provide, since nobody checks forty drawings.
- *
- * The panel now stays open while a record set is on screen, so stepping and inserting is a loop
- * rather than a reopen per record, and the count of what has already been taken is shown here
- * because record 3 looks exactly the same before and after it was inserted.
+ * Step through a multi-record SDF; one structure per message (nobody checks forty drawings). Shows
+ * how many have been inserted.
  */
 function RecordStepper({
   records,
@@ -829,22 +672,9 @@ function RecordStepper({
 type SketcherState = 'loading' | 'ready' | 'unavailable';
 
 /**
- * The sketcher, in a modal dialog.
- *
- * A centred modal rather than the app's `Sheet`, which is an edge drawer at most 20rem wide: a
- * drawing canvas needs real room — Ketcher below about 600×420 is a toolbar with a stamp-sized
- * canvas under it — and the composer sits at the bottom of a chat pane that has none.
- *
- * Built on Radix's Dialog rather than a hand-rolled overlay, and that is worth naming because the
- * hand-rolled one had a specific bug: its Escape handler sat on the overlay `div`, which is not
- * focusable, so Escape did nothing until the user had clicked *inside* — precisely the moment they
- * have not yet done. The primitive owns the focus trap, the Escape key and the `aria-modal`
- * bookkeeping, so there is no version of that mistake left to make.
- *
- * The editor is reached only through `src/chem/sketcher.ts`, so this component names no drawing
- * library and cares about exactly two things: mount into a div, and later ask for a molblock. The
- * molblock goes to RDKit, because a structure that has not been through RDKit is not a structure
- * this application will show anybody.
+ * The sketcher in a Radix modal dialog (a canvas needs more room than the side sheet), which owns
+ * focus trap, Escape and `aria-modal`. The editor is reached only through `src/chem/sketcher.ts`,
+ * and its molblock goes through RDKit before anything is shown.
  */
 function SketcherDialog({
   open,
@@ -869,16 +699,7 @@ function SketcherDialog({
             'rounded-xl border border-border-subtle bg-surface-raised p-3 shadow-lg',
           )}
         >
-          {/* Mounted only while open, so closing the dialog tears the editor's React tree down
-              through the effect cleanup rather than leaving it attached to a hidden node.
-
-              It does **not** tear down the WASM heap, and this comment used to say it did.
-              Verified against the installed `ketcher-standalone@3.18.0`: Indigo runs in a worker
-              the package keeps as a page-wide singleton shared by every struct service, and
-              nothing in `ketcher-react` terminates it — so the ~11.79 MB is retained from the
-              first Draw click for the life of the page whatever this dialog does.
-              `sketcher.ketcher.tsx`'s `destroy()` carries the reading, including why the teardown
-              the package *does* expose is deliberately not called. */}
+          {/* Mounted only while open, so closing tears down the editor's React tree. Indigo's worker is a page-wide singleton and stays (see `sketcher.ketcher.tsx` `destroy()`). */}
           {open && <SketcherBody onDrawn={onDrawn} initial={initial} />}
         </Dialog.Content>
       </Dialog.Portal>
@@ -911,8 +732,7 @@ function SketcherBody({
       }
       try {
         const session = await mount(host, initial);
-        // Closed while a 12 MB WASM editor was loading. Mount it and immediately tear it down
-        // rather than leaving a live editor attached to a detached node.
+        // Closed while the editor was loading: mount and immediately tear it down.
         if (cancelled) {
           session.destroy();
           return;
@@ -929,8 +749,7 @@ function SketcherBody({
       sessionRef.current?.destroy();
       sessionRef.current = null;
     };
-    // Mount-time only: the dialog remounts this per open, so the structure to start from is read
-    // once, and re-running on it would tear a live editor down mid-drawing.
+    // Mount-time only: the dialog remounts per open, and re-running would tear down a live editor.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -951,9 +770,7 @@ function SketcherBody({
       return;
     }
     if (read.status !== 'named') {
-      // Covers the empty canvas too — a sketcher exports that as a valid molblock with no atoms,
-      // and RDKit reads it as the empty SMILES. The panel does not need to tell "empty" from
-      // "unreadable", because the only thing it is entitled to say is that there is no structure.
+      // Also covers an empty canvas (a valid zero-atom molblock).
       setProblem('Nothing on the canvas that RDKit can read as a molecule.');
       return;
     }
@@ -991,12 +808,7 @@ function SketcherBody({
         <p className="mb-2 text-xs text-danger-ink">The structure editor could not be loaded.</p>
       )}
 
-      {/* `data-sketcher-canvas` marks the one region of this app the axe pass does not scan, and
-          the attribute is the whole record of that exemption: everything inside is Ketcher's own
-          markup, which this repository neither writes nor can fix. `e2e/a11y.spec.ts` excludes it
-          by this selector and scans the rest of the dialog — the title, the description above, and
-          the two controls — precisely so the alternative stays checked while the canvas does not
-          pretend to be. `ISSUES.md` carries the limitation. */}
+      {/* `data-sketcher-canvas` marks the one region the axe pass skips (Ketcher's own markup); `e2e/a11y.spec.ts` scans the rest of the dialog. */}
       <div
         data-sketcher-canvas
         role="group"

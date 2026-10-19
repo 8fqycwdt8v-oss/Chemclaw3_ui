@@ -1,30 +1,11 @@
 /**
- * The two charts a Bayesian-optimization result needs, drawn as inline SVG.
+ * The two charts a Bayesian-optimization result needs, as inline SVG (no charting dependency).
  *
- * **Hand-written rather than a library, and that is a decision rather than an omission.** This app
- * ships into a regulated pharma environment where every runtime dependency is somebody's review, and
- * `package.json` carries no charting package today. Two charts of about a hundred lines each do not
- * justify adding one — and a chart library would not have made either of these *more* honest, which
- * is where the difficulty actually is.
+ * 1. Nothing is encoded in colour alone, and each chart sits beside the numbers it draws. 2. Axes
+ * carry the objective's name and direction. 3. Colours come from the design tokens.
  *
- * Three rules both charts obey, each of them a thing a default chart gets wrong for this data:
- *
- * 1. **Nothing is encoded in colour alone.** Every mark that means something also carries a label, a
- *    shape or a stroke pattern, and every chart is rendered beside the numbers it draws — the table
- *    under a Pareto front is not a fallback, it is the accessible reading of the same fact.
- * 2. **The axes are labelled with the objective's own name and its direction.** "yield" and
- *    "impurity" are not interchangeable and a front is unreadable without knowing which way is
- *    better; an unlabelled scatter of a trade-off is worse than no scatter.
- * 3. **Colour comes from the design tokens** (`stroke-brand`, `fill-warn-soft`, …), so both themes
- *    are one palette rather than two. Nothing here hard-codes a hex.
- *
- * A third chart obeys the same three rules and lives next door: `SeriesChart.tsx`, the general
- * line/scatter/bar an artefact draws. It imports the geometry below rather than restating it, and
- * sits in its own file only so the artefact pane's lazy chunk carries it instead of the first load.
- *
- * Geometry is in viewBox units, so the drawing scales with its container and the type inside it
- * scales with the drawing. `fontSize` is an SVG attribute here rather than a Tailwind class for that
- * reason: a `px` size would be a fixed size in a coordinate system that is not pixels.
+ * `SeriesChart.tsx` (artefacts) follows the same rules and reuses this geometry. Coordinates are
+ * viewBox units, so `fontSize` is an SVG attribute.
  */
 
 import { useId } from 'react';
@@ -37,12 +18,8 @@ export const INNER_W = WIDTH - PAD.left - PAD.right;
 export const INNER_H = HEIGHT - PAD.top - PAD.bottom;
 
 /**
- * A numeric domain that is never zero-width.
- *
- * A campaign whose every run landed on the same number — which is exactly what a plateau looks
- * like — would otherwise divide by zero and collapse the whole series onto one line at the top of
- * the frame. `floor` is the smallest span worth drawing, and every caller passes the assay noise,
- * because a band narrower than the assay is a distinction the data cannot support anyway.
+ * A numeric domain never narrower than `floor` (callers pass the assay noise), so a flat series
+ * does not divide by zero.
  */
 export function domainOf(values: readonly number[], floor: number): { min: number; max: number } {
   const min = Math.min(...values);
@@ -62,18 +39,9 @@ const directionMark = (direction: string): string =>
   direction === 'minimize' ? '↓ lower is better' : '↑ higher is better';
 
 /**
- * The running best after each evaluation, with the assay's own noise drawn as a band.
- *
- * **The band is the whole point of the chart.** `assay_noise` exists upstream because a gain smaller
- * than the assay's reproducibility is not a gain — the backend's own module docstring records a live
- * answer graded *fabricated* for calling 1–2% real against a stated ±2%. A line chart without the
- * band invites exactly that reading: every wiggle looks like progress. Drawn as a band around the
- * current best, it says the thing directly — anything inside it is not distinguishable from the best
- * already in hand.
- *
- * The series is a **step**, not a smoothed line, because that is what a running best is: it holds
- * flat until a run beats it, and interpolating between two evaluations would draw values nobody
- * measured.
+ * The running best after each evaluation, with the assay noise drawn as a band around it: gains
+ * inside the band are not distinguishable from the current best. Drawn as a step (it holds until
+ * beaten), never interpolated.
  */
 export function BestSoFarChart({
   series,
@@ -101,8 +69,7 @@ export function BestSoFarChart({
   const yAt = (value: number): number =>
     PAD.top + INNER_H - ((value - min) / (max - min)) * INNER_H;
 
-  // Step-after: hold the current best across to the next evaluation, then jump. `H`/`V` rather than
-  // `L` for exactly that — a diagonal would draw intermediate values that were never measured.
+  // Step-after with `H`/`V`: a diagonal would draw values never measured.
   const path = series
     .map((value, index) =>
       index === 0 ? `M ${xAt(0)} ${yAt(value)}` : `H ${xAt(index)} V ${yAt(value)}`,
@@ -124,10 +91,7 @@ export function BestSoFarChart({
       </title>
       <desc id={descId}>
         {/*
-          "improving from", not "rising from". A running best only rises when the objective is
-          maximized; on a minimize objective — an impurity, a cost — it falls, and the sentence
-          said so backwards while `directionMark` three words earlier said it correctly. A
-          screen-reader user got the one description that contradicted the chart.
+          "improving", not "rising": a minimized objective's best falls.
         */}
         A step chart of the running best {objective} ({directionMark(direction)}), improving from{' '}
         {sig(series[0] ?? best)} to {sig(best)}. The shaded band spans ±{sig(noise)} around the
@@ -243,23 +207,16 @@ export interface ParetoAxis {
 export interface ParetoPoint {
   x: number;
   y: number;
-  /** The run's conditions as text. Rendered as the mark's own `<title>`, so hovering a dot says
-   *  which run it is and joins it to its row in the table beside the chart — a scatter whose points
-   *  cannot be identified is a shape and not a result. */
+  /**
+   * The run's conditions, as the mark's `<title>`, so each point can be matched to its table row.
+   */
   label: string;
 }
 
 /**
- * The Pareto front of a two-objective campaign.
- *
- * **Only two.** Three objectives on two axes means silently dropping one, and a reader cannot see
- * that it happened — so `SuggestionResult` renders a table instead and says why. This component is
- * therefore deliberately not general: it takes exactly two axes, and there is no `objectives[]`
- * parameter to be tempted with.
- *
- * The dashed line joins the front members in order of the x objective. It is not data — no run lies
- * on it — but the shape of a trade-off is the reason anyone draws this, and the `<desc>` says what
- * the line is so it cannot be read as interpolation.
+ * The Pareto front of a two-objective campaign — exactly two axes (with three or more,
+ * `SuggestionResult` shows a table instead). The dashed line joining front members is not data; the
+ * `<desc>` says so.
  */
 export function ParetoScatter({
   x,

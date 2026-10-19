@@ -1,19 +1,9 @@
 /**
- * One knowledge-graph note, opened from the citation that referenced it.
+ * One knowledge-graph note, opened from a citation (`GET /notes/{id}`).
  *
- * This is the surface `GET /notes/{id}` was added for. The service's own words:
- *
- * > a surface that renders `note-…` tokens as citation chips therefore had nothing to resolve
- * > them against, so a citation was a highlight rather than a link.
- *
- * What makes it worth a panel rather than a tooltip is the provenance. A note carries who wrote
- * it, which source it came from, a confidence, and a *validity window* — and the last one is the
- * one a reader cannot infer. The graph excludes an expired note from retrieval but still serves it
- * here, so a citation in an old answer can resolve to a note that no longer holds. Saying that out
- * loud is the difference between a link and a trap.
- *
- * Fetched when the panel opens, not when the chip renders. An answer can carry a dozen citations
- * and a chemist follows one.
+ * A panel rather than a tooltip because of provenance: author, source, confidence and validity
+ * window. An expired note is still served here, so a citation can resolve to a note that no longer
+ * holds; this says so. Fetched when the panel opens, not when the chip renders.
  */
 
 import { useAuth } from '../auth/AuthContext.tsx';
@@ -99,11 +89,8 @@ export function NoteSheet({
 }
 
 /**
- * The note itself — provenance, validity, structure, body and neighbours — without the sheet.
- *
- * Split out when an artefact of kind `link` with `target: "note"` needed to show a note *in the
- * pane*: one rendering of a note, so a citation chip's panel and an artefact's link cannot come to
- * disagree about what a note says or whether it still holds.
+ * The note itself without the sheet. Shared by the citation panel and `link` artefacts targeting a
+ * note, so the two cannot disagree.
  */
 export function NoteBody({
   noteId,
@@ -123,20 +110,9 @@ export function NoteBody({
 }): React.JSX.Element {
   const { auth } = useAuth();
   /**
-   * The note, keyed on which note.
-   *
-   * **`useNewestRead` is gone from this component and the reason is worth keeping.** Following a
-   * neighbour re-targets this panel rather than stacking another, so two reads could be in flight
-   * and the older one could land last: the heading, the provenance and the validity window all
-   * belong to one `noteId`, and showing another note's under it is worse than showing nothing. A
-   * claim token was how that was held. A key holds it by construction — the answer to
-   * `keys.note(a)` cannot be rendered under `keys.note(b)`, because it is not what this hook
-   * returns once `noteId` moves — and it holds the half the token could not: the neighbour a reader
-   * follows and then comes back from is not fetched twice.
-   *
-   * `enabled` (the sheet's `open`) rather than the `loadedFor !== noteId` render-phase call this replaces, which
-   * existed because the panel stays mounted behind a closed sheet and an effect on `open` alone
-   * would never fire again when the note changed underneath it.
+   * The note, keyed on `noteId`, so a stale read for a previous neighbour can never render under
+   * the current heading. `enabled` follows the sheet's `open`, since the panel stays mounted behind
+   * a closed sheet.
    */
   const { data: view, error, isPending } = useApiQuery({ ...noteQuery(noteId, auth), enabled });
 
@@ -149,10 +125,7 @@ export function NoteBody({
         {note && (
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <Badge tone="neutral">{note.type}</Badge>
-            {/* A number without its scale is noise; the label says what 0.72 is a measure of.
-                And `null` is the ordinary case rather than the exception — four of the five
-                producers in the service's `memory/` package score nothing — so the absence is
-                stated instead of being rendered as a number or as a silent gap. */}
+            {/* Confidence is labelled with its scale; `null` is common (most producers score nothing), so the absence is stated. */}
             {note.confidence === null ? (
               <Badge tone="neutral">no confidence recorded</Badge>
             ) : (
@@ -171,9 +144,7 @@ export function NoteBody({
       {error && (
         <EmptyState title="That note could not be read">
           <p>{error.message}</p>
-          {/* The path this panel replaced, kept for when it cannot serve. Not every citation
-              is a note id — a `qm-…` reference names a job whose note may never have been
-              written — and the agent can still say what it knows about one. */}
+          {/* Fallback when the note cannot be served: not every citation is a note (a `qm-…` job may have none), and the agent can still answer. */}
           <Button variant="outline" size="sm" className="mt-3" onClick={() => onAsk(noteId)}>
             Ask the agent about it instead
           </Button>
@@ -207,10 +178,7 @@ export function NoteBody({
           {view.note.compound_smiles && (
             <div>
               <Molecule smiles={view.note.compound_smiles} />
-              {/* The compound a note is about is very often the next thing a chemist wants to
-                  ask about, and copying it out of a panel by hand was the only way. Closing
-                  the sheet is part of the action: the message they are now editing is behind
-                  it. */}
+              {/* Put the note's compound in the composer; closing the sheet is part of the action. */}
               <div className="mt-1 flex justify-end">
                 <UseStructure smiles={view.note.compound_smiles} label onUsed={onUsed} />
               </div>

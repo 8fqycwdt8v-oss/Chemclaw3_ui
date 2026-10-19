@@ -43,7 +43,7 @@ export const BOB: Person = {
 /** `src/auth/devAuth.ts`'s principal — the only person there is in devauth mode. */
 export const DEV_NAME = 'Dev principal';
 
-export type AuthMode = 'dev' | 'msal';
+export type AuthMode = 'dev' | 'bff';
 
 /** One signed-in person: their own browser context, and the page they are looking at. */
 export interface Session {
@@ -90,7 +90,7 @@ export async function authModeOf(uiUrl: string): Promise<AuthMode> {
   if (cachedMode) return cachedMode;
   const res = await fetch(`${uiUrl}/config.js`);
   expect(res.ok, `${uiUrl}/config.js answered ${res.status}`).toBe(true);
-  const match = /"authMode":"(dev|msal)"/.exec(await res.text());
+  const match = /"authMode":"(dev|bff)"/.exec(await res.text());
   expect(match, 'config.js names no authMode').toBeTruthy();
   cachedMode = match![1] as AuthMode;
   return cachedMode;
@@ -99,7 +99,7 @@ export async function authModeOf(uiUrl: string): Promise<AuthMode> {
 /** Skip a scenario (or its rest) that needs two distinct people when the lane has only one. */
 export function requireTwoPeople(mode: AuthMode): void {
   base.skip(
-    mode !== 'msal',
+    mode !== 'bff',
     'needs two distinct people: the cluster is in devauth mode (one dev principal); ' +
       'run make kind-up with CHEMCLAW_KIND_AUTH=oidc-mock',
   );
@@ -114,8 +114,8 @@ export const accountButton = (page: Page): Locator =>
 /**
  * Open a fresh browser context and sign `person` in, ending on whatever page sign-in lands on.
  *
- * In msal mode a signed-out visitor is sent to the authority by the SPA's first `/api` call, so
- * there is nothing to click on the SPA side; the mock tenant's login page offers each preset as
+ * In bff mode a signed-out visitor is sent to the authority by the SPA's first load, so there is
+ * nothing to click on the SPA side; the mock tenant's login page offers each preset as
  * `mock-login-<key>`. In dev mode there is no sign-in and every person is the dev principal.
  */
 export async function signIn(browser: Browser, person: Person): Promise<Session> {
@@ -130,7 +130,7 @@ export async function signIn(browser: Browser, person: Person): Promise<Session>
   page.on('pageerror', (e) => problems.push(`pageerror: ${String(e)}`));
 
   await page.goto('/');
-  if (mode === 'msal') {
+  if (mode === 'bff') {
     const choose = page.getByTestId(`mock-login-${person.key}`);
     await expect(choose, `never reached the mock tenant; ${problems.join(' | ')}`).toBeVisible({
       timeout: 30_000,
@@ -207,26 +207,22 @@ export async function toolsCalled(page: Page): Promise<string[]> {
 }
 
 /**
- * The bearer the page attaches to its next `/api` request, provoked by a reload. `null` in dev
- * mode, where the BFF signs nothing and the service trusts the dev principal.
+ * Who the BFF says is signed in on this page (`GET /auth/session`), or `null` in dev mode, where
+ * there is no session. The page never holds a token, so this — the person's `oid` — is what a
+ * browser-side test can know of the identity; that the service accepted the bearer is shown by the
+ * request it answered.
  */
-export async function bearerOf(page: Page): Promise<string | null> {
-  if ((await authModeOf(lane().uiUrl)) !== 'msal') return null;
-  const request = page.waitForRequest(
-    (r) => r.url().includes('/api/') && !!r.headers().authorization,
-  );
-  await page.reload();
-  const header = (await request).headers().authorization ?? '';
-  expect(header).toMatch(/^Bearer /);
-  return header.slice('Bearer '.length);
+export async function sessionOf(page: Page): Promise<{ id: string; username: string } | null> {
+  if ((await authModeOf(lane().uiUrl)) !== 'bff') return null;
+  const res = await page.request.get('/auth/session');
+  expect(res.ok(), `/auth/session answered ${res.status()}`).toBe(true);
+  const body = (await res.json()) as {
+    authenticated: boolean;
+    account?: { id: string; username: string };
+  };
+  expect(body.authenticated, 'the page is signed in').toBe(true);
+  return body.account ?? null;
 }
-
-/** A JWT's claims, unverified — what the page *sent*. */
-export const claimsOf = (jwt: string): Record<string, unknown> =>
-  JSON.parse(Buffer.from(jwt.split('.')[1] ?? '', 'base64url').toString()) as Record<
-    string,
-    unknown
-  >;
 
 /** The service session id behind the conversation on screen, read off the page's own requests. */
 export async function sessionIdOf(page: Page): Promise<string> {

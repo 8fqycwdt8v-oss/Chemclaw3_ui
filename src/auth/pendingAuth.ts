@@ -16,6 +16,7 @@
 
 import { ApiError } from '../api/errors.ts';
 import { config } from '../env.ts';
+import { startLogin } from './bffAuth.ts';
 import type { AuthProvider } from './types.ts';
 
 export class AuthNotReadyError extends ApiError {
@@ -33,7 +34,9 @@ export const pendingAuth: AuthProvider = {
   },
 
   async login() {
-    /* The real provider owns the redirect; nothing to do before it exists. */
+    // The one thing that needs no provider: when sign-in stopped short (a cookie that was not
+    // kept), this is the person's way to try again.
+    if (config.authMode === 'bff') startLogin();
   },
 
   async logout() {

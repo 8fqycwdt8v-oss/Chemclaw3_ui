@@ -1,36 +1,12 @@
 /**
- * A series, drawn small.
+ * A series, drawn small: the app's one chart primitive (campaign best, scan profile, logD vs pH),
+ * so series never disagree about what a line means.
  *
- * The one chart primitive in this app, and it is deliberately one: a campaign's running best, a
- * scan profile and logD across pH are all "a run of numbers whose shape is the reading", and three
- * chart components would be three chances for them to disagree about what a line means.
- *
- * ## What it will not do
- *
- * It does not label the y axis, because nothing on the wire carries a unit — `tool_result.numbers`
- * and the arrays inside a stored result are bare. Drawing "72 %" beside a number the service never
- * called a percentage is the same class of invention as pairing an unlabelled `[4.76, 1.6]` into
- * "pKa 4.76 ± 1.6". So the endpoint is labelled with the value as written, the caller supplies the
- * key the service filed the series under, and the reader is told how many points there are.
- *
- * ## The marks
- *
- * One series, so there is no legend and no categorical palette — the caption names it. The line is
- * 2px with a soft area under it, the grid is two hairlines rather than a lattice, and the only
- * emphasised point is the last one, because "where did this end up" is the question a series in a
- * chat answer is being asked. Every colour comes from a token, so both themes are one definition.
- *
- * Each point carries a `<title>`, which is the cheapest honest hover layer there is: it needs no
- * script, survives keyboard focus on the group, and says the index and the value rather than
- * inventing a tooltip vocabulary.
- *
- * ## Why the endpoint dot is a `<div>` and not a `<circle>`
- *
- * The plot is stretched to its container with `preserveAspectRatio="none"`, which is what lets one
- * viewBox serve a 300px card and a 900px bleed at a constant height. Strokes survive that with
- * `vector-effect`; a circle does not — it becomes an ellipse, and the wider the card the more
- * obviously. The last point is always at the right edge, so its marker can be positioned in CSS
- * from one number and stay round at every width.
+ * No y-axis unit: the wire carries none, so the endpoint shows the value as written, the caption
+ * the service's key, plus the point count. One series, no legend; tokens for every colour; the last
+ * point is emphasised. Each point has a `<title>` for hover. The plot stretches with
+ * `preserveAspectRatio="none"`, so the endpoint dot is a positioned `<div>` (a `<circle>` would
+ * become an ellipse).
  */
 
 import { cn } from '@/lib/utils';

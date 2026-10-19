@@ -1,23 +1,13 @@
 /**
  * The transcript.
  *
- * While a turn streams we render the accumulated tokens as plain pre-wrap text and only switch to
- * full markdown once the answer settles. Re-parsing markdown on every animation frame is both
- * expensive and visually unstable — an unbalanced code fence makes the whole answer flicker
- * between "code block" and "prose" as the closing backticks arrive.
- *
- * `Bubble` is memoised. `updateAssistant` replaces the conversations map, the conversation and the
- * messages array on every rAF flush, but its `.map()` returns the *same object* for messages it
- * did not touch — so a finished bubble's props are referentially stable and the default shallow
- * compare is enough to keep it out of the per-token render path. Without this, every settled
- * answer in the transcript re-rendered its parsed markdown ~60 times a second.
- *
- * Do NOT give any of these a custom `areEqual`. One forgotten field and a streaming answer freezes
- * mid-sentence — the most expensive regression available here, and the one no unit test catches.
- *
- * Nothing carries `aria-live`. Text that mutates once per frame makes a screen reader queue every
- * mutation and stutter through the answer from the top; `aria-busy` plus the transition
- * announcements in `Announcer` say the same thing once each.
+ * - A streaming answer renders as plain pre-wrap text; markdown is parsed once it settles
+ *   (re-parsing per frame is slow and flickers on unbalanced fences).
+ * - `Bubble` is memoised: `updateAssistant` keeps untouched messages referentially stable, so
+ *   settled bubbles skip the per-token render. Never give these a custom `areEqual` — one forgotten
+ *   field freezes a streaming answer.
+ * - Nothing carries `aria-live` (per-frame mutations make screen readers stutter); `aria-busy` and
+ *   `Announcer` cover it.
  */
 
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -43,40 +33,22 @@ import { EmptyState } from '@/components/chem/Feedback';
 import { cn } from '@/lib/utils';
 
 /**
- * How many stored results are rendered as blocks under one answer.
- *
- * A cap rather than all of them, because each block is a fetch the reader did not ask for. Three
- * covers the shape of nearly every turn — a screen, a lookup and a search — and the rest stay one
- * click away on their own step in the agent's work, which is where a fourth table would have to be
- * looked for anyway.
+ * Stored results rendered as blocks under one answer; each is a fetch the reader did not ask for.
+ * The rest stay on their trace step.
  */
 const MAX_RESULT_BLOCKS = 3;
 
 /**
- * The rail's closing row: the answer as a step of the turn.
- *
- * The service announces every step except the one that produced the text, so a rail without this
- * stops at the last tool call — and a reader looking at where a four-minute turn went cannot see
- * that three of those minutes were the model writing.
- *
- * Words rather than tokens, because nothing on this side knows how the service tokenised anything,
- * and the duration runs from the last step that WAS announced to the turn's end. Absent while the
- * turn streams, and absent for a turn that produced no text at all — a row claiming an answer
- * where the card says "the turn finished without producing any answer text" would be the two
- * halves of one screen disagreeing.
- *
- * Exported for its own test. The arithmetic is the whole of it and it is not visible in the
- * markup — a duration measured from the wrong instant renders as a perfectly plausible number.
+ * The rail's closing row: the answer itself as a step (words, and time from the last announced step
+ * to the end). Absent while streaming and when there is no answer text. Exported for its test.
  */
 export function answerStep(message: AssistantMessage): { words: number; duration?: string } | null {
   if (message.status === 'streaming') return null;
   const text = message.finalText || message.streamedText;
   if (!text.trim()) return null;
   const words = text.trim().split(/\s+/).filter(Boolean).length;
-  // The last instant the trace knows about, which is NOT the last row's `at`: a `tool_call` row is
-  // stamped when the call was *issued* and its result closes that same row in place, so measuring
-  // from `at` charges the whole of the last tool's runtime to the answer — and the rail's rows
-  // then sum to more than the turn took.
+  // The last instant the trace knows of: a `tool_call` row's result closes it in place, so its `at`
+  // is the issue time, not the end.
   const lastStep = message.trace.reduce(
     (latest, entry) =>
       Math.max(latest, entry.at, entry.toolCall?.endedAt ?? 0, entry.job?.endedAt ?? 0),
@@ -90,16 +62,8 @@ export function answerStep(message: AssistantMessage): { words: number; duration
 }
 
 /**
- * The turn's results, as data, under the answer.
- *
- * A call qualifies when its result is *reachable*, and there are two ways to be reachable: the
- * service stored it (a `resultRef` to fetch) or it rode along on the event (`resultInline`). They
- * are independent — the inline cap and the store cap are different settings, and a deployment with
- * the store switched off still inlines its small results — so testing only the ref dropped every
- * block in exactly the deployment where no fetch was needed at all.
- *
- * A session id is still required for the fetching half, because that route is session-scoped: a
- * transcript rehydrated from the server has the calls and nothing to fetch against.
+ * The turn's results as data under the answer. A call qualifies if its result is stored
+ * (`resultRef`, needs a session id to fetch) or inline (`resultInline`); the two are independent.
  */
 const ResultBlocks = memo(function ResultBlocks({
   trace,
@@ -149,12 +113,8 @@ const ResultBlocks = memo(function ResultBlocks({
 });
 
 /**
- * The artefacts this turn wrote, one card each, after the result blocks.
- *
- * One per artefact rather than one per frame: a turn that created a table and then revised it
- * twice is one table in the pane, and three cards for it would read as three tables. The *last*
- * frame wins, because the card says which revision this answer left it at. Memoised on the trace
- * for `ResultBlocks`'s reason — the bubble re-renders per trace mutation, not per token.
+ * One card per artefact this turn wrote (the last frame wins, giving the final revision). Memoised
+ * on the trace.
  */
 const ExhibitCards = memo(function ExhibitCards({
   trace,
@@ -184,17 +144,8 @@ const ExhibitCards = memo(function ExhibitCards({
 });
 
 /**
- * Put the answer on the clipboard, and say whether it landed.
- *
- * The markdown the service sent rather than the rendered DOM: that is what a chemist pastes into an
- * ELN, a ticket or a message, and it is the only form in which the citations survive as text.
- * Before this, `navigator.clipboard` appeared exactly once in the whole app — on the crash screen —
- * so getting an answer out meant selecting and dragging it, which takes the citation chips, the
- * result tables and the figure marks with it.
- *
- * A refusal is shown rather than reported as an error, the same way `CrashScreen` handles it: a
- * browser can decline the clipboard (no permission, an insecure origin, an old WebView) and the
- * reader still has to be able to get the text out.
+ * Copy the answer's markdown (what goes into an ELN, with citations as text). A browser refusal is
+ * shown, not thrown.
  */
 function CopyAnswer({ text }: { text: string }): React.JSX.Element {
   const [state, setState] = useState<'idle' | 'copied' | 'failed'>('idle');
@@ -241,33 +192,23 @@ const AssistantBubble = memo(function AssistantBubble({
   /** The question to send again, on an answer the service lost (`retryQuestionOf`). */
   retryQuestion?: string;
 }): React.JSX.Element {
-  // finalText wins outright. answer.text is the full concatenation of every token, so anything
-  // that combined the two would render the entire answer twice.
-  //
-  // `||` and not `??`, which falls back only on null/undefined. A terminal `answer` carrying
-  // `text: ''` — a shape the service really sends — then replaced a settled answer with the empty
-  // string and the ternary below rendered nothing whatsoever, erasing tokens the reader had just
-  // watched arrive. Falling back to them is not the forbidden combination: it never concatenates.
+  // `finalText` wins outright (never concatenated with streamed text). `||`, not `??`: an `answer`
+  // with `text: ''` must not erase the streamed tokens.
   const body = message.finalText || message.streamedText;
   const streaming = message.status === 'streaming';
 
   const question = message.trace.findLast?.((e) => e.kind === 'question')?.question;
   const approval = message.trace.findLast?.((e) => e.kind === 'approval_request')?.approval;
 
-  // Recomputed only when the trace grows, so the answer is not re-parsed on every token of the
-  // *next* turn. Empty on a turn whose tools returned no numbers, which is what switches the
-  // grounding overlay off rather than flagging every figure in it.
+  // Recomputed only when the trace changes. Empty when tools returned no numbers, which turns the
+  // grounding overlay off.
   const figures = useMemo(() => returnedFigures(message.trace), [message.trace]);
 
   return (
     <div className="flex flex-col" aria-busy={streaming || undefined}>
-      {/* Everything that qualifies the answer, ranked: a bar for what stops the reader acting on
-          it, a chip for what they consult. Above the text, because a qualifier placed after it is
-          read once the reader has already believed it. */}
+      {/* Qualifiers above the text, ranked: a bar for what stops the reader acting, a chip for what they consult. */}
       <div className="max-w-prose">
-        {/* Somebody else's turn, followed live (Chemclaw3_ui #130). Said, because a watcher never
-            sees the question — the service stores the exchange whole, at the turn's end — and an
-            answer arriving under nobody's question reads as the agent volunteering it. */}
+        {/* Somebody else's turn, followed live: say so, since a watcher never sees the question. */}
         {message.watched && (
           <p className="mb-1.5 text-2xs text-ink-muted">
             {streaming
@@ -308,11 +249,8 @@ const AssistantBubble = memo(function AssistantBubble({
             </ErrorBoundary>
           )
         ) : (
-          // A settled turn with nothing in either field says so. An empty card is
-          // indistinguishable from a service that answered nothing — and from this component
-          // having lost the answer, which is exactly what it used to do. The question and approval
-          // cards are content in their own right, so a turn that ended in one is not "no answer".
-          // While it streams, the activity row above is the whole of what there is to say.
+          // A settled turn with no text says so, so it is not mistaken for a lost answer. Question
+          // and approval cards count as content.
           message.status === 'done' &&
           !question &&
           !approval && (
@@ -323,8 +261,7 @@ const AssistantBubble = memo(function AssistantBubble({
         )}
       </div>
 
-      {/* What the tools returned, as the tables they are, at the same depth as the sentence that
-          refers to them. A wide one takes the card's full width; the prose above stays measured. */}
+      {/* Tool results as tables; a wide one takes the card's full width. */}
       <ResultBlocks trace={message.trace} sessionId={sessionId} />
       {/* The artefacts this answer wrote, after the data it was written from. */}
       <ExhibitCards trace={message.trace} sessionId={sessionId} />
@@ -335,8 +272,8 @@ const AssistantBubble = memo(function AssistantBubble({
 
         {message.status === 'aborted' &&
           (message.withdrawn ? (
-            // A message taken out of a shared conversation's line never ran, so "stopped before
-            // the answer was complete" would describe an answer that does not exist.
+            // A withdrawn message never ran, so "stopped before the answer was complete" would be
+            // wrong.
             <p className="mt-2 text-xs text-ink-muted">{message.withdrawn}</p>
           ) : (
             <p className="mt-2 text-xs text-ink-muted">Stopped before the answer was complete.</p>
@@ -347,11 +284,7 @@ const AssistantBubble = memo(function AssistantBubble({
           // and that one already announces — two alerts with identical text read it out twice.
           <div className="mt-2 rounded-lg border border-danger/40 bg-danger-soft px-3 py-2">
             <p className="text-sm text-danger-ink">{message.error.message}</p>
-            {/* **The one place this app re-sends a question for the chemist, and why it may.** An
-                interrupted turn died with the service process running it: nothing will answer it,
-                nothing ran twice, and the question is already in the conversation — so sending it
-                again is the whole remedy, offered as a press rather than a poll. It goes through the
-                composer like any other send, so a turn already running still locks it out. */}
+            {/* Retry for an interrupted turn: nothing will answer it and nothing ran twice, so resending is the remedy. It goes through the composer like any send. */}
             {message.error.kind === 'turn_interrupted' && retryQuestion && (
               <Button
                 variant="outline"
@@ -380,11 +313,7 @@ const AssistantBubble = memo(function AssistantBubble({
         )}
       </div>
 
-      {/* No `AnswerFooter` here. It carried the confidence, the unsupported claims and the method
-          line BELOW the answer, and `StatusStrip` above now carries all three — ranked by what the
-          reader has to do about them, and placed before the text because a qualifier read after
-          the answer is read once the reader has already believed it. Rendering both would print
-          one turn's confidence twice. */}
+      {/* `StatusStrip` above carries confidence, unsupported claims and methods. */}
       <TracePanel
         trace={message.trace}
         sessionId={sessionId}
@@ -415,17 +344,10 @@ const Bubble = memo(function Bubble({
   const streaming = message.role === 'assistant' && message.status === 'streaming';
   return (
     <div
-      // The handle "Load earlier" anchors its scroll restore on. A `data-` attribute rather than a
-      // ref map: the restore needs exactly one element, chosen after the render that inserted the
-      // others, and threading sixty refs to find it would be a lot of bookkeeping for one query.
+      // The anchor "Load earlier" restores scroll against.
       data-message-id={message.id}
-      // Skip layout and paint for bubbles scrolled out of view. `auto` on the intrinsic size makes
-      // the browser remember each one's real height, so the scrollbar does not jump as they
-      // realise — a fixed guess would also fight the trace panel, whose expanded height is many
-      // times its collapsed one.
-      //
-      // The streaming bubble is exempt: the pin below reads `scrollHeight` every frame, and
-      // skipping the layout of the element that is actually growing would make it wrong.
+      // Skip layout and paint off-screen (`content-visibility: auto` with remembered intrinsic
+      // size). Not for the streaming bubble, whose `scrollHeight` the pin reads every frame.
       style={
         streaming ? undefined : { contentVisibility: 'auto', containIntrinsicSize: 'auto 220px' }
       }
@@ -441,20 +363,10 @@ const Bubble = memo(function Bubble({
 });
 
 /**
- * The question an interrupted answer would send again, or `undefined` for every other message.
- *
- * Read off the message before it rather than stored on the answer: the question is right there in
- * the transcript, on a live turn and on a reloaded one alike, and a copy on the answer would be a
- * second record of what was asked. Only for an answer the service lost (`turn_interrupted`) —
- * every other failure keeps its own remedy. Exported for its own test.
- *
- * **Only for the question's own sender.** In a shared conversation the service runs a message as
- * whoever sends it, so a member pressing Retry on somebody else's question would re-ask it under
- * their own name, roles and memories — another person's words, sent as theirs. Everyone else sees
- * the interrupted marker and no Retry. Whose a question is follows `senderOf`: a question this
- * browser sent live carries no author and is the reader's by construction; one read back from the
- * service is the reader's when its author is the reader. Outside a shared conversation every
- * question is the reader's.
+ * The question an interrupted answer would resend, read from the message before it, or `undefined`.
+ * Only for `turn_interrupted`, and only for the question's own sender: in a shared conversation
+ * Retry would otherwise send someone else's words as the reader's (see `senderOf`). Exported for
+ * its test.
  */
 export function retryQuestionOf(
   messages: readonly ChatMessage[],
@@ -471,16 +383,9 @@ export function retryQuestionOf(
 }
 
 /**
- * Who a user bubble should say sent it, or `undefined` for no label at all.
- *
- * Only in a conversation that has more than one person in it — one this reader was let into, or
- * one where somebody other than the reader has spoken — because everywhere else every question is
- * the reader's own and a "You" on each would be noise. Inside one, every user bubble is labelled,
- * the reader's own included: the service runs each message as its sender (Chemclaw3 #483), so
- * whose question it is decides whose roles and memories answered it.
- *
- * A message this browser sent live carries no author and is the reader's by construction.
- * Exported for its own test.
+ * Who a user bubble says sent it, or `undefined`. Only in a conversation with more than one person,
+ * where every user bubble is labelled (the reader's too), since the sender's roles answer it. A
+ * message sent live is the reader's. Exported for its test.
  */
 export function senderOf(
   message: ChatMessage,
@@ -518,20 +423,12 @@ function BubbleBody({
           </p>
         )}
         <div className="max-w-[min(85%,42rem)] rounded-2xl rounded-br-md bg-brand px-4 py-2.5 text-brand-fg shadow-xs">
-          {/* Plain text, with its structures drawable — see `StructureText`. Not markdown: a
-              chemist typed this, and a parser would turn their asterisks into emphasis in the
-              middle of a compound name. */}
+          {/* Plain text with drawable structures (`StructureText`), not markdown: asterisks in a compound name are not emphasis. */}
           <p className="text-base whitespace-pre-wrap">
             <StructureText text={message.text} />
           </p>
         </div>
-        {/* **Put the question back in the composer, and stop.** The failure path was better served
-            than the success path: a turn that *failed* returns its text to the draft
-            (`sendMessage`), while a turn that succeeded and answered the wrong question left the
-            chemist retyping it — with a SMILES in it, which is where a transcription error enters.
-            Deliberately not a "regenerate": `sendMessage` records that "nothing in this app has ever
-            re-posted a turn on the user's behalf", and that line is worth keeping. This refills and
-            focuses; the human presses Send, having seen what they are sending. */}
+        {/* Put the question back in the composer and stop; the human presses Send. Never an automatic regenerate. */}
         <Button
           variant="ghost"
           size="xs"
@@ -560,27 +457,20 @@ function BubbleBody({
   );
 }
 
-/**
- * Takes an id, not a conversation.
- *
- * `updateAssistant` replaces the conversation object on every animation frame, so a parent that
- * selects the whole object re-renders at the same rate and drags its siblings — the header, the
- * job feed, the composer — with it. Subscribing to the two fields this actually needs keeps that
- * churn inside the transcript, where `memo(Bubble)` already absorbs it.
- */
-/** How many messages to render before "Load earlier". A long chemistry transcript is otherwise
- *  hundreds of markdown trees the reader is not looking at. */
+/** How many messages render before "Load earlier". */
 const WINDOW_STEP = 60;
 
+/**
+ * Takes an id, not a conversation: the conversation object is replaced every animation frame, so
+ * subscribing to the two fields needed keeps that churn inside the transcript.
+ */
 export function MessageList({ conversationId }: { conversationId: string }): React.JSX.Element {
   const all = useChatStore((s) => s.conversations[conversationId]?.messages);
   const sessionId = useChatStore((s) => s.conversations[conversationId]?.sessionId ?? null);
   const contextLost = useChatStore((s) => s.conversations[conversationId]?.contextLost ?? false);
   const member = useChatStore((s) => Boolean(s.conversations[conversationId]?.membership));
   const me = useChatStore((s) => s.viewer);
-  // More than one person here: this reader was let in, or somebody else has spoken. Derived from
-  // the transcript rather than read from the roster, so opening a conversation costs no extra
-  // request — the roster is read when somebody opens the people panel.
+  // More than one person here, derived from the transcript so opening costs no roster request.
   const shared = useMemo(
     () =>
       member ||
@@ -588,10 +478,8 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
     [all, member, me],
   );
 
-  // Selecting a subject in the rail narrows the transcript to the turns that mention it. Read from
-  // THIS conversation's index, named by the same route parameter the rail is: a global `selected`
-  // matched one conversation's message ids against another's mentions, matched nothing, and left
-  // an empty transcript over a conversation full of turns.
+  // The rail's selected subject narrows this conversation's transcript, read from this
+  // conversation's index.
   const selectedEntity = useEntityStore((s) => {
     const slice = entitiesOf(s, conversationId);
     return slice.selected ? slice.entities[slice.selected] : undefined;
@@ -612,7 +500,7 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
   const endRef = useRef<HTMLDivElement | null>(null);
   const pinnedRef = useRef(true);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
-  /** Set by "Load earlier": which bubble the reader was looking at, and where it was on screen. */
+  /** Set by "Load earlier": which bubble the reader was looking at and where. */
   const anchorRef = useRef<{ id: string; top: number } | null>(null);
 
   const [windowSize, setWindowSize] = useState(WINDOW_STEP);
@@ -631,18 +519,8 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
     // Synchronously, before React can re-render: the pin effect below would otherwise still see a
     // stale `true` and slam the reader back to the bottom of a list they just expanded upwards.
     pinnedRef.current = false;
-    // Anchor on a real element rather than on `scrollHeight - scrollTop`.
-    //
-    // The arithmetic version is exact only if `scrollHeight` is truthful at the moment the layout
-    // effect runs, and with `content-visibility: auto` it is not: sixty freshly prepended bubbles
-    // report `contain-intrinsic-size`'s *estimate* until the browser gets round to laying them out,
-    // and every one that then resolves to a different height moves everything below it. Measured on
-    // a 663px-tall mobile viewport, that left the reader's message 380px from where it had been —
-    // still on screen, but most of a screen away from where they were looking.
-    //
-    // The first currently-shown bubble is on screen, so it is fully laid out and its position is
-    // real. Recording where it is now, and putting it back there afterwards, is immune to every
-    // estimate above it being wrong.
+    // Anchor on a real on-screen element rather than `scrollHeight` arithmetic: prepended bubbles
+    // report estimated heights under `content-visibility`.
     const first = shown[0];
     const node = first ? el?.querySelector(`[data-message-id="${CSS.escape(first.id)}"]`) : null;
     anchorRef.current =
@@ -650,9 +528,8 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
     setWindowSize((n) => n + WINDOW_STEP);
   };
 
-  // Declared ABOVE the pin effect on purpose — layout effects run in source order, and this one
-  // has to restore the offset before anything else touches scrollTop. Prepending content leaves
-  // scrollTop numerically unchanged, which throws the reader forward by the inserted height.
+  // Declared above the pin effect: layout effects run in order, and this must restore the offset
+  // first.
   useLayoutEffect(() => {
     const el = scrollerRef.current;
     const anchor = anchorRef.current;
@@ -665,9 +542,8 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
     el.scrollTop += node.getBoundingClientRect().top - anchor.top;
   }, [shown]);
 
-  // Keep the view pinned to the bottom while streaming, but stop fighting the user the moment they
-  // scroll up to read something earlier. An IntersectionObserver on the sentinel rather than a
-  // scroll listener: no per-event geometry reads on the streaming path.
+  // Pin to the bottom while streaming, until the user scrolls up. An IntersectionObserver avoids
+  // per-scroll geometry reads.
   useEffect(() => {
     const sentinel = endRef.current;
     const root = scrollerRef.current;
@@ -699,9 +575,7 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
     >
       <h2 className="sr-only-live">Conversation</h2>
 
-      {/* The card is allowed the wide measure; the prose inside it is held to the reading one.
-            That split is what gives a charge table or a grid of structures somewhere to be —
-            below `wide` the two collapse and the transcript is exactly as it was. */}
+      {/* The card may be wide; the prose inside keeps the reading measure. */}
       <div className="mx-auto flex w-full max-w-wide flex-col gap-5">
         {contextLost && (
           <div role="alert" className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2.5">
@@ -722,10 +596,7 @@ export function MessageList({ conversationId }: { conversationId: string }): Rea
         )}
 
         {total === 0 &&
-          // Two different nothings. A conversation with no turns is a new conversation; a
-          // conversation whose turns are all filtered out is a *filter* result, and saying
-          // "ask about a reaction" over a transcript full of turns is the failure the
-          // per-conversation index was introduced to stop.
+          // A new conversation and a filter that matches nothing get different empty states.
           (selectedEntity ? (
             <EmptyState icon={<FlaskConical className="size-5" />} title="Nothing about that yet">
               No turn in this conversation mentions it. Clear the filter in the rail to see the

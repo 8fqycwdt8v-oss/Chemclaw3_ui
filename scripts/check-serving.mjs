@@ -16,7 +16,7 @@
  * 2. `/config.js` renders `__CHEMCLAW_CONFIG__` — one image, any tenant. The config is rendered
  *    from the environment at request time, so an image that baked it in would pass every test in
  *    `tests/` and serve the wrong tenant's settings.
- * 3. SPA fallback on a client-side route — so a deep link, a `/c/:id` or the MSAL redirect URI
+ * 3. SPA fallback on a client-side route — so a deep link, a `/c/:id`
  *    resolves instead of 404-ing at the static server.
  * 4. `/api/metrics` is 404 — the proxy whitelist. This is the only thing standing between the
  *    browser and every backend route the BFF could otherwise forward, and it is a property of the
@@ -78,9 +78,9 @@ if (!up) {
 
 /* ── 3. SPA fallback ──────────────────────────────────────────────────────── */
 {
-  const res = await fetch(`${base}/auth/callback`);
-  if (res.status === 200) ok('SPA fallback serves /auth/callback');
-  else bad('SPA fallback', `GET /auth/callback answered ${res.status}, expected 200`);
+  const res = await fetch(`${base}/c/deep-link-check`);
+  if (res.status === 200) ok('SPA fallback serves a client-side route');
+  else bad('SPA fallback', `GET /c/deep-link-check answered ${res.status}, expected 200`);
 }
 
 /* ── 4. the proxy whitelist refuses what the UI never calls ───────────────── */

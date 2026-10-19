@@ -1,52 +1,20 @@
 /**
- * An `html` artefact (wave 3): agent-written HTML, shown only in the sandbox origin's frame — with
- * its own script running by default (hardening, owner decision 2026-10-03) and a per-view
- * **Disable scripts**, or, under `HTML_SCRIPTS_DEFAULT=off`, with none until **Run scripts**.
+ * An `html` artefact: agent-written HTML shown only in the sandbox origin's frame, with its scripts
+ * running by default (per-view **Disable scripts**) or, under `HTML_SCRIPTS_DEFAULT=off`, only
+ * after **Run scripts**. Lazily loaded.
  *
- * Lazy (`ExhibitPane` imports it with `React.lazy`), because almost no conversation holds one.
+ * The outer frame is `sandbox="allow-scripts"` only (opaque origin; no popups, top navigation,
+ * forms or modals), loaded from `config.sandboxOrigin` under `connect-src 'none'`; the shell nests
+ * the artefact in a `srcdoc` frame (`sandbox=""` or `allow-scripts` behind `RTC_PRELUDE`). Scripts
+ * can still use WebRTC and the clipboard — an accepted risk the view always states. Navigation is
+ * bounded by the app's `frame-src` and the shell's `default-src 'none'`. The script choice is never
+ * persisted.
  *
- * ## The walls, and what they do not hold
- *
- * The outer frame is `sandbox="allow-scripts"` and nothing else — no `allow-same-origin`, so its
- * document has an opaque origin and cannot read this app's cookies, storage or DOM; no
- * `allow-popups`, `allow-top-navigation`, `allow-forms` or `allow-modals`. It is loaded from a
- * **different origin** (`config.sandboxOrigin`, the BFF's second listener) whose shell page's CSP has
- * `connect-src 'none'`. The shell puts the artefact in a nested `srcdoc` frame: `sandbox=""` (no
- * script at all) when scripts are off, `sandbox="allow-scripts"` behind a prelude when they are on.
- *
- * **"No network" is not a claim this view makes.** CSP does not govern WebRTC: measured under this
- * exact shell, a scripted page sent UDP to an arbitrary host through a STUN candidate, carrying
- * data it read from the page, and Chromium ignores `webrtc 'block'`. A scripted page can also write
- * the clipboard after one click. The prelude removes the WebRTC constructors from the page's realm;
- * that is defence in depth and bypassable (a nested `srcdoc` realm is untouched). Running scripts by
- * default is an **owner-accepted residual risk** (docs/production-readiness.md), narrowed for a
- * deployment by browser policy and removed by `HTML_SCRIPTS_DEFAULT=off`. So the view says, always
- * and briefly, that scripts run isolated and what they can still do, with a link to the README.
- *
- * The per-view choice is never persisted: it is held against one revision of one artefact in this
- * mount, so a new revision, another artefact or a reload is back to the deployment's default.
- *
- * **Navigation is bounded, by `frame-src`.** The outer frame may only be navigated to an origin the
- * app's own CSP lists in `frame-src` — the sandbox origin, plus the Entra authority in MSAL mode —
- * so a page cannot carry data off by navigating its frame to another site (measured: self-navigation,
- * meta refresh, anchor clicks and `data:`/`blob:` URLs are all refused). The nested content frame is
- * bounded by the shell's `default-src 'none'`, which lists no frame source at all.
- *
- * ## When it is shown as source instead
- *
- * Never inline. Escaped source, with a notice, when this deployment has no sandbox origin (or names
- * the app's own), and when the page is open at an address other than `APP_ORIGIN` — the shell takes
- * content only from that origin, so the frame would stay blank; the notice names both.
- *
- * ## The handshake
- *
- * The shell posts `{type: "ready"}` once its listener is armed, and the HTML is posted in answer to
- * **every** `ready` that passes the checks, never before one — a post on `load` relied on the shell's
- * inline script having run by then, and answering only the first `ready` left a shell that reloaded
- * blank for good. Target `'*'`, because an opaque origin has no name to target. `ready` and heights
- * are accepted only from this frame's window with the opaque origin; `heightMessage` reads nothing
- * else and clamps. No `ready` within `SANDBOX_READY_TIMEOUT_MS` and the frame is replaced by the
- * source, with a notice that the sandbox did not answer, rather than left as an unexplained blank.
+ * Shown as escaped source with a notice when there is no sandbox origin, or the page is not at
+ * `APP_ORIGIN`. Handshake: the HTML is posted (target `'*'`, opaque origin) in answer to every
+ * `ready` from this frame; `ready` and heights are accepted only from this frame's window with an
+ * opaque origin. No `ready` within `SANDBOX_READY_TIMEOUT_MS` shows the source with "The sandbox
+ * did not answer".
  */
 
 import { useCallback, useId, useLayoutEffect, useRef, useState } from 'react';
@@ -68,12 +36,8 @@ import { Button } from '@/components/ui/button';
 export const NO_SANDBOX_NOTICE = 'HTML preview needs a separate sandbox origin';
 
 /**
- * What a running script can still do from inside the sandbox — the contract's residual risks.
- *
- * Not "navigate its frame": the content is a nested `srcdoc` frame under the shell's
- * `default-src 'none'`, which lists no frame source, and it cannot reach its parent's location.
- * What it *can* do that a reader must be told before typing is send what is typed into it out over
- * WebRTC — a password form drawn in the pane looks exactly like one.
+ * What a running script can still do — told before the reader types anything into it: send it out
+ * over WebRTC.
  */
 export const SCRIPT_RISKS =
   'They can still send data over the network through WebRTC, which no content policy blocks — ' +
@@ -104,8 +68,7 @@ function SandboxFrame({
   const frame = useRef<HTMLIFrameElement | null>(null);
   const [height, setHeight] = useState(initialHeight);
 
-  // A layout effect, so the listener is attached before the browser can paint — and so before the
-  // frame can load and say `ready` — rather than after, where a fast shell's `ready` was missed.
+  // A layout effect, so the listener exists before the frame can say `ready`.
   useLayoutEffect(() => {
     let answered = false;
     const silent = window.setTimeout(() => {
@@ -117,10 +80,7 @@ function SandboxFrame({
       const target = frame.current?.contentWindow;
       if (!target || event.source !== target || event.origin !== 'null') return;
       if (readyMessage(event.data)) {
-        // On *every* ready that passes the checks: a shell that reloaded (a navigation the app's
-        // frame-src kept on the sandbox origin, a browser restoring the frame) is a fresh document
-        // waiting for its content, and answering only the first left it blank for good. The shell
-        // takes one document per load, so a repeat cannot stack anything.
+        // Answer every `ready`: a reloaded shell is a fresh document waiting for content.
         answered = true;
         window.clearTimeout(silent);
         target.postMessage(

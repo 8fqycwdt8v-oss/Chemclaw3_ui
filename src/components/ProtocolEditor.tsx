@@ -1,29 +1,11 @@
 /**
- * Correcting a protocol the agent drafted.
+ * Correcting a protocol the agent drafted — the one place a human writes a document.
  *
- * This is the only place in the app where a human *writes* a document rather than deciding one, and
- * the shape of it follows from that. Three rules, each of which this repository already applies to
- * its other irreversible, attributable writes.
- *
- * **A save is a new revision, never an overwrite.** The document posted carries the
- * `parent_revision` it was edited against, so a save built on a revision that is no longer the head
- * is refused by the service rather than silently rebased. That 409 is the case worth getting right
- * and is the reason the state machine below has a `conflict` branch of its own: two chemists
- * editing one design is the ordinary case in a lab, and a save that quietly discarded the other
- * one's work while reporting success is the worst outcome this screen can produce. The handling
- * mirrors `decidePlan`'s `plan_changed` exactly — say what happened, offer the reload, and never
- * re-post the same edit against the new parent, which would be writing against a document nobody
- * read.
- *
- * **A change note is required before Save is live.** Same rule as the review queue's rejection
- * reason, for the same reason: a revision that moved four setpoints and says nothing about why
- * tells the next reader — and the agent, which reads this history — nothing at all.
- *
- * **Only the fields a chemist actually changes are editable.** Setpoints, charges, step text,
- * factor levels, per-arm overrides and analytics. Not the request (that is a record of what was
- * asked, and editing it would rewrite history), not the evidence (it is what the design rests on,
- * not part of it), not the plate layout (it is derived from the arms, and hand-editing a well
- * assignment would put the map and the arms out of step with nothing to notice).
+ * - A save is a new revision against `parent_revision`; a stale base gets a 409 (`conflict` state):
+ *   say so, offer a reload, never re-post the same edit against the new head.
+ * - A change note is required before Save.
+ * - Only what a chemist changes is editable (setpoints, charges, steps, factor levels, arm
+ *   overrides, analytics) — not the request, evidence or plate layout.
  */
 
 import { useEffect, useState } from 'react';
@@ -44,39 +26,16 @@ import { Sheet, SheetContent } from '@/components/ui/sheet';
 import { ConfirmDialog } from '@/components/chem/ConfirmDialog';
 
 /**
- * A deep copy of the document to edit. The wire shape is plain JSON, so this is lossless.
- *
- * **Kept, deliberately, now that the edits go through `immer`.** `produce` never mutates its base,
- * so the copy is not there to protect the draft — it is there to keep immer's auto-freeze off the
- * object the *document page* still holds and renders. Measured: `produce(base, d => {…})` leaves
- * `base` itself unfrozen but deep-freezes every sub-object structurally shared into the result, so
- * seeding straight from `revision.design` would freeze most of the caller's own state on the first
- * keystroke. Nothing mutates it today, which is exactly why that would be found in production
- * rather than here.
+ * A deep copy of the document to edit (plain JSON, lossless). Kept with immer: seeding straight
+ * from the page's object would let auto-freeze freeze the page's own state.
  */
 const clone = (design: ExperimentDesign): ExperimentDesign =>
   JSON.parse(JSON.stringify(design)) as ExperimentDesign;
 
 /**
- * A numeric field that keeps what is being typed.
- *
- * The obvious form — a controlled `type="number"` driven straight off the document — deletes the
- * value halfway through `1.5`: after `1.` the input's own `value` reads empty, the parse yields
- * `null`, and the re-render clears what the chemist was typing. So the text is local and the
- * document is only updated when the text parses. A half-typed `-` or `1.` leaves the last valid
- * value in place rather than a `null` nobody asked for.
- *
- * Empty is a real value here and means *unset*, which is not zero: an unstated pressure is not one
- * bar and an unstated pH is not neutral.
- */
-/**
- * Whether the box still says this value — the question `NumberField` resynchronises on.
- *
- * Not `String(value) === text`: `05`, `1.50` and `1e5` all *say* their value while differing from
- * its canonical spelling, and rewriting them is what threw a chemist's caret to the end of the box
- * mid-edit. Text that does not parse at all is somebody part-way through typing (`1e`, `-`, `1.`)
- * and is never overwritten; it is only when the box parses to a **different** number, or sits empty
- * against a value that is not null, that the display is stale.
+ * Whether the box still says this value: compared numerically, so `05`, `1.50` and `1e5` are left
+ * as typed; unparseable in-progress text (`1e`, `-`, `1.`) is never overwritten. Only a different
+ * number, or empty against a non-null value, is stale.
  */
 function textStillMeans(text: string, value: number | null): boolean {
   const trimmed = text.trim();
@@ -86,6 +45,10 @@ function textStillMeans(text: string, value: number | null): boolean {
   return parsed === value;
 }
 
+/**
+ * A numeric field that keeps what is being typed: the text is local and the document updates only
+ * when it parses, so `1.` mid-typing is not cleared. Empty means unset, not zero.
+ */
 function NumberField({
   label,
   value,
@@ -98,22 +61,8 @@ function NumberField({
   onChange: (value: number | null) => void;
 }): React.JSX.Element {
   const [text, setText] = useState(value === null ? '' : String(value));
-  // **The box is a draft of the field, not a second source of truth for it.** `text` was seeded
-  // once and never resynchronised, and the arm `<li>` key is stable, so "Clear override" set the
-  // arm's setpoints to null while the input went on showing the old number: the form displayed
-  // 60 °C for an arm that would be saved inheriting the base's 80 °C, and the Save posted the null.
-  //
-  // **The first version keyed that on `value` changing and did disturb mid-typing**, contrary to
-  // its own comment: `text` and `value` agree as *numbers* while a chemist types and not as
-  // strings, so every keystroke that moved the parsed value rewrote the box with `String(value)`.
-  // Measured through the real editor — `1` `e` `5` became `100000`, `0` `5` became `5`, and
-  // inserting a `2` into `1.50` gave back `12.5` with the trailing zero gone and the caret thrown
-  // to the end. Nothing was ever *saved* wrong; what was lost is the text the chemist was typing.
-  //
-  // So the question is not "did the value change" but "does this box still say the value" —
-  // `textStillMeans`. Mid-typing text that does not parse (`1e`, `-`, `1.`) is the chemist's and is
-  // left alone; a box that parses to something else, or is empty against a value that is not, is
-  // stale and is rewritten. That covers the case this was written for and no other.
+  // The box is a draft of the field: resync only when it no longer says the value
+  // (`textStillMeans`), e.g. after "Clear override", never mid-typing.
   if (!textStillMeans(text, value)) {
     setText(value === null ? '' : String(value));
   }
@@ -192,12 +141,8 @@ type State =
   | { status: 'failed'; message: string };
 
 /**
- * Has anything actually been typed?
- *
- * Compared as JSON against the revision this form was seeded from, rather than tracked with a flag
- * per field: a chemist who changes 60 °C to 70 and back has not edited the protocol, and a dirty
- * flag would still stop them closing. One `JSON.stringify` of a document this size is microseconds
- * and it runs on a close attempt, not on a keystroke.
+ * Whether anything was actually edited: a JSON compare against the seed revision, so changing a
+ * value and back is not dirty. Runs on close attempts only.
  */
 const isDirty = (draft: ExperimentDesign, original: ExperimentDesign, note: string): boolean =>
   note.trim() !== '' || JSON.stringify(draft) !== JSON.stringify(original);
@@ -212,12 +157,8 @@ export function ProtocolEditor({
 }: {
   designId: string;
   /**
-   * The read being edited — `GET /protocols/{id}`'s own flat shape. Its `revision` NUMBER is the
-   * `parent_revision` the save posts.
-   *
-   * `DesignOut` rather than `DesignRevision`: the service does not return a nested revision object
-   * here, and typing it as one is how `revision.design` came to be `undefined` on the document
-   * page under a green suite.
+   * The read being edited (`DesignOut`, flat); its `revision` number is the `parent_revision` the
+   * save posts.
    */
   revision: DesignOut;
   open: boolean;
@@ -232,41 +173,23 @@ export function ProtocolEditor({
   const [draft, setDraft] = useState<ExperimentDesign>(() => clone(revision.design));
   const [note, setNote] = useState('');
   const [state, setState] = useState<State>({ status: 'editing' });
-  /** Set when a close was refused because there were edits to lose. Cleared by either answer. */
+  /** Set when a close was refused because of unsaved edits; cleared by either answer. */
   const [confirmingDiscard, setConfirmingDiscard] = useState(false);
   const { auth } = useAuth();
 
   const dirty = (): boolean => isDirty(draft, revision.design, note);
 
   /**
-   * Stand between an edited form and every way of closing it.
-   *
-   * **This is the one screen in the app where a human writes**, and it had no unsaved-work guard at
-   * all. `SheetContent` is a Radix dialog, so Escape and a click on the overlay both close it; the
-   * document page renders the editor as `{editing && <ProtocolEditor …>}`, so closing *unmounts*
-   * it; and `draft` is component state seeded once. Twenty corrected setpoints, one stray Escape,
-   * gone — no confirmation, no draft, nothing to undo. Every other irreversible act in this
-   * codebase is confirmed (`ConfirmDialog` on the plan decision, on a protocol status move, on
-   * Save here), and this was the only irreversible *loss* that was not.
-   *
-   * A refusal-then-confirm rather than a nested `AlertDialog`: a modal on top of a modal is a focus
-   * trap inside a focus trap, and the question — "you have edits, discard them?" — belongs in the
-   * panel that holds them.
+   * Guard every way of closing an edited form (Escape, overlay click): closing unmounts the editor
+   * and loses the draft. A refusal-then-confirm banner in the panel rather than a nested modal.
    */
   const requestClose = (next: boolean): void => {
     if (next) {
       onOpenChange(true);
       return;
     }
-    // **`confirmingDiscard` is not part of this test, and including it discarded the edits.**
-    // Once the warning is showing the flag is `true`, so a second Escape — the reflex of somebody
-    // whose first one appeared to do nothing, which is exactly what happens when the warning
-    // renders off-screen in a scrolling panel — fell straight through to `onOpenChange(false)`
-    // with neither answer given. The guard refused the first close and permitted the second, on
-    // the one irreversible loss in this editor.
-    //
-    // The flag's job is to decide whether the banner is on screen, and nothing else. Discarding
-    // deliberately goes through the banner's own button, which calls `onOpenChange(false)` direct.
+    // Not conditioned on `confirmingDiscard`: a second Escape must not discard. Discarding goes
+    // through the banner's own button.
     if (dirty()) {
       setConfirmingDiscard(true);
       return;
@@ -287,21 +210,8 @@ export function ProtocolEditor({
   });
 
   /**
-   * One edit to the draft, written as if the document were mutable.
-   *
-   * Every setter below used to rebuild `design → base → charge[i] → field` by hand with a spread
-   * chain, and `setLevel` did it with a `map` inside a `map`. The failure mode of that shape is not
-   * a crash: it is a spread that reaches three levels where the change is four deep, which compiles,
-   * renders, and drops the edit. `produce` gives a mutable proxy and returns a new document with
-   * exactly the path that was written copied, so the nesting depth stops being something a reader
-   * has to check.
-   *
-   * **`isDirty` is unaffected and must stay a `JSON.stringify` compare.** It guards the only
-   * irreversible loss in this app — a stray Escape over twenty corrected setpoints — and it is
-   * correct under immer for the same reason it was correct before: a chemist who types 70 over 60
-   * and then 60 again has not edited the protocol. `produce` returns a *new reference* for that
-   * round trip, so a reference compare would call it dirty and refuse a close that should be free.
-   * That is a tempting simplification and it is wrong; it is not made here.
+   * One edit to the draft via immer's `produce`, which copies exactly the written path. `isDirty`
+   * must stay a JSON compare: `produce` returns a new reference even for a value changed and back.
    */
   const edit = (recipe: (draft: Draft<ExperimentDesign>) => void): void =>
     setDraft((current) => produce(current, recipe));
@@ -311,10 +221,7 @@ export function ProtocolEditor({
       d.base.setpoints[key] = value;
     });
 
-  // Every indexed setter below guards the lookup rather than asserting it. That is not defensive
-  // padding: `noUncheckedIndexedAccess` is on, and the `map((x, i) => i === index ? … : x)` these
-  // replace already did nothing for an index that is not there. The guard is that behaviour,
-  // written down.
+  // Indexed setters guard the lookup (`noUncheckedIndexedAccess`); a missing index is a no-op.
   const setChargeField = (
     index: number,
     key: 'equivalents' | 'amount_mmol' | 'mass_mg' | 'volume_ml',
@@ -345,9 +252,7 @@ export function ProtocolEditor({
     edit((d) => {
       const arm = d.arms[armIndex];
       if (!arm) return;
-      // An arm with no override yet gets one seeded from the base, so the override says what the
-      // arm runs at rather than what it leaves unstated — a `Setpoints` with a single field set and
-      // every other one null would silently unset the solvent.
+      // An arm's first override is seeded from the base, so unset fields are not silently cleared.
       arm.setpoints ??= { ...d.base.setpoints };
       arm.setpoints[key] = value;
     });
@@ -427,11 +332,8 @@ export function ProtocolEditor({
             <div
               role="alertdialog"
               aria-label="Discard your edits?"
-              // **Focused, and scrolled to.** This sits at child index 1 of a `overflow-y-auto`
-              // panel, so a chemist editing the arms table at the bottom of a 56rem sheet pressed
-              // Escape and saw nothing change — which is what made them press it again. And
-              // `role="alertdialog"` is not a live region: it announces only when focus moves into
-              // it, so a screen-reader user was told nothing at all that their close was refused.
+              // Focused and scrolled into view, so the refused close is seen (and announced:
+              // `alertdialog` only announces on focus).
               tabIndex={-1}
               ref={(el) => {
                 el?.focus();
@@ -723,9 +625,7 @@ export function ProtocolEditor({
               <span className="font-medium">
                 Change note <span className="font-normal text-ink-subtle">(required)</span>
               </span>
-              {/* Required before Save is live, exactly as the review queue's rejection reason is:
-                  a revision that moved four setpoints and says nothing about why tells the next
-                  reader, and the agent that reads this history, nothing. */}
+              {/* Required before Save: a revision should say why it changed. */}
               <textarea
                 value={note}
                 onChange={(e) => setNote(e.target.value)}

@@ -1,22 +1,13 @@
 /**
  * What an `exhibit` frame does when it arrives.
  *
- * Two arrival paths, two different meanings, one module so the difference is stated once:
- *
- *  - **On the turn stream** (`exhibitArrived`) the frame is part of the answer to a question this
- *    reader asked: the agent wrote or revised an artefact. The session's list is refetched, and a
- *    *created* artefact opens the pane unless the reader closed it this turn (the rule lives on
- *    `useExhibitPane.autoOpen`) — and only if that conversation is the one on screen.
- *  - **On the push-back stream** (`exhibitPushed`) it is somebody else's act — a colleague's edit or
- *    pin in a shared session, or this reader's own from another tab. The list is refetched and
- *    nothing opens: a column of the screen is not something a colleague's save gets to take.
- *
- * A third frame, `exhibit_draft` (wave 2), arrives on the turn stream only, before the `exhibit`
- * frame it turns into: `draftArrived` holds it in `exhibitDrafts.ts` and `exhibitArrived` settles it.
- *
- * The frame is a header and nothing renders from it directly (`shared/events.ts`), so what both
- * paths share is an invalidation — and it is `invalidateQueries` on the session's *prefix*, which
- * reaches the list, the head body and the history under it in one call (`keys.exhibit`).
+ * - **Turn stream** (`exhibitArrived`): the agent wrote or revised an artefact for this reader.
+ *   Refetch the list; a created artefact opens the pane (per `useExhibitPane.autoOpen`) only for
+ *   the conversation on screen.
+ * - **Push-back stream** (`exhibitPushed`): someone else's act (colleague or another tab). Refetch
+ *   only; nothing opens. `exhibit_draft` frames arrive on the turn stream first (`draftArrived`,
+ *   held in `exhibitDrafts.ts`). Both paths invalidate the session prefix (`keys.exhibit`),
+ *   covering list, head and history.
  */
 
 import { keys, queryClient } from '../api/queryClient.ts';
@@ -46,8 +37,8 @@ function onScreen(sessionId: string): boolean {
 
 export function exhibitArrived(sessionId: string, event: ExhibitEvent): void {
   const refreshed = refetch(sessionId);
-  // The draft this frame replaces, if one was streaming: kept on screen until the list can show
-  // the artefact in its place, then dropped — so the swap has no empty frame between the two.
+  // Keep the replaced draft on screen until the list can show the artefact, so the swap never
+  // blanks.
   const settled = event.exhibit_id ? settleDraft(sessionId, event) : null;
   if (settled !== null) void refreshed.finally(() => dropDraft(sessionId, settled));
   if (event.op !== 'created' || !event.exhibit_id) return;
@@ -64,13 +55,8 @@ export function exhibitPushed(sessionId: string): void {
 }
 
 /**
- * An `exhibit_draft` frame on the turn stream (wave 2): a document the agent is still writing.
- *
- * The first frame of a *create* opens the pane by the same rule as the `exhibit` frame it precedes
- * — the column only, only for the conversation on screen, and not if the reader closed the pane
- * this turn — so a long report is watched being written where it will land rather than appearing
- * after a silent minute. A revise opens nothing: it draws over the artefact only if the reader is
- * already looking at it.
+ * An `exhibit_draft` frame: a document still being written. A create's first frame opens the pane
+ * under the same rule as `exhibitArrived`; a revise opens nothing.
  */
 export function draftArrived(sessionId: string, event: ExhibitDraftEvent): void {
   const began = applyDraft(sessionId, event);

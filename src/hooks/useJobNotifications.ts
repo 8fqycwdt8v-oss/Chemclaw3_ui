@@ -1,20 +1,10 @@
 /**
  * Tell a chemist who is not looking at the tab that their job finished.
  *
- * The whole point of the push-back stream is work that takes minutes to days, so the completion
- * lands when the reader is elsewhere — in another tab, or another application. The in-app band and
- * its polite live region reach neither.
- *
- * Two channels, in order of how much they can be relied on:
- *
- *  - The **title badge** always works, needs no permission, and cannot be refused or forgotten.
- *  - A **notification** reaches someone who has switched applications entirely, and costs a
- *    permission prompt.
- *
- * The hard rule for the second: `requestPermission()` is never called from here. An unprompted
- * dialog at load is the fastest route to a permanent `denied` that no amount of later UI can undo,
- * so the request happens inside a click handler on an explicit opt-in (see the sidebar footer).
- * This hook only ever reads `Notification.permission`.
+ * Two channels: the title badge (always works, no permission) and a desktop notification (needs
+ * permission). This hook never calls `requestPermission()`: an unprompted dialog risks a permanent
+ * `denied`, so the request happens on an explicit opt-in click (sidebar footer). Here we only read
+ * `Notification.permission`.
  */
 
 import { useEffect, useRef } from 'react';
@@ -28,21 +18,10 @@ export function useJobNotifications(): void {
   const announced = useRef(new Set<string>());
 
   /**
-   * When this page started caring. Anything already in the feed is history, not news.
-   *
-   * `jobFeed` is persisted and kept for seven days, `markJobsSeen` deliberately does not run
-   * while the tab is hidden — so "unseen" accumulates exactly as designed — and `announced` is a
-   * fresh Set per mount. Those three are individually right and together produced a burst:
-   * measured, a tab restored **in the background** holding 12 persisted-unseen items aged six
-   * days constructed **12** notifications on mount, stacked, because the `tag` is per `job_id`.
-   *
-   * A notification is a claim that something *just happened*, and a six-day-old completion is
-   * not that. The backlog is not lost and is not silently dropped either: `document.title`
-   * carries it (measured in the same run, `(9+) Chemclaw`), which is the channel that can
-   * honestly say "there are things here" without claiming any of them is new.
-   *
-   * Read in the effect below rather than here: `Date.now()` in a render body is impure, and this
-   * value belongs to the commit anyway.
+   * When this page started caring: feed items older than this are backlog, not news, and do not
+   * notify (a background-restored tab would otherwise fire one per persisted unseen job). The
+   * backlog still shows in `document.title`. Set in the effect below, since `Date.now()` in render
+   * is impure.
    */
   const startedAt = useRef<number | null>(null);
 
@@ -69,9 +48,8 @@ export function useJobNotifications(): void {
   }, []);
 
   useEffect(() => {
-    // Before every guard, and `??=` so it is the FIRST commit that sets it: this effect re-runs
-    // on every render (`unseen` is a fresh array), and a watermark that moved forward with them
-    // would step over a completion that had already arrived.
+    // Set before every guard and only on the first commit (`??=`): the effect re-runs every render,
+    // and a moving watermark would skip a completion already received.
     startedAt.current ??= Date.now();
     if (!notifyEnabled) return;
     if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;

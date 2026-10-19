@@ -22,7 +22,7 @@ import { stubFetch } from './helpers.ts';
 import { resetQueryCache } from '../src/api/queryClient.ts';
 import type { PendingPlans } from '../src/api/client.ts';
 
-const mode = { current: 'dev' as 'dev' | 'msal', roles: [] as string[] };
+const mode = { current: 'dev' as 'dev' | 'bff', roles: [] as string[] };
 
 vi.mock('../src/auth/AuthContext.tsx', async () => {
   const { config } = await import('../src/env.ts');

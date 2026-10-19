@@ -3,7 +3,7 @@
 /**
  * The bundle budget, held as a budget rather than as a number somebody remembers.
  *
- * `scripts/check-bundle.mjs` policed what *lands* in the first load — MSAL stays lazy, the RDKit
+ * `scripts/check-bundle.mjs` policed what *lands* in the first load — no browser OIDC client, the RDKit
  * worker is emitted and referenced — and said nothing about how big any of it is.
  * `tests/entryChunk.test.ts` already states why a size does not belong in prose, and asserts the
  * property instead; this is the other half, which is a number a build can check.

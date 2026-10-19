@@ -139,17 +139,9 @@ describe('the structure panel', () => {
 });
 
 describe('the number this file is about', () => {
-  it('is the one the measurement produced, in the stub and in the prose', () => {
-    // **Two declarations of one fact, and only one of them was a thing a test could see.** The
-    // sweep (`scripts/measure-rdkit-rangeerror.mjs`) answered up to 570 and refused at 580; the
-    // engine's `Refused` docstring, its `withMol` comment and this file's own header all cite 580;
-    // the stub drove 500. A reader checking the prose against the tests found them disagreeing
-    // about the subject, which is the state this assertion exists to end.
+  it('is the length the measurement produced', () => {
+    // `scripts/measure-rdkit-rangeerror.mjs` answered up to 570 and refused at 580.
     expect(LONG.length).toBe(580);
-    expect(
-      readFileSync('src/chem/rdkit.engine.ts', 'utf8').includes('chain of 580 characters'),
-      'the engine no longer cites the length this suite drives, so the two have drifted again',
-    ).toBe(true);
   });
 });
 

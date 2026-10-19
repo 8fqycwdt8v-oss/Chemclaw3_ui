@@ -1,38 +1,17 @@
 /**
- * Keeping an open shared conversation in step with the other people in it (Chemclaw3_ui #130).
+ * Keep an open shared conversation in step with the other people in it, for the one conversation on
+ * screen:
  *
- * **What was wrong.** A shared conversation (Chemclaw3 #483) holds more than one person's turns,
- * and this browser only ever learnt about its own. The transcript was read back exactly once —
- * into an *empty* conversation the service had listed — so an owner never saw a member's question,
- * a member saw the conversation as it stood when they first opened it, and nobody saw somebody
- * else's turn while it ran, before or after a reload. The route to follow a running turn
- * (`GET /sessions/{id}/turn/stream`, Chemclaw3 #499) was used only to reattach a turn's own
- * sender.
+ * 1. Re-read and merge the transcript (`mergeTranscript`) on open, when the tab returns, after this
+ * browser's turn ends, after a watched turn ends, and when the line shows a running turn stopped. A
+ * merge never touches a turn this browser holds. 2. Follow somebody else's running turn live: poll
+ * `GET /sessions/{id}/queue` every `config.sharedPollMs`, attach a watcher to a running turn that
+ * is not ours, and render it in a placeholder that the re-read replaces.
  *
- * **What this does, for the one conversation on screen, while it is on screen:**
- *
- *  1. **Re-reads the transcript and merges it** (`mergeTranscript`) when the conversation is
- *     opened or the tab comes back into view, when a turn this browser sent ends, when a watched
- *     turn ends, and when the line says a turn it saw running has stopped. A merge never touches a
- *     turn this browser holds — least of all one it is streaming.
- *  2. **Follows somebody else's running turn live.** It reads the session's line
- *     (`GET /sessions/{id}/queue`) every `config.sharedPollMs`, and when a turn is running that is
- *     not this browser's, attaches a watcher and renders the answer as it streams, in a
- *     placeholder the re-read replaces with the stored question and answer, attributed to their
- *     sender.
- *
- * **Bounded on purpose.** One watcher per open conversation; none while this browser has its own
- * turn running there (its own stream already carries everything, and a second view would be a
- * stream slot spent on nothing); the poll and the watcher stop when the tab is hidden and when the
- * conversation is closed. A watcher counts toward the per-person stream cap upstream, so a `429` —
- * the turn's watcher cap or this person's stream cap — and a `404` — the turn ended, or runs on
- * another replica — are ordinary states: the watcher stands down for `REFUSED_BACKOFF_MS` and the
- * re-read at the turn's end delivers the exchange anyway. `stream_lagged` reattaches a bounded
- * number of times, as the sender's own stream does.
- *
- * Outside React, like `sendMessage`: it is a sequence with timers and a socket, not a render
- * concern. `useSharedConversationSync` in `App.tsx` decides *whether* a conversation is shared and
- * calls `followSharedConversation`; everything after that is here.
+ * Bounded: one watcher per conversation, none while our own turn runs there, nothing while hidden
+ * or closed. A 404 or 429 stands the watcher down for `REFUSED_BACKOFF_MS`; `stream_lagged`
+ * reattaches a bounded number of times. Outside React; `useSharedConversationSync` in `App.tsx`
+ * decides when to call `followSharedConversation`.
  */
 
 import { api } from '../api/client.ts';
@@ -46,10 +25,7 @@ import { useChatStore } from './chatStore.ts';
 import { createTokenBatcher } from './sendMessage.ts';
 import { transcriptToMessages } from './transcript.ts';
 
-/** How often an open shared conversation asks whether somebody's turn is running. The cost is one
- *  small GET; the delay is how long after a colleague presses Send their turn appears here. The
- *  deployment's (`SHARED_POLL_MS`, through `/config.js`), read per tick rather than captured at
- *  import, so it is the value the page was served. */
+/** The queue poll interval (`SHARED_POLL_MS` via `/config.js`), read per tick. */
 const queuePollMs = (): number => config.sharedPollMs;
 
 /** How long the watcher stands down after the service refused it or had nothing to show. */
@@ -62,12 +38,8 @@ const FOCUS_SYNC_MIN_MS = 2_000;
 const MAX_REATTACH = 2;
 
 /**
- * The re-reads after a watched turn ends, in milliseconds from the first.
- *
- * The answer reaches a watcher as the turn writes it, and the exchange reaches the transcript in
- * the same turn's final write — so the first read may land before that write commits. The
- * placeholder stays (showing the answer) until a read finds the exchange, and is dropped after the
- * last one so a turn that stored nothing — stopped, failed — does not leave a ghost.
+ * Re-read delays after a watched turn ends: the transcript write may land after the last frame. The
+ * placeholder is dropped after the last read, so a turn that stored nothing leaves no ghost.
  */
 const SETTLE_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000];
 
@@ -75,9 +47,8 @@ const sleep = (ms: number): Promise<void> =>
   ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
 
 /**
- * Follow `conversationId`'s shared session until the returned function is called.
- *
- * The caller has decided the conversation is shared and has a session; this does not re-decide it.
+ * Follow `conversationId`'s shared session until the returned function is called. The caller has
+ * decided it is shared.
  */
 export function followSharedConversation(conversationId: string, auth: AuthProvider): () => void {
   const store = (): ReturnType<typeof useChatStore.getState> => useChatStore.getState();
@@ -91,9 +62,9 @@ export function followSharedConversation(conversationId: string, auth: AuthProvi
   let watcher: AbortController | null = null;
   /** What the last read of the line said, so its running → stopped edge can trigger a re-read. */
   let wasRunning = false;
-  /** The watcher does not attach before this — set after the service refused it. */
+  /** No watcher before this (set after a refusal). */
   let quietUntil = 0;
-  /** The line route answered 404: an older service, or this person is no longer in the session. */
+  /** The line route answered 404: older service, or no longer a member. */
   let lineGone = false;
 
   /* ------------------------------------------------------------ the re-read */
@@ -224,9 +195,7 @@ export function followSharedConversation(conversationId: string, auth: AuthProvi
             reattached += 1;
             continue;
           }
-          // 404 (the turn ended, or runs on another replica), 429 (the turn's watcher cap, or
-          // this person's stream cap) and anything else: stand down, and let the re-read at the
-          // turn's end deliver what this view could not.
+          // Any refusal: stand down; the re-read at the turn's end delivers the exchange.
           const wait =
             err instanceof ApiError
               ? Math.max(err.retryAfterSeconds * 1000, REFUSED_BACKOFF_MS)
@@ -277,8 +246,7 @@ export function followSharedConversation(conversationId: string, auth: AuthProvi
         if (line.running && !watcher && !ownTurnHere() && Date.now() >= quietUntil) {
           void watch(sid);
         }
-        // A turn this browser saw running has stopped, and it did not follow it (its own, or one
-        // it was refused): the transcript has the exchange now.
+        // A turn we did not follow has stopped: the transcript has it now.
         if (wasRunning && !line.running && !watcher) void sync();
         wasRunning = line.running;
       }
@@ -301,8 +269,7 @@ export function followSharedConversation(conversationId: string, auth: AuthProvi
     void poll();
   };
 
-  // The window coming back from another application does not change `visibilityState`, and is as
-  // much "the conversation was focused" as a tab switch is. Throttled: focus can bounce.
+  // Window focus counts as returning to the conversation; throttled.
   let lastFocusSync = 0;
   const onFocus = (): void => {
     if (Date.now() - lastFocusSync < FOCUS_SYNC_MIN_MS) return;

@@ -1,31 +1,13 @@
 /**
- * The client-side record: what happened in this browser, kept where somebody can read it back.
+ * The client-side record: what happened in this browser, kept where support can read it back.
  *
- * Error *handling* in this app is careful — every failure has a typed kind, a banner and a
- * recovery. Error *reporting* did not exist: an `ErrorBoundary` `console.error`, ~30 deliberate
- * silent catches (one of which says in a comment "not worth a banner, but worth saying somewhere"
- * and then said it nowhere), and no global handler at all, so an unhandled rejection anywhere in
- * the app was invisible to everyone but the one chemist watching it fail. This module is the
- * "somewhere".
+ * - A level from `/config.js` (`logLevel`), with a per-browser `?debug=1` override (remembered in
+ *   `localStorage`).
+ * - A ring buffer of the last `RING_SIZE` entries, for the crash screen to offer for pasting.
+ * - A batched sink to the BFF, started explicitly by `main.tsx` (not on import, so unit tests never
+ *   post).
  *
- * Three parts, each with a reason for being separate:
- *
- *  - **A level and a per-session override.** `logLevel` is served by `/config.js`, so a tenant's
- *    verbosity is a deployment setting rather than a rebuild; `?debug=1` (persisted for the tab's
- *    browser under `localStorage`) turns one chemist's browser verbose without a redeploy, which
- *    is what support actually needs when a single user is the one seeing it.
- *  - **A ring buffer.** The last `RING_SIZE` entries, in memory, so the crash screen can hand the
- *    reader something to paste. It costs nothing and it is the only artefact available when the
- *    network is the thing that broke.
- *  - **A batched sink**, installed explicitly by `main.tsx` rather than on import. That is
- *    deliberate: a module-scope sink would make every unit test in this repository issue
- *    background POSTs into whatever `fetch` stub the test had installed, so the transport is
- *    started by the application and nowhere else.
- *
- * The console is mirrored ONLY at `debug`. Existing `console.*` calls in this codebase are all
- * deliberate and commented, and adding a second copy of every warning to the console would drown
- * them — the record lives in the buffer and at the sink, which is where a support conversation can
- * reach it.
+ * The console is mirrored only at `debug`.
  */
 
 import { config } from '../env.ts';
@@ -49,33 +31,16 @@ const BATCH_SIZE = 20;
 const FLUSH_INTERVAL_MS = 5_000;
 
 /**
- * How the sink waits out a failing endpoint, and the ceiling on that wait.
- *
- * A sink that retries a broken endpoint on every flush is the defect this module exists to report,
- * one layer down — and it cannot log its own failure without recursing. The first answer to that
- * was a latch: three consecutive non-2xx responses and the transport gave up **for the life of the
- * page**. That is the wrong shape for a diagnostic channel, and the arithmetic says why. The BFF
- * refuses a batch with a 429 when the pod is over its per-minute budget
- * (`server/clientEvents.ts`), a rolling restart answers a few requests with a 502, and either is
- * three responses in fifteen seconds at the sink's own cadence — after which a chemist's browser
- * reported nothing for the rest of the session, silently, exactly when something was wrong enough
- * to be worth reporting. Recovery was a page reload nobody knew to do.
- *
- * So: exponential backoff, capped, and it recovers. Five seconds, then 10, 20, 40 … to five
- * minutes, reset by the first success. A `Retry-After` on the response wins when it asks for
- * longer, because the server saying when to come back is better information than a doubling
- * client's guess.
+ * The sink's backoff on a failing endpoint: 5 s doubling to 5 min, reset by the first success; a
+ * longer `Retry-After` wins. It always recovers — a 429 or a rolling restart must not silence a
+ * browser for the rest of the session.
  */
 const SINK_BACKOFF_BASE_MS = 5_000;
 const SINK_BACKOFF_MAX_MS = 300_000;
 
 /**
- * Entries held while the sink is backed off, oldest dropped first.
- *
- * The backoff is what makes this bound necessary: a page that keeps logging through a five-minute
- * wait would otherwise grow the queue without limit, which is the failure mode `RING_SIZE` already
- * refuses for the ring buffer. Dropping the oldest is the right end to drop from — the entries
- * around the current failure are the ones somebody will read.
+ * Entries held while backed off, oldest dropped first, so a long outage cannot grow the queue
+ * without bound.
  */
 const MAX_QUEUED_ENTRIES = 500;
 
@@ -85,28 +50,15 @@ export interface LogEntry {
   level: EmitLevel;
   /** A short, stable, greppable event name — `turn.timing`, not a sentence. */
   message: string;
-  /** The turn this entry belongs to, when one was known. Empty is honest, not a placeholder. */
+  /** The turn this entry belongs to, or empty. */
   correlationId: string;
   /** The backend session this entry belongs to, when one was known. */
   sessionId: string;
   /**
-   * Whatever the call site had that a reader would need.
-   *
-   * This said "never PII by construction: call sites pass ids, statuses and counts, never message
-   * text", and no construction enforced any of it — the type is `Record<string, unknown>`, and
-   * every call site that reports a *thrown* error passes that error's own message: `ErrorBoundary`
-   * (`error.message`), both global handlers in `main.tsx` (`String(reason)`, `event.message`), and
-   * `api/client.ts` (`auth.token_acquisition_failed`). Those strings come from wherever the throw
-   * did, so an entry *can* carry text this rule says it cannot — and the set grows whenever
-   * somebody reports a new failure, which is the other reason the claim could not hold. Deleting
-   * it rather than the fields is deliberate: an unhandled rejection with its message removed is a
-   * log line that says something broke and refuses to say what, which is the state this module was
-   * written to end.
-   *
-   * What is true is a convention, and it is on the call site: pass ids, statuses, counts and
-   * enumerable reasons; never the transcript, a draft, a token, a cookie or an address. Whatever
-   * is passed leaves the browser (`startClientEventSink`) and is written into the UI pod's log by
-   * `server/clientEvents.ts`, which bounds and de-controls it but cannot know what it means.
+   * Whatever the call site had that a reader needs. Convention, not enforcement: pass ids,
+   * statuses, counts and enumerable reasons — never the transcript, a draft, a token, a cookie or
+   * an address. Thrown errors' messages are included. Everything here leaves the browser and lands
+   * in the UI pod's log (`server/clientEvents.ts`).
    */
   context?: Record<string, unknown>;
 }
@@ -123,13 +75,7 @@ const readOverride = (): LogLevel | null => {
   }
 };
 
-/**
- * Apply `?debug=1` / `?debug=0` if present, and report the level now in force.
- *
- * Reading the query string here rather than in `main.tsx` keeps the whole switch in one file: the
- * flag, where it is remembered, and what reads it. `?debug=0` clears the override rather than
- * pinning a level, so the deployment's own setting comes back.
- */
+/** Apply `?debug=1` / `?debug=0` and return the level in force; `0` clears the override. */
 function resolveLevel(): LogLevel {
   if (typeof window !== 'undefined') {
     try {
@@ -192,11 +138,7 @@ export const logger = {
   level: (): LogLevel => level,
 
   /**
-   * Stamp subsequent entries with the turn and session they belong to.
-   *
-   * Held here rather than passed at every call site because the correlation id is exactly the
-   * thing most call sites do not have — a silent catch in the sidebar cannot know which turn is
-   * running, and the whole point of the id is that everything from one turn carries it.
+   * Stamp subsequent entries with the current turn and session, which most call sites cannot know.
    */
   setContext(next: Partial<{ correlationId: string; sessionId: string }>): void {
     context = { ...context, ...next };
@@ -210,10 +152,8 @@ export const logger = {
 };
 
 /**
- * Everything a support conversation needs, as text a chemist can paste.
- *
- * Deliberately not JSON-only: the header lines are what makes it readable in a chat message, and
- * the entries below are what makes it useful to whoever reads the logs afterwards.
+ * Everything a support conversation needs, as pasteable text: readable header lines, then the
+ * entries.
  */
 export function diagnosticsText(): string {
   const header = [
@@ -234,16 +174,11 @@ export function diagnosticsText(): string {
 }
 
 /**
- * Start batching entries to `POST {apiBase}/client-events`.
- *
- * Called once, from `main.tsx`. Returns a stop function — used by the test that proves the
- * batching, and by nothing in the application, which runs one sink for the life of the page.
- *
- * The endpoint is the BFF's own: it is not proxied upstream (the Chemclaw service has no such
- * route), so the batch is written to the UI pod's log where an operator is already looking.
+ * Start batching entries to `POST {apiBase}/client-events`, the BFF's own route (logged in the UI
+ * pod). Called once from `main.tsx`; returns a stop function for tests.
  */
 export function startClientEventSink(): () => void {
-  /** Consecutive failures. Only ever sets how long to wait; it can no longer stop the sink. */
+  /** Consecutive failures; only sets the wait. */
   let failures = 0;
   /** Nothing is posted before this instant. `0` is "now", which is the ordinary state. */
   let nextAttemptAt = 0;
@@ -254,9 +189,7 @@ export function startClientEventSink(): () => void {
   const backOff = (retryAfterSeconds: number): void => {
     failures += 1;
     const doubling = Math.min(SINK_BACKOFF_BASE_MS * 2 ** (failures - 1), SINK_BACKOFF_MAX_MS);
-    // The server's own number wins when it asks for longer — a 429 from the BFF's per-minute
-    // budget knows when the window turns over and this client does not — and is still capped, so
-    // a hostile or mistaken header cannot silence the sink for the rest of the day.
+    // A longer server `Retry-After` wins, still capped.
     const asked = Math.min(retryAfterSeconds * 1_000, SINK_BACKOFF_MAX_MS);
     nextAttemptAt = Date.now() + Math.max(doubling, asked);
   };
@@ -297,12 +230,8 @@ export function startClientEventSink(): () => void {
   };
 
   /**
-   * Put a refused batch back at the front of the queue, oldest first out under the bound.
-   *
-   * The batch used to be dropped on failure, which combined with the latch meant a transient blip
-   * cost both the entries in flight and every entry after them. Holding them is what makes the
-   * backoff worth having: when the endpoint comes back, what was recorded during the outage is
-   * still there to send.
+   * Put a refused batch back at the front of the queue so entries from an outage are sent once the
+   * endpoint returns.
    */
   const requeue = (entries: LogEntry[]): void => {
     queue = [...entries, ...queue].slice(-MAX_QUEUED_ENTRIES);
@@ -328,11 +257,8 @@ export function startClientEventSink(): () => void {
       schedule(wait);
       return;
     }
-    // At most `BATCH_SIZE` per POST, even when a backoff has left hundreds queued, and this is
-    // the constraint the requeue above would otherwise break in two ways at once: `keepalive`
-    // requests are capped at 64 KiB by the browser (an oversized body is rejected, so the batch
-    // would fail for ever), and the BFF writes only the first `MAX_ENTRIES` (50) of a batch, so
-    // everything past that would be dropped in silence at the far end.
+    // At most `BATCH_SIZE` per POST: `keepalive` bodies are capped at 64 KiB, and the BFF keeps
+    // only the first 50 entries of a batch.
     const batch = queue.slice(0, BATCH_SIZE);
     queue = queue.slice(BATCH_SIZE);
     send(batch);

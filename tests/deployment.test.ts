@@ -39,7 +39,7 @@ describe('the launchers this repository ships', () => {
 
     it(`does not bake the dev auth provider into every image in ${file}`, () => {
       // `ALLOW_DEV_AUTH` is a build arg, not a runtime env, so a `${ALLOW_DEV_AUTH:-true}` default
-      // in compose compiles the no-token provider into an image built with AUTH_MODE=msal too —
+      // in compose compiles the no-token provider into an image built with AUTH_MODE=bff too —
       // the vulnerability was exactly that. The launcher may still turn it on *conditionally*
       // (start.sh does, but only inside `if AUTH_MODE = dev`), so the thing forbidden is the
       // unconditional shell default-substitution to true, not the token `true` itself.

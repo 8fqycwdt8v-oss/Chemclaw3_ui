@@ -1,35 +1,11 @@
 /**
- * What the turn is doing right now, and what it did once it is over.
+ * What the turn is doing now, and what it did once over — pure functions over the message, so they
+ * cannot drift from the store.
  *
- * Two derivations, one file, because they are the same question asked in two tenses and a reader
- * comparing them has to be able to see that they agree.
- *
- * ## Why this is a function over the message rather than state on it
- *
- * Every fact here is already in the store: `queued` is a flag, the open tool call is the newest
- * `tool_call` row with no ending, the running job is an unsettled `job_started`, and the plan's
- * position is the `[x] `/`[ ] ` prefixes the service re-emits on every status flip. Storing a
- * derived "current activity" would be a second copy of all of it, kept in step by hand, wrong the
- * first time a branch forgot to update it. A pure function cannot drift, and it is testable
- * without rendering anything.
- *
- * ## The order of the checks is the design
- *
- * A turn can be several of these at once — a durable job runs asynchronously while the model keeps
- * talking — so "what is happening" needs a ranking rather than a set. It is:
- *
- *   queued → an open tool call → text arriving → an unsettled durable job → the plan → thinking
- *
- * with `queued` first because it is the one state where *nothing* is running (the turn has not
- * been admitted yet), and the open tool call above the tokens because a call that has not come
- * back is what the turn is actually blocked on. The durable job sits below the tokens on purpose:
- * it does not block the turn, so reporting it while the answer is being written would name the
- * slowest thing on screen rather than the thing the reader is watching.
- *
- * `planning` sits second from last and is worth its own state rather than being folded into
- * "thinking": a turn whose only event so far is a plan revision has done something specific and
- * visible, and a reader watching the row wants to know that the wait is the harness settling on a
- * plan rather than a model that has said nothing at all.
+ * A turn can be several things at once, so they are ranked: queued → an open tool call → text
+ * arriving → an unsettled durable job → the plan → thinking. Queued first (nothing runs yet); an
+ * open call above tokens (the turn is blocked on it); a durable job below tokens (it does not block
+ * the turn).
  */
 
 import { isRefusal } from '../lib/refusals.ts';
@@ -56,20 +32,15 @@ export interface TurnActivity {
   /** The plan step this is happening under, when a plan is running. */
   step: PlanPosition | null;
   /**
-   * Whether the wait is ours or somebody else's.
-   *
-   * `waiting` is the durable job and the admission queue: nothing this process does will make them
-   * finish sooner, and the dot says so by not pulsing.
+   * `waiting` (durable job, admission queue) is out of this process's hands, so the dot does not
+   * pulse.
    */
   tone: 'busy' | 'waiting';
 }
 
 /**
- * The step the plan is on: the first one not marked done.
- *
- * `null` unless at least one line carries a status prefix. `GET /sessions/{id}/plan` returns bare
- * step text with no status, so a plan restored after a reload has no position to report — and
- * claiming "step 1 of 4" for it would be inventing a completion state nobody sent.
+ * The plan step in progress: the first not marked done. `null` unless some step carries a status
+ * prefix (a plan read back after reload has none).
  */
 export function planPosition(todos: readonly string[] | null): PlanPosition | null {
   if (!todos || todos.length === 0) return null;
@@ -99,33 +70,22 @@ function openJob(trace: readonly TraceEntry[]): TraceEntry | undefined {
   return trace.findLast?.((e) => e.kind === 'job_started' && !e.job?.settled);
 }
 
-/**
- * Where a message waiting in a shared conversation's line stands, as one sentence.
- *
- * `position` is how many messages are ahead of it, so `0` is next — waiting only for the turn that
- * is running now.
- */
+/** Where a queued message stands in a shared line; `0` is next. */
 export function linePlace(position: number): string {
   if (position <= 0) return 'Next in line — waiting for the turn in progress to finish';
   return `Waiting in line — ${position} ${position === 1 ? 'message' : 'messages'} ahead of yours`;
 }
 
 /**
- * What this streaming turn is doing.
- *
- * Only meaningful while `status === 'streaming'`; a settled turn is described by
- * `summarizeTurn` instead.
+ * What this streaming turn is doing (only meaningful while streaming; see `summarizeTurn` for
+ * settled turns).
  */
 export function turnActivity(message: AssistantMessage): TurnActivity {
   const step = planPosition(message.latestPlan);
   const trace = message.trace;
 
-  // Admission control, and only before anything else has happened: `queued` is a fact about how
-  // the turn started and it is never retracted, so a turn that queued for two seconds and has
-  // since called three tools is not "waiting for a slot".
-  // A place in a shared conversation's line (Chemclaw3 #499): somebody else's turn is running and
-  // this message runs after it. Said with the place, because "waiting" alone cannot tell a chemist
-  // whether they are next or fourth.
+  // Before anything else has happened: a place in a shared line (said with its position), or the
+  // admission wait.
   if (message.queuePlace && trace.length === 0 && !message.streamedText) {
     return {
       kind: 'queued',
@@ -148,10 +108,8 @@ export function turnActivity(message: AssistantMessage): TurnActivity {
 
   const call = openCall(trace);
   if (call?.toolCall?.queue?.state === 'queued') {
-    // A queued call has not started: it waits for a compute slot on a busy server, which is the
-    // admission queue's kind of wait — ours to report, not ours to shorten — so it takes that tone.
-    // A kind of its own because the row announces on a change of kind: under 'tool' the move from
-    // "Calling X" to waiting, and from waiting to running, would both be silent.
+    // A queued call waits for a compute slot: the `waiting` tone, and its own kind so the change is
+    // announced.
     return {
       kind: 'tool_queued',
       label: 'Waiting for a compute slot',
@@ -196,11 +154,8 @@ export function turnActivity(message: AssistantMessage): TurnActivity {
 }
 
 /**
- * The one sentence a screen reader is told when the row changes.
- *
- * Transitions only, through the app's single polite region — the house rule in `state/announce.ts`
- * — because the alternative is a live region on a row that also carries a per-second timer, which
- * queues an announcement every second and reads the answer over the top of itself.
+ * The one sentence announced when the row changes, through the app's single polite region
+ * (`state/announce.ts`), never a live region on a ticking row.
  */
 export function describeActivity(activity: TurnActivity): string {
   const where = activity.step ? ` Step ${activity.step.index} of ${activity.step.total}.` : '';
@@ -231,21 +186,11 @@ export interface TurnSummary {
   /** Failed calls and dead jobs: the rows worth opening the panel for. */
   problems: number;
   /**
-   * Retrieval sources whose retriever RAISED during a sweep.
-   *
-   * Counted apart from `problems` because the remedies do not overlap: a broken index is a page
-   * for whoever owns it, a failed tool call is usually the turn's own business. Naming them
-   * separately in the panel's header is what lets a reader decide whether to open it at all.
+   * Retrieval sources whose retriever raised during a sweep, counted apart from failures (different
+   * remedy).
    */
   sourcesDown: number;
-  /**
-   * Calls the plan gate refused.
-   *
-   * Counted apart from `problems`, and that separation is the same argument the trace panel makes
-   * in colour: a refusal is the control working. Adding it to the failures would report a
-   * correctly-gated turn as a broken one — the mistake the service's own live evaluation made
-   * before `tool_failed.reason` existed.
-   */
+  /** Calls a gate refused, counted apart from failures: a refusal is the control working. */
   held: number;
 }
 
@@ -264,14 +209,7 @@ const STEP_KINDS = new Set([
   'handoff',
 ]);
 
-/**
- * A run of consecutive `evidence_source` rows is one sweep.
- *
- * `gather_evidence` asks every source at once and reports each separately, so a five-source sweep
- * arrives as five events. Counting them as five steps would make one call look like most of the
- * turn — and the rail renders them as one row for exactly that reason, so the count has to agree
- * with what a reader can see.
- */
+/** Consecutive `evidence_source` rows are one sweep, counted as one step like the rail shows. */
 const isSweepContinuation = (entry: TraceEntry, previous: TraceEntry | undefined): boolean =>
   entry.kind === 'evidence_source' && previous?.kind === 'evidence_source';
 
@@ -287,26 +225,14 @@ export function summarizeTurn(trace: readonly TraceEntry[]): TurnSummary {
     if (entry.kind === 'tool_call') toolCalls += 1;
     if (entry.kind === 'job_started') jobs += 1;
     if (entry.kind === 'tool_failed') {
-      // `isRefusal`, not a comparison against one member: this counter and `TracePanel`'s badge
-      // ask the same question, and asking it twice is how a widened set reaches one and not the
-      // other — leaving a turn that reads "1 failure" in the summary and "needs plan approval" on
-      // the row it is counting.
+      // `isRefusal`, shared with `TracePanel`, so both agree on what counts.
       if (isRefusal(entry.toolFailure?.reason)) held += 1;
       else problems += 1;
     }
     if (entry.kind === 'job_failed') problems += 1;
     if (entry.kind === 'evidence_source') {
-      // **The whole sweep, not its first source.** `gather_evidence` asks every source at once and
-      // `foldIntoSweep` merges the run into ONE entry whose `evidenceSource` stays the source it
-      // started with — so counting off that field asked "did the first source fail?" and answered
-      // it for the sweep. Measured on `graph(ok) → lexical(failed) → eln(failed)` driven through
-      // `applyEvent`: the row rendered "lexical failed · eln failed" while this summary — the
-      // thing `sourcesDown`'s own docstring says "lets a reader decide whether to open it at
-      // all" — reported **0 sources down**. Any sweep whose first source succeeded hid every
-      // failure behind it.
-      //
-      // The `evidenceSource` fallback stays for transcripts persisted before `evidenceSweep`
-      // existed, which carry the one field and no sweep.
+      // Count over the whole sweep, not its first source; `evidenceSource` covers transcripts
+      // persisted before `evidenceSweep`.
       const sweep = entry.evidenceSweep ?? (entry.evidenceSource ? [entry.evidenceSource] : []);
       sourcesDown += sweep.filter((s) => s.failed).length;
     }
@@ -314,13 +240,7 @@ export function summarizeTurn(trace: readonly TraceEntry[]): TurnSummary {
   return { steps, toolCalls, jobs, problems, sourcesDown, held };
 }
 
-/**
- * How long a wait took, in the units a person would say it in.
- *
- * Whole seconds under a minute and `m:ss` above, because a turn that took 4.2 s and one that took
- * 3 minutes are read by different people for different reasons and a single unit serves neither.
- * Sub-second waits round to `0s` rather than to a decimal nobody can act on.
- */
+/** A duration as a person says it: whole seconds under a minute, `m:ss` above. */
 export function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '';
   const seconds = Math.round(ms / 1000);

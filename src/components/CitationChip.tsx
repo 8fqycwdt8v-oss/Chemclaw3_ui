@@ -1,19 +1,9 @@
 /**
- * A citation reference rendered inline in an answer.
+ * A citation rendered inline in an answer. Clicking resolves it via `GET /notes/{id}`; if that
+ * fails (a `qm-…` job may have no note), it falls back to asking the agent.
  *
- * It used to be a prompt button. There was no knowledge-graph read route on the HTTP surface, so
- * clicking a chip dropped "Expand note-123 — what are the conditions…" into the composer and made
- * the chemist spend another turn to read what the last one had already cited.
- *
- * `GET /notes/{id}` exists now, and a citation resolves. The old behaviour survives as the failure
- * path rather than as the default, and it earns its place: not every chip is a note id. A `qm-…`
- * reference names a job, whose `job-result` note may never have been written, and the agent can
- * still say something useful about one. So the chip tries the graph and falls back to asking.
- *
- * The chip owns its own panel rather than dispatching to a host component. These are rendered deep
- * inside markdown output with no props threaded to them — the same constraint that produced the
- * `chemclaw:prefill` window event — but the panel needs only auth, which is context, and one
- * chemist follows one citation at a time.
+ * The chip owns its panel: it sits deep in markdown output with no props, and the panel needs only
+ * auth from context.
  */
 
 import { useState } from 'react';
@@ -22,12 +12,8 @@ import { NoteSheet } from './NoteSheet.tsx';
 import { prefill } from '../state/composerEvents.ts';
 
 /**
- * One tone per kind `remarkCitations` can emit, and no more.
- *
- * It carried `reaction` and `qm` rows that no producer could reach — the plugin never emitted those
- * kinds once its prefixes were read off the corpus — while `job`, which it does emit, had no row and
- * fell through to the note tone. So a job id and a note id looked identical, which is the one
- * distinction a reader needs: a note resolves in the graph, a job may have no note at all.
+ * One tone per kind `remarkCitations` emits. Job and note ids look different on purpose: a note
+ * resolves in the graph, a job may have no note.
  */
 const PALETTE: Record<string, string> = {
   note: 'border-border-subtle bg-surface-sunken text-ink-muted',

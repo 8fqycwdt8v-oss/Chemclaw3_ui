@@ -1,49 +1,24 @@
 /**
- * The HTML sandbox's shell page (wave 3) — the only thing the second listener serves.
+ * The HTML sandbox's shell page — the only thing the second listener serves. Agent-written HTML
+ * runs in a `sandbox="allow-scripts"` frame (opaque origin) that is also on a different origin
+ * (`SANDBOX_ORIGIN`), so losing the attribute would still not put it on the token's origin. The app
+ * listener 404s `/sandbox/frame`.
  *
- * ## Why a second listener, and not a path on this one
+ * The shell: one inline script under a closed CSP (`default-src 'none'`, `connect-src 'none'`,
+ * `data:`/`blob:` images and fonts, no forms, no `<base>`), framable only by the app origin. It
+ * posts `{type: "ready"}` to the app origin, accepts `{type: "html", html, scripts, height, title}`
+ * from its parent at the app origin, and then only posts `{type: "height", px}` (debounced,
+ * clamped; `shared/sandbox.ts`).
  *
- * An `html` artefact is markup and script the agent wrote, and the app's origin holds the bearer
- * token. The frame that runs it is `sandbox="allow-scripts"` with no `allow-same-origin`, so its
- * document is opaque-origin whatever URL it came from — and it is *also* served from a different
- * origin (`SANDBOX_ORIGIN`), so that one attribute lost in a later edit would not put agent script
- * on the token's origin. A path on the app listener cannot be a different origin, so the app
- * listener answers `/sandbox/frame` with a 404 (`app.ts`) and this one answers nothing else.
- *
- * ## The page
- *
- * A static shell with one inline script, under the contract's policy: no network the CSP governs
- * (`connect-src 'none'`, `default-src 'none'`), inline script and style only, images and fonts
- * only from `data:`/`blob:`, no form submissions, no `<base>`, and framable **only by the app
- * origin**. Once its listener is armed it posts `{type: "ready"}` to the app origin (the contract's
- * hardening handshake — the app sends nothing before it), then accepts one message —
- * `{type: "html", html, scripts, height, title}` from its parent window *and* from the app origin
- * injected below — and from then on posts back `{type: "height", px}` and nothing else, debounced
- * and clamped (`shared/sandbox.ts`).
- *
- * ## Scripts: the app decides, per view (hardening item 4)
- *
- * The shell does not write the artefact into its own document. It puts it in a nested `srcdoc`
- * frame at the spec's height, with `sandbox=""` — no script at all — unless the message carries
- * `scripts: true`, which gets `sandbox="allow-scripts"` with `RTC_PRELUDE` in front. Which one the
- * app sends is `HTML_SCRIPTS_DEFAULT` (on by the owner's decision of 2026-10-03) and the per-view
- * "Disable scripts"/"Run scripts" control. What scripts can still do is measured, not argued: CSP
- * does not govern WebRTC, so a scripted page can send data out over STUN/UDP whatever `connect-src`
- * says, and can write the clipboard after one click. The nested frame inherits this response's CSP, and its
- * navigations are bounded by this document's `default-src 'none'` (no `frame-src`), so it cannot
- * navigate itself anywhere; the shell's own frame is bounded by the app's `frame-src`.
- *
- * No cookies are set, no credential is read, and nothing about a caller is logged beyond the
- * access line every response gets.
+ * The artefact goes into a nested `srcdoc` frame: `sandbox=""` (no script) unless `scripts: true`,
+ * then `allow-scripts` with `RTC_PRELUDE`. Scripts can still use WebRTC and the clipboard (accepted
+ * risk); they cannot navigate. No cookies are set or read.
  */
 
 import type http from 'node:http';
 import { SANDBOX_FRAME_PATH, SANDBOX_MAX_HEIGHT, SANDBOX_MIN_HEIGHT } from '../shared/sandbox.ts';
 
-/**
- * The shell's Content-Security-Policy — the contract's string, with the app origin as the one
- * ancestor allowed to frame it.
- */
+/** The shell's CSP, with the app origin as the only allowed framing ancestor. */
 export function sandboxCsp(appOrigin: string): string {
   return [
     "default-src 'none'",
@@ -73,25 +48,15 @@ export function sandboxHeaders(appOrigin: string): Record<string, string> {
 }
 
 /**
- * A string as a JavaScript literal that is safe inside `<script>`: JSON, with `<` escaped so the
- * value cannot close the tag it sits in. The origin is operator-supplied and already validated as
- * a plain origin (`plainOrigin`), so this is the second check, not the only one.
+ * A string as a script-safe JS literal (JSON with `<` escaped). The origin is already validated
+ * (`plainOrigin`).
  */
 const scriptLiteral = (value: string): string => JSON.stringify(value).replace(/</g, '\\u003c');
 
 /**
- * The prelude a **scripted** render puts in front of the artefact (wave-3 amendment): it removes the
- * WebRTC constructors from the content's realm, because WebRTC is the one egress no CSP directive
- * governs — measured, a page under this shell's `connect-src 'none'` sent UDP carrying data it had
- * read to an arbitrary host through a STUN candidate, and Chromium ignores `webrtc 'block'`.
- *
- * **Defence in depth only, and bypassable.** It reaches the realm it runs in and no other: a page
- * that creates a nested `srcdoc` frame gets a fresh realm whose constructors were never touched, and
- * a scripted render inherits `allow-scripts` into it. With scripts on by default that residual is an
- * owner-accepted risk (docs/production-readiness.md); what narrows it for a deployment is the
- * browser policy (`WebRtcIPHandling=disable_non_proxied_udp`, or Firefox's
- * `media.peerconnection.enabled=false`), and what removes it is `HTML_SCRIPTS_DEFAULT=off`
- * (README, "HTML sandbox").
+ * Prelude for scripted renders: removes the WebRTC constructors (CSP does not govern WebRTC).
+ * Defence in depth only — a nested `srcdoc` realm bypasses it. Browser policy narrows the residual;
+ * `HTML_SCRIPTS_DEFAULT=off` removes it (README, "HTML sandbox").
  */
 export const RTC_PRELUDE =
   '<script>(function () {' +
@@ -102,10 +67,7 @@ export const RTC_PRELUDE =
   '}' +
   '})();</script>';
 
-/**
- * What every refusal on the sandbox listener is sent with: text, nothing renderable, nothing
- * framable. The shell's own policy is not reused — a refusal has no script to permit.
- */
+/** Headers for every refusal on the sandbox listener: text, not renderable, not framable. */
 const REFUSAL_HEADERS: Readonly<Record<string, string>> = {
   'content-type': 'text/plain; charset=utf-8',
   'content-security-policy': "default-src 'none'; frame-ancestors 'none'",
@@ -171,11 +133,8 @@ export function renderSandboxShell(appOrigin: string): string {
 }
 
 /**
- * What the second listener answers: the shell on `GET`/`HEAD /sandbox/frame`, and a bare 404 for
- * every other path. Synchronous and stateless — the page is rendered once per process.
- *
- * Returns the route label it answered under, for the access line and the metrics, which are keyed
- * on patterns rather than on attacker-chosen paths (`app.ts`).
+ * The second listener's handler: the shell on `GET`/`HEAD /sandbox/frame`, a bare 404 otherwise.
+ * Returns the route label for logs and metrics.
  */
 export function createSandboxHandler(
   appOrigin: string,

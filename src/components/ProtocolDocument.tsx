@@ -1,30 +1,13 @@
 /**
- * One experiment design, as the document it is.
+ * One experiment design, laid out as a document — request, conditions, charge, procedure, factors,
+ * run sheet, plate, analytics, hazards, expectation, evidence, history — because a chemist checks
+ * it line by line before charging a vessel.
  *
- * ## What this screen is for
+ * Each request field shows its basis: `stated` (with the chemist's quote), `inferred` (warn-toned)
+ * or `absent`, so an agent's guess is never presented as an instruction.
  *
- * A protocol is the one artefact in this system that a chemist has to be able to *check line by
- * line* before anything is charged into a vessel, and the one they will then correct. So this is
- * laid out as a document — request, conditions, charge, procedure, factors, run sheet, plate,
- * analytics, hazards, expectation, evidence, history — rather than as a summary with disclosures.
- * A field that is one click away is a field nobody reads before ordering reagents.
- *
- * ## The basis chips are the whole honesty story
- *
- * `ExperimentRequest` carries, per field, whether the chemist **stated** it (with the words they
- * used), whether the agent **inferred** it, or whether it is **absent**. Those three render very
- * differently on purpose. A scale nobody stated is a vessel charge nobody agreed to, and an
- * inferred `plate_format` decides how many reactions get run; rendering an inference the same as an
- * instruction is how a guess becomes an order with nobody having decided anything. So `inferred` is
- * a warn-toned chip that says the word, `stated` carries the quote it was read from, and `absent`
- * says it is not stated rather than showing a blank.
- *
- * ## What it does not do
- *
- * It never composes a tool call from a click. "Ask Claude to revise" fills the composer with a
- * sentence naming this design and this revision, and a human presses Send — the line
- * `docs/chemistry-aware-frontend.md` §9 and `state/composerEvents.ts` both draw, and the reason a
- * one-tap "regenerate this protocol" button is not here.
+ * It never composes a tool call from a click: "Ask Claude to revise" fills the composer and a human
+ * presses Send (`state/composerEvents.ts`).
  */
 
 import { useCallback, useState } from 'react';
@@ -124,11 +107,8 @@ function Grid({
 }
 
 /**
- * One request field, with where its value came from.
- *
- * `stated` puts the chemist's own words in a tooltip on a focusable trigger — a tooltip on a
- * `<span>` is unreachable from a keyboard, which for the one control that lets a reader *check* a
- * transcription would be the wrong half of the audience to lose.
+ * One request field with its basis. A `stated` quote is in a tooltip on a focusable trigger, so
+ * keyboard users can check it.
  */
 function RequestValue({ label, field }: { label: string; field: RequestField }): React.JSX.Element {
   return (
@@ -193,11 +173,8 @@ function ChecksStrip({
           // rule the campaign renderer applies to a plateau verdict the service declined to give.
           <Badge tone="neutral">no checks recorded</Badge>
         ) : kind === 'request' ? (
-          // **Most of these did not run.** At the request stage the service reports every
-          // protocol-only check as a passing `note` reading "not checked yet — this design holds
-          // only the ask", precisely so a UI would not look like it had skipped them. Rendering
-          // that as "14 checks passed" turned the opposite claim into a green badge, on a design
-          // with no charge table, no procedure and no evidence.
+          // At the request stage, unrun checks are reported as passing notes, so they are not shown
+          // as passes.
           <Badge tone="neutral">the ask only — the procedure has not been checked</Badge>
         ) : (
           <Badge tone="ok">
@@ -228,14 +205,8 @@ function ChecksStrip({
 }
 
 /**
- * The conditions this design is run at — **what the arms agree on**, not what the body holds.
- *
- * This read `design.base.setpoints`, which is only what anybody runs while no arm overrides it. The
- * run sheet is the other half and carries a column only where the arms *disagree*, so a field every
- * arm overrode to the same value fell through both: three arms all set to `N2` over a body reading
- * `air` gave a page stating "Atmosphere: air", no atmosphere column, and the atmosphere the design
- * is actually run under stated nowhere. A field the arms disagree about comes back at its default
- * and shows as `—` here, because the run sheet is where it belongs.
+ * The conditions every arm shares (`sharedSetpoints`), not the body's own setpoints. Fields the
+ * arms disagree on show `—`; the run sheet carries them per row.
  */
 function Conditions({ design }: { design: ExperimentDesign }): React.JSX.Element {
   const setpoints = sharedSetpoints(design);
@@ -267,12 +238,8 @@ function Conditions({ design }: { design: ExperimentDesign }): React.JSX.Element
 }
 
 /**
- * The run-sheet columns that appear only when the arms disagree about them.
- *
- * The names, the membership and the order are the service's `render._RUN_SHEET_WHEN_VARYING`, and
- * this list existing at all is the point: all four used to ship on every sheet, which buries the
- * one column that varies among three constant ones on a 96-row plate. A column dropped here is not
- * a value lost — `Conditions` states what every arm shares.
+ * Run-sheet columns shown only when the arms disagree (the service's
+ * `render._RUN_SHEET_WHEN_VARYING`, same order). `Conditions` states the shared values.
  */
 const WHEN_VARYING = ['c /M', 'Atmosphere', 'p /bar', 'pH'] as const;
 
@@ -286,19 +253,14 @@ function runSheetRecords(design: ExperimentDesign): Json[] {
     for (const name of factorNames) levels[name] = arm.levels[name] ?? '';
     // Field by field, not `arm.setpoints ?? base` — see `setpointsFor`.
     const setpoints = setpointsFor(design.base.setpoints, arm);
-    // **The fixed columns are display labels, and that is load-bearing rather than cosmetic.**
-    // A factor name matches `^[a-z][a-z0-9_]*$`, so a solvent screen — the canonical HTE case —
-    // declares a factor literally named `solvent`; with the fixed keys spelled the same way, the
-    // later literal silently won the object and the level never reached the page or the CSV. Every
-    // label here carries a capital, a space or a slash, so no factor name can collide with one.
+    // Fixed columns are display labels (capitals, spaces, slashes), so no factor name
+    // (`^[a-z][a-z0-9_]*$`, e.g. `solvent`) can collide with one.
     return {
       Arm: arm.arm_id,
       Well: well?.label ?? '',
       Run: well?.run_order ?? '',
       ...levels,
-      // Temperature, time and solvent whether or not they vary — a chemist setting up a run reads
-      // those three off the row in front of them. Then the four in `WHEN_VARYING`, in the service's
-      // own order, dropped below if the arms agree about them.
+      // Temperature, time and solvent always; then `WHEN_VARYING` in the service's order.
       'T /°C': setpoints.temperature_c ?? '',
       't /h': setpoints.time_h ?? '',
       Solvent: setpoints.solvent,
@@ -311,20 +273,15 @@ function runSheetRecords(design: ExperimentDesign): Json[] {
       Note: arm.note,
     };
   });
-  // **The four that appear only when the arms disagree about them**, which is the service's rule
-  // and was not this one's: all four shipped on every sheet, so a 96-row plate buried the one
-  // column that varies among three constant ones. What a constant column would have said is on the
-  // page already — `Conditions` states what every arm shares — so the two are complements here as
-  // they are there, and dropping one loses nothing.
+  // Drop the `WHEN_VARYING` columns all arms agree on; `Conditions` shows those.
   const constant = new Set<string>(
     WHEN_VARYING.filter((key) => new Set(records.map((row) => String(row[key]))).size <= 1),
   );
   const trimmed = records.map((row) =>
     Object.fromEntries(Object.entries(row).filter(([key]) => !constant.has(key))),
   );
-  // A randomised design's whole point is that it is *run* in an order the plate does not show, so
-  // the sheet is sorted by that order — as the service's own `run_sheet_rows` does, and as this
-  // table's heading and aria-label both already claimed.
+  // Sorted by run order (as the service's `run_sheet_rows`), since a randomised design runs in an
+  // order the plate does not show.
   return wells.size > 0
     ? [...trimmed].sort((a, b) => {
         const left = typeof a.Run === 'number' ? a.Run : Number.POSITIVE_INFINITY;
@@ -348,9 +305,7 @@ function Evidence({ evidence }: { evidence: EvidenceRef[] }): React.JSX.Element 
             {item.tool && <span className="text-2xs text-ink-subtle">{item.tool}</span>}
           </div>
           {item.summary && <p className="mt-1 text-sm">{item.summary}</p>}
-          {/* What this evidence is behind. Without it a reader can see that the design cites six
-              things and not which numbers any of them stands behind, which is the question a
-              reviewer is asking. */}
+          {/* Which numbers each piece of evidence supports. */}
           {item.supports.length > 0 && (
             <p className="mt-1 font-mono text-2xs text-ink-subtle">
               supports {item.supports.join(', ')}
@@ -363,18 +318,10 @@ function Evidence({ evidence }: { evidence: EvidenceRef[] }): React.JSX.Element 
 }
 
 /**
- * Why a sign-off was not recorded, in the three shapes that answer differently.
- *
- * `status` and `revision` are the service's two 409 codes and each has its own sentence and its own
- * remedy. `other` is everything else — chiefly the 422 `require_movable` answers an illegal move
- * with, which the buttons above should now make unreachable from a click, and which is exactly why
- * it must be loud if it ever arrives: it means this repository's copy of the transition table has
- * drifted from the service's.
- *
- * `from` and `at` are what the *page* was showing when the button was pressed, carried here rather
- * than read off `view` at render time, because both conflicts re-read the design: by the time the
- * banner draws, `summary.status` is the new truth and `view.revision` is the new head, so a
- * sentence interpolating either would name the thing it is telling the chemist has changed.
+ * Why a sign-off was not recorded: `status` and `revision` are the service's two 409 codes, each
+ * with its own remedy; `other` is anything else (e.g. a 422 meaning this repo's transition table
+ * drifted). `from` and `at` capture what the page showed when pressed, since both conflicts re-read
+ * the design.
  */
 type Refusal = { reference: string } & (
   | { kind: 'status'; from: DesignStatus }
@@ -387,15 +334,9 @@ export function ProtocolDocument(): React.JSX.Element {
   const { auth, ready } = useAuth();
   const navigate = useNavigate();
 
-  /** The revision being read. `undefined` is the head, which is what a fresh open wants. */
   /**
-   * Which revision is on screen — in the URL, not in component state.
-   *
-   * The route's own comment argues for the design id being in the URL "so a shared link and a
-   * reload land on the same one", and every word of it applies to the revision: a QA reviewer asked
-   * to look at what changed in revision 3 could not be sent there, because `?revision=` existed on
-   * `api.getProtocol` and nowhere in the address bar. `replace` rather than a push, so stepping
-   * through a history does not fill the Back button with one entry per revision.
+   * The revision on screen lives in the URL (`?revision=`; absent is the head), so a link or reload
+   * lands on it. Updated with `replace` so stepping through history does not fill Back.
    */
   const [params, setParams] = useSearchParams();
   const requested = Number(params.get('revision') ?? '');
@@ -420,33 +361,14 @@ export function ProtocolDocument(): React.JSX.Element {
   const [statusReason, setStatusReason] = useState('');
   const [notice, setNotice] = useState<string | null>(null);
   /**
-   * A refused sign-off, held apart from `notice` because the two are not the same kind of thing.
-   *
-   * `notice` is a `role="status"` neutral banner — "Status recorded as approved." — and a conflict
-   * was being written into it, in the same tone, two lines after a success message. A chemist whose
-   * decision was *not* recorded got the same visual as one whose was. This renders as
-   * `ProtocolEditor`'s conflict block does: `role="alert"`, warn tone, and a reload action, because
-   * the only safe next step is to read what the other person did.
-   *
-   * **`other` is the third member and it is the one that was missing.** The two conflicts were
-   * named branches and *everything else* fell through to `notice` — so a 422, which is what the
-   * service answers a lifecycle move it will not make, reached the chemist in the same neutral
-   * banner as a success, wearing the message of a kind (`message_too_long`) about a completely
-   * different route. That is the defect this block was added to fix, one status code along.
+   * A refused sign-off, kept apart from `notice` (a neutral success banner): rendered as an alert
+   * with a reload action.
    */
   const [refusal, setRefusal] = useState<Refusal | null>(null);
 
   /**
-   * The design, at the revision the URL names.
-   *
-   * `(designId, at)` is the key, which is what the `loaded.key === key` derivation this replaces
-   * was for: a stale document is never shown under a revision the reader has just switched to, and
-   * there is no second render clearing the old one on the way in.
-   *
-   * `reload` was a `nonce` in the key. It is `refetch` now, which is the same act with the two
-   * differences that matter here: it does not rebuild the key, so the answer already on screen
-   * stays on screen while the re-read is in flight, and every caller of it — the conflict banner,
-   * a status move, a saved revision — reaches the same one.
+   * The design at the revision the URL names, keyed by `(designId, at)`. `refetch` re-reads without
+   * clearing what is on screen.
    */
   const {
     data: view = null,
@@ -468,12 +390,8 @@ export function ProtocolDocument(): React.JSX.Element {
   };
 
   /**
-   * Record a sign-off against the revision on screen — never against "whatever the head is".
-   *
-   * `atRevision` is passed in rather than read from a state variable because the service refuses a
-   * move that names anything but the head, and the revision this reader is looking at is the only
-   * honest answer: a colleague's save between opening the page and pressing the button now gives a
-   * 409 and a banner, instead of the chemist's name on a document they never read.
+   * Record a sign-off against the revision on screen; the service refuses anything but the head, so
+   * a colleague's intervening save gives a 409, not a misattributed approval.
    */
   const moveStatus = async (
     status: DesignStatus,
@@ -494,27 +412,14 @@ export function ProtocolDocument(): React.JSX.Element {
       setNotice(`Status recorded as ${status}.`);
       reload();
     } catch (err) {
-      // **Nothing that failed goes to `notice`.** That banner is `role="status"` and it says
-      // "Status recorded as approved." one branch up; a refusal written into it is a refusal
-      // rendered as the thing it is not. The two 409 codes get their own sentence because their
-      // remedies differ, and everything else — a 422, a 500, an unreachable service — keeps the
-      // service's own words in the alert, which is the only place the reason survives at all.
+      // Failures never go to `notice`. Each 409 code gets its own sentence; anything else keeps the
+      // service's words in the alert.
       setNotice(null);
-      // The service's id for the request that failed. `api/errors.ts` states the rule — every
-      // banner carries a reference — and this is the one screen where a chemist is most likely to
-      // need it, because "my sign-off was refused" is otherwise unjoinable to a single log line.
+      // The service's id for the failed request, for support.
       const reference = err instanceof ApiError ? err.correlationId : '';
-      // **A conflict reloads, and that is the fix for the commonest way to reach one.** Both 409s
-      // mean this page is out of date, and it used to stay out of date: `reload()` ran on success
-      // only, so the panel kept showing the pre-move status and sent it again as `expected_status`
-      // on the next click. Measured on both service backends: a first click that lands while its
-      // response is lost *guarantees* the retry is refused, because the retry carries the stale
-      // status — the chemist's own move, reported to them as somebody else's. Reloading is what
-      // lets them see that it already worked: the badge and the sign-off list come back saying so,
-      // and the button that would repeat the move is not offered any more, because the design now
-      // holds the status it names. A 422 or an unreachable service is not reloaded: nothing landed,
-      // and a failed re-read would replace this alert with the page's own "could not read that
-      // design".
+      // Both conflicts mean this page is stale, so re-read the design: commonly the chemist's own
+      // first click landed and its response was lost, and the re-read shows the move already
+      // recorded. A 422 or unreachable service is not reloaded.
       if (err instanceof ApiError && err.kind === 'status_conflict') {
         setRefusal({ kind: 'status', from: fromStatus, reference });
         reload();
@@ -534,14 +439,9 @@ export function ProtocolDocument(): React.JSX.Element {
   };
 
   /**
-   * Hand the revision back to the agent as a sentence, in the composer, unsent.
-   *
-   * The navigation is not decoration: this screen has no composer — `AppShell` renders one only for
-   * a conversation — so `prefill` dispatched from here would reach nobody. The conversation has to
-   * exist and be mounted first, and the dispatch waits a task past the settled navigation because
-   * the composer's listener is installed in the effect pass after the commit that `navigate`'s
-   * promise resolves on. `prefill`, never `prefillAndSend`: turning a design into a request is the
-   * chemist's sentence to finish and their Send to press.
+   * Hand the revision back to the agent as an unsent sentence in the composer. This screen has no
+   * composer, so navigate to the conversation first and dispatch after its listener is installed.
+   * `prefill`, never send.
    */
   const askToRevise = async (revision: number): Promise<void> => {
     const store = useChatStore.getState();
@@ -598,27 +498,15 @@ export function ProtocolDocument(): React.JSX.Element {
     );
   }
 
-  // Flat, because that is what the service sends: `revision` is a NUMBER and the revision's own
-  // fields sit beside it. This used to destructure a `revision` object the service has never
-  // returned, so `design` was `undefined` and the first field below threw — green in every stub in
-  // this repository, because every stub emitted the invented shape too.
+  // Flat, as the service sends it: `revision` is a number beside the revision's fields.
   const { design, history, summary, status_history: signOffs } = view;
   const head = history.reduce((best, row) => Math.max(best, row.revision), view.revision);
   const stale = view.revision !== head;
   const records = runSheetRecords(design);
   const headers = records.length > 0 ? Object.keys(records[0]!) : [];
   /**
-   * The sign-off buttons, which are the design's legal moves and nothing else.
-   *
-   * This panel used to render one per `DesignStatus`, all five, whatever the design was — so a
-   * draft protocol offered *Mark requested* and *Mark executed*, and an executed one offered three
-   * moves of which every single one is a 422. A button a chemist cannot succeed at is worse here
-   * than almost anywhere else in this app: the refusal reads as "the sign-off you just made did
-   * not happen", on a screen where that sentence has a second, very different meaning.
-   *
-   * What it costs is that the panel no longer shows the whole state machine — a chemist cannot see
-   * from here that `executed` exists until a design is approved. That is the accepted trade: the
-   * lifecycle is documentation, and a button is an offer.
+   * Sign-off buttons for the design's legal moves only (`legalStatusMoves`), so no button can only
+   * be refused.
    */
   const moves = summary ? legalStatusMoves(summary.status, view.kind) : [];
 
@@ -651,9 +539,7 @@ export function ProtocolDocument(): React.JSX.Element {
 
           {view.change_note && <p className="text-sm text-ink-muted">“{view.change_note}”</p>}
 
-          {/* A reader looking at an old revision has to be told, or every number on this page is
-              being read as current. The link out is what makes the notice actionable rather than
-              merely true. */}
+          {/* An old revision is labelled as such, with a link to the current one. */}
           {stale && (
             <p
               role="status"
@@ -675,27 +561,17 @@ export function ProtocolDocument(): React.JSX.Element {
             </p>
           )}
 
-          {/* Three refusals, three sentences, because the remedy differs. A `revision` conflict
-              means the document moved and the diff is worth reading; a `status` conflict means the
-              decision moved; anything else is the service's own words, kept rather than flattened.
-              The two conflicts have already re-read the design when this draws — they are the two
-              that mean the page is out of date — and the Reload button is here for the third. */}
+          {/* Three refusals, three sentences. The two conflicts have already re-read the design; Reload is for the third. */}
           {refusal && (
             <div
               role="alert"
               className="flex flex-col gap-2 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-xs text-warn-ink"
             >
               {refusal.kind === 'status' ? (
-                /* **It said "Somebody else already decided this", and for the commonest way of
-                   reaching this banner there is no somebody else.** It is raised by the service's
-                   `require_unmoved`, which compares the status this page was showing against the
-                   status the design now holds — and those come apart most often when the chemist's
-                   *own* first click landed and its response did not come back, so they press again
-                   from a page that never learned it worked. Measured on both service backends: that
-                   sequence is refused every time. Three of the old sentence's four clauses were
-                   false in that case — it was not somebody else, the move *was* recorded, and there
-                   is no decision of theirs to overwrite. This one is true either way and points at
-                   the list that settles which happened. */
+                /*
+                 * Worded to be true whether someone else moved it or the chemist's own earlier
+                 * click landed unseen; points at the sign-off list that settles which.
+                 */
                 <p>
                   <strong>This design has already moved.</strong> It was {refusal.from} when you
                   pressed the button and is not any more, so nothing was recorded now. The sign-off
@@ -725,11 +601,7 @@ export function ProtocolDocument(): React.JSX.Element {
           )}
 
           <div data-print="hide" className="flex flex-wrap gap-2">
-            {/* The one artefact here that leaves the screen. This document is described in its own
-                header comment as the thing "a chemist has to be able to check line by line before
-                anything is charged into a vessel" — which happens at a bench, on paper, next to
-                the vessel. There was no print stylesheet anywhere in the app, so printing it took
-                the sidebar, the composer and the job feed along with it. */}
+            {/* Print: the document is checked at the bench. A print stylesheet hides the app chrome. */}
             <Button size="sm" variant="outline" onClick={() => window.print()}>
               <Printer aria-hidden className="size-3.5" />
               Print
@@ -767,12 +639,7 @@ export function ProtocolDocument(): React.JSX.Element {
                 className="resize-y rounded-lg border border-border-subtle bg-surface px-2.5 py-2 outline-none focus-ring"
               />
             </label>
-            {/* **The buttons are gated on the header, not given an optional status.** A move now
-                states the status it was made from, and the only honest source for that is the badge
-                this reader is looking at — `summary.status`. `DesignOut.summary` is nullable, so
-                there is a real state in which this screen cannot say what it saw, and sending a
-                guess would defeat the compare-and-set by making it always agree. Withholding the
-                buttons says the true thing: the decision cannot be made from what loaded. */}
+            {/* Buttons only when the header loaded: a move sends the status it was made from, and guessing it would defeat the compare-and-set. */}
             {summary ? (
               <div className="flex flex-wrap gap-2">
                 {moves.map((status) => (
@@ -808,11 +675,7 @@ export function ProtocolDocument(): React.JSX.Element {
               </p>
             )}
 
-            {/* What the panel above promises. A move is recorded against the revision it was made
-                on, and the badge cannot show that: a revision landing on an approved design
-                demotes it back to `draft`, so the only place "the chemist approved revision 3"
-                survives is here. Rendering it is also the only thing that makes the reason worth
-                storing — a record nobody can read answers no question. */}
+            {/* Sign-offs per revision: a new revision demotes an approved design to draft, so this is the only record of what was approved. */}
             {signOffs.length > 0 && (
               <ul className="flex flex-col gap-1 border-t border-border-subtle pt-2 text-2xs text-ink-subtle">
                 {signOffs.map((event) => (
@@ -1084,9 +947,7 @@ export function ProtocolDocument(): React.JSX.Element {
                 ? '—'
                 : `${design.base.expected.yield_percent}%`}
             </span>
-            {/* The basis is the load-bearing half: a precedent yield is a number from a record and
-                an assumed one is somebody's expectation, and they read identically as a
-                percentage. */}
+            {/* The basis matters: a precedent yield and an assumed one look identical as a percentage. */}
             <Badge tone={design.base.expected.basis === 'precedent' ? 'ok' : 'warn'}>
               {design.base.expected.basis}
             </Badge>

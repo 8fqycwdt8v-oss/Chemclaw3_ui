@@ -21,7 +21,7 @@
  * ## What the lane is, and how the suite knows
  *
  *  - **Auth mode** is read from the BFF's own `/config.js` at the start of the run (`authMode`
- *    `msal` → the oidc-mock mode, alice and bob sign in at the mock tenant; `dev` → one dev
+ *    `bff` → the oidc-mock mode, alice and bob sign in at the mock tenant; `dev` → one dev
  *    principal, and the two-person parts skip with the reason on the line).
  *  - **Model gateway** cannot be read from the stack (the front door answers the same either way),
  *    so it comes from the environment by the rule core's `deploy/kind/up.sh` applies:
@@ -35,7 +35,7 @@
  *
  * Environment: `CHEMCLAW_UI_URL` (default http://127.0.0.1:15173), `CHEMCLAW_API_URL` (the front
  * door, default http://127.0.0.1:18000), `CHEMCLAW_KIND_AUTHORITY` (default the mock tenant on
- * https://127.0.0.1:18443/entra/mock-tenant).
+ * https://tenant.localhost:18443/entra/mock-tenant).
  */
 
 import { defineConfig, devices } from '@playwright/test';
@@ -45,7 +45,7 @@ export interface KindLane {
   uiUrl: string;
   /** The front door, for what the BFF deliberately does not proxy (`/metrics`). */
   coreUrl: string;
-  /** The mock tenant's authority, as the SPA's MSAL config names it. */
+  /** The mock tenant's authority, as the BFF is configured with it (`ENTRA_AUTHORITY`). */
   authority: string;
   modelGateway: { kind: 'mock' | 'real'; reason: string };
 }
@@ -72,7 +72,7 @@ const lane: KindLane = {
   uiUrl: strip(process.env.CHEMCLAW_UI_URL ?? 'http://127.0.0.1:15173'),
   coreUrl: strip(process.env.CHEMCLAW_API_URL ?? 'http://127.0.0.1:18000'),
   authority: strip(
-    process.env.CHEMCLAW_KIND_AUTHORITY ?? 'https://127.0.0.1:18443/entra/mock-tenant',
+    process.env.CHEMCLAW_KIND_AUTHORITY ?? 'https://tenant.localhost:18443/entra/mock-tenant',
   ),
   modelGateway: modelGateway(process.env),
 };

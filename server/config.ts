@@ -1,16 +1,17 @@
 /**
- * BFF configuration, read once from the environment at boot.
- *
- * Everything the browser needs at runtime is served from here via `/config.js`, so a single
- * container image can be deployed to any tenant without a rebuild (Vite inlines `import.meta.env`
- * at BUILD time, which is exactly what we are working around).
+ * BFF configuration, read once from the environment at boot. Browser-facing values are served at
+ * runtime via `/config.js`, so one image runs in any tenant (Vite would inline `import.meta.env` at
+ * build time).
  */
 
+import { readFileSync } from 'node:fs';
 import { MAX_MESSAGE_CHARS, isUsableMessageCap } from '../shared/events.ts';
 import { DEFAULT_DOCS_BASE_URL } from '../shared/sandbox.ts';
 import { MIN_SHARED_POLL_MS, SHARED_POLL_MS, isUsablePollInterval } from '../shared/sharedPoll.ts';
 
-export type AuthMode = 'dev' | 'msal';
+export type AuthMode = 'dev' | 'bff';
+
+export type ClientAuth = 'secret' | 'none';
 
 const str = (name: string, fallback = ''): string => process.env[name]?.trim() || fallback;
 const bool = (name: string, fallback: boolean): boolean => {
@@ -25,54 +26,30 @@ const num = (name: string, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 /**
- * The raw `AUTH_MODE` as given, kept beside the resolved mode so `validateConfig` can refuse a typo.
- *
- * This used to be `str('AUTH_MODE', 'dev') === 'msal' ? 'msal' : 'dev'`, which resolved *every*
- * unrecognised value to the unauthenticated mode. So `AUTH_MODE=MSAL`, or `entra`, or a value
- * carrying a trailing newline from a secret manager, booted a production deployment with no
- * sign-in, `frame-ancestors *`, and no `X-Frame-Options` — silently, and looking exactly like a
- * working deployment until someone noticed nobody had been asked to log in. A mode nobody named is
- * a configuration error, not a default.
+ * The raw `AUTH_MODE`, kept so `validateConfig` can refuse a typo rather than fall back to the
+ * unauthenticated mode.
  */
 const rawAuthMode = str('AUTH_MODE', 'dev');
 
-const MODES: Record<string, AuthMode> = { dev: 'dev', msal: 'msal' };
+const MODES: Record<string, AuthMode> = { dev: 'dev', bff: 'bff' };
 
 /**
- * Still `dev` on an unrecognised value, because `cfg` is a plain object built at module scope and
- * has nowhere to throw to. The refusal is `validateConfig`'s job — `authModeIsValid` is what
- * carries the fact there. What matters is that the process does not *serve* in this state.
+ * `dev` on an unrecognised value only because `cfg` cannot throw at module scope; `validateConfig`
+ * refuses to serve it.
  */
 const authMode: AuthMode = MODES[rawAuthMode] ?? 'dev';
 const authModeIsValid = rawAuthMode in MODES;
 
 /**
- * `MAX_MESSAGE_CHARS` as given, resolved beside a validity flag — the same pair as
- * `rawAuthMode`/`authModeIsValid` above, for the same reason.
- *
- * This used to be `Math.max(1, Math.floor(num(...)))` inline in `cfg`, and clamping *up* is the
- * destructive reading of a bad value: `0` means "refuse every message", not "use the default", and
- * a deployment that wrote it (the "0 means unlimited" convention, or a Helm `| default 0`) got a
- * one-character composer with no error anywhere. Worse, the clamp ran at the one layer that hid
- * the value from `src/env.ts`, whose guard against a zero cap can only ever see what crosses
- * `/config.js` — `1` passes it. The backend refuses the same value rather than clamping it
- * (`service_max_message_chars: Field(default=100_000, gt=0)`), and this is that posture on this
- * side of the wire: the resolved value is never a cap nobody can send through, and the refusal is
- * `validateConfig`'s.
- *
- * Whitespace is "unset", matching `str()` and `bool()` — `num()` does not trim, which is how `" "`
- * used to parse as 0 and clamp to 1.
+ * `MAX_MESSAGE_CHARS` as given, plus a validity flag. A bad value (including `0`) is refused by
+ * `validateConfig`, never clamped, matching the backend's `gt=0`. Whitespace is treated as unset.
  */
 const rawMaxMessageChars = str('MAX_MESSAGE_CHARS');
 const parsedMaxMessageChars = rawMaxMessageChars ? Number(rawMaxMessageChars) : MAX_MESSAGE_CHARS;
 const maxMessageCharsIsValid = isUsableMessageCap(parsedMaxMessageChars);
 const maxMessageChars = maxMessageCharsIsValid ? parsedMaxMessageChars : MAX_MESSAGE_CHARS;
 
-/**
- * `SHARED_POLL_MS` as given, resolved beside a validity flag — the `MAX_MESSAGE_CHARS` pair again.
- * A value that is not an interval is refused by `validateConfig` rather than clamped, so a typo
- * cannot quietly turn every open shared conversation into a tight loop against the service.
- */
+/** `SHARED_POLL_MS` as given, plus a validity flag: a bad value is refused rather than clamped. */
 const rawSharedPollMs = str('SHARED_POLL_MS');
 const parsedSharedPollMs = rawSharedPollMs ? Number(rawSharedPollMs) : SHARED_POLL_MS;
 const sharedPollMsIsValid = isUsablePollInterval(parsedSharedPollMs);
@@ -86,20 +63,14 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
 export const isLoopbackHost = (host: string): boolean => LOOPBACK_HOSTS.has(host.trim());
 
-/** Entra's login host, needed in the CSP when MSAL is on — see `csp` below. */
+/** Entra's login host: the default authority's host when only a tenant is configured. */
 const ENTRA_HOST = 'https://login.microsoftonline.com';
 
 /**
- * The MSAL authority: `ENTRA_AUTHORITY` as given, or Entra's public cloud for `ENTRA_TENANT_ID`.
- *
- * **Unset is the production path and it is exactly what it was** — `https://login.microsoftonline.com/<tenant>`,
- * the string `src/auth/msalAuth.ts` used to hardcode — and so is the CSP built from it below;
- * `tests/csp.test.ts` pins the whole header byte for byte. Setting it is for an authority that is
- * not Entra's public cloud: a sovereign cloud (`login.microsoftonline.us`), or the mock tenant in
- * Chemclaw3_mock that the OIDC browser test signs in against (`e2e/oidc-mock.spec.ts`).
- *
- * A trailing slash is dropped so the value is the same shape as the default; anything else about
- * it is `validateConfig`'s to refuse, not this line's to repair.
+ * The authority the BFF signs users in against: `ENTRA_AUTHORITY`, or Entra's public cloud for
+ * `ENTRA_TENANT_ID`. Set it for a sovereign cloud or a test tenant. A trailing slash is dropped;
+ * anything else wrong is `validateConfig`'s to refuse. Discovery is read from
+ * `<authority>/v2.0/.well-known/openid-configuration`.
  */
 const rawEntraAuthority = str('ENTRA_AUTHORITY');
 
@@ -110,26 +81,26 @@ const entraAuthority =
   rawEntraAuthority.replace(/\/+$/, '') || `${ENTRA_HOST}/${str('ENTRA_TENANT_ID')}`;
 
 /**
- * The origin the CSP opens for MSAL — the authority's, so a configured authority is reachable and
- * nothing else is. `ENTRA_HOST` when the value does not parse: `validateConfig` refuses to serve
- * that, and until it does the header stays the one this process has always sent.
+ * A secret from the environment, or from the file `<NAME>_FILE` names (a mounted Secret): the file
+ * wins, so a mounted value cannot be shadowed by a stale variable. Unreadable files are `''`, which
+ * `validateConfig` refuses where the secret is required.
  */
-const authorityOrigin = (authority: string): string => {
-  try {
-    return new URL(authority).origin;
-  } catch {
-    return ENTRA_HOST;
+function secret(name: string): string {
+  const file = str(`${name}_FILE`);
+  if (file) {
+    try {
+      return readFileSync(file, 'utf8').trim();
+    } catch {
+      return '';
+    }
   }
-};
+  return str(name);
+}
 
 /**
- * A plain `http(s)://host[:port]` origin, or `''` for anything else.
- *
- * For `SANDBOX_ORIGIN` and `APP_ORIGIN` (wave 3). Both are written into a CSP — `frame-src` on the
- * app, `frame-ancestors` on the sandbox shell — and the second is also injected into the shell's
- * script as the one origin it takes content from. So the value must be an origin and nothing else:
- * no path (a CSP source with a path matches only that path), no userinfo, no query, and a host CSP
- * reads as a host, for `AUTHORITY_HOSTNAME`'s reason — `http://*` would admit every host.
+ * A plain `http(s)://host[:port]` origin, or `''`. Used for `SANDBOX_ORIGIN`/`APP_ORIGIN`, which go
+ * into CSP and the shell's script: no path, userinfo or query, and no host characters CSP reads as
+ * syntax.
  */
 export function plainOrigin(raw: string): string {
   if (!raw) return '';
@@ -147,14 +118,9 @@ export function plainOrigin(raw: string): string {
 }
 
 /**
- * The HTML sandbox's origin and the app's own, as given and as origins (wave 3).
- *
- * `SANDBOX_ORIGIN` is where the browser reaches this process's **second listener** — the one that
- * serves `GET /sandbox/frame` and nothing else (`server/sandbox.ts`). `APP_ORIGIN` is where the
- * browser reaches the app; the sandbox shell takes content only from it and may be framed only by
- * it. The process cannot learn either from a request — a public origin is the ingress's to choose —
- * so both are stated. The sandbox is on only when both are origins and they **differ**:
- * `validateConfig` refuses the other combinations rather than serving a sandbox that is not one.
+ * The sandbox origin (the second listener, `server/sandbox.ts`) and the app's own origin, both
+ * stated because the process cannot learn its public origins. The sandbox is on only when both are
+ * origins and they differ.
  */
 const rawSandboxOrigin = str('SANDBOX_ORIGIN');
 const rawAppOrigin = str('APP_ORIGIN');
@@ -162,18 +128,9 @@ const sandboxOrigin = plainOrigin(rawSandboxOrigin);
 const appOrigin = plainOrigin(rawAppOrigin);
 
 /**
- * Whether the sandbox runs, and the sentence the startup line says about it (hardening, 2026-10-03).
- *
- * On only when both origins are origins, they differ, **and the app is not framable by anyone**
- * (`ALLOW_FRAMING`). The last is a choice, documented in README "HTML sandbox": the shell's
- * `frame-ancestors` names `APP_ORIGIN` alone, and CSP checks *every* ancestor, so inside a preview
- * host's iframe the sandbox frame is blocked by the browser and the artefact is a blank box. That
- * combination is not refused — every launcher this repository ships now sets the sandbox origins,
- * so a refusal would turn the preview opt-in into a process that cannot start — it is turned off
- * with its reason logged, and HTML artefacts are shown as escaped source, which is what a framed
- * app can honestly offer.
- *
- * Exported for the tests and for `index.ts`'s one line; `cfg` carries the result.
+ * Whether the sandbox runs, and the startup line's reason. Off when `ALLOW_FRAMING` is set: the
+ * shell's `frame-ancestors` names `APP_ORIGIN` only and CSP checks every ancestor, so a framed app
+ * cannot frame the sandbox; HTML artefacts then show as source. Exported for tests and `index.ts`.
  */
 export function sandboxState(c: {
   rawSandboxOrigin: string;
@@ -206,51 +163,26 @@ const sandbox = sandboxState({ rawSandboxOrigin, sandboxOrigin, appOrigin, allow
 const sandboxEnabled = sandbox.on;
 
 /**
- * Whether an `html` artefact's own script runs without anybody pressing a button (contract,
- * hardening item 4). **On by default — an owner decision of 2026-10-03**, taken with the residual
- * risks written down (README "HTML sandbox"); `HTML_SCRIPTS_DEFAULT=off` is the kill switch that
- * puts back "Run scripts". Anything but `on`/`off` is refused by `validateConfig` rather than read
- * as either: a typo in a security switch must not silently pick a side.
+ * Whether an `html` artefact's script runs without a click: `on` by default (owner decision, README
+ * "HTML sandbox"); `off` is the kill switch. Anything else is refused.
  */
 const rawHtmlScriptsDefault = str('HTML_SCRIPTS_DEFAULT', 'on').toLowerCase();
 const htmlScriptsDefaultIsValid = rawHtmlScriptsDefault === 'on' || rawHtmlScriptsDefault === 'off';
 
 /**
- * Content-Security-Policy for the SPA.
- *
- * Built conditionally on auth mode because MSAL refreshes tokens silently through a hidden
- * IFRAME to login.microsoftonline.com. Copying the backend's `connect-src 'self'` verbatim
- * would break that refresh roughly an hour after login — a failure that looks like a random
- * logout and is miserable to trace back to a header.
+ * Content-Security-Policy for the SPA. Identical in every auth mode: the browser holds no token and
+ * talks only to this origin, so signing in is a top-level navigation the policy does not govern.
  */
-function buildCsp(
-  mode: AuthMode,
-  allowFraming: boolean,
-  authority: string = ENTRA_HOST,
-  sandbox = '',
-): string {
+function buildCsp(allowFraming: boolean, sandbox = ''): string {
   const directives: Record<string, string[]> = {
     'default-src': ["'self'"],
-    // No inline scripts: /config.js is a real same-origin file precisely so this can stay strict.
-    //
-    // `wasm-unsafe-eval` is what lets `WebAssembly.instantiate` run at all. It permits WASM
-    // compilation and nothing else — it does NOT re-open `eval` or inline script, which is
-    // exactly why the narrow token exists.
-    //
-    // **It is not sufficient for RDKit, and the page does not get what is.** `@rdkit/rdkit`'s
-    // Embind glue builds its invokers with `Function(...)` on the ordinary path, so the toolkit
-    // needs `'unsafe-eval'` — and that token is never in THIS policy, the document's. It is in
-    // `RDKIT_WORKER_CSP` below, sent only on the RDKit worker's own script response, which a
-    // network-served dedicated worker takes as its policy instead of the document's (measured,
-    // `ISSUES.md` Issue 10). The relaxation lives on a thread with no DOM and no markup path.
-    //
-    // Verify against the BFF, not against Vite: the dev server serves index.html itself and never
-    // sends this header, so a missing directive here fails ONLY in the container. That is how
-    // Issue 10 stayed invisible; `e2e/rdkit.spec.ts` now draws a structure behind the real BFF.
+    // No inline scripts (`/config.js` is a real file). `wasm-unsafe-eval` permits WASM compilation
+    // only. RDKit's Embind needs `'unsafe-eval'`, which is never in the document's policy — only in
+    // `RDKIT_WORKER_CSP` on the worker's own script. Vite's dev server sends no CSP, so verify
+    // behind the BFF (`e2e/rdkit.spec.ts`).
     'script-src': ["'self'", "'wasm-unsafe-eval'"],
-    // Ketcher runs Indigo in a Web Worker created from a same-origin module URL. Without this the
-    // sketcher dialog mounts and then dies on the first chemistry operation — and `worker-src`
-    // does NOT fall back to `script-src` in browsers that implement it, so it has to be stated.
+    // Ketcher runs Indigo in a same-origin worker, and `worker-src` does not fall back to
+    // `script-src`.
     'worker-src': ["'self'"],
     // Tailwind injects a stylesheet; RDKit and Ketcher both emit inline style attributes.
     'style-src': ["'self'", "'unsafe-inline'"],
@@ -261,29 +193,13 @@ function buildCsp(
     'frame-src': ["'none'"],
     'form-action': ["'self'"],
     'base-uri': ["'none'"],
-    // Framing is its own opt-in (`ALLOW_FRAMING`), not a consequence of the auth mode.
-    //
-    // It used to be `mode === 'dev' ? ['*'] : ["'none'"]`, which dropped this control — and the
-    // `X-Frame-Options` header with it — for every dev-mode deployment, because ONE of them
-    // (the Replit preview) needs an iframe. A dev-mode UI requires no sign-in and opens every
-    // authorization gate, so it is the deployment that can least afford to be clickjacked.
+    // Framing is its own opt-in (`ALLOW_FRAMING`), independent of auth mode: an unauthenticated dev
+    // UI can least afford clickjacking.
     'frame-ancestors': allowFraming ? ['*'] : ["'none'"],
     'object-src': ["'none'"],
   };
 
-  // The authority's ORIGIN, not its URL: CSP source expressions with a path match that path
-  // only, and MSAL talks to several under the authority (discovery, token, the iframe's
-  // authorize). For the default authority this is `ENTRA_HOST` itself, so the header is unchanged.
-  if (mode === 'msal') {
-    const origin = authorityOrigin(authority);
-    directives['connect-src'] = ["'self'", origin];
-    directives['frame-src'] = [origin];
-    directives['form-action'] = ["'self'", origin];
-  }
-
-  // The HTML sandbox's origin, and only when it is on: the one other origin this page may frame
-  // (`HtmlView`). Its own page carries its own, far stricter policy (`server/sandbox.ts`); this
-  // line only lets the frame exist. Off, the header is byte-for-byte what it was.
+  // The sandbox origin, only when it is on — the one other origin this page may frame.
   if (sandbox) {
     const framed = directives['frame-src']!.filter((source) => source !== "'none'");
     directives['frame-src'] = [...framed, sandbox];
@@ -295,25 +211,10 @@ function buildCsp(
 }
 
 /**
- * The RDKit worker's own policy — the one place `'unsafe-eval'` is permitted, and only there.
- *
- * **Why a header on one script changes anything.** A dedicated worker loaded from a network URL
- * runs under the CSP of *its own response*, not the document's; a `blob:` or `data:` worker
- * inherits the document's. Measured in Chromium 151 (`ISSUES.md` Issue 10): under a document CSP
- * without `'unsafe-eval'`, a same-origin worker whose response carries `script-src 'self'
- * 'wasm-unsafe-eval' 'unsafe-eval'` evaluates `new Function`, the identical script served with
- * the document's policy throws `EvalError`, and so does a `blob:` worker. `ISSUES.md` used to say
- * the opposite of the network case; it was not measured then.
- *
- * **Why `'unsafe-eval'` and not only `'wasm-unsafe-eval'`.** Measured against the built worker
- * behind this BFF: with the WASM token alone the worker's load throws `EvalError` in Embind's
- * `craftInvokerFunction` and nothing is drawn; with `'unsafe-eval'` added it draws. Nothing
- * narrower exists — CSP has no token for "`Function` but not `eval`".
- *
- * Everything else is closed: no `default-src` fallback to anything, `connect-src 'self'` for the
- * `.wasm` fetch, and `script-src 'self'` so the worker can import its sibling chunks and nothing
- * from anywhere else. A worker has no DOM, so there is no markup for an injected string to become
- * and no token in scope — the page holds the bearer token and the page's policy is unchanged.
+ * The RDKit worker's own policy — the only place `'unsafe-eval'` is permitted. A worker loaded from
+ * a network URL runs under its own response's CSP (a `blob:` worker inherits the document's), and
+ * Embind's `Function(...)` needs `'unsafe-eval'`; there is no narrower token. Everything else is
+ * closed, and a worker has no DOM or token in scope.
  */
 export const RDKIT_WORKER_CSP = [
   "default-src 'none'",
@@ -323,21 +224,38 @@ export const RDKIT_WORKER_CSP = [
 ].join('; ');
 
 /**
- * The emitted RDKit worker chunk, by shape — the only response `RDKIT_WORKER_CSP` is sent on.
- *
- * Vite writes it as `assets/rdkit.worker-<hash>.js` (the name `scripts/check-bundle.mjs` and
- * `e2e/worker.spec.ts` already hold it to). Anchored at both ends and to `/assets/`, so no other
- * path — a deep link, a query-carrying variant of the shell, another chunk — can pick up the
- * relaxed policy. As a subresource `<script>` the header would be ignored anyway; as a navigated
- * document it is served `text/javascript` with `nosniff`, which renders as text and runs nothing.
+ * The emitted RDKit worker chunk (`/assets/rdkit.worker-<hash>.js`), matched exactly so no other
+ * path gets the relaxed policy.
  */
 export function isRdkitWorkerScript(pathname: string): boolean {
   return /^\/assets\/rdkit\.worker-[A-Za-z0-9_-]{8,}\.js$/.test(pathname);
 }
 
+/**
+ * `ENTRA_CLIENT_AUTH`: `secret` (default; the Web-platform registration's client secret) or `none`
+ * (a public client, PKCE alone: a test tenant that issues no secret). Anything else is refused.
+ */
+const rawEntraClientAuth = str('ENTRA_CLIENT_AUTH', 'secret').toLowerCase();
+const entraClientAuth: ClientAuth = rawEntraClientAuth === 'none' ? 'none' : 'secret';
+
+/**
+ * Cookies are `Secure` and `__Host-` prefixed (host-only, path `/`, no `Domain`) exactly when the
+ * browser reaches the app over https. A plain-http `APP_ORIGIN` is accepted for loopback only
+ * (`validateConfig`) and gets unprefixed cookies, because browsers differ on `Secure` over http.
+ */
+const cookieSecure = appOrigin.startsWith('https:');
+const cookiePrefix = cookieSecure ? '__Host-' : '';
+
 export interface BffConfig {
   port: number;
   bindHost: string;
+  /**
+   * The metrics listener's port: `GET /metrics` and nothing else, on `bindHost`. A port of its own
+   * so the exposition reaches an in-cluster scraper and never the app's Route, which targets `PORT`.
+   */
+  metricsPort: number;
+  /** `METRICS_PORT` as given, so a port that is not one can be quoted in the refusal. */
+  rawMetricsPort: string;
   clientDir: string;
   apiUrl: string;
   authMode: AuthMode;
@@ -349,31 +267,65 @@ export interface BffConfig {
   /** Opt-in to being framed by any origin — the Replit preview, and nothing else so far. */
   allowFraming: boolean;
   entraTenantId: string;
-  /** The MSAL authority, resolved: `ENTRA_AUTHORITY`, or Entra's public cloud for the tenant. */
+  /** The sign-in authority, resolved: `ENTRA_AUTHORITY`, or Entra's public cloud for the tenant. */
   entraAuthority: string;
   /** The raw `ENTRA_AUTHORITY` as given — empty when unset, which is the production default. */
   rawEntraAuthority: string;
+  /** The BFF's own (Web platform) app registration. Never served to the browser. */
   entraClientId: string;
+  /** The registration's client secret; empty when `entraClientAuth` is `none`. Never logged. */
+  entraClientSecret: string;
+  /** How the BFF proves who it is at the token endpoint: `secret`, or `none` for a public client. */
+  entraClientAuth: ClientAuth;
+  /** The raw `ENTRA_CLIENT_AUTH` as given, so a typo is named in the refusal. */
+  rawEntraClientAuth: string;
+  /** `ENTRA_ISSUER`: the issuer discovery must report, when the operator wants it pinned. */
+  entraIssuer: string;
   apiScope: string;
+  /** Whether the end-session endpoint is offered at sign-out (`ENTRA_END_SESSION`). */
+  endSessionEnabled: boolean;
+  /** A session unused this long ends (`SESSION_IDLE_MINUTES`). */
+  sessionIdleMs: number;
+  /** A session ends this long after sign-in whatever it does (`SESSION_MAX_AGE_HOURS`). */
+  sessionMaxAgeMs: number;
+  /** Sessions held at once; the least recently used is dropped over it (`SESSION_MAX_SESSIONS`). */
+  maxSessions: number;
+  /** An access token is renewed when it has less than this left (`TOKEN_REFRESH_SKEW_SECONDS`). */
+  tokenRefreshSkewMs: number;
+  /** A sign-in left unfinished is forgotten after this long (`LOGIN_STATE_TTL_SECONDS`). */
+  loginStateTtlMs: number;
+  /** Every call to the identity provider gives up after this (`OIDC_HTTP_TIMEOUT_MS`). */
+  oidcHttpTimeoutMs: number;
+  /** After a failed refresh the provider is left alone this long (`TOKEN_REFRESH_BACKOFF_SECONDS`). */
+  tokenRefreshBackoffMs: number;
+  /**
+   * The secret the sign-in cookie's key is derived from (`SESSION_KEY` or `SESSION_KEY_FILE`);
+   * empty means a random key per process.
+   */
+  sessionKey: string;
+  /** Origins besides the authority's that discovery may point at (`ENTRA_ENDPOINTS_ORIGINS`). */
+  entraEndpointOrigins: string[];
+  /** Token-endpoint calls in flight at once, for sign-ins and for refreshes each (`OIDC_MAX_INFLIGHT`). */
+  oidcMaxInflight: number;
+  /** The session cookie's name: `__Host-` prefixed exactly when `APP_ORIGIN` is https. */
+  sessionCookieName: string;
+  /** The cookie that ties a sign-in in progress to the browser that began it. */
+  loginCookieName: string;
+  /** Whether cookies carry `Secure` (and so the `__Host-` prefix): `APP_ORIGIN` is https. */
+  cookieSecure: boolean;
   appVersion: string;
   sseHeartbeatMs: number;
   upstreamConnectTimeoutMs: number;
   /**
-   * How long the upstream may take to begin ANSWERING before the request is abandoned.
-   *
-   * Distinct from `upstreamConnectTimeoutMs`, which covers an upstream that never accepts, and
-   * from `requestTimeoutMs`, which covers a client that never finishes sending. This is the one
-   * that was missing, and its absence was the only unrecoverable failure on this path — see the
-   * comment at its use in `server/proxy.ts`. `0` disables it and restores that.
+   * How long the upstream may take to send response headers before the request is abandoned, so a
+   * hung backend frees the socket pool (see `server/proxy.ts`). `0` disables it.
    */
   upstreamHeadersTimeoutMs: number;
   /** How long a client may take to *send* a request before it is disconnected. */
   requestTimeoutMs: number;
   /**
-   * How long a client may take to send the request HEADERS. The tighter half of the pair above.
-   *
-   * Node refuses a server whose `headersTimeout` exceeds its `requestTimeout`, so the value used
-   * is clamped to it — see `createBffServer`.
+   * How long a client may take to send request headers; clamped to `requestTimeoutMs` (Node
+   * requires it).
    */
   headersTimeoutMs: number;
   /** Client connections this process will hold at once, whatever is on them. */
@@ -390,10 +342,10 @@ export interface BffConfig {
   maxBodyBytes: number;
   /** Largest request body forwarded on the attachment upload route. */
   maxUploadBytes: number;
-  /** Batches this PROCESS accepts on `/api/client-events` per minute before it 429s. The route is
-   *  unauthenticated by design (it reports pre-sign-in failures), so this is its only bound on
-   *  rate — and there is no per-address bucket, for the reason `server/clientEvents.ts` measured.
-   *  The docstring here used to say "one IP", which was never what the code counted. */
+  /**
+   * Batches this process accepts on `/api/client-events` per minute before 429. The route is
+   * unauthenticated, so this is its only rate bound (process-wide; see `server/clientEvents.ts`).
+   */
   clientEventsRatePerMin: number;
   warmSessions: boolean;
   reviewerRoles: string[];
@@ -432,9 +384,9 @@ export interface BffConfig {
   /** Whether an `html` artefact's script runs until somebody presses "Disable scripts". */
   htmlScriptsDefault: boolean;
   logLevel: string;
-  /** How much the BROWSER records, served through `/config.js`. Separate from `logLevel`, which
-   *  is this process's own verbosity: turning the pod's logs up is not the same decision as
-   *  turning every chemist's browser up. */
+  /**
+   * How much the browser logs, served via `/config.js`; separate from this process's `logLevel`.
+   */
   clientLogLevel: string;
   /** `DOCS_BASE_URL`: where the browser reads this repository's README (an internal mirror when
    *  air-gapped), as an absolute http(s) URL or a path on this origin. */
@@ -444,6 +396,8 @@ export interface BffConfig {
 export const cfg: BffConfig = {
   port: num('PORT', 8080),
   bindHost: str('BIND_HOST', '0.0.0.0'),
+  metricsPort: num('METRICS_PORT', 8082),
+  rawMetricsPort: str('METRICS_PORT'),
   clientDir: str('CLIENT_DIR', new URL('./client', import.meta.url).pathname),
   // The Chemclaw3 service. In compose this is the service name; locally, a uvicorn on :8080.
   apiUrl: str('CHEMCLAW_API_URL', 'http://127.0.0.1:8080'),
@@ -459,156 +413,91 @@ export const cfg: BffConfig = {
   entraTenantId: str('ENTRA_TENANT_ID'),
   entraAuthority,
   rawEntraAuthority,
-  // The SPA's own app registration. NOT the API's client id, and note the backend has no
-  // CHEMCLAW_ENTRA_CLIENT_ID setting at all — its Settings model is extra="forbid", so
-  // exporting one there aborts its startup. The SPA client id is purely a frontend concern.
+  // The BFF's own app registration (platform: Web), not the API's. The backend has no
+  // `CHEMCLAW_ENTRA_CLIENT_ID`.
   entraClientId: str('ENTRA_CLIENT_ID'),
+  entraClientSecret: entraClientAuth === 'secret' ? secret('ENTRA_CLIENT_SECRET') : '',
+  entraClientAuth,
+  rawEntraClientAuth,
+  entraIssuer: str('ENTRA_ISSUER').replace(/\/+$/, ''),
   // Must be an API scope: api://<api-client-id>/<scope>. Requesting only openid/profile yields
-  // an ID token whose `aud` is the SPA client id, which the backend's audience check rejects.
+  // an ID token whose `aud` is the BFF's client id, which the backend's audience check rejects.
   apiScope: str('API_SCOPE'),
+  endSessionEnabled: bool('ENTRA_END_SESSION', true),
+  // Eight working hours idle; a day absolute. The refresh token outlives both, so these — not the
+  // identity provider — decide how often a chemist signs in again.
+  sessionIdleMs: num('SESSION_IDLE_MINUTES', 480) * 60_000,
+  sessionMaxAgeMs: num('SESSION_MAX_AGE_HOURS', 24) * 3_600_000,
+  // A session is ~5 kB with its tokens, so 10k is ~50 MB: far above 200 chemists per pod, and a
+  // bound on a flood of sign-ins.
+  maxSessions: Math.floor(num('SESSION_MAX_SESSIONS', 10_000)),
+  // Entra access tokens live 60-90 minutes; renewing two minutes early keeps a request that was
+  // already authorised from reaching the backend expired.
+  tokenRefreshSkewMs: num('TOKEN_REFRESH_SKEW_SECONDS', 120) * 1_000,
+  loginStateTtlMs: num('LOGIN_STATE_TTL_SECONDS', 600) * 1_000,
+  oidcHttpTimeoutMs: num('OIDC_HTTP_TIMEOUT_MS', 10_000),
+  tokenRefreshBackoffMs: num('TOKEN_REFRESH_BACKOFF_SECONDS', 5) * 1_000,
+  sessionKey: secret('SESSION_KEY'),
+  oidcMaxInflight: Math.floor(num('OIDC_MAX_INFLIGHT', 16)),
+  entraEndpointOrigins: str('ENTRA_ENDPOINTS_ORIGINS')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+  sessionCookieName: `${cookiePrefix}chemclaw_session`,
+  loginCookieName: `${cookiePrefix}chemclaw_login`,
+  cookieSecure,
   appVersion: str('APP_VERSION', 'dev'),
   // Pre-creating a session while the user types costs the service one live-session slot per
   // conversation typed into, sent or not. Default on; switchable without a client rebuild.
   warmSessions: bool('WARM_SESSIONS', true),
-  // The app roles that may decide a knowledge proposal or cancel a durable job. These are the
-  // service's own `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`, and they have to be told to this process
-  // rather than guessed: the names are chosen per deployment, so a hardcoded list would be wrong
-  // everywhere. Used only to hide affordances that would come back 403 — the service enforces.
-  //
-  // Empty is meaningful and matches the service's posture: under enforcement it fails closed, so
-  // nobody is offered a decision, which is a misconfiguration to notice rather than paper over.
+  // App roles that may decide or cancel (the backend's `CHEMCLAW_ENTRA_PRIVILEGED_ROLES`), used
+  // only to hide controls that would 403. Empty offers nobody those controls.
   reviewerRoles: str('REVIEWER_ROLES')
     .split(',')
     .map((role) => role.trim())
     .filter(Boolean),
-  // The backend's message cap, which is a *setting* there and was a compile-time constant here:
-  // a site that raised `CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS` got a composer still refusing at the
-  // old default, and one that lowered it got a composer inviting a message the service rejects
-  // with a 422 after the whole body has been uploaded. Same rule as `REVIEWER_ROLES` above — the
-  // value is the backend's and there is no route that publishes it, so it is told to this process
-  // per deployment. The shared constant is the fallback, so an unset variable — or one that is not
-  // a usable cap, which `validateConfig` refuses — keeps today's behaviour exactly.
+  // Must match the backend's `CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS` (no route publishes it). Unset
+  // falls back to the shared default.
   maxMessageChars,
   rawMaxMessageChars,
   maxMessageCharsIsValid,
-  // How soon a member sees somebody else's turn start, against one small GET per open shared
-  // conversation per tick. The default suits a deployment; the browser suite shortens it for the
-  // one page that waits on it rather than sleeping through the production cadence.
+  // How soon a member sees another's turn start; the browser suite shortens it.
   sharedPollMs,
   rawSharedPollMs,
   sharedPollMsIsValid,
   sseHeartbeatMs: num('SSE_HEARTBEAT_MS', 15_000),
   upstreamConnectTimeoutMs: num('UPSTREAM_CONNECT_TIMEOUT_MS', 10_000),
-  // Deliberately generous rather than tight. It bounds time-to-first-response-*header*, and the
-  // slowest legitimate case here is a route the backend answers after real work (a protocol
-  // generation, a durable launch) — not a turn, whose headers arrive at once and whose body is the
-  // slow part. What matters is that a hung backend now recycles the socket pool on its own instead
-  // of holding it until a human notices; a deployment that knows its backend can tighten this.
+  // Generous: bounds time to the first response header (a turn's headers arrive at once), so a hung
+  // backend recycles sockets.
   upstreamHeadersTimeoutMs: num('UPSTREAM_HEADERS_TIMEOUT_MS', 120_000),
-  // Time to RECEIVE a request, not to answer one, so this bounds nothing about a 600 s turn or a
-  // silent job stream — both of those are *responses*. It used to be 0 (disabled), and the cost
-  // was measured: 129 unauthenticated one-byte POSTs each claimed one of the upstream agent's
-  // keep-alive sockets and never released it, which took the whole /api surface offline until the
-  // attacker let go — with no credential, and with no recovery short of the attacker letting go.
-  //
-  // The default is 130 s rather than something tighter because this bounds the whole request, body
-  // included, and the largest legitimate one here is a 32 MB attachment from a bench laptop on
-  // hotel wifi. The *header* phase is bounded much more tightly, on its own knob below.
-  //
-  // This used to be stated as "130 s because Node refuses `headersTimeout > requestTimeout` and
-  // `headersTimeout` is pinned just above the 120 s keep-alive". That was a real constraint on a
-  // belief that is no longer true of this runtime — see `headersTimeoutMs`.
+  // Time to receive a whole request, body included (a 32 MB upload on a slow link). Without it,
+  // slow unauthenticated requests could hold every upstream socket. Does not bound responses.
   requestTimeoutMs: num('REQUEST_TIMEOUT_MS', 130_000),
-  // Time to receive the request HEADERS, and it was 125 s "just above the LB idle timeout".
-  //
-  // That reason describes a Node that stopped existing before 14.11: `headersTimeout` used to run
-  // from the moment the SOCKET was accepted, so a value under the fronting keep-alive really did
-  // kill the second request on a reused connection. It runs from the first byte of the request
-  // now. Measured on this runtime (v22.22.2) with `headersTimeout: 500`: a keep-alive connection
-  // left idle for 1,500 ms — three times the bound — served its second request normally, in
-  // 1,510 ms end to end; a connection dribbling one header byte every 200 ms was answered 408 and
-  // closed at 510 ms. The bound applies to the header phase and to nothing else.
-  //
-  // So the only real constraint is `headersTimeout <= requestTimeout`, and the number can be what
-  // it should have been: long enough for any header block a real client sends in one segment,
-  // short enough that a socket held open by a request that never arrives costs 30 s rather than
-  // 125 s. It bounds the header phase only — a 600 s turn is a *response* and a 32 MB upload is a
-  // *body*, and neither is affected.
+  // Time to receive request headers (measured from the first byte on current Node). Only
+  // constraint: `<= requestTimeout`.
   headersTimeoutMs: num('HEADERS_TIMEOUT_MS', 30_000),
-  // Client connections held at once. Nothing bounded this, so the pod's worst-case file
-  // descriptor and per-socket buffer use was whatever a caller decided to open.
-  //
-  // Be precise about what it buys, because the finding that asked for it overstated the case:
-  // running out of descriptors at accept() is NOT a crash on this runtime. Measured with the
-  // server process at `ulimit -n 96` and 300 connections arriving from another process, it
-  // emitted no `error` on the server, raised no exception, and stayed listening — the surplus is
-  // dropped silently. What this adds is a ceiling this process *chose*, at which it sheds, rather
-  // than an unknown one the kernel enforces; 1024 is twice the upstream socket pool, so every
-  // proxied request the pool can carry has a connection plus as many again for static assets and
-  // probes.
-  //
-  // The cost is stated rather than hidden: a shed connection is destroyed without a response, so
-  // a client over the ceiling reads a reset rather than a 503. There is no way to answer one
-  // politely at this layer — the connection is refused before any request exists to answer.
+  // Client connections held at once (twice the upstream pool). Over it, connections are dropped
+  // without a response.
   maxConnections: num('MAX_CONNECTIONS', 1_024),
-  // How long `/readyz` answers 503 before the listening socket closes on SIGTERM. One
-  // Kubernetes readiness period (its `periodSeconds` default is 10 s), so at least one probe
-  // observes the refusal and takes this pod out of rotation before it stops accepting. See the
-  // shutdown handler in `server/index.ts` for what it was measured against.
+  // How long `/readyz` answers 503 after SIGTERM before the listener closes — one readiness period
+  // (see `server/index.ts`).
   shutdownDrainMs: num('SHUTDOWN_DRAIN_MS', 10_000),
-  // The other half of that measurement: the pool was 128 and the outage threshold was 129. Raised
-  // and made configurable so a legitimate burst of concurrent turns is not sharing a ceiling with
-  // whatever is holding sockets open.
-  //
-  // This is now the ORDINARY pool only. Every call it carries is short — a health probe, a panel
-  // fetch, a turn stop — so 512 is a burst ceiling rather than a residency one: 200 chemists
-  // arriving at 09:00 fire one `/healthz` and a handful of panel loads each, and none of them
-  // holds a socket for more than a round trip.
+  // The ordinary upstream pool: short calls only (probes, panel reads, stops), so a burst ceiling.
   maxUpstreamSockets: num('MAX_UPSTREAM_SOCKETS', 512),
-  // The SSE pool, and the number that decides how many chemists a UI pod can hold.
-  //
-  // Measured on the shipped build against a stub upstream that holds streams open: one shared
-  // pool of 512 filled at exactly 512 live streams, and with it full an ordinary
-  // `GET /api/healthz` never answered at all (curl exit 28, 0 bytes) — the queue below has no
-  // timeout of its own, so `POST /sessions/{id}/messages` queued behind the streams for ever.
-  // Splitting the pools is what makes that impossible; this number is what decides when the
-  // STREAMS themselves start queueing.
-  //
-  // 1024 = 200 chemists x (3 job streams + 1 turn stream) + 22% headroom, which is the
-  // deployment target this repository is sized against. A pod expecting more raises it; the
-  // cost is one file descriptor and one upstream TCP connection per socket, and the backend
-  // must be willing to accept them (`service_max_event_streams_total` is its own, lower bound —
-  // over it the service 429s, which the SPA's job-stream client already backs off from).
+  // The SSE upstream pool, separate so held streams cannot starve ordinary calls. 1024 = 200
+  // chemists x 4 streams + headroom. The backend's own stream cap is lower and answers 429.
   maxUpstreamStreamSockets: num('MAX_UPSTREAM_STREAM_SOCKETS', 1_024),
-  // How long a request may sit in `http.Agent`'s queue waiting for a socket.
-  //
-  // Node's agent queue is unbounded and untimed: `agent.timeout` and `request.setTimeout` both
-  // bound a socket this request HAS, and a request that never gets one is bounded by neither. So
-  // a saturated pool did not degrade, it stopped — every subsequent call hung until a stream
-  // somewhere ended, which for a job stream means until the tab closes. A refusal is strictly
-  // better than that: the SPA's stream client backs off with jitter on a non-2xx, an ordinary
-  // call surfaces a banner the chemist can act on, and `upstream_saturated` in the log plus the
-  // upstream-error counter make the pod's real limit visible from a scrape.
+  // How long a request waits for a free upstream socket before a 503 (`upstream_saturated`). Node's
+  // agent queue is otherwise unbounded and untimed.
   upstreamQueueTimeoutMs: num('UPSTREAM_QUEUE_TIMEOUT_MS', 10_000),
-  // The backend caps a message at 100k characters — but that is a Pydantic validator, which runs
-  // after FastAPI has read and buffered the whole body. The BFF is the only thing in front of it,
-  // so it is the only place a body can be refused before it is paid for. 2 MB leaves room for the
-  // largest legitimate JSON here (a 100k-character message with structures attached to it).
+  // Bodies are refused here before the backend buffers them. 2 MB fits the largest legitimate JSON
+  // (a 100k-character message with structures).
   maxBodyBytes: num('MAX_BODY_BYTES', 2 * 1024 * 1024),
   // Attachments stream through the same pipe and are legitimately much larger.
   maxUploadBytes: num('MAX_UPLOAD_BYTES', 32 * 1024 * 1024),
-  // 200 chemists x 12 flushes a minute (`src/lib/logger.ts`'s 5 s cadence) is 2,400, so the old
-  // ceiling refused three of every four batches at the deployment target — thinning the browser's
-  // record by 4x at exactly the moment something is wrong, and spending 40 req/s of this pod on
-  // writing the refusals. 3,000 is that arithmetic plus 25% headroom. The worst case it admits is
-  // 3,000 x 64 KiB ≈ 3.2 MB/s, still an order below the 31 MB/s this process was measured
-  // sustaining.
-  //
-  // It also had NO READER until now: the limit `handleClientEvents` enforced was a module
-  // constant of its own, so this knob configured nothing and a deployment that raised it changed
-  // no behaviour at all.
+  // 200 chemists x 12 flushes a minute, plus 25% headroom.
   clientEventsRatePerMin: Math.max(1, Math.floor(num('CLIENT_EVENTS_RATE_PER_MIN', 3_000))),
-  csp: buildCsp(authMode, allowFraming, entraAuthority, sandboxEnabled ? sandboxOrigin : ''),
+  csp: buildCsp(allowFraming, sandboxEnabled ? sandboxOrigin : ''),
   rawSandboxOrigin,
   rawAppOrigin,
   sandboxOrigin,
@@ -629,8 +518,8 @@ export const cfg: BffConfig = {
 };
 
 /**
- * Fail fast on a configuration that cannot possibly work, and warn loudly on one that works but
- * is unsafe. Mirrors the backend's own `_refuse_unauthenticated_exposure` posture.
+ * Refuse a configuration that cannot work or is unsafe, mirroring the backend's
+ * `_refuse_unauthenticated_exposure`. Returns the problems; empty means OK.
  */
 export function validateConfig(c: BffConfig = cfg): string[] {
   const problems: string[] = [];
@@ -640,24 +529,8 @@ export function validateConfig(c: BffConfig = cfg): string[] {
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       problems.push(`CHEMCLAW_API_URL must be http(s), got ${parsed.protocol}`);
     }
-    // A path prefix on the upstream is silently discarded, so refuse it rather than serve it.
-    //
-    // Nothing in this process ever reads `pathname`: `server/proxy.ts` and `server/ready.ts` both
-    // take `protocol`, `hostname` and `port` and then build the upstream path from the route
-    // table, which starts at the gateway root. So `CHEMCLAW_API_URL=https://gw.example/chemclaw` —
-    // the ordinary shape for a service behind a shared ingress — boots clean, reports ready, and
-    // requests `/jobs` from a gateway that serves it at `/chemclaw/jobs`. Every `/api` route 404s
-    // and the one thing that would explain it, the configured address, looks right in the startup
-    // line.
-    //
-    // Refused rather than honoured, in the posture this function already takes for `AUTH_MODE` and
-    // `MAX_MESSAGE_CHARS`: honouring it means threading a prefix through two modules and a route
-    // table for a deployment that can put the prefix in its ingress instead, and a half-honoured
-    // prefix is the same silent 404 with more places to look for it.
-    //
-    // Only the path. A query string, a fragment or userinfo on this value is dropped just as
-    // silently and is not refused here — nothing produces one, and a refusal nobody can trigger is
-    // a rule nobody reads.
+    // A path on `CHEMCLAW_API_URL` would be silently ignored (the proxy uses only protocol, host
+    // and port), so every route would 404. Refuse it; put prefixes in the ingress.
     else if (parsed.pathname !== '/' && parsed.pathname !== '') {
       problems.push(
         `CHEMCLAW_API_URL must name the service root, not a path under it: ${JSON.stringify(
@@ -672,8 +545,12 @@ export function validateConfig(c: BffConfig = cfg): string[] {
 
   if (!c.authModeIsValid) {
     problems.push(
-      `AUTH_MODE ${JSON.stringify(c.rawAuthMode)} is not a valid mode (expected "msal" or ` +
-        '"dev"). Refusing to start rather than falling back to unauthenticated access.',
+      c.rawAuthMode === 'msal'
+        ? 'AUTH_MODE=msal no longer exists: the browser no longer holds tokens. Use AUTH_MODE=bff ' +
+            '(docs/operations.md, "Token custody"), which needs a Web-platform app registration ' +
+            'with a client secret (ENTRA_CLIENT_SECRET) and APP_ORIGIN.'
+        : `AUTH_MODE ${JSON.stringify(c.rawAuthMode)} is not a valid mode (expected "bff" or ` +
+            '"dev"). Refusing to start rather than falling back to unauthenticated access.',
     );
   }
 
@@ -692,57 +569,10 @@ export function validateConfig(c: BffConfig = cfg): string[] {
     );
   }
 
-  if (c.authMode === 'msal') {
-    if (!c.entraTenantId) problems.push('ENTRA_TENANT_ID is required when AUTH_MODE=msal');
-    if (!c.entraClientId) problems.push('ENTRA_CLIENT_ID is required when AUTH_MODE=msal');
-    if (!c.apiScope) problems.push('API_SCOPE is required when AUTH_MODE=msal');
-  }
+  if (c.authMode === 'bff') problems.push(...bffProblems(c));
 
-  // An authority MSAL cannot use is refused here, at boot, rather than in every chemist's browser
-  // — where it is a crash screen naming an MSAL error code nobody on the bench can act on.
-  //
-  // **https only, and there is no flag that relaxes it**, unlike `ALLOW_INSECURE_AUTH` below. That
-  // flag exists because a dev-mode UI on a non-loopback bind *works* and is merely dangerous; an
-  // http authority does not work at all — `@azure/msal-browser` refuses one itself
-  // (`authority_uri_insecure`, `UrlString.validateAsUri` in msal-common 16, loopback included). A
-  // flag would let the process start and then fail in the page. A local test authority is served
-  // over https with a throwaway certificate instead: see `playwright.oidc-mock.config.ts`.
-  if (c.rawEntraAuthority) {
-    let parsed: URL | null = null;
-    try {
-      parsed = new URL(c.rawEntraAuthority);
-    } catch {
-      problems.push(`ENTRA_AUTHORITY is not a valid URL: ${JSON.stringify(c.rawEntraAuthority)}`);
-    }
-    if (parsed && parsed.protocol !== 'https:') {
-      problems.push(
-        `ENTRA_AUTHORITY must be https, got ${JSON.stringify(c.rawEntraAuthority)}. MSAL.js ` +
-          'refuses any other scheme (authority_uri_insecure), so this would fail at sign-in in ' +
-          'every browser. Serve a local test authority over https with a throwaway certificate.',
-      );
-    } else if (parsed && (parsed.search || parsed.hash || parsed.username || parsed.password)) {
-      problems.push(
-        `ENTRA_AUTHORITY must be a plain authority URL (scheme, host, tenant path), got ` +
-          `${JSON.stringify(c.rawEntraAuthority)}. MSAL appends its own paths and parameters to it.`,
-      );
-    } else if (parsed && !AUTHORITY_HOSTNAME.test(parsed.hostname)) {
-      // The origin is written into connect-src, frame-src and form-action, and the URL parser
-      // accepts host characters CSP reads as syntax: `https://*/t` would allow every https host,
-      // and `https://x;frame-ancestors/t` would inject a directive.
-      problems.push(
-        `ENTRA_AUTHORITY must name a plain DNS host or IP address, got ` +
-          `${JSON.stringify(c.rawEntraAuthority)}. Its origin is written into the CSP.`,
-      );
-    }
-  }
-
-  // The docstring above has claimed to mirror `_refuse_unauthenticated_exposure` since this
-  // function was written, while only logging a warning — and a warning on a container's stdout is
-  // not a refusal. With `CHEMCLAW_ENTRA_REQUIRED=false` upstream, every visitor to a reachable
-  // dev-mode UI drives the agent as a shared principal with all authorization gates open.
-  //
-  // `authModeIsValid` guards this so a typo produces one error naming the typo, rather than that
-  // error plus a confusing second one about a dev mode nobody asked for.
+  // Dev auth on a reachable bind would let anyone drive the agent as a shared principal: refused
+  // unless `ALLOW_INSECURE_AUTH`. Guarded by `authModeIsValid` so a typo yields one error.
   if (
     c.authModeIsValid &&
     c.authMode === 'dev' &&
@@ -752,8 +582,27 @@ export function validateConfig(c: BffConfig = cfg): string[] {
     problems.push(
       `AUTH_MODE=dev on a non-loopback bind (${c.bindHost}) requires no sign-in, so every ` +
         'visitor drives the agent as a shared principal with all authorization gates open. Set ' +
-        'AUTH_MODE=msal, bind to 127.0.0.1, or set ALLOW_INSECURE_AUTH=true to say this is ' +
+        'AUTH_MODE=bff, bind to 127.0.0.1, or set ALLOW_INSECURE_AUTH=true to say this is ' +
         'deliberate.',
+    );
+  }
+
+  // Like `SANDBOX_PORT`: whole digits, 1–65535, and a port of its own, since a shared one would put
+  // `/metrics` back on a listener a Route can reach.
+  if (
+    (c.rawMetricsPort && !/^\d+$/.test(c.rawMetricsPort)) ||
+    !Number.isInteger(c.metricsPort) ||
+    c.metricsPort < 1 ||
+    c.metricsPort > 65_535
+  ) {
+    problems.push(
+      `METRICS_PORT ${JSON.stringify(c.rawMetricsPort || String(c.metricsPort))} is not a port ` +
+        '(expected a whole number from 1 to 65535).',
+    );
+  } else if (c.metricsPort === c.port || (c.sandboxEnabled && c.metricsPort === c.sandboxPort)) {
+    problems.push(
+      `METRICS_PORT ${c.metricsPort} is also ${c.metricsPort === c.port ? 'PORT' : 'SANDBOX_PORT'}. ` +
+        "Metrics have a listener of their own, kept off the app's Route; give it a port of its own.",
     );
   }
 
@@ -771,6 +620,153 @@ export function validateConfig(c: BffConfig = cfg): string[] {
   return problems;
 }
 
+/**
+ * Whether `SESSION_KEY` is at least 32 bytes in a form that says so: 64 or more hex characters, or
+ * base64/base64url that decodes to 32 or more bytes. A word or a short string is refused rather
+ * than stretched into a key.
+ */
+export function isUsableSessionKey(raw: string): boolean {
+  // All hex digits reads as hex, and must then be long enough as hex.
+  if (/^[0-9a-f]+$/i.test(raw)) return raw.length >= 64;
+  return /^[A-Za-z0-9+/_-]+={0,2}$/.test(raw) && Buffer.from(raw, 'base64').length >= 32;
+}
+
+/** The tenants that name no single issuer: a sign-in cannot validate a token against them. */
+const MULTI_TENANT_AUTHORITIES = new Set(['common', 'organizations', 'consumers']);
+
+/**
+ * What `AUTH_MODE=bff` needs and cannot guess. Every value here is read by the BFF alone; none is
+ * served to the browser.
+ */
+function bffProblems(c: BffConfig): string[] {
+  const problems: string[] = [];
+  if (!c.entraTenantId && !c.rawEntraAuthority) {
+    problems.push('ENTRA_TENANT_ID (or ENTRA_AUTHORITY) is required when AUTH_MODE=bff');
+  }
+  if (MULTI_TENANT_AUTHORITIES.has(c.entraTenantId.toLowerCase())) {
+    problems.push(
+      `ENTRA_TENANT_ID ${JSON.stringify(c.entraTenantId)} names no single issuer, so an ID token ` +
+        'cannot be validated against it. Use the tenant GUID.',
+    );
+  }
+  if (!c.entraClientId) problems.push('ENTRA_CLIENT_ID is required when AUTH_MODE=bff');
+  if (!c.apiScope) problems.push('API_SCOPE is required when AUTH_MODE=bff');
+  else if (!c.apiScope.includes('/')) {
+    // A bare App ID URI yields an ID token, whose `aud` is this client — which the backend's
+    // audience check rejects. Worth catching before the first sign-in.
+    problems.push(
+      `API_SCOPE ${JSON.stringify(c.apiScope)} looks like an App ID URI rather than a scope. It ` +
+        'must include the scope name, e.g. api://<api-client-id>/Chat.Access',
+    );
+  }
+  if (c.rawEntraClientAuth !== 'secret' && c.rawEntraClientAuth !== 'none') {
+    problems.push(
+      `ENTRA_CLIENT_AUTH ${JSON.stringify(c.rawEntraClientAuth)} is not "secret" or "none".`,
+    );
+  } else if (c.entraClientAuth === 'secret' && !c.entraClientSecret) {
+    problems.push(
+      'ENTRA_CLIENT_SECRET (or ENTRA_CLIENT_SECRET_FILE) is required when AUTH_MODE=bff: the ' +
+        'token exchange happens here, with a Web-platform registration. ENTRA_CLIENT_AUTH=none ' +
+        'is for a tenant that issues no secret.',
+    );
+  }
+
+  // The origin is the redirect URI's, the cookie's and the CSRF check's one source of truth: a
+  // process that cannot learn the browser's origin from a request must be told it.
+  if (!c.rawAppOrigin) {
+    problems.push(
+      'APP_ORIGIN is required when AUTH_MODE=bff: it is the redirect URI registered with the ' +
+        'identity provider (<APP_ORIGIN>/auth/callback) and the only Origin a state-changing ' +
+        'request may carry.',
+    );
+  } else if (c.appOrigin) {
+    if (!c.appOrigin.startsWith('https:') && !isLoopbackHost(new URL(c.appOrigin).hostname)) {
+      problems.push(
+        `APP_ORIGIN ${JSON.stringify(c.appOrigin)} is http on a non-loopback host: the session ` +
+          'cookie could not be Secure. Serve the app over https.',
+      );
+    }
+  }
+
+  if (c.allowFraming) {
+    problems.push(
+      'ALLOW_FRAMING=true is refused when AUTH_MODE=bff: a signed-in app that any origin can frame ' +
+        'can be clickjacked into acting as the person.',
+    );
+  }
+  if (c.sessionKey && !isUsableSessionKey(c.sessionKey)) {
+    problems.push(
+      'SESSION_KEY must be at least 32 random bytes written as 64 hex characters or as base64 ' +
+        '(generate one with `openssl rand -base64 32`).',
+    );
+  }
+  for (const origin of c.entraEndpointOrigins) {
+    if (plainOrigin(origin) !== origin.replace(/\/+$/, '')) {
+      problems.push(
+        `ENTRA_ENDPOINTS_ORIGINS has ${JSON.stringify(origin)}, which is not an origin.`,
+      );
+    }
+  }
+  if (c.rawEntraAuthority) problems.push(...authorityProblems(c.rawEntraAuthority));
+  if (c.entraIssuer && !/^https?:\/\//.test(c.entraIssuer)) {
+    problems.push(`ENTRA_ISSUER ${JSON.stringify(c.entraIssuer)} is not a URL.`);
+  }
+
+  const positive: [string, number][] = [
+    ['SESSION_IDLE_MINUTES', c.sessionIdleMs],
+    ['SESSION_MAX_AGE_HOURS', c.sessionMaxAgeMs],
+    ['SESSION_MAX_SESSIONS', c.maxSessions],
+    ['LOGIN_STATE_TTL_SECONDS', c.loginStateTtlMs],
+    ['OIDC_HTTP_TIMEOUT_MS', c.oidcHttpTimeoutMs],
+    ['OIDC_MAX_INFLIGHT', c.oidcMaxInflight],
+  ];
+  for (const [name, value] of positive) {
+    if (!(value > 0)) problems.push(`${name} must be a number above zero.`);
+  }
+  if (!(c.tokenRefreshSkewMs >= 0))
+    problems.push('TOKEN_REFRESH_SKEW_SECONDS must not be negative.');
+  if (!(c.tokenRefreshBackoffMs >= 0)) {
+    problems.push('TOKEN_REFRESH_BACKOFF_SECONDS must not be negative.');
+  }
+  return problems;
+}
+
+/**
+ * The authority the BFF discovers the provider from. https, except a loopback test authority: the
+ * discovery document and the token exchange carry the client secret and the user's code, so a
+ * plain-http authority anywhere else is refused.
+ */
+function authorityProblems(raw: string): string[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return [`ENTRA_AUTHORITY is not a valid URL: ${JSON.stringify(raw)}`];
+  }
+  if (
+    parsed.protocol !== 'https:' &&
+    !(parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname))
+  ) {
+    return [
+      `ENTRA_AUTHORITY must be https, got ${JSON.stringify(raw)}. The client secret and the ` +
+        'sign-in code travel to it. Only a loopback test authority may be plain http.',
+    ];
+  }
+  if (parsed.pathname.split('/').some((part) => MULTI_TENANT_AUTHORITIES.has(part.toLowerCase()))) {
+    return [
+      `ENTRA_AUTHORITY ${JSON.stringify(raw)} names no single tenant, so an ID token cannot be ` +
+        'validated against it. Use the tenant GUID.',
+    ];
+  }
+  if (parsed.search || parsed.hash || parsed.username || parsed.password) {
+    return [
+      `ENTRA_AUTHORITY must be a plain authority URL (scheme, host, tenant path), got ` +
+        `${JSON.stringify(raw)}. Discovery paths and parameters are appended by the BFF.`,
+    ];
+  }
+  return [];
+}
+
 /** An http(s) URL, or a path on this origin (`/docs/`, never the scheme-relative `//host`). */
 function docsBaseIsUsable(base: string): boolean {
   if (base.startsWith('/')) return !base.startsWith('//');
@@ -783,14 +779,8 @@ function docsBaseIsUsable(base: string): boolean {
 }
 
 /**
- * What makes a sandbox configuration not a sandbox — refused, in this function's usual posture,
- * rather than served half-working.
- *
- * Every refusal here is a deployment that would otherwise *look* configured: a frame that never
- * paints because `frame-ancestors` names an origin the app is not served from, a shell that ignores
- * every message because it was told the wrong app origin, or — worst — a "sandbox" on the app's own
- * origin, which is not one. Unset `SANDBOX_ORIGIN` is not a problem: `html` artefacts then show as
- * escaped source, and the second listener does not start.
+ * Sandbox configurations that would look configured but are not a sandbox. Unset `SANDBOX_ORIGIN`
+ * is fine (HTML shows as source).
  */
 function sandboxProblems(c: BffConfig): string[] {
   const problems: string[] = [];
@@ -813,10 +803,8 @@ function sandboxProblems(c: BffConfig): string[] {
         `${JSON.stringify(c.rawAppOrigin)}. It is written into the sandbox shell's CSP and script.`,
     );
   }
-  // Unconditionally, sandbox configured or not — a bad value is a typo whoever reads it, and the
-  // README states the rule without a condition. Whole digits as typed *and* in range: `num()` falls back to 8081 on a non-number, so only the
-  // raw value can show that `SANDBOX_PORT=abc` was asked for; and a `0` would make Node bind a
-  // random port no Route points at, while 70000 throws at listen.
+  // `SANDBOX_PORT` is always checked: whole digits, 1–65535 (`0` binds a random port; `num()` would
+  // hide a non-number).
   if (
     (c.rawSandboxPort && !/^\d+$/.test(c.rawSandboxPort)) ||
     !Number.isInteger(c.sandboxPort) ||

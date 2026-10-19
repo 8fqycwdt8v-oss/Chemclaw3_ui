@@ -1,49 +1,13 @@
 /**
- * Where an RDKit call runs: in the worker if this browser has one, on this thread if it does not.
+ * Where an RDKit call runs: in the worker when this browser has one, on this thread otherwise — the
+ * same `operations` table either way (`rdkit.engine.ts`). The worker may be absent (no `Worker`,
+ * e.g. happy-dom), fail to construct (CSP, missing chunk), or stop answering; in every case the
+ * request is still answered by running the call here. A missing worker must never surface as "not a
+ * molecule".
  *
- * `rdkit.ts` is the seam every caller uses and does not know the difference; this file is the only
- * place in the app that does. It exists because the answer has to be the same either way — the
- * same `operations` table is dispatched in both placements (`rdkit.engine.ts`), so the fallback is
- * not a second implementation and cannot drift from the first.
- *
- * **Three ways the worker can be absent, and all three end here rather than at a call site.**
- *
- *  - The environment has no `Worker` at all. That is every unit test in this repository — happy-dom
- *    implements none — and it is also a browser old enough to matter to nobody, so the fallback is
- *    real coverage rather than a branch nothing exercises.
- *  - Construction throws. A CSP without `worker-src` is the realistic one (`server/config.ts`
- *    states it, and the note there records that `worker-src` does **not** fall back to
- *    `script-src`), as is a chunk that did not arrive.
- *  - It is alive and stops answering. `onerror` catches an uncaught throw inside it; what catches
- *    the rest — a thread the browser reclaimed under memory pressure — is the reply budget below.
- *
- * In every one of them the request is **answered**, by running the same engine call here. That is
- * the rule this file is built around: a missing worker is a placement problem, and a placement
- * problem must never reach a chemist as "that is not a molecule". The whole available/unreadable
- * distinction `rdkit.engine.ts` maintains would be worthless if the transport could manufacture a
- * negative.
- *
- * ## What Comlink does here, and the three things it does not
- *
- * The request id, the `Map<number, {settle, timer}>` of pending calls, the `message` listener that
- * dispatched replies back into it and the `{ id, ok, value }` envelope on both sides are all
- * Comlink's now. `Comlink.wrap<typeof operations>(worker)` is the whole client, and the worker is
- * three lines. What is left below is the part Comlink has no opinion about, and each piece is here
- * because removing it would break a property this file exists to hold:
- *
- *  1. **The reply budget.** Comlink has no timeout and no cancellation: a call whose worker stops
- *     running is a promise that never settles, which is the silent empty box for the life of the
- *     page that `toolkitLoad.ts` was written to refuse.
- *  2. **Answering the calls a retired worker was holding.** `retire()` used to settle them
- *     directly, because this file owned the pending map. Comlink owns it now and exposes no way to
- *     reach into it, so each call races its own abandon signal — `inFlight` is a set of thunks
- *     rather than a map of ids, which is the one piece of bookkeeping that did not go away.
- *  3. **Mapping a rejection to the engine's own negative rather than to a verdict.** Comlink
- *     rejects a call whose remote threw, and it rejects a call it could not even post. Both mean
- *     the same thing here — *this placement did not answer* — so both re-run in-process, where the
- *     operation's own `catch` produces the honest `null` or `false`. A version of this file that
- *     let either rejection reach a caller would be reporting a transport fault as chemistry, which
- *     is the one outcome the whole seam is built to prevent.
+ * Comlink handles messaging. This file adds what Comlink lacks: a reply budget (Comlink has no
+ * timeout), answering calls held by a retired worker, and mapping any rejection to an in-process
+ * re-run rather than a verdict.
  */
 
 import * as Comlink from 'comlink';
@@ -52,18 +16,9 @@ import { TOOLKIT_LOAD_TIMEOUT_MS } from './toolkitLoad.ts';
 import type { Args, Op, Returns } from './rdkit.protocol.ts';
 
 /**
- * How long a request may go unanswered before the worker is treated as gone.
- *
- * The same budget, and the same argument, as `TOOLKIT_LOAD_TIMEOUT_MS`: it is not a latency target
- * but the point past which "still working" and "never coming" are indistinguishable. It has to be
- * at least that large, because the first request through a cold worker is waiting on exactly that
- * load.
- *
- * It bounds the one failure `onerror` cannot see. Everything the worker does either completes,
- * throws — and a throw is a rejection, which is answered — or waits on `loadRDKit`, which carries
- * its own 60 s bound. So the only way a reply never comes is the thread itself ceasing to run, and
- * a silent empty box for the life of the page is precisely the outcome `toolkitLoad.ts` was
- * written to refuse.
+ * How long a request may go unanswered before the worker is treated as gone — the same budget as
+ * `TOOLKIT_LOAD_TIMEOUT_MS`, since the first request waits on the load. Catches the one failure
+ * `onerror` cannot: the thread stops running.
  */
 const REPLY_BUDGET_MS = TOOLKIT_LOAD_TIMEOUT_MS;
 
@@ -76,22 +31,11 @@ let worker: Worker | null | undefined;
 let remote: RemoteOperations | null = null;
 
 /**
- * How to tell each in-flight call that its worker is not going to answer.
- *
- * A set of thunks rather than the id-keyed map this file used to carry, because there is nothing
- * left to key on: Comlink matches replies to calls by its own id and gives no way to settle one
- * from outside. So a call registers how to abandon itself and `retire` calls them all, which is
- * the same guarantee — every waiting caller is answered, by the in-process re-run — reached from
- * the other side.
+ * How to abandon each in-flight call when its worker is retired (Comlink owns the reply matching).
  */
 const inFlight = new Set<() => void>();
 
-/**
- * The worker, or `null` if this page is not going to get one.
- *
- * Built on the first call rather than at module load: importing `rdkit.ts` must stay free, because
- * `Molecule` imports it to read `MAX_PARSED_SMILES_CHARS` on a path that may never draw anything.
- */
+/** The worker, or `null`. Built on first call so importing `rdkit.ts` stays free. */
 function ensureWorker(): RemoteOperations | null {
   if (worker !== undefined) return remote;
   if (typeof Worker === 'undefined') {
@@ -99,14 +43,10 @@ function ensureWorker(): RemoteOperations | null {
     return null;
   }
   try {
-    // `new URL(..., import.meta.url)` is the form Vite compiles into a separately emitted chunk;
-    // anything else (a string path, a variable) is left alone and 404s in the build.
-    // `scripts/check-bundle.mjs` asserts the chunk is emitted *and* referenced, so this spelling is
-    // load-bearing and survives verbatim.
+    // `new URL(..., import.meta.url)` is the form Vite emits as a separate chunk;
+    // `scripts/check-bundle.mjs` asserts it.
     const started = new Worker(new URL('./rdkit.worker.ts', import.meta.url), { type: 'module' });
-    // An uncaught throw inside the worker, or a script that failed to load at all. Either way this
-    // page has no worker; the requests in flight are re-run here rather than failed, because a
-    // transport fault must not be reported as a chemical verdict.
+    // The worker failed: requests in flight are re-run here rather than failed.
     const lost = (): void => retire();
     started.addEventListener('error', lost);
     started.addEventListener('messageerror', lost);
@@ -119,13 +59,7 @@ function ensureWorker(): RemoteOperations | null {
   }
 }
 
-/**
- * Stop using the worker, and let everything waiting on it answer here instead.
- *
- * Abandoning a call is the same outcome the worker reports when an engine call throws, and `call`
- * below re-runs the operation in-process on either. So a worker dying mid-flight costs the caller
- * the time already spent and nothing else.
- */
+/** Stop using the worker; everything waiting on it is answered here instead. */
 function retire(): void {
   const dying = worker;
   worker = null;
@@ -139,19 +73,13 @@ function retire(): void {
   }
 }
 
-/**
- * Run one engine operation, wherever it belongs.
- *
- * Typed off the engine's own table, so the arguments a caller passes are the arguments the engine
- * takes and the value it gets back is the value the engine returns.
- */
+/** Run one engine operation wherever it belongs, typed off the engine's table. */
 export async function call<K extends Op>(op: K, ...args: Args<K>): Promise<Returns<K>> {
   const active = ensureWorker();
   if (active) {
     const answer = await onWorker(active, op, args);
-    // `null` is "this placement did not answer", never "the answer is nothing" — an operation that
-    // really answers `null` comes back as `{ value: null }`. Conflating the two is how a dead
-    // worker would become "that is not a molecule".
+    // `null` means "this placement did not answer"; a real `null` answer arrives as `{ value: null
+    // }`.
     if (answer && 'value' in answer) return answer.value as Returns<K>;
     if (answer && isStackExhaustion(answer.thrown)) {
       const spent = await escalationWithNowhereToGo(op);
@@ -164,21 +92,9 @@ export async function call<K extends Op>(op: K, ...args: Args<K>): Promise<Retur
 }
 
 /**
- * What a canonical read is when the worker ran out of stack and the page cannot take the call.
- *
- * The worker rethrows a `RangeError` from RDKit's canonical ranking so that this file re-runs the
- * call on the page, which has the bigger stack (`withMol` in `rdkit.engine.ts`). That escalation
- * assumes the page can load RDKit, and **under the production CSP it cannot**: `'unsafe-eval'` is
- * granted to the worker's own script and never to the document (`RDKIT_WORKER_CSP`,
- * `server/config.ts`), so the page's copy of the engine fails to load and answers `unreadable`.
- * The surfaces then ask `rdkitAvailable()` — which the *worker* answers `true` — and tell the
- * chemist "RDKit could not read this as a molecule" about a chain it had just read. Driven behind
- * the real BFF (`e2e/rdkit-too-complex.spec.ts`): that is exactly what the composer said.
- *
- * So when the page cannot load the toolkit, the escalation is spent and the honest answer is the
- * one the page would have given had it the stack to try: `too-complex`. Only the two canonical
- * reads carry that value; every other operation's negative is already the one a stack refusal
- * produces in-process, so they fall through to the page as before.
+ * A canonical read when the worker ran out of stack and the page cannot run RDKit (the production
+ * CSP grants `'unsafe-eval'` only to the worker): answer `too-complex`, not the page's `unreadable`
+ * (`e2e/rdkit-too-complex.spec.ts`). Other operations fall through as before.
  */
 const STACK_REFUSAL: { [K in Op]?: Returns<K> } = {
   readCanonicalSmiles: { status: 'too-complex' },
@@ -199,13 +115,9 @@ async function escalationWithNowhereToGo(op: Op): Promise<{ value: unknown } | n
 }
 
 /**
- * One call across the boundary, bounded: its answer, what it threw, or `null` if it went silent.
- *
- * Three ways it does not answer, raced against each other: the call rejects (the engine threw in
- * there, or Comlink could not post the arguments), the reply budget expires, or the worker is
- * retired under it by the `error` listener. All three mean "no answer" to the caller and none of
- * them is allowed to reach one; a rejection carries its reason only so `call` can tell a stack
- * exhaustion from the rest.
+ * One bounded call across the boundary: its answer, what it threw, or `null` if it went silent
+ * (rejection, budget expired, or worker retired). The rejection reason lets `call` recognise a
+ * stack exhaustion.
  */
 async function onWorker(
   active: RemoteOperations,
@@ -240,13 +152,7 @@ async function onWorker(
   }
 }
 
-/**
- * Drop the worker, as a test does between cases.
- *
- * Exported for `tests/rdkitWorker.test.ts`, which drives this module against a fake `Worker` and
- * must not carry one case's decision into the next. Nothing in `src/` calls it: a page that has
- * settled on a placement keeps it.
- */
+/** Drop the worker between tests (`tests/rdkitWorker.test.ts`); not used in `src/`. */
 export function resetWorkerForTests(): void {
   retire();
   worker = undefined;

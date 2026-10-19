@@ -20,6 +20,8 @@ import type { AddressInfo } from 'node:net';
 let upstream: http.Server;
 let bff: http.Server;
 let port = 0;
+let metricsServer: http.Server;
+let metricsPort = 0;
 let lines: string[] = [];
 
 /** Open upstream responses we must release in teardown so the process can exit. */
@@ -41,10 +43,13 @@ beforeAll(async () => {
   process.env.CLIENT_DIR = '/nonexistent-client-dir';
   process.env.AUTH_MODE = 'dev';
   process.env.LOG_LEVEL = 'info';
-  const { createBffServer } = await import('../server/app.ts');
+  const { createBffServer, createMetricsServer } = await import('../server/app.ts');
   bff = createBffServer();
   await new Promise<void>((resolve) => bff.listen(0, '127.0.0.1', resolve));
   port = (bff.address() as AddressInfo).port;
+  metricsServer = createMetricsServer();
+  await new Promise<void>((resolve) => metricsServer.listen(0, '127.0.0.1', resolve));
+  metricsPort = (metricsServer.address() as AddressInfo).port;
 });
 
 afterAll(async () => {
@@ -53,6 +58,7 @@ afterAll(async () => {
   // plain `close` waits for connections that will not close on their own. Drop them.
   bff.closeAllConnections();
   upstream.closeAllConnections();
+  await new Promise<void>((resolve) => metricsServer.close(() => resolve()));
   await new Promise<void>((resolve) => bff.close(() => resolve()));
   await new Promise<void>((resolve) => upstream.close(() => resolve()));
 });
@@ -64,7 +70,7 @@ beforeEach(() => {
 });
 
 const metrics = async (): Promise<string> =>
-  (await fetch(`http://127.0.0.1:${port}/metrics`)).text();
+  (await fetch(`http://127.0.0.1:${metricsPort}/metrics`)).text();
 
 /** The parsed access line for `route`, or undefined. */
 const accessLine = (route: string): Record<string, unknown> | undefined => {

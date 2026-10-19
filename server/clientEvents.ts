@@ -1,30 +1,11 @@
 /**
- * `POST /api/client-events` — the sink for what the browser recorded.
+ * `POST /api/client-events`: the sink for browser log batches (`src/lib/logger.ts`). The BFF writes
+ * each entry as a JSON log line in this pod's log; it is never proxied.
  *
- * Every failure this SPA knows about used to die in the browser: a render error reached one
- * `console.error`, an unhandled rejection reached nothing at all, and roughly thirty deliberate
- * silent catches recorded nothing anywhere. `src/lib/logger.ts` is the browser half; this is where
- * the batches land.
- *
- * **The BFF logs them itself.** The Chemclaw service has no client-event route — there is nothing
- * to forward to — so a batch becomes one JSON line per entry in this pod's log, beside the access
- * log and in the same shape as the service's own records. If the service ever grows such a route,
- * the change here is to proxy instead, and the browser half does not move.
- *
- * **This route is answered here and is never proxied.** `server/routes.ts` is the list of paths
- * forwarded upstream and this is not one of them, which is why it is handled before that check
- * rather than added to the list.
- *
- * It is also the only route in this process that accepts a body it will *write down*, so the
- * hardening is about log integrity rather than about the backend:
- *
- *  - a body cap far below the proxy's, because a log line is not a payload;
- *  - a bound on entries per batch and on the length of each field;
- *  - control characters stripped, so nothing can forge a second line or a second JSON object;
- *  - the whole record emitted as JSON with the client's text as a *value*, never interpolated;
- *  - `source: "browser"` on every one, so a log query can tell what this pod observed from what a
- *    browser told it. These entries are unauthenticated by construction — the page that sends them
- *    is served before sign-in — and must never be read as this process's own testimony.
+ * The one route that writes a request body to the log, so it is hardened for log integrity: a small
+ * body cap, bounded entries and fields, control characters stripped, client text only as JSON
+ * values, and `source: "browser"` on every record (unauthenticated input, never this process's
+ * testimony).
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -42,12 +23,7 @@ const MAX_FIELD = 512;
 
 const LEVELS = new Set(['error', 'warn', 'info', 'debug']);
 
-/**
- * One field, as text safe to put in a log record.
- *
- * Control characters go first: a newline in a "message" is how a client forges a second line in a
- * line-delimited log, and it is worth removing even though every value here ends up JSON-encoded.
- */
+/** One field as log-safe text: control characters removed (no forged lines), then length-capped. */
 const clean = (value: unknown, limit = MAX_FIELD): string =>
   String(value ?? '')
     // eslint-disable-next-line no-control-regex -- the control characters ARE the point.
@@ -55,12 +31,8 @@ const clean = (value: unknown, limit = MAX_FIELD): string =>
     .slice(0, limit);
 
 /**
- * The caller's own fields, bounded in every direction.
- *
- * Kept because they are the useful half — a status, a tool name, an attempt count — and
- * bounded because they arrive from an unauthenticated page: at most `MAX_CONTEXT_KEYS` keys,
- * primitives only, each stringified and cut. A nested object would let one entry carry a whole
- * document into a single log line.
+ * The caller's context fields, bounded: at most `MAX_CONTEXT_KEYS` keys, primitives only, each
+ * stringified and cut.
  */
 const MAX_CONTEXT_KEYS = 12;
 
@@ -111,12 +83,8 @@ function entriesFrom(body: unknown): { entries: ClientEntry[]; appVersion: strin
 }
 
 /**
- * Read at most `MAX_BODY_BYTES`. Resolves `null` when the body was over the cap.
- *
- * It does NOT destroy the request on the way past the cap, and that is the difference between a
- * 413 the caller reads and a connection reset it cannot interpret: destroying the request takes
- * the socket with it, so the response explaining the refusal never leaves. The caller writes the
- * 413 first and hangs up afterwards, exactly as `proxy.ts::refuseTooLarge` does.
+ * Read at most `MAX_BODY_BYTES`; `null` when over. Does not destroy the request, so the caller can
+ * still write the 413.
  */
 function readBody(req: IncomingMessage): Promise<string | null> {
   return new Promise((resolve) => {
@@ -141,53 +109,15 @@ function readBody(req: IncomingMessage): Promise<string | null> {
 }
 
 /**
- * How many batches this process will write per minute, whoever sends them.
- *
- * **Measured before this existed**: twenty concurrent clients posting maximum-size batches for
- * three seconds had 1,297 accepted, writing 24,643 log entries and ~94 MB — about 31 MB/s, from
- * an unauthenticated route, from anything that can open a socket to the pod. The handler bounded
- * the *shape* of an entry (a 64 KiB body, 50 entries, 512-character messages) and nothing bounded
- * the *rate*, which on a cluster with log shipping is node-disk fill and unbounded ingest cost.
- *
- * The number is chosen against the sink's own cadence rather than picked round: `src/lib/logger.ts`
- * flushes at most every `FLUSH_INTERVAL_MS` (5 s), so a chemist's browser costs ~12 batches a
- * minute, with the ceiling scaling by replica because each pod holds its own.
- *
- * **It was 600, which is ~50 concurrent browsers, against a deployment target of 200.** At the
- * target the arithmetic above is 2,400 batches a minute, so three of every four were refused —
- * browser-side diagnostics thinning by 4x at exactly the moment something is wrong at scale, and
- * 40 req/s of this pod spent writing the refusals. The default is now that arithmetic plus
- * headroom (`server/config.ts`), and it is read from the config rather than fixed here: the knob
- * `CLIENT_EVENTS_RATE_PER_MIN` existed all along and had no reader, so a deployment that raised it
- * changed nothing. The worst case it admits is 3,000 × 64 KiB ≈ 3.2 MB/s, an order below the
- * 31 MB/s measured above, which is the point.
- *
- * **There is no per-address bucket, and that is a measurement rather than an omission.** One was
- * written first, at 60/min keyed on `req.socket.remoteAddress`. In this deployment the UI pod sits
- * behind an OpenShift route, so every browser's batches arrive from the router's address and the
- * per-address ceiling becomes a *global* one ten times stricter than the one below: driven with
- * 120 batches from a single address — ten chemists at the sink's own cadence, well inside the
- * process budget — it accepted 60 and refused 60. Nothing in this process establishes a trusted
- * forwarding header (`server/proxy.ts` strips client-supplied `x-chemclaw-*` and reads no
- * `X-Forwarded-For`), so there is no honest per-client key to bucket on, and a second limit that
- * cannot see clients is a limit that only refuses real ones.
- *
- * A refusal is a 429 the caller can read, not a closed socket: the browser sink treats a non-2xx
- * as a reason to back off and honours the `Retry-After` below (see `startClientEventSink`), and it
- * recovers when the pressure passes. Refusals need no counter of their own — `observe` in
- * `server/app.ts` books every response, so they are already
- * `chemclaw_ui_requests_total{route="/api/client-events",status="429"}`.
+ * Batches this process accepts per minute (`CLIENT_EVENTS_RATE_PER_MIN`), sized for the deployment
+ * target at the browser sink's 5 s cadence plus headroom. Process-wide, with no per-address bucket:
+ * behind the router every browser shares one address, and there is no trusted forwarding header.
+ * Refusals are 429 with `Retry-After`, counted by the access metrics.
  */
 const PROCESS_BATCHES_PER_MINUTE = cfg.clientEventsRatePerMin;
 const BUDGET_WINDOW_MS = 60_000;
 
-/**
- * The batches charged in the window that ends at `resetAt`.
- *
- * A fixed window rather than a sliding log: a sliding window keeps a timestamp per request, which
- * is the unbounded allocation this bound exists to prevent — and with one counter for the whole
- * process, there is nothing to sweep and no map to grow.
- */
+/** Batches charged in the current fixed window (one counter, nothing to grow). */
 let budget = { count: 0, resetAt: 0 };
 
 /** Whether this batch is within the budget, charging it when it is. */
@@ -211,11 +141,7 @@ export async function handleClientEvents(req: IncomingMessage, res: ServerRespon
     return;
   }
 
-  // Charged before the body is read, so a refused caller cannot make this process buffer 64 KiB
-  // per attempt just by being over its limit. The refusal is written FIRST and the still-arriving
-  // body hung up on afterwards, exactly as the 413 below does it: destroying the request instead
-  // of answering takes the socket with it, and the browser reads a network error rather than the
-  // `Retry-After` its sink is waiting for.
+  // Charged before reading the body; the 429 is written first, then the remaining body hung up on.
   if (!withinBudget(Date.now())) {
     const retryAfter = Math.max(1, Math.ceil((budget.resetAt - Date.now()) / 1000));
     res.writeHead(429, {
@@ -249,9 +175,7 @@ export async function handleClientEvents(req: IncomingMessage, res: ServerRespon
 
   const { entries, appVersion, agent } = entriesFrom(parsed);
   for (const entry of entries) {
-    // `debug` has its own arm, and the ternary that lacked one is why it mattered: `LEVELS` admits
-    // `debug`, so a chemist on `?debug=1` had every debug line written at INFO — through the one
-    // knob (`LOG_LEVEL`) an operator would reach for to make it stop.
+    // `debug` entries are written at debug level, not info.
     const emit =
       entry.level === 'error'
         ? log.error

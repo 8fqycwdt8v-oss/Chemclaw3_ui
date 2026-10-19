@@ -43,7 +43,7 @@ vi.mock('../src/auth/AuthContext.tsx', () => ({
 
 function provider(recovers: boolean): AuthProvider & { asked: number } {
   return {
-    mode: 'msal',
+    mode: 'bff',
     account: null,
     asked: 0,
     async getAccessToken() {

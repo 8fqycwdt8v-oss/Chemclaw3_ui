@@ -1,29 +1,11 @@
 /**
- * Skills the agent has proposed, waiting on the person they would act on.
+ * Skills the agent has proposed, decided in place by the person they would act on (the service
+ * returns the whole document, so nothing needs reading elsewhere).
  *
- * **This is the third inbox this page has carried and the first that can decide in place**, so the
- * reason is worth stating against the two that could not. A *plan* is approved on the strength of
- * the reasoning that produced it, which lives in a conversation, so `ReviewQueue.tsx` links back
- * rather than answering here. A *proposal* under the deleted PR-gate was machine-written knowledge,
- * and that gate is gone. This is neither: a skill **is** the document, the service returns it whole
- * for exactly that reason (`api/routes/proposals.ProposalOut`), and there is nothing a reader would
- * go elsewhere to learn. Deciding here is informed, which is the bar the plan section set.
- *
- * **The empty state is the part this file exists to get right.** `ReviewQueue.tsx` has had to
- * delete two inboxes for decisions that could not occur, and both times the failure was identical
- * and quiet — a list route 404s, the client folds it into `[]`, and the section renders a confident
- * permanently-empty queue that reads as "you are up to date". So `api.listProposals` deliberately
- * does not degrade, and this screen distinguishes three states that all look like "nothing here":
- * the deployment keeps no proposals at all (**503**), the call failed, and the genuine empty queue.
- *
- * **Accepting writes the skill inside the decision**, so a person who accepts has changed what
- * their own turns do, immediately and for nobody else. The copy says so rather than saying
- * "accepted", because the one thing a reader must not have to guess is whether anything happened.
- *
- * **A decision is final and the copy does not pretend otherwise.** The service refuses a second
- * decision on the same document and says so; re-proposing the same bytes cannot reopen it. Declining
- * something you later want is recoverable, but through the skills screen rather than through here,
- * which is why the confirm names that path instead of implying an undo this queue does not have.
+ * The empty state distinguishes three things: no proposal store (**503**), a failed call, and a
+ * genuinely empty queue; `api.listProposals` does not fold errors into `[]`. Accepting writes the
+ * skill immediately for this person only, and the copy says so. Decisions are final; recovery after
+ * a decline is via the skills screen, which the confirm names.
  */
 
 import { useState } from 'react';
@@ -39,13 +21,8 @@ import { ConfirmDialog } from '@/components/chem/ConfirmDialog';
 import { EmptyState, Loading } from '@/components/chem/Feedback';
 
 /**
- * The frontmatter `description:` a skill declares, or nothing.
- *
- * Read off the body rather than asked for as a field, because the body is what is being decided and
- * a second source for one string is a second thing that can disagree with it. Deliberately naive —
- * a one-line regex over the block, not a YAML parser: this is a *preview* beside the document, so
- * the cost of missing an exotic spelling is that the reader sees the body, which they were going to
- * read anyway.
+ * The frontmatter `description:`, read off the body so there is one source. A one-line regex, not a
+ * YAML parser: this is only a preview beside the body.
  */
 function described(body: string): string {
   const frontmatter = body.split('---')[1] ?? '';
@@ -65,10 +42,8 @@ function Proposal({
   const [busy, setBusy] = useState<'accept' | 'decline' | null>(null);
   const [failed, setFailed] = useState<string>('');
   const description = described(proposal.content);
-  // A `profile` proposal is a *record*: the service keeps an accepted one and writes nothing,
-  // because a profile changes only through a reviewed commit to `data/profiles/`. Skill copy on it
-  // ("Keep this skill", "acts on your turns from the next one") told a chemist something now acted
-  // on their turns when nothing did.
+  // A `profile` proposal is a record only: accepting it writes nothing (profiles change via commits
+  // to `data/profiles/`), so skill copy does not apply.
   const isSkill = proposal.kind === 'skill';
 
   async function decide(accepted: boolean): Promise<void> {
@@ -78,12 +53,9 @@ function Proposal({
       await api.decideProposal(auth, proposal.kind, proposal.name, proposal.content_hash, accepted);
       onDecided();
     } catch (err) {
-      // Named rather than swallowed. A **409 carries four different reasons** — already decided, a
-      // newer version replaced it, a name a skill this deployment ships already uses, and the row
-      // cap on the personal tier — and only the service knows which, so its sentence is shown. A
-      // fixed "already decided" here told a chemist at the cap the wrong thing, and they never
-      // learned the remedy (remove one, then accept) while the proposal sat open in front of them.
-      // A 503 means the deployment cannot keep the skill this decision would write.
+      // Show the service's sentence: a 409 has several causes (already decided, superseded, name
+      // taken by a shipped skill, personal-tier cap) and only the service knows which. A 503 means
+      // the deployment cannot keep the skill.
       setFailed(
         err instanceof ApiError
           ? err.status === 409
@@ -111,9 +83,7 @@ function Proposal({
           Read the whole {isSkill ? 'skill' : 'profile'} ({proposal.content.length.toLocaleString()}{' '}
           characters)
         </summary>
-        {/* Preformatted rather than rendered: a `SKILL.md` is a document whose frontmatter is part
-            of what is being approved, and rendering it would hide the half that decides where it
-            applies. */}
+        {/* Preformatted, not rendered: the frontmatter is part of what is approved. */}
         <pre className="mt-2 max-h-96 overflow-auto rounded bg-surface-sunken p-3 text-xs whitespace-pre-wrap">
           {proposal.content}
         </pre>
@@ -169,10 +139,8 @@ function Proposal({
 
 /** The section. */
 export function BehaviourProposals(): React.JSX.Element {
-  // Gated on `ready`: mounted before the token existed, this read failed `token_unavailable` on a
-  // cold load and — with `retry: false` and a key auth does not change — stayed failed until the
-  // reader left the page. `isPending` rather than `isLoading`, because a disabled query is pending
-  // without fetching, and `isLoading` would render the empty queue in that gap.
+  // Gated on `ready` so a cold load does not fail `token_unavailable` and stay failed. `isPending`,
+  // not `isLoading`, because a disabled query is pending without fetching.
   const { auth, ready } = useAuth();
   const { data, error, isPending, refetch } = useApiQuery({
     queryKey: keys.proposals,
@@ -183,9 +151,8 @@ export function BehaviourProposals(): React.JSX.Element {
   if (isPending) return <Loading>Loading what the agent has proposed…</Loading>;
 
   if (error) {
-    // The three readings of "nothing here", kept apart. 503 is a *configuration* fact and says so
-    // with the setting that changes it, because an operator reading this over somebody's shoulder
-    // is the person who can fix it.
+    // Keep the three "nothing here" states apart; 503 names the setting that changes it, for the
+    // operator.
     const unavailable = error instanceof ApiError && error.status === 503;
     return (
       <EmptyState

@@ -13,7 +13,9 @@
  * sandbox on and refuse nothing.
  */
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadAll } from 'js-yaml';
 
@@ -31,6 +33,7 @@ interface Container {
   readinessProbe: { httpGet: { path: string; port: string } };
   livenessProbe: { httpGet: { path: string; port: string } };
   startupProbe?: { httpGet: { path: string; port: string } };
+  volumeMounts?: { name: string; mountPath: string; readOnly?: boolean }[];
 }
 interface RouteSpec {
   host: string;
@@ -52,16 +55,23 @@ const one = (kind: string): Doc => {
 const deployment = one('Deployment');
 const service = one('Service');
 const routes = docs.filter((d) => d.kind === 'Route');
-const template = deployment.spec.template as { spec: { containers: Container[] } };
+const template = deployment.spec.template as {
+  spec: { containers: Container[]; volumes?: { name: string; secret?: { secretName: string } }[] };
+};
 const container = template.spec.containers[0]!;
 const env = Object.fromEntries(container.env.map((e) => [e.name, String(e.value)]));
 const routeSpec = (route: Doc): RouteSpec => route.spec as unknown as RouteSpec;
 
-/** Every environment variable `server/config.ts` reads, by the three readers it reads them with. */
+/**
+ * Every environment variable `server/config.ts` reads, by the readers it reads them with. A secret
+ * is read from `<NAME>` or from the file `<NAME>_FILE` names, so both spellings are the BFF's.
+ */
 const configNames = new Set(
-  [...readFileSync('server/config.ts', 'utf8').matchAll(/\b(?:str|num|bool)\('([A-Z0-9_]+)'/g)].map(
-    (m) => m[1],
-  ),
+  [
+    ...readFileSync('server/config.ts', 'utf8').matchAll(
+      /\b(str|num|bool|secret)\('([A-Z0-9_]+)'/g,
+    ),
+  ].flatMap((m) => (m[1] === 'secret' ? [m[2], `${m[2]}_FILE`] : [m[2]])),
 );
 
 afterEach(() => {
@@ -85,6 +95,10 @@ describe('the example OpenShift manifests', () => {
       'SANDBOX_PORT',
       'SANDBOX_BIND_HOST',
       'HTML_SCRIPTS_DEFAULT',
+      'METRICS_PORT',
+      // The token handler: what it signs in against, and where it finds its client secret.
+      'AUTH_MODE',
+      'ENTRA_CLIENT_SECRET_FILE',
     ]) {
       expect(env, name).toHaveProperty(name);
     }
@@ -97,15 +111,25 @@ describe('the example OpenShift manifests', () => {
     expect(pipeline).toMatch(new RegExp(`'${container.name}=\\$\\{params\\.IMAGE_REGISTRY\\}`));
   });
 
-  it('opens the app and the sandbox on the ports the BFF listens on, by name', () => {
+  it('opens the app, the sandbox and the metrics on the ports the BFF listens on, by name', () => {
     const ports = Object.fromEntries(container.ports.map((p) => [p.name, p.containerPort]));
-    expect(ports).toEqual({ http: Number(env.PORT), sandbox: Number(env.SANDBOX_PORT) });
-    expect(ports.http).not.toBe(ports.sandbox);
+    expect(ports).toEqual({
+      http: Number(env.PORT),
+      sandbox: Number(env.SANDBOX_PORT),
+      metrics: Number(env.METRICS_PORT),
+    });
+    expect(new Set(Object.values(ports)).size).toBe(3);
     const servicePorts = service.spec.ports as { name: string; targetPort: string }[];
     expect(servicePorts.map((p) => [p.name, p.targetPort])).toEqual([
       ['http', 'http'],
       ['sandbox', 'sandbox'],
+      ['metrics', 'metrics'],
     ]);
+  });
+
+  it('routes nothing to the metrics port: the exposition is for an in-cluster scraper', () => {
+    // How busy the pod is and how many people are signed in is not for anyone who can reach a host.
+    expect(routes.map((route) => routeSpec(route).port.targetPort)).not.toContain('metrics');
   });
 
   it('probes the app port for readiness and liveness, and the sandbox port for its page', () => {
@@ -138,8 +162,43 @@ describe('the example OpenShift manifests', () => {
     expect(site(sandbox.host)).not.toBe(site(app.host));
   });
 
+  it('mounts the client secret it names, from a Secret, read-only, and keeps it out of env', () => {
+    const file = env.ENTRA_CLIENT_SECRET_FILE ?? '';
+    const mount = container.volumeMounts?.find((m) => file.startsWith(`${m.mountPath}/`));
+    expect(mount, 'a mount holding the secret file').toBeDefined();
+    expect(mount?.readOnly).toBe(true);
+    const volume = template.spec.volumes?.find((v) => v.name === mount?.name);
+    expect(volume?.secret?.secretName).toBeTruthy();
+    // The secret itself is never a literal in a manifest.
+    expect(Object.keys(env)).not.toContain('ENTRA_CLIENT_SECRET');
+  });
+
+  it('keeps a browser on one pod, because sessions live in that pod’s memory', () => {
+    const appRoute = routes.find((r) => routeSpec(r).port.targetPort === 'http');
+    expect(appRoute?.metadata.annotations?.['haproxy.router.openshift.io/disable_cookies']).toBe(
+      'false',
+    );
+  });
+
+  it('limits each client address at the router: the sign-in routes are open to anyone', () => {
+    const appRoute = routes.find((r) => routeSpec(r).port.targetPort === 'http');
+    const annotations = appRoute?.metadata.annotations ?? {};
+    expect(annotations['haproxy.router.openshift.io/rate-limit-connections']).toBe('true');
+    for (const name of ['concurrent-tcp', 'rate-tcp', 'rate-http']) {
+      expect(
+        Number(annotations[`haproxy.router.openshift.io/rate-limit-connections.${name}`]),
+        name,
+      ).toBeGreaterThan(0);
+    }
+  });
+
   it('boots, with this environment, with the sandbox on and nothing refused', async () => {
-    for (const [name, value] of Object.entries(env)) vi.stubEnv(name, value);
+    // The file is the Secret's mount; here, a stand-in with the same name's contents.
+    const secretFile = join(mkdtempSync(join(tmpdir(), 'oidc-')), 'client-secret');
+    writeFileSync(secretFile, 'not-a-real-secret');
+    for (const [name, value] of Object.entries({ ...env, ENTRA_CLIENT_SECRET_FILE: secretFile })) {
+      vi.stubEnv(name, value);
+    }
     vi.resetModules();
     const { cfg, validateConfig } = await import('../server/config.ts');
     expect(validateConfig(cfg)).toEqual([]);
@@ -147,5 +206,6 @@ describe('the example OpenShift manifests', () => {
     expect(cfg.htmlScriptsDefault).toBe(true);
     expect(cfg.port).toBe(Number(env.PORT));
     expect(cfg.sandboxPort).toBe(Number(env.SANDBOX_PORT));
+    expect(cfg.metricsPort).toBe(Number(env.METRICS_PORT));
   });
 });

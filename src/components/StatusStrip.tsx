@@ -1,34 +1,11 @@
 /**
- * Everything that qualifies an answer, ranked instead of stacked.
+ * Everything that qualifies an answer, ranked by what the reader has to do.
  *
- * What this replaces was three amber boxes and a footer. Each box was carefully worded and each
- * was right; together they were 217 measured pixels of warning above a two-line answer, and on a
- * phone the first half of the screen. Three equal alarms is how a reader learns to skip amber, and
- * the cost of that lesson is paid on the one turn where the amber mattered.
- *
- * So the ranking is by what the reader has to *do*:
- *
- *   **A bar** — "do not act on this yet". `review_required` and a turn cut short both change
- *   whether the answer can be used at all, so they keep the full width and the `role="alert"`
- *   that interrupts. Nothing is softened and nothing is collapsed.
- *
- *   **A chip** — "this answer is narrower, or better founded, than it looks". A missing connector,
- *   the verifier's score, the methods behind the numbers: each is a fact about the answer's
- *   standing that a reader consults rather than obeys. One row, expanding in place.
- *
- * ## The chips carry the chemistry, not the plumbing
- *
- * `capabilityLoss` is what turns "safety was unreachable" — a fact about a pod, which a chemist
- * can do nothing with — into "no hazard screen, no genotoxicity alerts, no ICH impurity limits",
- * which is the same fact stated as what they now have to do about it. The connector's own name
- * rides along for whoever has to check the deployment.
- *
- * ## Provenance sits above the answer now, not under it
- *
- * The method a number came from used to be four disclosures deep while the number itself sat at
- * depth zero, and the fix at the time was a line in the footer. A footer is still below the text
- * it qualifies, which is below where the reader has already believed it. The method chip is the
- * same information at the altitude the risk actually has.
+ * **A bar** ("do not act on this yet"): `review_required` and a cut-short turn keep full width and
+ * `role="alert"`. **A chip** ("narrower, or better founded, than it looks"): a missing connector,
+ * the verifier's score, the methods behind the numbers; one row, expanding in place. Chips state
+ * lost capability in chemistry terms (`capabilityLoss`), with the connector name alongside.
+ * Provenance sits above the answer, before the reader believes it.
  */
 
 import { useState } from 'react';
@@ -39,10 +16,8 @@ import { capabilityLoss, methodsUsed } from '../chem/provenance.ts';
 import { cn } from '@/lib/utils';
 
 /**
- * A qualifier that interrupts.
- *
- * `role="alert"` on both members, deliberately: these are the two that change what the reader is
- * about to believe, and they are the whole of the class. Everything else waits its turn.
+ * A qualifier that interrupts. `role="alert"` is reserved for the two that change what the reader
+ * is about to believe.
  */
 function AlertBar({
   tone,
@@ -72,11 +47,8 @@ function AlertBar({
 }
 
 /**
- * One consultable fact, one line high.
- *
- * A chip with `detail` is a `<button>` that discloses it; one without is inert text. Two elements
- * for the same shape would be a second visual language for the same class of fact, so the styling
- * is shared and only the element changes.
+ * One consultable fact, one line high. With `detail` it is a disclosing `<button>`, otherwise inert
+ * text; styling is shared.
  */
 function Chip({
   tone = 'neutral',
@@ -127,20 +99,18 @@ function Chip({
   );
 }
 
-/** What produced the score, in the fewest words that stay true. The citation gate is deterministic
- *  and scores against this turn's own tool results; the judge is a model scoring against the
- *  claims. A reader comparing 0.82 from one with 0.82 from the other is comparing nothing. */
+/**
+ * What produced the score. The citation gate is deterministic over this turn's tool results; the
+ * judge is a model scoring the claims. Their scores are not comparable.
+ */
 const VERIFIER_LABEL: Record<'judge' | 'citation-gate', string> = {
   judge: 'scored by a model judge',
   'citation-gate': 'scored against this turn’s evidence',
 };
 
 /**
- * What each answer check looked at, in a chemist's words rather than the gate's own name.
- *
- * One row per member of `AnswerCheck`. An unknown check never reaches this table: `checks_run` is
- * parsed with `listOf(ANSWER_CHECKS)` (`shared/events.ts`), which drops it, so a third check
- * upstream has to be added to `ANSWER_CHECKS` and named here before it is shown at all.
+ * What each answer check looked at, in a chemist's words. Unknown checks are dropped at parse time
+ * (`listOf(ANSWER_CHECKS)` in `shared/events.ts`), so a new check needs adding there and here.
  */
 const CHECK_LABEL: Record<AnswerCheck, string> = {
   verifier: 'citations',
@@ -183,17 +153,14 @@ export function StatusStrip({ message }: { message: AssistantMessage }): React.J
       {message.partialReason && (
         <AlertBar tone="warn" icon={<Scissors className="size-4" />}>
           <span className="font-semibold">Cut short.</span> {message.partialReason}
-          {/* The service sends this BEFORE the answer, deliberately, so the reader meets it above
-              the text rather than discovering afterwards that the text was not the whole job. */}
+          {/* Sent before the answer, so the reader meets it above the text. */}
           <span className="mt-1 block">
             What follows is what the turn managed, not what it set out to do.
           </span>
         </AlertBar>
       )}
 
-      {/* Severity order, left to right: what is wrong with the answer, what was missing from it,
-          how well it scored, what produced it. A reader scanning the row meets the chips in the
-          order they would act on them. */}
+      {/* Severity order, left to right: what is wrong, what was missing, how well it scored, what produced it. */}
       {hasChip && (
         <div className="flex flex-wrap items-center gap-1.5">
           {unsupportedClaims.length > 0 && (
@@ -222,9 +189,7 @@ export function StatusStrip({ message }: { message: AssistantMessage }): React.J
               label={
                 <>
                   {capabilityLoss(connector)}{' '}
-                  {/* De-emphasised by size and by the parentheses, NOT by opacity: multiplying an
-                      `-ink` token's alpha silently un-chooses the colour that was measured to
-                      pass on this ground. */}
+                  {/* De-emphasised by size and parentheses, not opacity: altering an `-ink` token's alpha breaks its measured contrast. */}
                   <span className="font-mono text-2xs">({connector})</span>
                 </>
               }
@@ -257,9 +222,7 @@ export function StatusStrip({ message }: { message: AssistantMessage }): React.J
             />
           )}
 
-          {/* What looked at this answer, which is a different fact from what it scored. An answer
-              with no chip here was not checked at all — and with both gates shipping off that is
-              the ordinary case, which is exactly why the two must not render the same. */}
+          {/* What looked at this answer (distinct from its score). No chip here means it was not checked, which is the ordinary case with both gates off. */}
           {checksRun.length > 0 && (
             <Chip
               tone="ok"

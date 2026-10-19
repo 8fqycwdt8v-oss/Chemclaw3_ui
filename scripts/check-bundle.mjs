@@ -10,7 +10,7 @@
  *
  * ## The budget, and why it is a first-party check
  *
- * This file policed what *lands* in the entry chunk — MSAL stays lazy, the RDKit worker is emitted
+ * This file policed what *lands* in the entry chunk — no OIDC client, the RDKit worker is emitted
  * — and said nothing at all about how big any of it is. `tests/entryChunk.test.ts` states the
  * reason a size does not belong in prose ("a size in prose is a claim about one commit on one
  * branch") and asserts the *property* instead. What was missing is the other half: a number
@@ -99,17 +99,32 @@ export function firstLoadFiles(html) {
  *
  * Not a dependency taken but the framework growing, and holding React at 19.2 to stay under a
  * number would be the ratchet this file argues against. The headroom is re-set to the same ~6%.
+ *
+ * **Re-set on 2026-10-17**, from 240,000 / 770,000, by the npm minor/patch group that superseded
+ * Dependabot #160. That headroom went to the product, not to dependencies: `main` (`5d7d7b9`), after
+ * the 27 merges since #119 (the artefact pane, shared conversations, interrupted turns, the BFF
+ * sign-in), measured 0.2% under the raw bound. The group's own cost, each bump reverted alone:
+ *
+ *     main                                   768,826 raw   236,001 gzip
+ *     radix-ui 1.7.0                          +1,783 raw      +527 gzip
+ *     vite 8.3.4                                +137 raw       +49 gzip
+ *     the other eight                     a few bytes either way
+ *     after                                  770,745 raw   236,581 gzip   (+1,919 / +580)
+ *
+ * radix-ui 1.7.0 fixes layers this app uses (a portalled layer inside a modal Dialog, which every
+ * sheet is; Popover); holding it back to stay under the number would be the same ratchet. The
+ * headroom is re-set to ~6%.
  */
 export const BUDGET = {
-  firstLoadGzip: 240_000,
-  firstLoadRaw: 770_000,
+  firstLoadGzip: 252_000,
+  firstLoadRaw: 820_000,
 };
 
 /** The measurement this budget was set from, so the headroom is checkable rather than asserted. */
 export const MEASURED = {
-  at: '2026-10-01',
-  firstLoadGzip: 226_780,
-  firstLoadRaw: 723_873,
+  at: '2026-10-17',
+  firstLoadGzip: 236_581,
+  firstLoadRaw: 770_745,
 };
 
 const kb = (bytes) => `${(bytes / 1024).toFixed(1)} kB`;
@@ -143,7 +158,7 @@ function main() {
   /* ── the runtime config script survives bundling ──────────────────────────── */
 
   // Vite warns rather than fails when it cannot bundle a non-module script, so a refactor could
-  // silently drop this tag — and the app would then read its MSAL settings from nothing, in
+  // silently drop this tag — and the app would then read its runtime settings from nothing, in
   // production only.
   if (html.includes('src="/config.js"')) ok('index.html still loads /config.js');
   else
@@ -152,42 +167,23 @@ function main() {
       'the app would read its runtime config from nothing',
     );
 
-  /* ── MSAL stays out of the entry chunk ────────────────────────────────────── */
+  /* ── no OIDC client reaches the browser ───────────────────────────────────── */
 
-  // Auth is a seam with two implementations, and the dev path must not pay for the one it never
-  // uses. A static import would quietly pull ~230 kB of MSAL into every first load.
-  //
-  // The probe is `PublicClientApplication`, a class from @azure/msal-browser. Grepping for "msal"
-  // would false-positive on this app's own `authMode === 'msal'` comparisons and on the lazy
-  // chunk's filename, both of which legitimately appear in the entry.
-  const PROBE = 'PublicClientApplication';
-
-  const entryMatch = html.match(/src="(\/assets\/index-[^"]+\.js)"/);
-  if (!entryMatch) {
-    bad('could not find the entry chunk in index.html', 'this check cannot run');
-  } else {
-    const entry = join(CLIENT_DIR, entryMatch[1]);
-    console.log(`    entry chunk: ${entry}`);
-    if (readFileSync(entry, 'utf8').includes(PROBE)) {
-      bad(`MSAL is inlined into the entry chunk`, 'it must stay dynamically imported');
-    } else {
-      ok('MSAL is not in the entry chunk');
-    }
-
-    // Positive control: if MSAL is in no chunk at all, the probe string has gone stale and the
-    // check above would be passing for the wrong reason.
+  // The BFF holds the tokens (docs/operations.md, "Token custody"); a browser-side OIDC library in
+  // any chunk would mean something in the page can obtain one again. `acquireTokenSilent` and
+  // `PublicClientApplication` are MSAL's names for exactly that.
+  {
     const assets = join(CLIENT_DIR, 'assets');
     const chunks = readdirSync(assets).filter((name) => name.endsWith('.js'));
-    const carrying = chunks.filter((name) =>
-      readFileSync(join(assets, name), 'utf8').includes(PROBE),
-    );
-    if (carrying.length === 0) {
-      bad(
-        `${PROBE} was not found in any of ${chunks.length} chunks`,
-        'this check has stopped testing anything — the probe string moved',
-      );
+    const PROBES = ['PublicClientApplication', 'acquireTokenSilent'];
+    const carrying = chunks.filter((name) => {
+      const text = readFileSync(join(assets, name), 'utf8');
+      return PROBES.some((probe) => text.includes(probe));
+    });
+    if (carrying.length > 0) {
+      bad(`a browser OIDC client is in ${carrying.join(', ')}`, 'tokens must stay in the BFF');
     } else {
-      ok(`MSAL is present in ${carrying.length} lazily-loaded chunk(s)`);
+      ok(`no browser OIDC client in any of ${chunks.length} chunks`);
     }
   }
 

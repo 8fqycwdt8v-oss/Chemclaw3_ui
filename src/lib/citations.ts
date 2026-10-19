@@ -1,13 +1,7 @@
 /**
- * Linkify the agent's citations.
- *
- * The agent's instructions require it to "cite the note id behind every claim", but those ids
- * arrive as unstructured text inside the answer — there is no citation array on the wire. So we
- * find them in the markdown AST.
- *
- * A remark plugin rather than a regex over rendered HTML: a post-hoc regex would happily rewrite
- * `reaction-abc` inside a code fence, inside an inline `code` span, or inside an existing link's
- * text, all of which are wrong and all of which occur in real answers about reaction SMILES.
+ * Linkify the agent's citations. Ids arrive as plain text in the answer, so they are found in the
+ * markdown AST; a remark plugin, unlike a regex over HTML, leaves code fences, inline code and link
+ * text alone.
  */
 
 import { visit, SKIP } from 'unist-util-visit';
@@ -25,34 +19,13 @@ interface LinkNode extends Node {
 }
 
 /**
- * Identifier shapes the backend actually emits.
+ * Note-id prefixes the backend writes into `knowledge/`. `qm-` and the job prefixes cover durable
+ * job ids (`<connector>-<hash>`), whose `job-result` note may not exist, which is why
+ * `CitationChip` can fall back to asking the agent.
  *
- * **Read against the corpus, not against our own fixtures.** The list here was `reaction-`, `note-`
- * and `qm-`, and the first two match nothing the service has ever written: every note id in
- * `knowledge/` begins `compound-`, `rxn-`, `playbook-`, `campaign-`, `opt-`, `interaction-`,
- * `report-`, `failure-`, `proposal-`, `bo-candidate-` or `job-result-`. A note of *type* `reaction`
- * is filed under `rxn-`, and nothing at all is filed under `note-` — the only `note-` strings in the
- * backend are Temporal workflow ids (`note-reindex-…`), which are not notes.
- *
- * So the chip that exists to make a citation checkable was firing on almost no real citation. It
- * survived this long because a test can only disagree with the fixture it was given, and ours said
- * `note-suzuki-42`.
- *
- * `qm-` stays, and gains its siblings: a durable job id is minted by the workflow as
- * `<connector>-<hash>`, and a job's `job-result` note may never have been written — which is why
- * `CitationChip` falls back to asking the agent rather than assuming the graph can answer.
- *
- * **`reaction-` came back, and this time the corpus is what says so.** An ELN or ORD run is not a
- * file in `knowledge/` — it is a row in the service's reaction store — and its citation spelling
- * is `reaction-<source>.<id>` (or the bare `reaction-<id>`), minted by core's
- * `kg.note.note_id_for_reaction` and handed to the model by `gather_evidence`'s reaction retriever
- * and by `similar_reactions`. `GET /notes/{id}` resolves both forms (driven on the kind cluster:
- * `reaction-eln-ord.suzuki-flow-hte-04620` → 200, a citation-only record whose species read
- * "structure not given by the source"). So every citation of an experimental record — the
- * citations a chemist most needs to check — rendered as plain text. It has its own, narrower
- * pattern below, because "reaction-" also opens ordinary English compounds ("the reaction-energy
- * job") that must stay prose: a record id carries a digit or a `<source>.` qualifier, and a
- * compound word carries neither.
+ * ELN/ORD reaction records (`reaction-<source>.<id>` or `reaction-<id>`, from core's
+ * `note_id_for_reaction`) have their own narrower pattern below, requiring a digit or a `<source>.`
+ * qualifier so prose like "reaction-energy" stays text.
  */
 const NOTE_PREFIXES = [
   'compound',
@@ -84,10 +57,8 @@ const PATTERNS: { kind: string; re: RegExp }[] = [
 
 const combined = new RegExp(PATTERNS.map((p) => p.re.source).join('|'), 'g');
 
-// `report-` names both a written report note and a durable report job, so a `report-<id>` token
-// can satisfy both patterns below. Classify job-shaped ids first: `PATTERNS`' declaration order
-// (note before job) only controls how `combined` splits prose into tokens, not which kind a
-// genuinely ambiguous token gets — checking job first here is what actually breaks the tie.
+// `report-` is both a note and a job prefix. Classify job-shaped ids first: `PATTERNS` order only
+// governs tokenising, this order breaks the tie.
 const CLASSIFICATION_ORDER = ['job', 'note'] as const;
 
 const kindOf = (token: string): string => {
@@ -100,9 +71,10 @@ const kindOf = (token: string): string => {
   return 'note';
 };
 
-/** The href scheme `<Markdown>` renders as a citation chip, mirroring `#figure/` in
- *  `provenance.ts`. Exported so the component that gives it meaning is also the one that can
- *  strip it out of the answer, rather than repeating the literal. */
+/**
+ * The href scheme `<Markdown>` renders as a citation chip (cf. `#figure/` in `provenance.ts`);
+ * exported so the renderer can strip it rather than repeat the literal.
+ */
 export const CITE_HREF = '#cite/';
 
 /**
@@ -150,12 +122,6 @@ export function remarkCitations() {
 }
 
 /**
- * The SMILES recogniser used to live here, and it demanded a bond/branch/ring character or a digit
- * so that plain words would not pass. That rejected `CCO` — ethanol, and every other
- * straight-chain molecule a chemist writes without punctuation. It now lives in
- * `src/chem/recognise.ts`, which asks the answerable question instead (could every letter be a
- * SMILES atom?) and is affordable being looser because RDKit is the arbiter behind it.
- *
- * This file keeps the citation half: which prose tokens are identifiers is a different question
- * from which are structures, and it is the one this module was named for.
+ * SMILES recognition lives in `src/chem/recognise.ts`; this module handles only citation
+ * identifiers.
  */

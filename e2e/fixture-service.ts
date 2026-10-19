@@ -17,9 +17,9 @@
  * already drifted once: its own comment records that it answered `{sessions: []}` where the
  * service returns a bare array, so every browser test quietly ran the sidebar's degraded branch.
  * Typing every frame as `ChemclawEvent` and every JSON body by its `src/api/client.ts` interface
- * makes `tsc -b` — already a CI step — the checker. It runs under Node's type stripping, the same
- * path `scripts/check-openapi.mjs` uses; every import here is `import type` and therefore erased,
- * so nothing application-side is loaded at runtime.
+ * makes `tsc -b` — already a CI step — the checker. It runs under Node's type stripping; every
+ * import here is `import type` and therefore erased, so nothing application-side is loaded at
+ * runtime.
  *
  *   node --experimental-strip-types e2e/fixture-service.ts [port]
  */

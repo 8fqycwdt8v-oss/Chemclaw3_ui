@@ -1,16 +1,8 @@
 /**
- * Conversation list.
- *
- * Sessions are listed from the server when the backend supports `GET /sessions`, and merged with
- * the local list so a conversation started on another device shows up. Locally-known conversations
- * always win on title, since the server can only derive one from the first stored message.
- *
- * The panel body is shared between the persistent column (>= lg) and the Sheet below it. That
- * sharing is the point: the sidebar used to `display:none` under 768px with no replacement, which
- * took the conversation switcher, "New conversation" and — worst — the "Reset app" recovery
- * control off phones entirely. Reset app is the documented way out of the poisoned-state bug the
- * store's v2 key bump exists for, so losing it on the device most likely to hit that bug was the
- * sharpest edge in the product.
+ * Conversation list: the server's sessions (`GET /sessions`) merged with the local list, so
+ * conversations from another device appear; a local title wins. The panel body is shared by the
+ * persistent column (>= lg) and the mobile Sheet, so navigation and "Reset app" are always
+ * reachable.
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -63,11 +55,8 @@ import { NotifyToggle } from '@/components/chem/NotifyToggle';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 
 /**
- * Fold one page of the service's sessions into the local list.
- *
- * Shared by the first read and by "Load more", so the two cannot drift about what a restored
- * conversation looks like. Returns the ids it added, which is what tells the caller whether the
- * page was worth asking for.
+ * Fold one page of the service's sessions into the local list (first read and "Load more"). Returns
+ * how many were added.
  */
 function adoptSessions(remote: SessionSummary[]): number {
   const state = useChatStore.getState();
@@ -84,18 +73,10 @@ function adoptSessions(remote: SessionSummary[]): number {
     const ids: string[] = [];
     for (const summary of additions) {
       const created = summary.created_at ? Date.parse(summary.created_at) : Date.now();
-      // **The service names its sessions now, and this used to ignore it.** The comment here read
-      // "the server has never sent one, so the guard was decoration in front of a constant" — true
-      // when written, false since `routes/sessions.py` began constructing
-      // `SessionSummary(..., title=title)` from the session's first user message. The guard was
-      // deleted one release before it became load-bearing, so every restored conversation read
-      // "Earlier conversation" until somebody clicked into it and `hydrateTranscript` renamed it
-      // from a transcript it had to fetch first. The placeholder stays as the fallback for a
-      // service that predates the field, and for a session minted before anyone had spoken.
+      // The service's title (from the first user message); the placeholder is the fallback for
+      // older services and sessions nobody has spoken in.
       const named = summary.title?.trim();
-      // `updated_at` is the newest stored message; `created_at` is when the session was *started*.
-      // Sorting by the second is what put a conversation opened last Tuesday and abandoned above
-      // one used an hour ago — the bug this file's own sort comment names.
+      // Sort by last activity (`updated_at`), not by when the session started.
       const touched = summary.updated_at ? Date.parse(summary.updated_at) : created;
       const conversation = {
         ...newConversation(),
@@ -117,12 +98,9 @@ function adoptSessions(remote: SessionSummary[]): number {
 }
 
 /**
- * Fold `GET /sessions/shared` into the local list, marking each as somebody else's.
- *
- * `adoptSessions`' shape for the same reason — a stub the transcript rehydrate knows to read — plus
- * `membership`, which is what moves the row under "Shared with me" and takes Branch and Delete off
- * it. A session this browser already holds is *marked* rather than duplicated: it was opened
- * before (by link, say) and is only now known to be somebody else's.
+ * Fold `GET /sessions/shared` into the local list, marked as somebody else's (`membership`), which
+ * files the row under "Shared with me" and hides Branch and Delete. A session already held is
+ * marked, not duplicated.
  */
 export function adoptShared(remote: SharedSessionSummary[]): void {
   const state = useChatStore.getState();
@@ -162,9 +140,7 @@ export function adoptShared(remote: SharedSessionSummary[]): void {
 }
 
 /**
- * The conversations other people have let this person into (Chemclaw3 #483), adopted into the
- * local list as they arrive. Once per mount, like the owned listing; `listSharedSessions` folds a
- * service without the route into `[]`, so an older deployment simply has no such section.
+ * Adopt conversations others let this person into, once per mount; an older service yields none.
  */
 function useSharedSessions(): void {
   const { auth, ready } = useAuth();
@@ -179,12 +155,8 @@ function useSharedSessions(): void {
 }
 
 /**
- * Pull server-side sessions. Anything not known locally is added as a stub.
- *
- * Paged, because the service caps a listing at `service_max_listed_sessions` (100) and advertises
- * `X-Next-Cursor` when there may be more — so conversation 101 was not below a fold, it was never
- * fetched, and nothing said so. The first page is read on mount; the rest is a control, because
- * pulling every page on boot would be a hundred round trips for a list nobody scrolled.
+ * Pull server-side sessions, paged by `X-Next-Cursor` (the service caps a listing at
+ * `service_max_listed_sessions`). The first page loads on mount; more on request.
  */
 function useServerSessions(): {
   health: 'idle' | 'degraded';
@@ -195,15 +167,8 @@ function useServerSessions(): {
 } {
   const { auth, ready } = useAuth();
   /**
-   * The listing, as pages.
-   *
-   * `getNextPageParam` reading `X-Next-Cursor` is what the hand-held `cursor` state was: the
-   * service advertises the header when there may be more, and an empty one means this is the end.
-   * `isFetchingNextPage` is `loadingMore`. Neither is a behaviour change; they are the two pieces
-   * of the control that had to be kept in step by hand.
-   *
-   * Not enabled until auth resolves: the placeholder provider throws rather than sending an
-   * unauthenticated request, so running this earlier set `degraded` on every single boot.
+   * The listing as pages; `getNextPageParam` reads the cursor. Disabled until auth resolves (the
+   * placeholder provider throws).
    */
   const { data, error, fetchNextPage, hasNextPage, isFetchingNextPage, isFetchNextPageError } =
     useApiInfiniteQuery<SessionPage, ApiError, string>({
@@ -214,26 +179,15 @@ function useServerSessions(): {
       enabled: ready,
     });
 
-  /**
-   * Adopting what arrived, which is a *use* of the pages rather than part of fetching them.
-   *
-   * Keyed on the page array, so it runs once per page that arrives and is idempotent besides —
-   * `adoptSessions` adds only ids the store does not already hold.
-   */
+  /** Adopt each page as it arrives; idempotent. */
   const pages = data?.pages;
   useEffect(() => {
     if (!pages) return;
     for (const page of pages) adoptSessions(page.sessions);
   }, [pages]);
 
-  // A backend without the listing endpoint and a backend that refused our token are not the same
-  // thing, and silently showing a local-only list made them look identical. Not worth a banner,
-  // but worth saying somewhere.
-  //
-  // **It un-latches**, which is the half a plain `error` boolean would have kept and the old
-  // `setHealth('idle')` on success existed for: a single failure used to leave "showing local
-  // conversations only" on screen for the life of the session. react-query clears `error` on the
-  // next success, so the reset is the library's rather than a line that can be forgotten.
+  // Note when the listing failed (missing route vs refused token look identical otherwise); clears
+  // on the next success.
   useEffect(() => {
     if (!error) return;
     logger.warn('sessions.list_failed', {
@@ -243,32 +197,9 @@ function useServerSessions(): {
   }, [error]);
 
   /**
-   * How the last *next-page* fetch failed, when one did — and whether pressing the control again
-   * could plausibly work.
-   *
-   * **`hasNextPage` does not answer this, and the comment that used to stand below claimed it
-   * did.** It is `getNextPageParam(lastSuccessfulPage)`, and a fetch that *failed* never reaches
-   * `getNextPageParam` at all — so the flag keeps whatever the last page that did arrive said.
-   * Driven against the installed `@tanstack/query-core` with this app's own defaults, a listing
-   * whose page 1 advertises a cursor and whose page 2 throws lands on
-   * `{status:'error', hasNextPage:true, pages:1, isFetchNextPageError:true}`: `hasNextPage` goes
-   * `false` only when the *first* page fails, because then there is no page to derive one from.
-   * So "the button goes away" was true of exactly the case where there was no button.
-   *
-   * `isFetchNextPageError` is the flag that distinguishes the two failures, and they want opposite
-   * things: a first page that fails leaves no listing at all and is the `degraded` note below; a
-   * next page that fails leaves the listing on screen with its cursor unresolved, which is what
-   * this control is about.
-   *
-   * **Final and transient are not the same failure and must not get the same control.** A 422 —
-   * `not a session cursor`, or a registry that cannot resume a listing — is final: the same cursor
-   * will be refused for as long as it is pressed, which is the doomed retry this hook shipped
-   * offering. A 503, a 429 the limiter will lift, and a `fetch` that threw are not final, and
-   * there the button *is* the remedy. `ApiError.retryable` is this app's own answer to "could a
-   * bare retry of this request succeed?" — `sendMessage` reads the same flag to decide whether a
-   * banner offers Retry — so the two decisions cannot drift apart. Anything that is not an
-   * `ApiError` is treated as final: nothing here can say a retry would help, and offering one that
-   * cannot is the defect being fixed.
+   * How the last next-page fetch failed, if it did. `hasNextPage` does not reflect a failed fetch.
+   * A non-retryable `ApiError` (e.g. 422 bad cursor) is final and removes the control; a retryable
+   * one keeps it. Non-`ApiError` failures count as final.
    */
   const moreFailed: 'retry' | 'final' | null = !isFetchNextPageError
     ? null
@@ -277,15 +208,10 @@ function useServerSessions(): {
       : 'final';
 
   return {
-    // Only when there is no server listing at all. It used to be any `error`, which put "showing
-    // local conversations only" underneath a list of server conversations the moment a *later*
-    // page failed — a sentence the rows above it contradict. `data.pages` is what tells the two
-    // apart, and it is the same distinction `moreFailed` is drawn on one field over.
+    // Degraded only when no server page arrived at all.
     health: error && !pages?.length ? 'degraded' : 'idle',
-    // Gone once a page has failed finally, because the cursor it would re-issue is the one the
-    // service refused. Kept when the failure was transient, because then pressing it again is
-    // what fixes it — react-query refetches the failed page rather than starting over, and a
-    // success clears `isFetchNextPageError` so the control returns to its ordinary label.
+    // Hidden after a final failure; kept after a transient one (pressing again refetches the failed
+    // page).
     more: hasNextPage && moreFailed !== 'final' ? () => void fetchNextPage() : null,
     loadingMore: isFetchingNextPage,
     moreFailed,
@@ -293,17 +219,9 @@ function useServerSessions(): {
 }
 
 /**
- * Everything in one conversation a search should reach, lowercased, cached on the conversation.
- *
- * Keyed on the conversation *object*, which the store replaces only when that conversation
- * actually changes — so a streaming turn rebuilds one entry per animation frame and the other
- * twenty-nine are read straight back. Without it the scan below allocated a lowercased copy of
- * every message body in every conversation on every frame: measured at 30 conversations × 200
- * messages, 2.1 ms per frame, i.e. ~128 ms of string work per second of streaming, for as long
- * as the reader has anything typed in the box.
- *
- * A `WeakMap` rather than an LRU because the right eviction rule is exactly "the conversation is
- * gone", and that is the one rule a `WeakMap` applies for free.
+ * Each conversation's searchable text, lowercased, cached per conversation object (replaced only
+ * when it changes), so a streaming turn rebuilds one entry per frame. A `WeakMap` evicts exactly
+ * when the conversation is gone.
  */
 const haystacks = new WeakMap<Conversation, string>();
 
@@ -323,10 +241,8 @@ function haystack(c: Conversation): string {
 }
 
 /**
- * The conversation ids this panel lists, newest first, narrowed by the search box.
- *
- * Exported and pure so the subscription above can be a shallow-compared array rather than the
- * whole conversations map — see the comment at its one call site.
+ * The conversation ids this panel lists, newest first, filtered by search. Pure, so the
+ * subscription can be a shallow-compared array.
  */
 export function visibleConversationIds(state: ChatState, needle: string): string[] {
   // The store prepends on create but server-merged stubs were appended, so a conversation used
@@ -342,15 +258,8 @@ export function visibleConversationIds(state: ChatState, needle: string): string
 }
 
 /**
- * Remove a conversation from this browser *and* from the service.
- *
- * Server first, then local, and the order is the whole point: a local delete that ran first would
- * leave the caller with no session id to send if the request failed, and the chemist believing the
- * conversation was gone when the service still holds it.
- *
- * A failure is reported and the conversation stays. That is the honest outcome — "it is gone" is
- * the claim this function exists to make true — and it is recoverable: the row is still there to
- * try again.
+ * Remove a conversation on the service, then locally. On failure it is reported and kept, so the
+ * chemist is never told it is gone when it is not.
  */
 async function deleteConversation(id: string, auth: AuthProvider): Promise<void> {
   const sessionId = useChatStore.getState().conversations[id]?.sessionId;
@@ -361,8 +270,7 @@ async function deleteConversation(id: string, auth: AuthProvider): Promise<void>
       logger.warn('session.delete_failed', {
         kind: err instanceof ApiError ? err.kind : 'unknown',
       });
-      // 403 is a member asking (Chemclaw3 #483): deleting a shared conversation is its owner's
-      // act, because it erases everybody's words. Final, so no Retry — and the way out is named.
+      // A member cannot delete a shared conversation (403): final, and the message says who can.
       const forbidden = err instanceof ApiError && err.kind === 'forbidden';
       useChatStore.getState().setBanner({
         kind: 'warn',
@@ -380,12 +288,8 @@ async function deleteConversation(id: string, auth: AuthProvider): Promise<void>
 }
 
 /**
- * Copy this conversation onto a new session and open it.
- *
- * The local half is a fresh conversation pointed at the forked session with the parent's messages
- * carried over, so the branch reads as a branch rather than as an empty thread that happens to
- * share a history on the server. `sessionOrigin: 'server'` is deliberate: the service holds the
- * authoritative copy, and the transcript rehydrate is what reconciles the two if they differ.
+ * Fork onto a new session and open it locally with the parent's messages; `sessionOrigin: 'server'`
+ * lets the transcript rehydrate reconcile.
  */
 async function forkConversation(
   id: string,
@@ -438,8 +342,7 @@ function ConversationRow({
       <button
         type="button"
         onClick={onSelect}
-        // aria-current is the only machine-readable "you are here"; a background tint alone was
-        // both low-contrast and invisible to assistive tech.
+        // `aria-current` marks the active row for assistive tech.
         aria-current={active ? 'page' : undefined}
         className={cn(
           'w-full rounded-lg px-2.5 py-2 pr-9 text-left transition-colors',
@@ -482,9 +385,7 @@ function ConversationRow({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
-          {/* Somebody else's conversation (Chemclaw3 #483): branching and deleting it are its
-              owner's acts, and the service refuses a member both — so neither is offered. What a
-              member holds instead is leaving, which nobody should have to ask the owner for. */}
+          {/* Somebody else's conversation: Branch and Delete are the owner's (the service refuses a member), so a member is offered Leave. */}
           {conversation.membership && (
             <ConfirmDialog
               trigger={
@@ -519,28 +420,14 @@ function OwnerActions({
 }): React.JSX.Element {
   return (
     <>
-      {/* deleteConversation has existed in the store from the start and no UI ever called it,
-              so the only way to remove one conversation was to delete all of them.
-
-              **Two things were wrong with the version that gave it one.** It was a local map
-              delete — the server session, its transcript, its checkpoints, its attachments and its
-              ownership row all survived — so the chemist who deleted a conversation *because* it
-              held something they did not want kept had been told something untrue. And it was one
-              click on a 24px control, with no confirmation and no undo, in a codebase that confirms
-              the plan decision, the protocol status move and "Clear all conversations".
-
-              `onSelect` is prevented so the menu does not close and unmount the dialog it is
-              opening. */}
-      {/* Branch it, keeping both. The service copies the whole thread under a new id and
-              refuses while a turn is in flight, so a fork is never a half-copied conversation.
-              This is also the version of "edit and resend" that keeps the original: the message
-              control refills the composer in place, this one gives the new question its own
-              thread. */}
+      {/* Delete removes the conversation on the service, behind a confirmation. `onSelect` is
+          prevented so the menu does not unmount the dialog it opens. */}
+      {/* Branch keeps both conversations: the service copies the whole thread (refusing
+          mid-turn) under a new id. */}
       <DropdownMenuItem
         onSelect={() => {
-          // A statement body, not `() => void fork(…)`: the rule reads the expression form as
-          // returning the promise. `forkConversation` reports its own failures through the
-          // banner, so there is nothing here to await.
+          // A statement body so the promise is not returned; `forkConversation` reports its own
+          // failures.
           void forkConversation(id, auth, navigate);
         }}
       >
@@ -602,9 +489,7 @@ function SidebarLink({
       </span>
       {children}
       {count > 0 && (
-        // The number is in the accessible name rather than beside it as a bare digit: a screen
-        // reader announcing "Review queue 2" says nothing about what the 2 counts, and this link
-        // also leads to recorded notes, which this badge is not about.
+        // The count is in the accessible name, so it is announced with what it counts.
         <Badge tone="warn" className="ml-auto" aria-label={`${count} waiting on you`}>
           {count}
         </Badge>
@@ -617,9 +502,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
   const navigate = useNavigate();
   const activeId = useChatStore((s) => s.activeId);
   const { health: degraded, more: loadMoreSessions, loadingMore, moreFailed } = useServerSessions();
-  // Either this tab 429'd itself, or the tab holding the account's streams says it did. The
-  // chemist's question is the same one — "am I being told about finished jobs?" — and the second
-  // is the only form a follower can ever see, because a follower holds no streams to 429.
+  // Either this tab or the leader tab hit the stream cap; followers only see the latter.
   const throttled = useChatStore((s) => s.jobStreamsThrottled || s.jobStreamsThrottledElsewhere);
   const streamsFailing = useChatStore((s) => s.jobStreamsFailing.length > 0);
   // A number, not the list: zustand compares with `Object.is`, so subscribing to the array itself
@@ -628,19 +511,10 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
   const [query, setQuery] = useState('');
   const needle = query.trim().toLowerCase();
 
-  // **The list is subscribed to as ids, not as the conversation map.** `updateAssistant` replaces
-  // `state.conversations` on every animation-frame token flush, so `useChatStore((s) =>
-  // s.conversations)` changed identity ~60×/s and re-rendered this whole panel — every row, each
-  // with its own `DropdownMenu` — for the entire duration of every answer. Measured on the
-  // sidebar alone: 2.8 ms/flush at one conversation, 50.5 ms at thirty, linear in a number the
-  // chemist grows over time. The projection below still runs per write (that is what zustand
-  // compares) but it returns the same *shallow* array while the order and the match set hold, so
-  // React does nothing. `ConversationRow` already subscribes to its own conversation, so the one
-  // row that genuinely changed still re-renders — which is the whole of what should.
+  // Subscribe to the id list (shallow-compared), not the conversations map, which changes on every
+  // token flush; each row subscribes to its own conversation.
   const visible = useChatStore(useShallow((s) => visibleConversationIds(s, needle)));
-  // Split by whose they are, as ids for the same reason as above: a conversation somebody else let
-  // this person into is listed under its own heading, so "mine" and "shared with me" are never
-  // one column a reader has to tell apart row by row.
+  // Shared conversations are listed under their own heading.
   const sharedIds = useChatStore(
     useShallow((s) => visible.filter((id) => s.conversations[id]?.membership)),
   );
@@ -651,17 +525,13 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
   useSharedSessions();
 
   const open = (id: string): void => {
-    // Read at click time rather than subscribed: the announcement wants the title and the length
-    // as they are when the reader acts, and subscribing to the map to get them is what put this
-    // panel on the per-token render path.
+    // Read at click time, so this panel does not subscribe to the whole map.
     const opened = useChatStore.getState().conversations[id];
     const title = opened?.title ?? 'conversation';
     const count = opened?.messages.length ?? 0;
     void navigate(`/c/${id}`);
     onNavigate?.();
-    // Land the reader in the transcript rather than leaving focus on a list item whose content
-    // just changed underneath it, and say what they landed in — the transcript itself gives no
-    // spoken cue that it swapped.
+    // Move focus to the transcript and announce what opened.
     document.getElementById('transcript')?.focus({ preventScroll: true });
     announceStatus(`Opened ${title}. ${count} message${count === 1 ? '' : 's'}.`);
   };
@@ -687,10 +557,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
         <div className="flex items-center gap-2 rounded-lg border border-border-subtle bg-surface px-2.5 py-1.5 focus-within:border-brand focus-within:ring-2 focus-within:ring-ring/25">
           <Search aria-hidden className="size-3.5 shrink-0 text-ink-subtle" />
           <input
-            // Not an `id`: this component renders twice (the persistent column and the mobile
-            // drawer), and a duplicated id makes both `htmlFor` associations point at one input
-            // and `getElementById` resolve to the hidden copy. A data attribute is honest about
-            // there being more than one.
+            // A data attribute, not an `id`: this component renders twice (column and drawer).
             data-conversation-search=""
             // The accessible name moves onto the input with the id: a `<label htmlFor>` cannot
             // address one of two identical ids, and this component is rendered twice.
@@ -717,9 +584,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           ))}
         </ul>
 
-        {/* Conversations other people let this person into (Chemclaw3 #483). A heading and a
-            labelled list rather than a second landmark: they are still conversations, and one
-            "Conversations" navigation with two groups is what a screen reader should hear. */}
+        {/* A heading within the one "Conversations" navigation, not a second landmark. */}
         {sharedIds.length > 0 && (
           <>
             <h2 className="px-2.5 pt-4 pb-1 text-2xs font-semibold tracking-wide text-ink-subtle uppercase">
@@ -738,11 +603,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           </>
         )}
 
-        {/* Only when the service said there is a next page. The listing is capped at
-            `service_max_listed_sessions`, and before this the cap was invisible: conversation 101
-            was not below a fold, it was never fetched, and nothing on screen said so. Hidden while
-            a search is active, because the search reads what is in this browser and a page fetched
-            now would not be in it yet. */}
+        {/* Only when the service advertised another page; hidden during search, which reads only local conversations. */}
         {loadMoreSessions && !needle && (
           <div className="px-1 pt-2">
             <Button
@@ -752,10 +613,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
               disabled={loadingMore}
               onClick={loadMoreSessions}
             >
-              {/* The label says which of the two this press is. A page that failed transiently
-                  leaves the control here *because* pressing it again is the remedy, and a button
-                  that reads "Load earlier conversations" after a failure says nothing about the
-                  failure — the reader would be guessing whether their last press did anything. */}
+              {/* The label says whether this press is a retry. */}
               {loadingMore
                 ? 'Loading…'
                 : moreFailed === 'retry'
@@ -765,12 +623,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           </div>
         )}
 
-        {/* A page the service refused finally takes the control away — and says so where the
-            control was. The pre-`react-query` code cleared the cursor on any failure, which
-            removed the button silently; a control that vanishes with no sentence is how a chemist
-            concludes the list is complete when it is not. Not the `degraded` note in the footer:
-            that one says "showing local conversations only", which is false here — the pages that
-            did arrive are on screen above this. */}
+        {/* After a final failure, say the list is incomplete where the control was. */}
         {moreFailed === 'final' && !needle && (
           <div className="px-1 pt-2">
             <StatusDot
@@ -783,38 +636,24 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
       </nav>
 
       <div className="space-y-3 border-t border-border-subtle p-3">
-        {/* The screens that are not a conversation. In the footer rather than above the list
-            because they are where a chemist goes occasionally, and the list is where they go
-            every time. */}
+        {/* Non-conversation screens, in the footer. */}
         <nav aria-label="Other views" className="flex flex-col gap-1">
-          {/* The count is on this link and not on a toast, because a question held open for a
-              person has a deadline measured in days: it must be visible on every screen for as
-              long as it is open, and gone the moment it is not. Before the service delivered
-              `awaiting_answer` at all, the only trace of a paused campaign was a durable run that
-              appeared to execute for a week (backend D-2026-09-05). */}
+          {/* A count on the link: an open question has a deadline in days and must stay visible. */}
           <SidebarLink to="/review" icon={<FileCheck2 />} onNavigate={onNavigate} count={awaiting}>
             Review queue
           </SidebarLink>
-          {/* A design outlives the conversation that drafted it — corrected by somebody who was
-              not in that thread, run a week later — so it needs a way in that is not a session
-              id, the same argument `/jobs` is here on. */}
+          {/* Designs outlive the conversation that drafted them, so they need a way in that is not a session. */}
           <SidebarLink to="/protocols" icon={<FlaskConical />} onNavigate={onNavigate}>
             Experiment protocols
           </SidebarLink>
-          {/* The agent's working documents outlive the conversation beside which they were written,
-              and a report draft is wanted by somebody holding no session id — `/protocols`' own
-              argument, one row up. */}
+          {/* Artefacts outlive their conversation too. */}
           <SidebarLink to="/artefacts" icon={<Shapes />} onNavigate={onNavigate}>
             My artefacts
           </SidebarLink>
           <SidebarLink to="/jobs" icon={<Server />} onNavigate={onNavigate}>
             Durable runs
           </SidebarLink>
-          {/* Judgment outlives every conversation it came out of, and a skill nobody can find is
-              the half of a bargain the service has been claiming: the stored tiers are exempt from
-              per-use review *on the condition* that the people they act on can see what they say
-              and remove them (`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`). A route
-              with no way in leaves that condition exercisable only with `curl`. */}
+          {/* Stored skills must be findable so the people they act on can see and remove them. */}
           <SidebarLink to="/skills" icon={<BookOpen />} onNavigate={onNavigate}>
             Skills
           </SidebarLink>
@@ -830,9 +669,7 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           />
         )}
 
-        {/* Low-key, exactly like the throttle notice above it, and for the same reason: nothing
-            the reader can act on, but "a durable run finished and nobody told you" is not a state
-            to leave unsaid. Until now every failure but a 429 retried in silence for ever. */}
+        {/* Low-key notice: completed-job notifications are failing. */}
         {streamsFailing && (
           <StatusDot
             status="warn"
@@ -858,11 +695,8 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           description="This clears every conversation stored in this browser and starts fresh. Notices held only in this browser — saved-query findings, check-ins and job completions — are discarded too. Close any other ChemClaw tab first: one left open keeps its copy and writes it back. Server-side sessions are not deleted, but this device will no longer have a link to them."
           confirmLabel="Reset everything"
           variant="destructive"
-          // Not `clearAll()` alone: the next write folds the stored notices back onto disk
-          // (`mergeWithStored` — they are the rows a re-fetch cannot replace), so the findings,
-          // check-ins and job endings this dialog says it discards rehydrated on the next load.
-          // The reset reaches this tab only: there is no cross-tab signal for chat state, so
-          // another open tab's next flush writes its in-memory copy back — hence the caveat.
+          // `forgetLocalHistory`, not `clearAll()` alone, or the stored notices would be folded
+          // back to disk. This tab only: another open tab may write its copy back.
           onConfirm={forgetLocalHistory}
         />
       </div>

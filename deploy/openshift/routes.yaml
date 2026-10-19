@@ -17,6 +17,20 @@ metadata:
   name: chemclaw3-ui
   labels:
     app.kubernetes.io/name: chemclaw3-ui
+  annotations:
+    # Sessions live in one pod's memory, so the router must keep a browser on the pod that signed
+    # it in. The router's affinity cookie does exactly that and is on by default; this says so on
+    # purpose. `disable_cookies: 'true'` here would sign people out on every other request.
+    haproxy.router.openshift.io/disable_cookies: 'false'
+    # A per-client-IP limit is a REQUIRED control here, not an option: `/auth/login` and
+    # `/auth/callback` are open to anyone, and each callback can cost one call to the identity
+    # provider carrying the client secret. The BFF bounds how many run at once (OIDC_MAX_INFLIGHT)
+    # but cannot see the real client address safely, so the router counts per source IP. Numbers
+    # are per 3 seconds; raise them for an office whose users share one address.
+    haproxy.router.openshift.io/rate-limit-connections: 'true'
+    haproxy.router.openshift.io/rate-limit-connections.concurrent-tcp: '200'
+    haproxy.router.openshift.io/rate-limit-connections.rate-tcp: '100'
+    haproxy.router.openshift.io/rate-limit-connections.rate-http: '300'
 spec:
   host: chemclaw.apps.example.com
   to:

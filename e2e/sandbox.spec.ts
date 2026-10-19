@@ -244,8 +244,8 @@ test('the frame cannot navigate itself off the sandbox origin', async ({ page, i
     if (request.url().startsWith('http://127.0.0.1:4322')) asked.push(request.url());
   });
   // The content tries to navigate itself, then the shell's frame does: the shell's
-  // `default-src 'none'` bounds the first, the app's `frame-src` (the sandbox origin; in MSAL mode
-  // also the Entra authority) bounds the second.
+  // `default-src 'none'` bounds the first, the app's `frame-src` (the sandbox origin alone) bounds
+  // the second.
   await content.evaluate((url) => {
     window.location.href = url;
   }, elsewhere);

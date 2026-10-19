@@ -1,46 +1,9 @@
 /**
- * The conversation's subjects, as a rail beside it.
- *
- * What this is for: after twenty exchanges about a coupling, "which bromide were we using" is a
- * scroll. The transcript indexes what was *said*; this indexes what the conversation is *about* —
- * and it pays off exactly when a chat UI otherwise degrades, which is when the conversation gets
- * long.
- *
- * Selecting an entity filters the transcript to the turns that mention it; selecting it again
- * clears the filter.
- *
- * Everything here is populated under `src/chem/entities.ts`'s promotion rule — structured sources
- * only. A rail full of near-misses is worse than no rail, because a chemist stops reading it and
- * then misses the one row that mattered.
- *
- * ## It shows the values now, which is what the toolkit was bought for
- *
- * `src/chem/rdkit.ts` justifies a 6.9 MB dependency on three grounds, and the first is that
- * canonical identity lets the rail "join a computed value to the structure it was computed for".
- * The key collapsed the spellings and nothing was ever attached to it: a row was a drawing, a
- * SMILES and a comma-joined list of tool names. `ValueList` is the other half.
- *
- * It is deliberately unglamorous, because `tool_result.numbers` carries no labels and no units.
- * "predict_pka returned 4.76, 1.6" is the whole of what can truthfully be said — dressing it up as
- * "pKa = 4.76 ± 1.6" would invent an order the wire does not promise and a meaning it does not
- * carry. The method badge and its caveat live one click away in the trace, which is where a reader
- * who wants more than the figures should end up.
- *
- * ## Below `lg` it is a sheet, not an absence
- *
- * It used to be `hidden … lg:flex` with no replacement, so on a tablet or a phone the structures,
- * the jobs, the notes and the transcript filter simply did not exist. `Sidebar`'s own docstring
- * records the last time this pattern shipped here — it took the conversation switcher and the
- * recovery control off phones, and calls it "the sharpest edge in the product". The fix is the same
- * one: share the body between a persistent column and a Sheet, so there is one implementation and
- * the small screen cannot quietly drift from the large one.
- *
- * **There is no pin control**, and its absence is deliberate rather than pending. The branch this
- * comes from had one, and what it did was toggle a boolean that changed the pin's own colour:
- * nothing rendered a pinned entity anywhere else, so "hold two candidates side by side" was a
- * promise the button did not keep. A control that looks like a feature and is a no-op costs more
- * trust than the missing feature does, so it is left out until there is a place for a pinned
- * structure to be held.
+ * The conversation's subjects as a rail beside it, populated under `src/chem/entities.ts`'s
+ * promotion rule. Selecting an entity filters the transcript to turns that mention it; selecting
+ * again clears it. Rows show what tools returned for a structure (`ValueList`), without inventing
+ * labels or relationships. Below `lg` the same body is a sheet. There is no pin control: nothing
+ * would hold a pinned entity.
  */
 
 import { useState } from 'react';
@@ -85,17 +48,14 @@ const JOB_TONE: Record<JobEntity['status'], 'ok' | 'danger' | 'neutral'> = {
   running: 'neutral',
 };
 
-/** How many figures to show per call before saying how many more there are. A property tool
- *  returns two or three; `compute_electronic_properties` returns about fifty, and a rail row is
- *  not where fifty numbers become legible. */
+/** Figures shown per call before "N more"; some tools return about fifty. */
 const VALUES_SHOWN = 6;
 
 function JobRow({ entity }: { entity: JobEntity }): React.JSX.Element {
   return (
     <span className="block min-w-0">
       <span className="flex items-center gap-1.5">
-        {/* "running" is a claim this row is entitled to make only because the push-back stream
-            closes it — before `job_failed` was read, it was a claim that never expired. */}
+        {/* "running" is closed by the push-back stream's ending. */}
         <Badge tone={JOB_TONE[entity.status]}>{entity.status}</Badge>
         <span className="truncate text-xs">{entity.jobKind}</span>
       </span>
@@ -108,17 +68,9 @@ function JobRow({ entity }: { entity: JobEntity }): React.JSX.Element {
 }
 
 /**
- * What the tools returned for this structure.
- *
- * One line per tool that returned anything, naming the tool — a number whose method is unnamed is
- * the failure this whole repo is arranged against. A call that named several structures is marked,
- * because the same figures are attached to each of them.
- *
- * Each figure carries the key the tool filed it under, and its unit where the payload stated one
- * (`tool_result.values`). Where the result was not JSON there are no names, and the row falls back
- * to the bare figures rather than guessing — see `Mention.values`, which is also where the rule
- * that survives the names is written: `pka 4.76` and `sd 1.6` are two values, and nothing here may
- * render them as one measurement with an uncertainty.
+ * What tools returned for this structure: one line per tool, naming it; a call on several
+ * structures is marked. Figures carry the tool's key and unit when structured, bare otherwise;
+ * never combined into a value-with-uncertainty.
  */
 function ValueList({ mentions }: { mentions: readonly Mention[] }): React.JSX.Element | null {
   const withValues = mentions.filter((m) => m.tool && (m.values?.length ?? 0) > 0);
@@ -198,9 +150,7 @@ function Row({
         selected ? 'border-brand bg-brand-soft' : 'border-border-subtle bg-surface-raised',
       )}
     >
-      {/* The filter button and the "use this" control are SIBLINGS, not nested. A button inside a
-          button is invalid, and the browser resolves it by dropping one — which is a control that
-          silently does nothing, the exact shape of the pin this rail deleted. */}
+      {/* Sibling buttons, never nested (a nested button is dropped by the browser). */}
       <button
         type="button"
         onClick={() => {
@@ -244,11 +194,7 @@ function Row({
   );
 }
 
-/**
- * The rail's contents. Shared by the persistent column, the sheet — and, where a deployment has
- * artefacts, the pane's **Index** tab — so the three cannot drift. Exported for that third one,
- * which renders it unchanged.
- */
+/** The rail's contents, shared by the column, the sheet and the artefact pane's Index tab. */
 export function RailBody({
   conversationId,
   onSelected,
@@ -256,9 +202,8 @@ export function RailBody({
   conversationId: string;
   onSelected?: () => void;
 }): React.JSX.Element | null {
-  // One subscription to the conversation's whole slice. Its identity changes only when *this*
-  // conversation ingests something, and `NO_ENTITIES` is a shared constant, so a conversation with
-  // no entities does not mint a new snapshot on every render.
+  // One subscription to this conversation's slice; `NO_ENTITIES` is a shared constant, so empty
+  // conversations are stable.
   const slice = useEntityStore((s) => entitiesOf(s, conversationId));
   const select = useEntityStore((s) => s.select);
   const { entities, order, selected } = slice;
@@ -312,15 +257,11 @@ export function useSubjectCount(conversationId: string): number {
 export function EntityRail({
   conversationId,
 }: {
-  /** The conversation whose index this is. Named rather than read off an "active conversation"
-   *  pointer, so the rail cannot describe one conversation while the transcript beside it
-   *  describes another — see `src/chem/entities.ts`. */
+  /** The conversation whose index this is, named explicitly (see `src/chem/entities.ts`). */
   conversationId: string;
 }): React.JSX.Element | null {
   const count = useSubjectCount(conversationId);
-  // Nothing at all rather than an empty panel: a rail that reserves a sixth of the width to say
-  // "no subjects yet" is worse than the space it takes, and a fresh conversation is every
-  // conversation's first state.
+  // Nothing at all when empty.
   if (count === 0) return null;
 
   return (
@@ -334,14 +275,8 @@ export function EntityRail({
 }
 
 /**
- * The same rail, on a screen too narrow to hold it beside the transcript.
- *
- * Rendered by the top bar rather than by the shell, for the same reason the conversation drawer's
- * trigger is: a control belongs where a reader looks for controls, and the transcript has no chrome
- * of its own on a phone.
- *
- * The trigger disappears with the rail's own emptiness rule, so nobody is ever offered a button
- * that opens a drawer with nothing in it.
+ * The rail as a sheet on narrow screens, triggered from the top bar; the trigger hides when the
+ * rail is empty.
  */
 export function EntityRailTrigger({
   conversationId,
@@ -366,9 +301,7 @@ export function EntityRailTrigger({
       </SheetTrigger>
       <SheetContent side="right" title="What this conversation is about" className="w-72 p-0">
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3 pt-10">
-          {/* Selecting a subject filters the transcript, which is *behind* this sheet — so the
-              sheet gets out of the way rather than leaving a chemist to dismiss it and wonder
-              whether the tap registered. */}
+          {/* Close the sheet on select: the filtered transcript is behind it. */}
           <RailBody conversationId={conversationId} onSelected={() => setOpen(false)} />
         </div>
       </SheetContent>

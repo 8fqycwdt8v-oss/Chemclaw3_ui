@@ -1,11 +1,7 @@
 /**
- * Conversation state shapes.
- *
- * The one structural decision worth calling out: a `Conversation` has its own local `id`,
- * separate from the server's `sessionId`. The backend's session handle is disposable — it can be
- * evicted from a bounded live-session LRU, and a restarted pod without durable storage loses it —
- * so binding the user's visible transcript to it would mean losing history for no reason. The
- * local id owns the transcript; the session id is swapped underneath it when needed.
+ * Conversation state shapes. A `Conversation` has its own local `id`, separate from the server's
+ * disposable `sessionId` (evictable, lost on a restart without durable storage); the local id owns
+ * the transcript and the session id is swapped underneath when needed.
  */
 
 import type { ApiErrorKind } from '../api/errors.ts';
@@ -28,10 +24,8 @@ export type TraceKind =
   | 'exhibit';
 
 /**
- * One entry in the "show your work" panel, in arrival order.
- *
- * The backend's runner emits signals before the text of the update they preceded, so arrival
- * order is already the truthful transcript order — we do not re-sort.
+ * One entry in the "show your work" panel, in arrival order (already the true order; never
+ * re-sorted).
  */
 export interface TraceEntry {
   id: string;
@@ -39,18 +33,9 @@ export interface TraceEntry {
   kind: TraceKind;
   plan?: { todos: string[] };
   /**
-   * A tool invocation and, once it comes back, what it returned.
-   *
-   * One entry rather than two, because a call and its result are one step of the agent's work
-   * and reading them as separate rows means scanning for the pair. Neither field set means the
-   * call is still running — a real state now that a call is announced at issue rather than on
-   * return (backend D-159).
-   *
-   * `failed` exists so that state cannot be claimed falsely. A raised call never gets a
-   * `tool_result` (the backend emits `tool_failed` instead, and the two are exhaustive), so
-   * without it a failed call would read "running…" for the rest of the conversation. It carries
-   * no message: the `tool_failed` row that follows is where the reason belongs, and saying it
-   * twice in adjacent rows is not saying it better.
+   * A tool call and, once it returns, what it returned — one row per step. Neither field set means
+   * still running (calls are announced at issue). `failed` marks a raised call (it never gets a
+   * `tool_result`); the following `tool_failed` row carries the reason.
    */
   toolCall?: {
     tool: string;
@@ -60,78 +45,42 @@ export interface TraceEntry {
     result?: string;
     failed?: boolean;
     /**
-     * The call ran and how it ended was not recorded. Only a *rehydrated* transcript reaches this.
-     *
-     * The stored transcript pairs calls with results by `call_id` and returns `result: null` when
-     * the pairing is incomplete — which the service's own `TranscriptToolCall` docstring says
-     * happens for a turn that died mid-call **or a result row that was pruned**, and asks a surface
-     * to render as "this ran and we do not know how it ended".
-     *
-     * That is why it is not `failed`. `failed` names an outcome — the tool raised — and retention
-     * deleting a result row is not that outcome. It is not the empty state either: with neither
-     * field set the row reads "running…", which is false inside a transcript that finished days
-     * ago. Three existing states, none of them true, so there is a fourth.
+     * The call ran and how it ended was not recorded — only in a rehydrated transcript (`result:
+     * null` from the service: the turn died mid-call or the result was pruned). Neither `failed`
+     * nor "running".
      */
     unresolved?: boolean;
     /**
-     * Where a *queued* call is, from the latest `tool_queued` for it (backend
-     * `connectors/queued.py`): waiting for a compute slot, or picked up. Absent for a call that
-     * went straight to its server, which is every call the connector's manifest does not queue.
-     * Without it the row says "running…" for the whole wait, which is false while the call sits
-     * in the queue — the part a chemist on a busy deployment is actually watching.
+     * Where a queued call is (from `tool_queued`): waiting for a slot or picked up. Absent for
+     * unqueued calls.
      */
     queue?: { state: 'queued' | 'running'; waiting: number | null; jobId: string };
     /**
-     * When the ending arrived, by our clock.
-     *
-     * Paired with the entry's own `at` this is the duration of the call — the one number that
-     * turns a list of tool names into a reading of where a turn's time went. Our clock and not
-     * the service's, because nothing on the wire carries one; a reloaded transcript therefore has
-     * no duration at all, which the rail renders as a dash rather than as zero.
+     * When the ending arrived, by our clock; with `at` it gives the call's duration. Absent on
+     * reloaded transcripts (shown as a dash).
      */
     endedAt?: number;
     /**
-     * Content address of the untruncated result, when the service stored one.
-     *
-     * Carried on the trace rather than fetched eagerly: the point of the backend's split is that
-     * one result is pulled when a reader asks for it, not that every result of every turn is
-     * pulled because it exists. Absent or empty means there is nothing to offer.
+     * Content address of the untruncated result, fetched only when a reader asks. Absent or empty:
+     * nothing to offer.
      */
     resultRef?: string;
     /**
-     * The model was shown a cut of this result; `resultRef` then opens the full text.
-     *
-     * Absent means not cut. Stored only when true, the same way the ref is stored only when set.
+     * The model was shown a cut of this result; `resultRef` opens the full text. Stored only when
+     * true.
      */
     resultCut?: boolean;
     /**
-     * The numeric values the result carried, untruncated.
-     *
-     * The one piece of structured chemistry the stream carries, and it is on the trace row rather
-     * than derived from the preview beside it because the preview is cut at an arbitrary byte and
-     * this is not. `src/chem/provenance.ts` checks the answer's figures against it; `TracePanel`
-     * shows the list, so a reader who distrusts a mark can see the evidence rather than take it
-     * on faith. Absent for a call still running and empty for one that returned no numbers, which
-     * are different facts and the second of which switches the check off.
+     * The numbers the result carried, untruncated. `src/chem/provenance.ts` checks the answer's
+     * figures against them; `TracePanel` shows them. Absent while running; empty (no numbers)
+     * switches the check off.
      */
     numbers?: number[];
-    /**
-     * The same figures, each under the key the tool filed it under.
-     *
-     * Beside `numbers` rather than replacing it, because the two answer different questions: the
-     * bare list is what `provenance.ts` checks the answer's written figures against, where a name
-     * is noise, and this is what a surface *prints*, where a number with no name is not a
-     * measurement. Empty for a result that was not JSON — the service refuses to guess a label out
-     * of prose, and so does everything downstream of it.
-     */
+    /** The same figures under the tool's own keys, for display; empty for non-JSON results. */
     values?: { label: string; value: number; unit: string }[];
     /**
-     * The whole result, when it was small enough for the service to send with the event.
-     *
-     * An optimisation and never a presence check: `resultRef` is still what says a result was
-     * stored, and a result over the service's inline cap arrives with this empty and is fetched
-     * exactly as before. What it buys is the common case — an ICH limit, a pKa — rendering with
-     * the turn instead of paying a round trip for a payload smaller than the preview beside it.
+     * The whole result when small enough to send inline. An optimisation only; `resultRef` remains
+     * the presence check.
      */
     resultInline?: string;
   };
@@ -141,49 +90,28 @@ export interface TraceEntry {
     /** The specialist that made the call; absent or empty is the main agent — as on `toolCall`. */
     agent?: string;
     /**
-     * Which gate refused this call, or absent/null for an ordinary failure.
-     *
-     * A refusal is the control working, and rendering it in the same red as a database outage
-     * reports a correctly-gated turn as a broken one. `lib/refusals.ts` owns what each one is
-     * shown as; nothing should switch on the raw string outside it.
+     * Which gate refused this call, or absent/null for an ordinary failure. `lib/refusals.ts` owns
+     * how each is shown.
      */
     reason?: RefusalReason | null;
   };
   /**
-   * One retrieval source's own report of what it contributed to a sweep.
-   *
-   * Carried because `failed` is the only thing that distinguishes a source that raised from one
-   * that was asked and had nothing — the merged evidence list collapses the two, which is a defect
-   * the backend has already paid for once.
+   * One retrieval source's report; `failed` distinguishes a source that raised from one that found
+   * nothing.
    */
   evidenceSource?: { source: string; chunks: number; failed: boolean };
   /**
-   * Every source in one sweep, in the order they reported.
-   *
-   * `gather_evidence` asks all of them at once and the service reports each separately, so a
-   * five-source sweep arrives as five events. They are folded into ONE entry as they arrive, for
-   * two reasons: it is how a reader reads them — "who was asked, and what did each contribute" is
-   * one line, not five — and a row per source spends the trace's own `MAX_TRACE_ENTRIES` budget on
-   * retrieval, evicting the tool calls and results at the front of a retrieval-heavy turn.
-   *
-   * `evidenceSource` stays beside it, holding the first source of the sweep, so a trace persisted
-   * before this field existed still renders.
+   * Every source in one sweep, in report order, folded into one row (readable as one line, and
+   * saves the `MAX_TRACE_ENTRIES` budget). `evidenceSource` keeps the first source for older
+   * persisted traces.
    */
   evidenceSweep?: { source: string; chunks: number; failed: boolean }[];
   /** When the last source of the sweep reported, by our clock — so the row can say how long the
    *  whole sweep took. Absent for a sweep of one, which took no measurable time of its own. */
   evidenceSweepEndedAt?: number;
   /**
-   * A durable job.
-   *
-   * `settled` is the `job_started` row's version of `toolCall.failed`, and exists for the same
-   * reason: a launch row that never learns its job ended goes on saying "runs asynchronously"
-   * for the life of the conversation. Both endings set it — the row that follows says which one.
-   *
-   * `planStep` is the checklist item the launch served (the todo's bare text, backend
-   * D-2026-08-27), set only on `job_started` rows and only when the service sent one — it is what
-   * lets the plan card badge the step a running job belongs to. Absent means the job was not
-   * launched from a plan step.
+   * A durable job. `settled` marks a launch row whose job has ended (either way). `planStep` is the
+   * plan item it served, when the service sent one.
    */
   job?: {
     jobId: string;
@@ -200,22 +128,14 @@ export interface TraceEntry {
   note?: { noteId: string; reference: string };
   approval?: { prompt: string };
   /**
-   * The conversation moved from one peer agent to another.
-   *
-   * **There is no hand-back half, unlike the version of this that was deleted.** That one was an
-   * enter/exit pair around a specialist's work, and rendering only the entry left a trace showing
-   * a turn permanently inside a specialist it had already left. A peer handoff has no exit:
-   * control stays where it went unless another handoff moves it, so one entry is the whole event
-   * and both agents are named on it.
+   * The conversation moved between peer agents. A peer handoff has no hand-back, so one row names
+   * both agents.
    */
   handoff?: { from: string; to: string; reason: string };
   /**
-   * An artefact this turn created or revised — the `exhibit` frame's header, which is all the
-   * stream carries (the body is fetched). What the answer's artefact card is drawn from.
-   *
-   * `kind` and `title` are empty on a row rebuilt from a reloaded transcript: the stored tool call
-   * carries only the id and revision `create_exhibit`/`revise_exhibit` returned, and the card reads
-   * the rest off the session's artefact list rather than inventing a title.
+   * An artefact this turn created or revised (the `exhibit` header; the body is fetched). `kind`
+   * and `title` are empty on rows rebuilt from a reloaded transcript; the card reads them from the
+   * artefact list.
    */
   exhibit?: {
     exhibitId: string;
@@ -234,20 +154,13 @@ export interface UserMessage {
   text: string;
   at: number;
   /**
-   * Who sent it, as the stored transcript records it (`TranscriptMessage.author.actor`).
-   *
-   * Absent on a message this browser sent live — that is this person's own by construction — and
-   * on a row the service stored without an author. Read because a shared session can hold more
-   * than one person (Chemclaw3 #483), and the service runs every message as its *sender*: whose
-   * question a bubble is, is also whose roles and memories answered it.
+   * Who sent it, from the stored transcript (`author.actor`). Absent on a message this browser sent
+   * and on rows stored without an author.
    */
   author?: string;
   /**
-   * The turn that stored this message (`TranscriptMessage.correlation_id`), on a message read back
-   * from the service. With the answer's own `correlationId` it is what lets a re-read transcript be
-   * merged into one this browser already holds by identity rather than by matching text
-   * (`mergeTranscript`). Absent on a question this browser sent live — its turn's id lands on the
-   * answer — and on a row stored before the column existed.
+   * The turn that stored this message, so a re-read transcript merges by identity
+   * (`mergeTranscript`). Absent on questions sent live and on older rows.
    */
   correlationId?: string;
 }
@@ -260,188 +173,95 @@ export interface AssistantMessage {
   /** Accumulated `token.text`. */
   streamedText: string;
   /**
-   * Set once, from `answer.text`.
-   *
-   * `answer.text` is the FULL concatenation of every token, so rendering both fields would
-   * duplicate the entire answer. The renderer picks `finalText ?? streamedText`; there is
-   * deliberately no code path that concatenates them.
+   * Set once from `answer.text`, the full concatenation of every token. Render `finalText ??
+   * streamedText`, never both.
    */
   finalText: string | null;
   confidence: number | null;
   unsupportedClaims: string[];
   reviewRequired: boolean;
   /**
-   * Which verifier produced `confidence`, or null when none ran.
-   *
-   * Kept beside the score rather than folded into it, because the two backends measure different
-   * things: the citation gate is deterministic and scores against the turn's own tool results,
-   * the judge is a model scoring against the claims. Showing one number for both invites the
-   * reader to compare scores that are not comparable.
+   * Which verifier produced `confidence` (deterministic citation gate vs LLM judge), or null; the
+   * scores are not comparable.
    */
   verifiedBy: 'judge' | 'citation-gate' | null;
   /**
-   * Which answer checks actually ran on this turn. **Empty means none did.**
-   *
-   * The field that makes the three above readable, and the reason it is here rather than only on
-   * the wire: both honesty gates ship off, so a checked-and-clean answer and one nothing looked at
-   * are identical in `confidence`, `review_required` and `unsupportedClaims` — and a surface that
-   * flags on those shows the same unflagged answer for both. `shared/events.ts` says the rule for
-   * every reader: an empty array is *unverified*, never *clean*.
-   *
-   * Optional because it is absent from every message persisted before this build read it, and an
-   * absent one means exactly what an empty one does — the same reading `endedAt` takes.
+   * Which answer checks ran; empty means none did — render as unverified, never clean. Optional:
+   * absent on older persisted messages, read the same as empty.
    */
   checksRun?: AnswerCheck[];
   /**
-   * Whether a second pass challenged this answer, and the durable hold it opened.
-   *
-   * Both permanently at their defaults upstream today (`agent/verifier.py` has assigned neither
-   * since D-2026-08-15), and carried anyway for the reason the mirror carries them: reviving them
-   * is a coordinated three-repo cut, and a store that dropped them would make the cut arrive as
-   * nothing happening. Optional for the same reason as `checksRun`.
+   * Whether a second pass challenged this answer, and the hold it opened. At their defaults
+   * upstream today; kept so a revival is not dropped.
    */
   challenged?: boolean;
   reviewHoldId?: string | null;
   /**
-   * Connectors that were unreachable for this turn, so their tools were absent from it.
-   *
-   * On the message rather than in `trace`, because it qualifies the whole answer rather than
-   * describing one step of it. The model is never told a tool is missing — it reasons from the
-   * surface it was given — so without surfacing this, an answer assembled without the ELN reads
-   * exactly like one assembled with it.
+   * Connectors unreachable for this turn, so their tools were absent. On the message because it
+   * qualifies the whole answer.
    */
   degradedConnectors: string[];
   /**
-   * This turn was cut off by a page reload rather than by anything that happened to it.
-   *
-   * Stamped by `partialize`, which rewrites a message still marked `streaming` to `aborted` —
-   * because there is no way to resume a *stream* across a reload. That much is unchanged. What was
-   * wrong is the conclusion drawn from it: the backend detaches rather than cancels
-   * (`D-2026-08-27-a-disconnect-is-a-detach-not-a-stop`), so the turn ran to completion on its own
-   * pump and **wrote its answer to the session transcript**. `recoverDetachedAnswer` already knew
-   * how to fetch that, and only ever ran inside the tab that started the turn — so a reload during
-   * a ten-minute turn threw away an answer that existed, and the transcript rehydrate could not
-   * pick it up either, because it runs only for a conversation with no local messages at all.
-   *
-   * A flag rather than matching the aborted message's prose, so the recovery is not one copy-edit
-   * away from silently never firing again.
+   * This turn was cut off by a page reload, set by `partialize`. The turn itself usually ran on and
+   * wrote its answer, so this flag tells the next boot to recover it (`resumeInterruptedTurn`).
    */
   interruptedByReload?: boolean;
   /**
-   * The turn is parked waiting for a server admission permit, and has not started running.
-   *
-   * On the message rather than in `trace` for the same reason `degradedConnectors` is: it is a
-   * state of the whole turn, not a step of it. The backend sends `queued` only when a turn
-   * genuinely has to wait, so this stays false for a normal turn. It is never cleared — once the
-   * first token arrives there is a body to render and the waiting notice is not reached, which
-   * is also the truthful record: this turn *was* queued.
+   * The turn waited for a server admission permit. Never cleared: it is the record that the turn
+   * was queued.
    */
   queued: boolean;
   /**
-   * This message is waiting in a shared conversation's line behind another participant's turn,
-   * and where — `ticket` is what withdrawing it takes, `position` how many are ahead (`0` = next).
-   *
-   * Set from a `queued` event that carries a ticket (Chemclaw3 #499) and cleared by the first event
-   * that is anything else, because that is the turn having started: from then on Stop stops the
-   * turn, and withdrawing would answer 404. Absent on every message that never waited in a line.
+   * This message is waiting in a shared conversation's line: `ticket` withdraws it, `position` is
+   * how many are ahead (`0` = next). Cleared by the first other event (the turn started).
    */
   queuePlace?: { ticket: number; position: number } | null;
   /**
-   * The sentence saying why this message never ran — it was withdrawn from the line before its
-   * turn came, by its sender or by somebody the service lets withdraw it.
-   *
-   * Distinct from `error`, because nothing failed and nothing was spent; and from a bare `aborted`,
-   * whose copy says an answer was cut short when there never was one.
+   * Why this message never ran: withdrawn from the line before its turn. Distinct from `error` and
+   * from `aborted`.
    */
   withdrawn?: string;
   /**
-   * The turn hit a guard and stopped with work still open, so the answer below is partial.
-   *
-   * Carries the service's own sentence, which names the limit that fired and the session. On the
-   * message rather than in `error`, and that distinction is the whole point: `error` means the turn
-   * failed and there is nothing to read, while this arrives BEFORE the answer it qualifies and the
-   * answer is still worth showing.
-   *
-   * Null for every turn that ran to its own conclusion, which is nearly all of them.
+   * The turn hit a guard and stopped with work open, so the answer is partial; the service's
+   * sentence. Unlike `error`, the answer is still shown.
    */
   partialReason: string | null;
   trace: TraceEntry[];
   /** Newest `plan` snapshot, for the header checklist. Full history stays in `trace`. */
   latestPlan: string[] | null;
   /**
-   * The identity of `latestPlan`, as the event that carried it stated.
-   *
-   * What binds an approval to the plan a human actually read. Without it the approval card had to
-   * `GET /sessions/{id}/plan` for a hash — a round trip that races the revision the hash exists to
-   * catch, and which showed whatever the service was proposing at fetch time rather than what this
-   * message rendered.
-   *
-   * Empty string for a service that predates the field, which the card must read as "fetch it",
-   * never as a hash that will match. Null when no plan has been seen at all.
+   * The identity of `latestPlan` as its event stated it, binding an approval to what was rendered.
+   * Empty (older service) means fetch it; null means no plan seen.
    */
   latestPlanHash: string | null;
   /**
-   * The state-changing tools `latestPlan` declares, as the same event stated them.
-   *
-   * What the approval card must *display*, per
-   * `D-2026-09-12-an-approval-that-names-no-tool-authorizes-every-tool`: the steps alone would be
-   * collecting a yes to something the chemist had not been shown. The service put it on the `plan`
-   * event for exactly the reason `latestPlanHash` is there — so the card needs no round trip — and
-   * this field is what carries it that far.
-   *
-   * Null when the event did not name one, which an older service will not: the card then falls back
-   * to the fetch rather than rendering "authorizes nothing", which would be a false reassurance.
+   * The state-changing tools `latestPlan` declares, which the approval card must display. Null when
+   * not sent: the card fetches rather than showing "authorizes nothing".
    */
   latestPlanScope: string[] | null;
   /**
-   * Whose turn wrote `latestPlan`, as `GET /sessions/{id}/plan` reports it — the one person who
-   * may decide on it (Chemclaw3 #483). Absent when not read (a plan streamed into this browser's
-   * own turn is this person's by construction) and `null` when the service records no author, in
-   * which case the session's owner decides.
+   * Whose turn wrote `latestPlan` — the only person who may decide it. Absent when not read (this
+   * person's own turn); `null` when unrecorded (the owner decides).
    */
   latestPlanAuthor?: string | null;
   /**
-   * When the turn stopped, however it stopped — answered, aborted or failed.
-   *
-   * What makes the summary line able to say how long the turn took. Deliberately *our* clock and
-   * not the service's: nothing on the wire carries a turn duration, so this is the wait the reader
-   * actually had, which is the number they would have counted themselves.
-   *
-   * Optional rather than required, and absent on every message written before it existed — a
-   * persisted transcript is read back by this same type, and a required field would make every
-   * stored turn structurally invalid for the sake of a duration nobody recorded. Absent means
-   * "not known", and the summary simply omits the time.
+   * When the turn stopped, however it stopped, by our clock (the wait the reader had). Absent on
+   * older messages; the summary then omits the time.
    */
   endedAt?: number | null;
   /**
-   * The service's own id for the turn that produced this message.
-   *
-   * The join key between what a chemist saw and what the service logged: it is minted per turn and
-   * stamped on every JSON log record the service writes. It used to reach this app on exactly one
-   * path — an in-stream `error` event — so a turn that SUCCEEDED had no reference at all, and "the
-   * answer at 14:32 cited the wrong note" was unjoinable to anything. Read back from the response
-   * header (and from any frame that carries one) and rendered in the trace panel's footer.
-   *
-   * Absent on a message persisted before this field existed, and empty against a service that does
-   * not send one — both read as "no reference", which is the honest answer.
+   * The service's id for the turn, read from the response header or a frame, and shown in the trace
+   * panel's footer to join with service logs. Absent or empty means no reference.
    */
   correlationId?: string;
   /**
-   * No frame has arrived for `TURN_STALL_MS`, and the turn has not ended.
-   *
-   * Not an error and not a timeout: the reader is told the chain has gone quiet, and the turn is
-   * left running. Cleared the moment a frame arrives, so it describes now rather than ever.
+   * No frame for `TURN_STALL_MS` and the turn has not ended. Not an error; cleared when a frame
+   * arrives.
    */
   stalled?: boolean;
   /**
-   * This is somebody else's turn in a shared conversation, followed live through
-   * `GET /sessions/{id}/turn/stream` (Chemclaw3_ui #130) — not a turn this browser sent.
-   *
-   * What it changes is ownership: no Stop, no Withdraw, no recovery poll, and **never persisted**.
-   * A watcher sees events from the moment it attaches and never the question (the service stores
-   * the exchange whole, at the turn's end), so this bubble is a placeholder for an exchange the
-   * transcript will hold: the re-read after the turn ends replaces it with the stored question and
-   * answer, attributed to whoever sent them (`mergeTranscript`).
+   * Somebody else's turn in a shared conversation, followed live. No Stop, Withdraw or recovery,
+   * and never persisted; replaced by the stored exchange after the turn ends (`mergeTranscript`).
    */
   watched?: boolean;
   error: { kind: ApiErrorKind; message: string } | null;
@@ -455,15 +275,8 @@ export interface Conversation {
   /** The server handle. Null before the first turn; replaced on a 404. */
   sessionId: string | null;
   /**
-   * Where `sessionId` came from.
-   *
-   * `'server'` means the session was listed by `GET /sessions` or opened from an `/open/` link, so
-   * there is a transcript on the backend worth reading. `'local'` means this browser minted it —
-   * on the first send, or ahead of it by `warmSession` — so there is nothing to read back and
-   * asking would be a wasted round-trip that raises a banner if it fails.
-   *
-   * It describes where the id came from, not what state the conversation is in, so it stays true
-   * as the session is rotated underneath.
+   * Where `sessionId` came from: `'server'` (listed or opened by link, so there is a transcript to
+   * read) or `'local'` (minted here, nothing to read back). Stays true as the session rotates.
    */
   sessionOrigin: 'local' | 'server';
   title: string;
@@ -471,20 +284,14 @@ export interface Conversation {
   updatedAt: number;
   messages: ChatMessage[];
   /**
-   * True once the server session was replaced mid-conversation, meaning the agent no longer
-   * remembers the turns above. Surfaced in the UI rather than hidden: a chemist reasoning from
-   * a premise the agent has forgotten is a real hazard.
+   * The server session was replaced mid-conversation, so the agent no longer remembers the turns
+   * above. Shown to the user.
    */
   contextLost: boolean;
   /**
-   * Present when this conversation is **somebody else's** and its owner let this person in
-   * (`GET /sessions/shared`, Chemclaw3 #483) — carrying that owner's actor id, `null` when the
-   * service could not name one.
-   *
-   * What it changes is what this person may do here, and the service enforces each rule on its
-   * own: a member reads and sends (every message runs as them), but deleting or branching the
-   * conversation and stopping somebody else's turn stay the owner's, so those controls are not
-   * offered rather than offered and refused. Absent on a conversation this person owns.
+   * Present when this conversation is somebody else's and this person is a member (owner's actor
+   * id, or `null`). Members read and send; deleting, branching and stopping others' turns stay the
+   * owner's, so those controls are hidden.
    */
   membership?: { owner: string | null };
 }
@@ -496,10 +303,8 @@ export interface Banner {
   text: string;
   action?: 'reauth' | 'reset' | 'retry';
   /**
-   * Seconds the service asked the caller to wait, from a `Retry-After`. Counted down in the
-   * banner so a pause reads as a pause: the number is the whole difference between "come back in
-   * twenty seconds" and "this is over", and without it a rate limit looks exactly like a spent
-   * budget.
+   * Seconds the service asked to wait (`Retry-After`), counted down in the banner so a pause is not
+   * mistaken for a spent budget.
    */
   retryAfterSeconds?: number;
 }

@@ -1,14 +1,7 @@
 /**
- * The rendering of one finished durable job's result.
- *
- * Shared by the two places a completion can arrive, which are genuinely different events despite
- * showing the same thing: inside a turn, as a trace row (`TracePanel`), and outside one, from the
- * push-back stream (`JobFeed`). A chemist should not have to learn two visual languages for "the
- * job finished" depending on whether they happened to be mid-conversation when it did.
- *
- * The summary is whatever the backend put in the push-back payload, so every field is probed
- * rather than assumed — a job kind with a different shape renders its id and nothing else instead
- * of throwing.
+ * One finished durable job's result, shared by the trace row (`TracePanel`, inside a turn) and the
+ * push-back feed (`JobFeed`, outside one), so both look the same. Summary fields are probed, not
+ * assumed; an unknown shape renders just the id.
  */
 
 import { CircleX, FileText } from 'lucide-react';
@@ -24,12 +17,9 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 
 /**
- * The artefact a finished job wrote, when its summary names one (G1).
- *
- * `request_development_report` records a `report` note and — since artefacts wave 2 — a `document`
- * artefact in the session that asked for it, and says which in `summary.exhibit_id`. Read through
- * `EXHIBIT_ID_RE` rather than trusted: the summary is a bare `dict[str, object]` upstream, and a
- * button that opened the pane on a string the service never minted would open it on nothing.
+ * The artefact a finished job wrote, when `summary.exhibit_id` names one (e.g.
+ * `request_development_report`'s document). Checked against `EXHIBIT_ID_RE` because the summary is
+ * an untyped dict upstream.
  */
 export function reportExhibitOf(summary: JobSummary | undefined): string | null {
   const id = summary?.exhibit_id;
@@ -37,13 +27,9 @@ export function reportExhibitOf(summary: JobSummary | undefined): string | null 
 }
 
 /**
- * **Open report**: the report artefact, in front, in the pane — from wherever the card is.
- *
- * From the push-back feed that may be another conversation, so it is gone to first (`navigate`),
- * and the pane is told which artefact to show *for that session* (`show` is keyed by session, so
- * the focus waits for the conversation to mount rather than landing on this one). The list is
- * refetched as well: the `exhibit` push that announces the report is best effort, and this click is
- * the moment the reader needs the list to contain it.
+ * **Open report**: navigate to the job's conversation if needed, focus the report there (`show` is
+ * keyed by session, so it waits for the mount), and refetch the list, since the announcing
+ * `exhibit` push is best effort.
  */
 function OpenReport({
   exhibitId,
@@ -119,12 +105,8 @@ export function JobResultCard({
 }
 
 /**
- * The other ending, and the one this UI used to have no rendering for at all.
- *
- * Same two arrival points as `JobResultCard`, same argument for sharing one component. The wording
- * carries a distinction the wire cannot: `reason` is documented as possibly empty, and an empty
- * reason must still read as a failure rather than as a blank card, so the fallback sentence says
- * what is known ("it failed") and does not guess at what is not ("why").
+ * A failed job, shared like `JobResultCard`. `reason` may be empty, so the fallback says it failed
+ * without guessing why.
  */
 export function JobFailureCard({
   jobId,

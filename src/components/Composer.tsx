@@ -1,42 +1,15 @@
 /**
  * The message composer.
  *
- * Two backend facts shape this component:
- *  - Turns are serialised per session and a second concurrent POST is a hard 409, not a queue.
- *    So the send control is disabled for the whole streamed turn rather than optimistically
- *    accepting input.
- *  - Messages over the service's character cap are a 422. We show the counter as it approaches
- *    and block the send, rather than letting the user write an essay and then lose it.
- *
- * The Enter key is decided by pointer type, not by convention. A soft keyboard has no Shift, so
- * "Enter sends, Shift+Enter for a newline" means a phone user cannot write a multi-line message at
- * all — on a tool whose users paste procedures. On a coarse pointer Enter inserts a newline and
- * the Send button is the only way to submit; Cmd/Ctrl+Enter sends everywhere.
- *
- * The draft lives in the store, keyed by conversation. As component state on a component that does
- * not unmount when `conversationId` changes, it leaked: you could type in one conversation, switch
- * to another, and send the first one's text into the second.
- *
- * ## The paste is confirmed, because the paste is what people do
- *
- * `StructureInput` is built on one rule — a chemist must never send a structure they have not seen
- * — and for a while the fastest way in went round it. Pasting a SMILES out of ChemDraw, an Excel
- * column or a colleague's mail put an unchecked string straight into the message: no
- * canonicalisation, no drawing, no rail row. The safest path was behind an unlabelled hexagon and
- * the unguarded one was the muscle memory everybody already had.
- *
- * `PasteConfirmation` closes that. It is deliberately **not** a dialog: the paste itself is never
- * intercepted, the text lands exactly as pasted, and a strip appears above the composer a beat
- * later showing what RDKit made of it. A chemist who pasted the right thing loses nothing and can
- * keep typing; one who pasted the wrong thing sees it before they press Send. Blocking the caret
- * to demand an acknowledgement would tax the correct case to catch the rare one.
- *
- * ## Dropping a file anywhere here used to navigate the browser away
- *
- * A page with no drop handler hands a dropped file to the browser, which opens it — losing the
- * draft and the whole app with it. So the composer is a drop target for structures and working
- * files alike, and a window-level guard turns a *missed* drop into nothing at all rather than into
- * a navigation.
+ * - Send is disabled while this conversation's turn streams; over the deployment's character cap
+ *   the send is blocked with a counter.
+ * - Enter by pointer type: on a coarse pointer Enter is a newline (no Shift on soft keyboards);
+ *   Cmd/Ctrl+Enter sends everywhere.
+ * - The draft lives in the store per conversation (this component does not unmount on a switch).
+ * - A pasted structure is confirmed, not intercepted (`PasteConfirmation`): the text lands as
+ *   pasted and a strip shows what RDKit made of it.
+ * - It is a drop target for structures and files, and a window-level guard stops a missed drop
+ *   navigating away.
  */
 
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
@@ -80,16 +53,9 @@ import {
 } from './StructureInput.tsx';
 
 /**
- * What a paste turned out to be, once RDKit had looked at it — and **where it landed**.
- *
- * The span is the load-bearing part. A confirmation that knows only its own text cannot say which
- * occurrence of that text it is about, and SMILES collide constantly because every one of them is
- * an infix of larger ones: with `compare OCCO with ` in the box, pasting `OCC` and accepting the
- * canonical form rewrote the *glycol* to `CCOO` — ethyl hydroperoxide, a real and different
- * compound — and left the pasted token alone, with nothing on screen saying anything had changed.
- *
- * So a check names a span, `raw` at `at`, and both the write-back and the invalidation below ask
- * the same question of it: does the draft still say exactly this, exactly there?
+ * What a paste turned out to be, and where it landed: `raw` at `at`. The span matters because
+ * SMILES are often infixes of each other, so the write-back and invalidation both check this exact
+ * text at this exact position.
  */
 type PasteCheck = {
   /** What was pasted, as it lands in the draft. */
@@ -107,21 +73,16 @@ type PasteCheck = {
   | { status: 'refused' }
   /** RDKit itself never loaded, so nothing here is a claim about the string. */
   | { status: 'unavailable' }
-  /** RDKit read it as a molecule and ran out of stack naming it. Not a refusal about the
-   *  chemistry, and not about the toolkit being absent either — see `Refused` in
-   *  `src/chem/rdkit.engine.ts`. Derived from there rather than restated: this literal was the
-   *  third unreconciled copy of it, and a refusal added upstream compiled clean into the
-   *  `refused` branch above, which is the one sentence that must not be said about a molecule. */
+  /**
+   * Read as a molecule but not named on this thread — not a chemical refusal and not a missing
+   * toolkit (`Refused` in `src/chem/rdkit.engine.ts`).
+   */
   | { status: NotAChemicalVerdict }
 );
 
 /**
- * Does the draft still hold this check's text, at its position, as a whole token?
- *
- * Asked in one place so the write-back and the invalidation cannot answer it differently. All
- * three clauses earn their place: the text, or the strip is about something else; the position,
- * or `OCC` matches inside `OCCO`; and the boundaries, because typing `Cl` onto a pasted `OCC`
- * leaves the span itself untouched while the message now names 2-chloroethanol.
+ * Whether the draft still holds this check's text at its position as a whole token (text, position
+ * and token boundaries all matter). Shared by write-back and invalidation.
  */
 const spanHolds = (draft: string, check: PasteCheck): boolean => {
   const end = check.at + check.raw.length;
@@ -142,8 +103,7 @@ type Upload =
   | { state: 'ok' | 'failed'; text: string }
   | null;
 
-/** What the strip calls each thing it can be handed. A molblock is named as one because the
- *  chemist pasted ten lines of MDL and needs to see that it was understood as a structure. */
+/** Strip labels; a molblock is named so the chemist sees it was understood as a structure. */
 const PASTE_LABEL: Record<'molecule' | 'reaction' | 'molblock', string> = {
   molecule: 'Pasted structure',
   reaction: 'Pasted reaction',
@@ -151,29 +111,10 @@ const PASTE_LABEL: Record<'molecule' | 'reaction' | 'molblock', string> = {
 };
 
 /**
- * "This is what I understood you to paste."
- *
- * The confirmation `StructureInput` gives a typed or drawn structure, given to a pasted one — and
- * given the way a paste can afford, which is quietly. It appears above the composer, it does not
- * take focus, it does not block the caret, and it stays until it is used or dismissed.
- *
- * What it shows is decided by whether RDKit's reading matches the chemist's spelling. When it does
- * — the overwhelmingly common case, because most SMILES a chemist copies are already canonical —
- * there is nothing to offer and the strip is purely a picture saying "yes, that one". When it does
- * not, the difference is the whole point: `BrC1=CC=C(OC)C=C1` and `COc1ccc(Br)cc1` are one compound
- * with two spellings, and only one of them is the entity key the rest of this app will file it
- * under.
- *
- * Replacing is offered, never performed. The chemist's own spelling is valid input — the backend
- * canonicalises everything it is given — so rewriting their message under them would be taking a
- * decision that is not this component's to take.
- *
- * ## It says the negative cases too
- *
- * It used to be asymmetric in exactly the wrong direction: a picture when the paste was fine, and
- * nothing whatsoever when the app already knew the string was not a molecule or that RDKit had
- * never loaded. Those are the two the chemist needed, and they are the two that reached the
- * message unremarked, which is the silence this whole control exists to close.
+ * "This is what I understood you to paste": a quiet strip above the composer that does not take
+ * focus, shown until used or dismissed. If RDKit's canonical form differs from the paste, replacing
+ * is offered, never performed. It also reports the negative cases (not a molecule, toolkit
+ * unavailable).
  */
 function PasteConfirmation({
   pasted,
@@ -187,10 +128,7 @@ function PasteConfirmation({
   const differs = pasted.status === 'read' && pasted.canonical !== pasted.raw;
   return (
     <div
-      // "status" while nothing is wrong: interrupting a chemist who pasted the right structure to
-      // tell them it was the right structure is how a signal gets trained away. The other two
-      // states are something being wrong about the message they are holding, and an assertive
-      // announcement is what a screen-reader user gets instead of a picture they cannot see.
+      // `status` when all is well; `alert` when something is wrong with the message being held.
       role={pasted.status === 'read' ? 'status' : 'alert'}
       className="mb-2 flex items-start gap-3 rounded-xl border border-border-subtle bg-surface-raised p-2.5"
     >
@@ -222,10 +160,8 @@ function PasteConfirmation({
           </p>
         )}
         {pasted.status === 'too-complex' && (
-          // The panel's own wording again, for the same reason the refusal shares its: one string
-          // must not get two different sentences from the two surfaces that check pastes. That was
-          // a comment and not a fact — the two diverged in both tails — so the sentence is now one
-          // exported constant both read, and only the clause after it is this surface's own.
+          // The shared `TOO_COMPLEX_EXPLANATION`, so both checking surfaces say the same thing;
+          // only the clause after it is this surface's own.
           <p className="text-xs text-warn-ink">
             Pasted <span className="font-mono break-all text-ink">{shortly(pasted.raw)}</span> —{' '}
             {TOO_COMPLEX_EXPLANATION} The message carries your spelling unchanged.
@@ -262,27 +198,24 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   const [dryRun, setDryRun] = useState(false);
   const [upload, setUpload] = useState<Upload>(null);
   const [structureOpen, setStructureOpen] = useState(false);
-  /** A structure file dropped on the composer, handed to the panel to read. Carries the drop it
-   *  came from, so dropping the same file twice re-reads it — the panel keys its own reset on
-   *  this object's identity, and two drops of one file are two intentions. */
+  /**
+   * A dropped structure file for the panel to read; a new object per drop so the same file dropped
+   * twice is re-read.
+   */
   const [droppedFile, setDroppedFile] = useState<{ at: number; file: File } | null>(null);
   const [dragging, setDragging] = useState(false);
-  /** What the last paste turned out to be, or null. Cleared by the next paste, by using it, by
-   *  dismissing it, and by the draft moving out from under it — never on a timer, because a strip
-   *  that vanishes while a chemist is reading it is worse than no strip. */
+  /**
+   * The last paste's check, or null. Cleared by the next paste, by use, by dismissal or by the
+   * draft moving — never on a timer.
+   */
   const [pasted, setPasted] = useState<PasteCheck | null>(null);
-  /** Every paste gets a number and only the newest may write the strip. Two pastes start two
-   *  independent reads, and a reaction resolves later than a molecule — it awaits every component
-   *  of both sides — so the slower, older one used to win and its button then acted on that older
-   *  string. */
+  /**
+   * Paste sequence number: only the newest paste may write the strip (reads resolve out of order).
+   */
   const pasteSeq = useRef(0);
   /**
-   * The two facts that tell "the paste has not landed yet" from "the chemist edited it".
-   *
-   * The read can finish on a microtask that runs *before* the browser has inserted the pasted
-   * text, so a draft that does not hold the span is not evidence of an edit while it is still
-   * exactly the draft the paste started from. Once it is anything else — or once the span has
-   * been seen to hold and then stopped holding, which is what an undo looks like — it is.
+   * Tells "the paste has not landed yet" from "the chemist edited it": the read can finish before
+   * the browser inserts the text.
    */
   const pasteBefore = useRef('');
   const pasteLanded = useRef(false);
@@ -290,27 +223,15 @@ export function Composer({ conversationId }: { conversationId: string }): React.
    *  it. See the effect below. */
   const uploadAbort = useRef<AbortController | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  /** Where the caret was when the structure panel took focus. Captured on open rather than read
-   *  back on insert, because by then the caret belongs to the panel's own input. */
+  /** The caret position captured when the structure panel opened. */
   const caretRef = useRef<number | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const hintId = useId();
 
   /**
-   * Everything above this line that is *about a conversation* is dropped when the conversation
-   * changes.
-   *
-   * This component does not unmount on a switch — only its prop changes — and the file's own
-   * history says what that costs: the draft used to live here too, and you could type in one
-   * conversation, switch, and send the first one's text into the second. It was moved to the
-   * store; these four were left behind. The upload notice announced an attachment the new
-   * conversation's session does not have, the structure panel stayed open over it, and the paste
-   * strip offered "Use the canonical form" against a draft that has never held the pasted span —
-   * a button that writes nothing and says nothing.
-   *
-   * Adjusting state during render rather than in an effect, which is this codebase's shape for
-   * derived state (`JobsPanel`, `NoteSheet`, `ResultSheet`) and the only one with no window in
-   * which the previous conversation's strip is on screen over the new one.
+   * Per-conversation state reset when the conversation changes (this component does not unmount on
+   * a switch), adjusted during render so the previous conversation's strip is never shown over the
+   * new one.
    */
   const [ephemeralFor, setEphemeralFor] = useState(conversationId);
   if (ephemeralFor !== conversationId) {
@@ -323,43 +244,26 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   }
 
   /**
-   * The other half of the switch: a paste read that is still in flight may no longer write the
-   * strip, or it settles the previous conversation's structure over the new one — which the
-   * withdrawal effect below cannot catch, because it never saw the span land. Same mechanism a
-   * superseded paste already obeys: a read writes only while it is the newest.
-   *
-   * A LAYOUT effect, not a passive one. A passive cleanup is scheduled after paint, and the read
-   * resolves on a microtask — which can run first, leaving the stale strip on screen anyway.
+   * A paste read still in flight may not write the strip after a conversation switch. A layout
+   * effect, so the cleanup runs before the microtask that resolves the read.
    */
   useLayoutEffect(() => {
     pasteSeq.current += 1;
   }, [conversationId]);
 
   /**
-   * And the upload goes with it.
-   *
-   * The controller lived only in component state, so leaving took it out of reach: `AppShell`
-   * unmounts the composer on `/review` and `/jobs` — both one click away in the sidebar — and a
-   * 40 MB file kept uploading with its progress callback pointed at a dead tree, invisible and
-   * uncancellable for the rest of its life. Coming back re-mounts a composer with no progress bar
-   * and no way to tell whether it landed.
-   *
-   * Aborting is the right default because the composer's own Cancel button already treats an abort
-   * as "no upload happened", and because the request is bound to the session the upload started
-   * against — which is no longer the one on screen.
+   * Abort an in-flight upload when the conversation changes or the composer unmounts; the upload
+   * belongs to the session it started against.
    */
   useEffect(() => () => uploadAbort.current?.abort(), [conversationId]);
 
   const composerLock = useChatStore((s) => s.composerLock);
-  // Scoped to THIS conversation. A global check locked the composer in every conversation while
-  // one of them streamed — invisible before the router, routine once Back can switch in a
-  // keypress.
+  // Scoped to this conversation, so another conversation's stream does not lock this composer.
   const streaming = useChatStore((s) =>
     s.streaming?.conversationId === conversationId ? s.streaming : null,
   );
-  // Whether the streaming message is still waiting in a shared conversation's line (Chemclaw3
-  // #499). Then the turn running is somebody else's, and the control takes this message back out of
-  // the line rather than stopping anything — so it says so.
+  // Whether this conversation's message is still waiting in a shared line; the control then
+  // withdraws rather than stops.
   const waitingInLine = useChatStore((s) => {
     const live = s.streaming?.conversationId === conversationId ? s.streaming : null;
     if (!live) return false;
@@ -372,9 +276,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   const text = useChatStore((s) => s.drafts[conversationId] ?? '');
   const setDraft = useChatStore((s) => s.setDraft);
 
-  // A soft keyboard cannot produce Shift+Enter, so Enter has to mean "newline" there. Read once
-  // at mount rather than set from inside the effect: the effect version rendered twice, and the
-  // first render had the wrong key behaviour.
+  // Read once at mount so the first render already has the right Enter behaviour.
   const [coarsePointer, setCoarsePointer] = useState(
     () => window.matchMedia?.('(pointer: coarse)').matches ?? false,
   );
@@ -386,16 +288,11 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     return () => query.removeEventListener('change', onChange);
   }, []);
 
-  // Citation chips and prompt buttons hand text back through a window event rather than being
-  // wired through the tree — they are rendered deep inside markdown output.
-  //
-  // The detail may be a plain string (prefill only) or { text, autoSend: true } (approval
-  // buttons — skips the "type and press Send" step so the user gets one-tap approve/decline).
-  // We use a ref so the handler always sees the current blocked/dryRun/conversationId values
-  // without being recreated on every render.
+  // Chips and prompt buttons deep in rendered markdown hand text back through a window event: a
+  // plain string prefills; `{ text, autoSend: true }` sends at once. A ref keeps the handler
+  // current without re-subscribing.
   const autoSendRef = useRef<((message: string) => void) | null>(null);
-  // Refreshed after every commit rather than assigned during render: a ref write in the render
-  // body is a side effect, and under StrictMode's double render it happens twice.
+  // Updated after commit, not during render (StrictMode renders twice).
   useEffect(() => {
     autoSendRef.current = (message: string) => {
       const isBlocked =
@@ -424,17 +321,9 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   }, [conversationId, setDraft]);
 
   /**
-   * Put a structure into the draft at the caret.
-   *
-   * The single implementation, reached three ways: the structure panel's Insert, the
-   * `chemclaw:insert-structure` event that every rendered structure in the app now dispatches, and
-   * the paste strip's "replace with the canonical form". They must agree about padding and about
-   * where the caret lands afterwards, and the only way to guarantee that is for there to be one of
-   * them.
-   *
-   * `caretAt` is read from the ref when the panel captured it and from the live textarea otherwise
-   * — an event arriving from a rail row has no captured caret, and appending at `text.length` would
-   * put a structure at the end of a sentence the chemist was writing in the middle of.
+   * Put a structure into the draft at the caret — the single implementation for the panel's Insert,
+   * the `chemclaw:insert-structure` event and the paste strip. Uses the panel's captured caret,
+   * else the live one.
    */
   const putStructure = useCallback(
     (canonical: string, caretAt: number): void => {
@@ -442,16 +331,14 @@ export function Composer({ conversationId }: { conversationId: string }): React.
       const at = Math.min(Math.max(caretAt, 0), draft.length);
       const before = draft.slice(0, at);
       const after = draft.slice(at);
-      // A SMILES glued to the previous word is a different token, and `looksLikeSmiles` would be
-      // right to refuse it. Pad only where padding is missing, so the chemist's own spacing
-      // survives.
+      // Pad only where whitespace is missing, so the SMILES is its own token and the chemist's
+      // spacing survives.
       const fragment = `${before && !/\s$/.test(before) ? ' ' : ''}${canonical}${after && !/^\s/.test(after) ? ' ' : ''}`;
 
       setDraft(conversationId, `${before}${fragment}${after}`);
 
       const caret = before.length + fragment.length;
-      // After the state has been committed and the textarea is back on screen; setting the range
-      // against the pre-update value would put the caret in the wrong place.
+      // After commit, so the caret is set against the updated value.
       requestAnimationFrame(() => {
         const el = textareaRef.current;
         el?.focus();
@@ -462,17 +349,9 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   );
 
   /**
-   * A structure somewhere in the app was handed back to be used.
-   *
-   * Inserted at the *live* caret rather than at `caretRef`, which only holds a position when the
-   * structure panel captured one. The dispatcher is a rail row, a search hit or an inline span,
-   * none of which took focus off the textarea, so `selectionStart` is still the chemist's own
-   * cursor — and appending at the end would drop a structure after a sentence they were editing
-   * in the middle of.
-   *
-   * Not promoted to the rail: every structure that can dispatch this is one the rail either
-   * already holds or has deliberately declined to hold, so admitting it here would either be a
-   * no-op or a way round the promotion rule.
+   * A structure elsewhere in the app was handed back to be used: inserted at the live caret (the
+   * dispatcher did not take focus). Not promoted to the rail; the rail already holds it or declined
+   * it.
    */
   useEffect(() => {
     const onInsert = (event: Event): void => {
@@ -484,13 +363,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     return () => window.removeEventListener(INSERT_STRUCTURE_EVENT, onInsert);
   }, [putStructure]);
 
-  /**
-   * A file dropped anywhere else on the window is swallowed.
-   *
-   * Without this the browser's default takes over and *navigates to the file* — the draft, the
-   * conversation and the whole app go with it. A chemist dragging a `.mol` and missing the
-   * composer by ten pixels should get nothing, not a lost afternoon.
-   */
+  /** Swallow a file dropped anywhere else on the window, so the browser does not navigate to it. */
   useEffect(() => {
     const swallow = (event: DragEvent): void => {
       if (!event.dataTransfer?.types.includes('Files')) return;
@@ -504,26 +377,18 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     };
   }, []);
 
-  // The profiles this deployment offers, if more than one. A property of the *service*, not of a
-  // conversation — which is why it was in component state rather than the store, and why it is
-  // `staleTime: Infinity` here: the composer outlives every conversation switch and the answer
-  // does not change under it.
-  //
-  // Silent on failure, unchanged: a service without the route has exactly one profile, and a
-  // banner about a picker nobody asked for would be noise.
+  // The deployment's agent profiles (a service property, so `staleTime: Infinity`). Silent on
+  // failure: no route means one profile.
   const { data: profiles = [] } = useApiQuery({ ...profilesQuery(auth), enabled: ready });
 
-  // Mint the backend session while they type, so the first send is one round-trip rather than
-  // two. Debounced, so a stray keypress in a conversation they abandon does not cost a session;
-  // gated on `ready`, because under Entra a pre-token POST /sessions is just a 401.
+  // Mint the backend session while the user types (debounced; only once a token is available).
   useEffect(() => {
     if (!ready || !text.trim() || sessionId) return;
     const timer = setTimeout(() => warmSession(conversationId, auth), 300);
     return () => clearTimeout(timer);
   }, [text, ready, sessionId, conversationId, auth]);
 
-  // Auto-grow, driven from the value rather than the change event so it also shrinks back after a
-  // send. Previously the inline height survived clearing the text, leaving a tall empty box.
+  // Auto-grow from the value so the box also shrinks after a send.
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
@@ -531,9 +396,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     el.style.height = `${Math.min(el.scrollHeight, MAX_TEXTAREA_PX)}px`;
   }, [text]);
 
-  // The deployment's cap, not this bundle's: `CHEMCLAW_SERVICE_MAX_MESSAGE_CHARS` is tuned per
-  // site and reaches the SPA through `/config.js`, so the counter and the block agree with the
-  // validator that will actually see the message.
+  // The deployment's cap from `/config.js`, so the counter matches the service's validator.
   const maxChars = config.maxMessageChars;
   const tooLong = text.length > maxChars;
   const isStreaming = streaming !== null;
@@ -554,50 +417,22 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   };
 
   /**
-   * Accept a structure from the panel — into the message, and nowhere else.
-   *
-   * It is inserted at the caret rather than sent, because a structure is almost never the whole
-   * question: "screen this for hazards" and "what is the pKa of this" are what a chemist is
-   * actually writing, and a panel that sent the SMILES on its own would force them to describe the
-   * molecule twice.
-   *
-   * It is also promoted into the entity rail. A structure a human drew or dropped and confirmed
-   * satisfies the rail's structured-source rule rather than weakening it — the rule exists to keep
-   * out strings the UI *guessed* were molecules, and there is no guess here (see the
-   * promotion-rule docstring in `src/chem/entities.ts`).
-   *
-   * The panel stays open when the file it is showing holds more than one structure. Closing it was
-   * right for the single-structure case and made inserting record 2 of 12 cost a full reopen —
-   * hexagon, re-drop, step, Insert — for every record after the first.
+   * Accept a structure from the panel: inserted at the caret (rarely the whole question), and
+   * promoted into the entity rail (a confirmed structure satisfies the rail's rule; see
+   * `src/chem/entities.ts`). The panel stays open while the file has more records.
    */
   const insertStructure = ({ canonical, raw, source, moreRecords }: AcceptedStructure): void => {
-    // The raw spelling, not the canonical one: the store canonicalises for the key and keeps what
-    // was typed as an alias, so the rail can show a chemist the string they recognise.
+    // The raw spelling: the store canonicalises for the key and keeps this as an alias.
     void useEntityStore.getState().ingestUserStructure(conversationId, raw, source);
     putStructure(canonical, caretRef.current ?? text.length);
     if (!moreRecords) setStructureOpen(false);
   };
 
   /**
-   * Look at what was just pasted, and say what RDKit made of it.
-   *
-   * The paste is **never** intercepted — `preventDefault` is not called and the text lands exactly
-   * as pasted. Only a paste that is one whitespace-free token is even asked about, which is what
-   * keeps this off the path of somebody pasting a paragraph of a procedure: a structure arrives as
-   * a token, and prose does not.
-   *
-   * A molecule is promoted into the rail here, and that is the same door `ingestUserStructure`
-   * opens for the panel rather than a way round it. Read the promotion rule for what it defends
-   * against — *inference*. There is none here: a human put this exact string on their clipboard,
-   * and the strip draws it back to them at the moment it is admitted.
-   *
-   * A reaction is drawn and not promoted. `ingestUserStructure` canonicalises, a molecule toolkit
-   * cannot canonicalise a reaction, and inventing a second user-supplied door for a case nobody has
-   * asked for would be surface without a caller.
-   *
-   * What is recorded is a **span** — the text and the caret it went in at — because the strip's
-   * one button rewrites the draft, and a rewrite that only knows its own text cannot say which
-   * occurrence of it to touch.
+   * Check what was just pasted, without intercepting it. Only a single whitespace-free token (or a
+   * molblock) is checked, so pasted prose is ignored. A molecule is promoted to the rail (a human
+   * supplied this exact string); a reaction is drawn but not promoted. The check records a span for
+   * the strip's rewrite button.
    */
   const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>): void => {
     // What the browser is about to insert, and where. CRLF is normalised because a textarea does
@@ -623,11 +458,8 @@ export function Composer({ conversationId }: { conversationId: string }): React.
       at,
     });
 
-    // A molblock is looked at *before* the whitespace guard below, because it is multi-line by
-    // definition: the most common copy-out of a drawing package was the one payload no paste path
-    // handled, while the file-drop path parsed byte-identical content happily. It is kept
-    // verbatim — a molblock's header is four fixed lines and the first is routinely blank, so
-    // trimming it would shift the counts line and destroy the file.
+    // A molblock is multi-line, so it is checked before the whitespace guard, and kept verbatim
+    // (its header lines must not be trimmed).
     if (looksLikeMolblock(clip)) {
       void readCanonicalSmilesFromMolblock(clip).then(async (read) => {
         // Before `refusal`, for the reason the token path below gives: the toolkit is present and
@@ -654,9 +486,8 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     const at = caret + (clip.length - clip.trimStart().length);
 
     void readStructure(token).then(async (read) => {
-      // Before `refusal`, and before `mightBeStructure`: the toolkit is present and the token is
-      // structure-shaped, so both of those would pass and the strip would say "RDKit could not
-      // read this as a molecule" about one it just read.
+      // Before `refusal` and `mightBeStructure`: a too-complex read is a molecule, not "could not
+      // read".
       if (read?.kind === 'too-complex') {
         show({ status: 'too-complex', raw: token, at });
         return;
@@ -676,12 +507,8 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   };
 
   /**
-   * A confirmation that outlives its subject is worse than none.
-   *
-   * The strip is bound to a span of the draft, not to a string, so editing that span withdraws it:
-   * it used to keep drawing ethanol over `OCCCl` — 2-chloroethanol — and its button then spliced
-   * the canonical form into the middle of the edited token, producing `CCOCl`. Displayed: ethanol.
-   * Transmitted: ethyl hypochlorite.
+   * Withdraw the strip when its span is edited; otherwise its button would splice the canonical
+   * form into a different molecule.
    */
   useEffect(() => {
     if (!pasted) return;
@@ -726,11 +553,8 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   };
 
   /**
-   * Route a dropped file to the surface that can read it.
-   *
-   * A `.mol`/`.sdf` opens the structure panel already holding it; anything else goes to the
-   * attachment route, which is what the paperclip beside this does and what a dropped CSV almost
-   * certainly means. Neither destination is new — the drop is just a second way to reach them.
+   * Route a dropped file: `.mol`/`.sdf` to the structure panel, anything else to the attachment
+   * upload.
    */
   const takeDroppedFile = (file: File): void => {
     if (STRUCTURE_FILE.test(file.name)) {
@@ -816,8 +640,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
               </>
             ) : (
               <p
-                // A failed upload used to look exactly like a successful one — same muted grey, in
-                // the same place — and neither ever cleared.
+                // A failed upload is an alert, distinct from a success.
                 role={upload.state === 'failed' ? 'alert' : 'status'}
                 className={cn(
                   'text-xs',
@@ -842,12 +665,8 @@ export function Composer({ conversationId }: { conversationId: string }): React.
             pasted={pasted}
             onReplace={() => {
               const draft = useChatStore.getState().drafts[conversationId] ?? '';
-              // Spliced at the recorded span rather than replaced by value: the chemist pasted it
-              // into a sentence and the sentence should keep its shape, but `String.replace` with
-              // a string pattern rewrites the *first* match anywhere in the draft, which is a
-              // different molecule whenever the pasted one is an infix of something already
-              // there. If the span has moved under us the strip is stale, and the right thing to
-              // do is drop it without writing anything.
+              // Spliced at the recorded span, not by `String.replace` (which hits the first match
+              // anywhere). If the span moved, the strip is stale and nothing is written.
               if (pasted.status === 'read' && spanHolds(draft, pasted)) {
                 const before = draft.slice(0, pasted.at);
                 const after = draft.slice(pasted.at + pasted.raw.length);
@@ -897,11 +716,8 @@ export function Composer({ conversationId }: { conversationId: string }): React.
             onPaste={onPaste}
             onKeyDown={(e) => {
               if (e.key !== 'Enter') return;
-              // An IME owns this Enter: it is settling a candidate, not ending a message. Above
-              // every other rule, the Cmd/Ctrl shortcut included — what a CJK writer confirms
-              // mid-composition is the character, and the message they meant to send does not
-              // exist yet. `keyCode === 229` is the same fact reported by browsers that never
-              // set `isComposing`, so dropping it leaves exactly those users with the bug.
+              // An IME owns this Enter (`isComposing`, or `keyCode === 229` in browsers that do not
+              // set it): it settles a candidate, it does not send.
               if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               if (e.metaKey || e.ctrlKey) {
                 e.preventDefault();
@@ -924,8 +740,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
             ref={fileRef}
             type="file"
             className="hidden"
-            // The tooltip has always said "CSV, SOP"; without this every file type was offerable
-            // and the rejection happened server-side, after the upload.
+            // Restrict the picker to the types the service accepts.
             accept=".csv,.tsv,.txt,.json,.md,.pdf,.docx,.xlsx,text/*,application/pdf"
             onChange={(e) => {
               const file = e.target.files?.[0];
@@ -933,10 +748,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
               e.target.value = '';
             }}
           />
-          {/* Named, not just tooltipped. This is the domain-defining control of a chemistry app
-              and it was an unlabelled hexagon — a tooltip does not exist on touch, which is the
-              pointer a bench chemist has. The word appears wherever there is room for it, on the
-              same icon-at-narrow pattern Send uses. */}
+          {/* Labelled, not just tooltipped: tooltips do not exist on touch. */}
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -1000,9 +812,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
         {/* min-h so the hint/counter swap does not shift the composer under the reader. */}
         <div className="mt-2 flex min-h-5 items-center justify-between gap-3 text-xs text-ink-muted">
           <div className="flex flex-wrap items-center gap-2">
-            {/* Only before the session exists: the profile is fixed on the service when the
-                session is minted, so offering the choice afterwards would be offering a control
-                that silently does nothing. And only when there is a choice to make. */}
+            {/* Only before the session exists (the profile is fixed when it is minted), and only when there is a choice. */}
             {!sessionId && profiles.length > 1 && (
               <>
                 <label htmlFor="profile" className="sr-only-live">

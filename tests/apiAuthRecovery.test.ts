@@ -41,7 +41,7 @@ function provider(
 } {
   const queue = [...tokens];
   return {
-    mode: 'msal',
+    mode: 'bff',
     account: null,
     asked: 0,
     async getAccessToken() {
@@ -137,7 +137,7 @@ describe('a 401 on a plain route', () => {
 describe('the token provider failing before any request is opened', () => {
   /**
    * `getAccessToken` throwing is not the same fault as the fetch it never reaches throwing.
-   * `msalAuth.getAccessToken` rethrows a silent-refresh failure that is not
+   * a provider's `getAccessToken` rethrows a silent-refresh failure that is not
    * `InteractionRequiredAuthError` on purpose, rather than resolving it into a forced redirect —
    * so this failure must not be read by `sendMessage` as `kind: 'network'`, which is exactly what
    * happened before `'token_unavailable'` existed: a bare, non-`ApiError` rejection escaped
@@ -149,7 +149,7 @@ describe('the token provider failing before any request is opened', () => {
     const stub = stubFetch(() => jsonError(500, 'must not be reached'));
     restore = stub.restore;
     const auth: AuthProvider = {
-      mode: 'msal',
+      mode: 'bff',
       account: null,
       getAccessToken: () => Promise.reject(new Error('acquireTokenSilent: network is down')),
       login: async () => undefined,

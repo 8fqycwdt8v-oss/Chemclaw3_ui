@@ -48,18 +48,16 @@ const HAPPY: ChemclawEvent[] = [
 ];
 
 describe('streamTurn', () => {
-  it('carries a note frame under the new wire name, on the real SSE path', async () => {
+  it('carries a note frame under the wire name, on the real SSE path', async () => {
     // The unit-level tolerance is in `tests/eventContract.test.ts`; this is the same claim made
     // where it has to hold — a frame off the wire, with the discriminator in BOTH places the
-    // service sets it, through the parser this app actually runs. The rename lands on the reader
-    // first (see `NoteProposedEvent`), so what a surface receives must be indistinguishable from
-    // the old name's event.
+    // service sets it, through the parser this app actually runs.
     const { events } = await collect(
       'event: note_recorded\ndata: {"type":"note_recorded","note_id":"note-x","reference":"r"}\n\n' +
         sseFrames([answerEvent({ text: 'done' })]),
     );
-    expect(events.map((e) => e.type)).toEqual(['note_proposed', 'answer']);
-    expect(events[0]).toEqual({ type: 'note_proposed', note_id: 'note-x', reference: 'r' });
+    expect(events.map((e) => e.type)).toEqual(['note_recorded', 'answer']);
+    expect(events[0]).toEqual({ type: 'note_recorded', note_id: 'note-x', reference: 'r' });
   });
 
   it('keeps reading past a loop-cap error and returns the partial answer it precedes', async () => {

@@ -16,10 +16,9 @@ tsconfig.tsbuildinfo
 .claude/worktrees/
 
 # Sibling checkouts this repository's own pipelines make *inside the workspace*, so that
-# `tests/backendContract.test.ts` gates rather than warns. `.chemclaw3` is
-# `.github/workflows/ci.yml`'s full checkout of Chemclaw3; `.jenkins-lib` is `Jenkinsfile`'s
-# sparse one, which carries `src/chemclaw/api` and therefore the same `static/app.js` that
-# reddened the first push-lane run. Neither is source here, and an agent or a developer who runs
+# `npm run contract:check` gates rather than warns. `.chemclaw3` is
+# `.github/workflows/ci.yml`'s checkout of Chemclaw3 at the pinned commit; `.jenkins-lib` is
+# `Jenkinsfile`'s sparse clone. Neither is source here, and an agent or a developer who runs
 # either lane locally would otherwise be offered another repository's tree to commit.
 # `.chemclaw3-mock` is the `oidc-mock` job's checkout of Chemclaw3_mock, the stand-in tenant the
 # real-browser sign-in runs against.

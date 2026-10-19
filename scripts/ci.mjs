@@ -9,7 +9,7 @@
  * ## Why this file exists
  *
  * `.github/workflows/ci.yml` used to carry four assertions as inline shell — the `/config.js`
- * reference, the MSAL entry-chunk probe with its positive control, and running `dist/server.js`
+ * reference, the browser-OIDC-client probe, and running `dist/server.js`
  * from an empty temp directory — plus a whole `container` job of `curl`s. None of them had a name
  * a contributor could type. The only way to run them was to copy YAML into a terminal, which in
  * practice means they were run by the pipeline and by nobody else.
@@ -25,12 +25,12 @@
  *
  * ## What is deliberately not here
  *
- * `npm run smoke` and `npm run check:openapi` both require a **live Chemclaw3 service** and both
- * exit non-zero when they cannot reach one — deliberately, and `check-openapi.mjs` says so in its
- * own comments: "a check that reports success it did not perform is worse than no check". Putting
- * either in an offline gate would mean either a permanently red gate or teaching them to pass when
- * they did not run, and the second is the failure mode they were written to refuse. They are
- * `npm run check:live` instead, which is the named home they did not have.
+ * `npm run smoke` requires a **live Chemclaw3 service** and exits non-zero when it cannot reach
+ * one — deliberately: "a check that reports success it did not perform is worse than no check".
+ * Putting it in an offline gate would mean either a permanently red gate or teaching it to pass
+ * when it did not run, and the second is the failure mode it was written to refuse. It is
+ * `npm run check:live` instead, which is the named home it did not have. (The API contract is not
+ * a live check: `contract:check` and `generate:check` read the pinned copy and are gate steps.)
  *
  * ## What the container step does
  *
@@ -68,6 +68,16 @@ export const STEPS = [
     why: 'the production dependency closure, which is what a chemist’s browser executes',
   },
   {
+    name: 'contract',
+    run: 'contract:check',
+    why: 'the committed API contract is core’s file at the commit contracts/core.lock pins',
+  },
+  {
+    name: 'generate',
+    run: 'generate:check',
+    why: 'shared/generated/ is what the pinned contract produces; a stale file reads a contract nobody pinned',
+  },
+  {
     name: 'typecheck',
     run: 'typecheck',
     why: 'tsc -b, strict and noUncheckedIndexedAccess, over every project',
@@ -92,7 +102,7 @@ export const STEPS = [
   {
     name: 'bundle',
     run: 'check:bundle',
-    why: 'facts about the emitted chunks: /config.js survives, MSAL stays lazy',
+    why: 'facts about the emitted chunks: /config.js survives, no OIDC client in the browser',
   },
   {
     name: 'standalone',
@@ -156,7 +166,7 @@ function main() {
     console.log('  Not in the list, and why:');
     console.log('    ci:container    needs a container runtime; skips with a reason without one.');
     console.log(
-      '    check:live      smoke + check:openapi, which need a live Chemclaw3 service.\n',
+      '    check:live      smoke + check:live-contract, which need a live Chemclaw3 service.\n',
     );
     exit(0);
   }

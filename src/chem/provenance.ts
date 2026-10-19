@@ -1,28 +1,13 @@
 /**
- * Provenance: what a number came from, and by what method.
+ * Provenance: what a number came from, and by what method. Three jobs, no React or DOM:
  *
- * Three separate jobs, kept in one module because they answer one question — *how far does this
- * answer's authority actually reach* — and because none of them may touch React or the DOM.
+ * 1. Grounding: match the answer's figures against `tool_result.numbers` (untruncated values the
+ * tools returned). 2. Method: which method a tool name implies (semiempirical, cited table,
+ * surrogate). 3. Lost capability: a degraded connector as what it means for the answer.
  *
- * 1. **Grounding.** `tool_result.numbers` is the untruncated, deduplicated list of every numeric
- *    value a turn's tools actually returned. Matching the answer's figures against it is the only
- *    structured check the wire currently affords.
- * 2. **Method.** A tool name is the only thing that says whether a value is semiempirical, a
- *    cited table row or a surrogate's guess. The map below is the lookup.
- * 3. **Lost capability.** A connector name means nothing to a chemist; "no hazard screen" does.
- *
- * ## The rule that governs all of it: under-flag
- *
- * The backend documented what over-flagging costs. Its own live grounding check scored citations
- * against the *truncated* preview and graded 19 of 36 answers as fabrication; nine of nine verdicts
- * checked by hand were false — every one an id the tool really had returned. A surface that
- * accuses a real figure of being invented teaches a chemist to ignore the mark, and an ignored
- * mark is worse than no mark. So every ambiguous case here resolves to "grounded", and whole
- * classes of figure are never flagged at all.
- *
- * Nothing in this file reads `tool_result.preview`. That string is cut at an arbitrary byte and is
- * off limits for chemistry (see `recognise.ts`); `numbers` exists precisely so it does not have to
- * be mined.
+ * Rule: under-flag. A false "unmatched" mark teaches chemists to ignore marks, so every ambiguous
+ * case resolves to grounded and whole classes of figure are never flagged. `tool_result.preview` is
+ * never read.
  */
 
 import { visit, SKIP } from 'unist-util-visit';
@@ -43,12 +28,8 @@ interface LinkNode extends Node {
 /* ------------------------------------------------------------------ grounding */
 
 /**
- * The figures a turn's tools actually returned, deduplicated across every call.
- *
- * Per message rather than per call, because the answer is written after all of them and does not
- * say which call a number came from. An empty result is the load-bearing case: it means this turn
- * has *no* basis for the check, which is not the same as every figure being unsupported — see
- * `remarkGrounding`.
+ * The figures a turn's tools returned, deduplicated. Empty means the turn has no basis for the
+ * check (see `remarkGrounding`), not that every figure is unsupported.
  */
 export function returnedFigures(trace: readonly TraceEntry[]): number[] {
   const seen = new Set<number>();
@@ -61,44 +42,22 @@ export function returnedFigures(trace: readonly TraceEntry[]): number[] {
 }
 
 /**
- * Scale factors a written figure may differ from a returned one by, and still be the same value.
- *
- * Units are **not on the wire**. `numbers` carries 0.45 with no way to say whether the tool called
- * it a fraction or the answer will call it 45%, and a molar concentration reported in µM is the
- * same measurement as the same value in M. Refusing those would flag correct arithmetic as
- * fabrication, which is the one failure this module may not have.
- *
- * A *closed* list rather than "any power of ten", because the point of the check is lost if every
- * figure matches every other figure at some scale. These are the conversions this domain writes
- * constantly: percent ↔ fraction, and the two metric prefix steps (m/k and µ/M).
+ * Scale factors a written figure may differ by and still be the same value (no units on the wire):
+ * percent ↔ fraction and the m/k and µ/M steps. A closed list, or everything would match at some
+ * scale.
  */
 const SCALE_FACTORS = [1, 1e2, 1e-2, 1e3, 1e-3, 1e6, 1e-6] as const;
 
 /**
- * Relative slack applied on top of the written precision.
- *
- * The precision rule below already absorbs honest rounding, so this only has to cover what it
- * cannot see: a value that reached the answer through an intermediate the wire never carried (a
- * mean, a difference, a float round-trip through JSON). Half a percent is loose enough for those
- * and tight enough that 4 600 does not ground a claimed 5 000.
+ * Relative slack on top of the written precision, for values derived through intermediates; tight
+ * enough that 4 600 does not ground 5 000.
  */
 export const RELATIVE_SLACK = 0.005;
 
 /**
- * How much a figure written as `literal` is allowed to differ from a returned value.
- *
- * The principled half of the rule is **the precision it was written to**. "4.8" asserts one
- * decimal place and nothing finer, so a tool that returned 4.7601 said exactly that figure; "4.76"
- * asserts two, and 4.7601 is still exactly it; "5000" and 5000.0 are the same number. Half a unit
- * in the last written place is therefore the honest tolerance, and it scales itself — it is 0.005
- * for a two-decimal figure and 0.5 for an integer, with no constant to tune.
- *
- * `1.2e3` is read the same way: one decimal in the mantissa, so the last written place is 100 and
- * the tolerance is 50.
- *
- * What this deliberately does NOT do is treat trailing zeros as insignificant. "5000" could be one
- * significant figure, and reading it that way would let anything from 4 500 to 5 500 ground it —
- * generous in the safe direction, but so generous that the highlight would stop meaning anything.
+ * How far a figure written as `literal` may differ from a returned value: half a unit in the last
+ * written place (0.005 for "4.76", 0.5 for an integer; `1.2e3` gives 50). Trailing zeros count as
+ * significant.
  */
 export function writtenTolerance(literal: string): number {
   const plain = literal.replace(/,/g, '');
@@ -109,10 +68,8 @@ export function writtenTolerance(literal: string): number {
 }
 
 /**
- * Is `value`, written as `literal`, one of the figures the turn's tools returned?
- *
- * Ties every ambiguity to "yes". A figure is grounded if it matches ANY returned value under ANY
- * of the scale factors, within the looser of the written precision and the relative slack.
+ * Whether `value`, written as `literal`, matches any returned value under any scale factor, within
+ * the looser of written precision and relative slack.
  */
 export function isGroundedFigure(
   literal: string,
@@ -135,25 +92,15 @@ export function isGroundedFigure(
 }
 
 /**
- * Digit runs that could be a quantity. Boundaries are checked separately, in `figuresIn`.
- *
- * No sign in the pattern: a leading `-` is decided by what precedes it, because `5-10` is a range
- * of two positive numbers and `≈ -4.76` is one negative one, and a regex that swallows the hyphen
- * cannot tell them apart.
- *
- * **A comma is a thousands separator or it is not part of the number.** This used to read
- * `\d[\d,]*`, which swallowed any comma between digits — so `1,2-dichloroethane` yielded the
- * literal `1,2`, `Number("12")` read it as twelve, and the compound's *name* rendered as a grounded
- * figure the moment any tool in the turn returned 12, 1.2 or 1 200 under one of the scale factors.
- * Locant lists are not an edge case in chemistry prose: `2,6-lutidine`, `1,3-butadiene`,
- * `1,2,4-trimethylbenzene`. So a comma counts only in front of exactly three digits, and
- * `figuresIn` drops the survivors of a `digit,digit` pair outright.
+ * Digit runs that could be a quantity (boundaries checked in `figuresIn`). No sign: a leading `-`
+ * depends on context (`5-10` vs `≈ -4.76`). A comma counts only as a thousands separator before
+ * exactly three digits, so locants like `1,2-dichloroethane` are not numbers.
  */
 const DIGIT_RUN = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
 
-/** Characters that make a preceding position part of a word rather than a boundary. A `-` is NOT
- *  one: it separates a range, and it also joins an identifier — the leading-zero and
- *  never-flag-an-integer rules below are what keep `compound-123` harmless. */
+/**
+ * Characters that make the preceding position part of a word. `-` is not one (ranges, identifiers).
+ */
 const WORD_BEFORE = /[A-Za-z0-9_.]/;
 
 export interface Figure {
@@ -165,18 +112,10 @@ export interface Figure {
 }
 
 /**
- * The quantity-shaped literals in a run of plain text, with their offsets.
- *
- * Rejects, in order of how often each fires on real answers:
- *
- * - a run glued to a preceding word character — `GFN2-xTB`, `Q3D`, `pH7` — where the digits are
- *   part of a name and not a measurement at all;
- * - a run following `.` — the third component of `1.2.3`, which is a version and not a decimal;
- * - a leading zero followed by another digit — `08` in a date, `007` in an id;
- * - a run followed by a word character, which is a unit or an identifier glued on;
- * - either half of a `digit,digit` pair the thousands rule did not accept — the locants of
- *   `1,2-dichloroethane` and `2,6-lutidine`, which are positions on a ring and not quantities;
- * - anything longer than 15 digits, which no calculator in this system reports.
+ * The quantity-shaped literals in plain text, with offsets. Rejects runs glued to a preceding word
+ * (`GFN2-xTB`, `pH7`), after `.` (`1.2.3`), with a leading zero (`08`), followed by a word
+ * character, either half of a non-thousands `digit,digit` pair (locants), and anything over 15
+ * digits.
  */
 export function figuresIn(text: string): Figure[] {
   const found: Figure[] = [];
@@ -190,9 +129,7 @@ export function figuresIn(text: string): Figure[] {
     if (WORD_BEFORE.test(before)) continue;
     if (/\w/.test(after)) continue;
     if (/^0\d/.test(digits)) continue;
-    // A bare comma between two digits, on either side. `DIGIT_RUN` has already claimed every
-    // comma that separates thousands, so what is left is a locant list — and one half of `1,2`
-    // read as the number 1 is no better than the whole of it read as 12.
+    // A bare comma between digits is a locant list; neither half is a number.
     if (after === ',' && /\d/.test(twoAfter)) continue;
     if (before === ',' && /\d/.test(twoBefore)) continue;
     if (digits.replace(/\D/g, '').length > 15) continue;
@@ -210,22 +147,15 @@ export function figuresIn(text: string): Figure[] {
 }
 
 /**
- * Whether a figure may be flagged as *not* found among the returned values.
- *
- * Only figures written with a fractional part or an exponent. A bare integer in a chemistry answer
- * is overwhelmingly a count, an equivalent, a step number, a temperature in whole kelvin or a
- * literature year — none of which any tool returns and none of which is a fabricated measurement.
- * Flagging them would bury the one mark that matters under a dozen that do not, which is the
- * clutter failure the design brief names.
- *
- * A decimal is different: writing 4.76 is a claim to have measured or computed something to that
- * precision, and that is exactly the claim `numbers` can check.
+ * Whether a figure may be flagged as unmatched: only decimals and exponents. Bare integers are
+ * mostly counts, equivalents, steps or years.
  */
 export const isCheckableFigure = (literal: string): boolean => /[.]\d|[eE][+-]?\d/.test(literal);
 
-/** What the overlay concluded about one literal. `unmatched` is deliberately not called
- *  "unsupported": a figure can be legitimately derived or unit-converted from what a tool
- *  returned, and the wire carries no units to prove otherwise. */
+/**
+ * The overlay's verdict on one literal. `unmatched`, not "unsupported": it may be derived or
+ * converted.
+ */
 export type FigureGrounding = 'grounded' | 'unmatched';
 
 export function groundingOf(figure: Figure, returned: readonly number[]): FigureGrounding | null {
@@ -237,16 +167,8 @@ export function groundingOf(figure: Figure, returned: readonly number[]): Figure
 export const FIGURE_HREF = '#figure/';
 
 /**
- * Remark plugin: mark the answer's figures against what the turn's tools returned.
- *
- * A remark plugin and not a regex over rendered HTML, for the same reason `remarkCitations` is one:
- * a post-hoc regex would happily rewrite the digits inside a code fence, inside an inline `code`
- * span holding a SMILES string, or inside a citation chip's own text. Visiting text nodes makes
- * all three impossible rather than merely unlikely.
- *
- * **`returned` being empty disables the plugin entirely.** A turn that called no tool, or whose
- * tools returned no numbers, has nothing to check against — painting its every figure as unmatched
- * would be an accusation manufactured out of the absence of evidence.
+ * Remark plugin marking the answer's figures against the returned values. Visits text nodes only,
+ * so code spans, SMILES and citation chips are never touched. An empty `returned` disables it.
  */
 export function remarkGrounding(returned: readonly number[]) {
   return (tree: Node): void => {
@@ -293,14 +215,9 @@ export function remarkGrounding(returned: readonly number[]) {
 /* -------------------------------------------------------------------- method */
 
 /**
- * What produced a value, and the caveat the method's own authors attached to it.
- *
- * `method` is the badge: short enough to sit beside a tool name without pushing it off the line.
- * `caveat` is the expandable half, and every one of them is quoted or compressed from the
- * backend's own connector manifests (`connector.yaml`) and MCP tool descriptions.
- * **Nothing here is invented.** A caveat about chemistry that this frontend made up would be
- * indistinguishable, to a reader, from one the method's authors wrote — so a tool whose manifest
- * says nothing gets a method and no caveat, and a tool absent from the map gets neither.
+ * What produced a value and the caveat its authors attached, quoted or compressed from the
+ * backend's `connector.yaml` and tool descriptions. Nothing invented: a tool whose manifest says
+ * nothing gets no caveat; an unknown tool gets neither.
  */
 export interface ToolMethod {
   method: string;
@@ -316,22 +233,8 @@ const STORE = 'Calculation store';
 const RETRIEVAL = 'Knowledge-graph retrieval';
 
 /**
- * Keyed on the tool name as the wire spells it, and an absent tool is an absence rather than an
- * error: `methodFor` returns null and no badge renders.
- *
- * **It used to be keyed on a `KnownTool` union, on the argument that "a method attributed to a tool
- * the backend does not have will not compile".** That bar was measured against the fleet and does
- * not hold: the authoritative surface is `registry.enabled()` in a deployment's connector set — 100
- * tools and jobs with the fleet wired, against 58 names in the union — so it admitted a subset of
- * the real surface and could never prove a name wrong. What it did do is refuse a sourced method for
- * any of the other 64 (`props`, `kinetics`, `unitops`, `thermalsafety`, `suitability` and `pyexec`
- * were absent entirely), which is the opposite of what it was for. Nothing read the list at runtime
- * — `toolLabel` derives its label from the name — so the union was a bar and not a lookup, and the
- * list's own docstring claiming it picked an icon was stale as well.
- *
- * What still governs what goes in here is the rule below the interface: every method and caveat is
- * quoted or compressed from the backend's own manifest, and a tool whose manifest says nothing gets
- * no entry. A list of names cannot enforce that, and a widened key does not weaken it.
+ * Keyed on the tool name as the wire spells it; an unknown tool has no entry and no badge. Every
+ * entry is sourced from the backend's own manifests.
  */
 const TOOL_METHOD: Record<string, ToolMethod> = {
   // calc — inline GFN2-xTB calculators. Bundle manifest: "Fast cached property calculators …
@@ -546,30 +449,14 @@ const TOOL_METHOD: Record<string, ToolMethod> = {
   recall_observations: { method: RETRIEVAL },
 };
 
-/** The method behind a tool, or null for one this map does not know. Null renders no badge:
- *  a wrong method claim is worse than a missing one. Takes a plain string, because the name came
- *  off the wire and the backend adds tools without asking this repo. */
+/** The method behind a tool, or null (no badge — a wrong method claim is worse than none). */
 export const methodFor = (tool: string): ToolMethod | null =>
   (TOOL_METHOD as Record<string, ToolMethod | undefined>)[tool] ?? null;
 
 /**
- * The distinct methods a turn's tools used, in the order they were first used.
- *
- * Why a turn-level list exists at all: provenance was inverted relative to risk. The number is in
- * the answer at depth 0; the method that produced it was four disclosures down — behind "Show the
- * agent's work", then the row, then the badge. A chemist should never have to ask whether 4.76 is
- * a semiempirical estimate or a cited table, and in practice one at that depth never does.
- *
- * The answer is not to move the caveats up. `TOOL_METHOD`'s caveats are two to four lines each and
- * five of them stacked is the annotation clutter this module's own header warns trains people to
- * stop reading. It is to move *one line* up: which methods, deduplicated, once per answer. The
- * caveat stays exactly where it is, one disclosure into the trace, which is now a drill-down from
- * something rather than the only place the question is answerable.
- *
- * Deduplicated by the method *string*, not by tool: a turn that called `predict_pka` and
- * `predict_logd` used one method twice, and saying "GFN2-xTB · semiempirical" twice says nothing
- * the once did not. A tool this map has no sourced method for contributes nothing — a confidently
- * wrong method label is worse than a missing one, and that rule does not change with the altitude.
+ * The distinct methods a turn's tools used, in first-use order, shown once per answer so the method
+ * is visible without opening the trace (the caveats stay in the trace). Deduplicated by method
+ * string; unknown tools contribute nothing.
  */
 export function methodsUsed(trace: readonly TraceEntry[]): string[] {
   const seen: string[] = [];
@@ -585,16 +472,8 @@ export function methodsUsed(trace: readonly TraceEntry[]): string[] {
 /* ---------------------------------------------------------- lost capability */
 
 /**
- * What the absence of a capability means for the answer, in chemistry rather than in infrastructure.
- *
- * "molfp was unreachable" is a fact about a pod. "This answer contains no precedent search" is the
- * same fact stated as what the reader must now do about it, which is the entire point of the event
- * (`CapabilityDegradedEvent`: "the ELN says nothing about that batch" and "the ELN was unreachable"
- * otherwise arrive as the same sentence).
- *
- * `durable-jobs (Temporal)` is deliberately in this map and is **not** a bundle: the backend puts
- * the durable execution layer in the same list because a surface does the identical thing with the
- * name, and it is prefixed so it cannot be mistaken for one in the registry.
+ * What a missing capability means for the answer, in chemistry terms ("no precedent search"), keyed
+ * by connector name. `durable-jobs (Temporal)` is not a bundle but is reported the same way.
  */
 const CAPABILITY_LOSS: Record<string, string> = {
   safety: 'no hazard screen, no genotoxicity alerts and no ICH impurity limits',
@@ -607,13 +486,7 @@ const CAPABILITY_LOSS: Record<string, string> = {
     'no durable job could be started, so every long calculation was out of reach',
 };
 
-/**
- * A sentence for one degraded capability.
- *
- * The fallback names the connector and says what follows from it in general terms. It has to stay
- * honest rather than guess: the event's own contract warns that a name here need not resolve in the
- * registry, so a deployment can legitimately send one this map has never seen.
- */
+/** A sentence for one degraded capability; unknown names get an honest generic fallback. */
 export function capabilityLoss(connector: string): string {
   return CAPABILITY_LOSS[connector] ?? `nothing only ${connector} can reach`;
 }

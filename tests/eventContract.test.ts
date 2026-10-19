@@ -1,23 +1,16 @@
-import { readFileSync } from 'node:fs';
-import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { EVENT_FIELDS, normalizeEvent } from '../shared/events.ts';
+import { EVENT_TYPES, normalizeEvent } from '../shared/events.ts';
 import type { ChemclawEvent } from '../shared/events.ts';
-import { clientEventTypes } from './backendContract.ts';
+import { EVENT_ENUMS, EVENT_SCHEMAS } from '../shared/generated/events.ts';
 
 /**
  * The gate, asserted as a gate.
  *
- * `shared/events.ts` states the rule its own history taught: **`EVENT_TYPES` is the gate**, and an
- * interface added to the union without its discriminator changes nothing at runtime. That rule has
- * now been broken six times — `capability_degraded`, `tool_failed`, `job_failed`, and then
- * `evidence_source` and `handoff`, which shipped in the backend (M10 and M9) and never reached
- * this file. Every one of them was an event that existed to *qualify* what the agent said, so
- * dropping it rendered a worse answer as an ordinary one.
- *
- * Prose in a docstring did not stop the fifth and sixth. This does: every member of the union must
- * survive `normalizeEvent`, checked by round-tripping a frame of each type rather than by reading
- * the list — the list is the thing that was wrong.
+ * Every member of the union must survive `normalizeEvent`, checked by round-tripping a frame of each
+ * type rather than by reading a list. The members themselves are generated from the pinned
+ * contract (`shared/generated/events.ts`), so a kind the contract gains is admitted by
+ * construction; what these tests hold is that the tolerant readings in `shared/events.ts` keep
+ * every field's value and fall back where they say they do.
  */
 describe('the event contract admits every member of its own union', () => {
   const frames: Record<ChemclawEvent['type'], Record<string, unknown>> = {
@@ -38,7 +31,7 @@ describe('the event contract admits every member of its own union', () => {
     exhibit: { exhibit_id: 'xb-0123456789abcdef', revision: 1, kind: 'table', op: 'created' },
     exhibit_draft: { call_id: 'toolu_1', op: 'create', kind: 'document', markdown: '# Draft' },
     question: { question: 'which?', options: [] },
-    note_proposed: { note_id: 'n1', reference: 'ref' },
+    note_recorded: { note_id: 'n1', reference: 'ref' },
     approval_request: { prompt: 'ok?', approval_id: 'a1' },
     answer: { text: 'done' },
     error: { message: 'bad' },
@@ -121,9 +114,8 @@ describe('the event contract admits every member of its own union', () => {
  * to a constant passes a presence check while discarding what arrived.
  */
 // One frame per member, every declared field populated with a value distinguishable from the
-// default it would fall back to. Transcribed from `src/chemclaw/api/events.py`; when the backend
-// adds a field, it is added here in the same change, and this is the assertion that makes
-// "same change" mean something.
+// default it would fall back to. When the pinned contract gains a field, the declaration check
+// below fails until it is added here.
 const full: Array<[string, Record<string, unknown>]> = [
   // It declared no fields until shared-session queueing (Chemclaw3 #499) gave it a place in line,
   // and this entry was kept present with an empty frame for exactly that day: the declaration
@@ -223,7 +215,7 @@ const full: Array<[string, Record<string, unknown>]> = [
     },
   ],
   ['question', { question: 'which?', options: ['a'] }],
-  ['note_proposed', { note_id: 'n1', reference: 'branch/x' }],
+  ['note_recorded', { note_id: 'n1', reference: 'branch/x' }],
   ['approval_request', { prompt: 'ok?', approval_id: 'a1' }],
   [
     'answer',
@@ -281,64 +273,20 @@ describe('the event contract carries every field of every member', () => {
 });
 
 /**
- * And the fixture above covers every field the union declares — checked against the source.
+ * The fixture above covers every field the union declares.
  *
- * The two tests above are only as good as `full`, and `full` is written by hand. That is the same
- * weakness one level up that let three fields go missing in the first place: `EVENT_TYPES` was the
- * gate, `EVENT_TYPES` was written by hand, and prose in a docstring asking people to remember did
- * not hold for six members and then for three fields.
- *
- * So the fixture is checked against the *declarations* rather than trusted — and the declarations
- * are now the schemas themselves (`EVENT_FIELDS`), which is the honest version of what this used to
- * do with the compiler API. Every field of every member must appear in `full`, and the two tests
- * above then prove `normalizeEvent` actually *carries* it rather than defaulting it.
- *
- * What changed under this, and it is most of the reason F5 was worth doing: "adding a field to an
- * interface and nowhere else" is no longer a thing that can happen. The interface and the decoder
- * are one object. The remaining risk this guards is the other one — a field declared and then
- * *defaulted away* by a wrong fallback — which a fixture carrying a distinguishable value is the
- * only way to see.
- *
- * What this closes and what it does not: it makes this repository unable to gain a field in the
- * mirror without proving the normaliser preserves it. It cannot see the service, so a field added
- * *there* and never mirrored here is still invisible to this suite — that half is
- * `Chemclaw3`'s `tests/test_event_contract.py`, which fails on the side that makes the change and
- * names this file.
- */
-/**
- * `shared/events.ts` parsed with the TypeScript compiler API — the same compiler that type-checks
- * it, so there is no second idea of what the file says.
- *
- * Still here for `ErrorCode`, and **only** for it. It used to read the `ChemclawEvent` members'
- * fields as well, by finding each interface in the union and listing its property signatures.
- * There are no interfaces any more: every member is a `valibot` schema and its type is
- * `v.InferOutput` of that schema, so "what does this member declare" has an answer at runtime —
- * `EVENT_FIELDS` — and parsing the file to ask it would be re-deriving a basis that is now
- * observable. `ErrorCode` is a hand-written union with a hand-written runtime list beside it, so
- * the walk below is still the only way to read the half that has no runtime existence.
- *
- * Repo-root relative, as `tests/delivery.test.ts` reads the Jenkinsfile: vitest runs from the root,
- * and `import.meta.url` is not a file: URL under this environment.
- */
-const eventsSource = (): ts.SourceFile =>
-  ts.createSourceFile(
-    'shared/events.ts',
-    readFileSync('shared/events.ts', 'utf8'),
-    ts.ScriptTarget.Latest,
-    true,
-  );
-
-/**
- * Every member of `ChemclawEvent`, as `discriminator -> declared field names`.
- *
- * Read off the schemas rather than parsed out of the source. The question this used to answer with
- * forty lines of compiler API — "is there a field in the interface that the normaliser does not
- * carry?" — has no answer any more, because there is no interface for a field to be in: the
- * normaliser IS the declaration. What is left worth asserting is the half below it, that the
- * fixture populates every declared field, and that needs the list rather than the parse.
+ * The two tests above are only as good as `full`, and `full` is written by hand. A field declared
+ * and then *defaulted away* by a wrong fallback is invisible to a presence check; only a frame
+ * carrying a distinguishable value shows it. So the fixture is checked against the generated
+ * declarations: every field of every member must appear in `full`.
  */
 const declaredMembers = (): ReadonlyMap<string, ReadonlySet<string>> =>
-  new Map([...EVENT_FIELDS].map(([type, fields]) => [type, new Set(fields)]));
+  new Map(
+    Object.entries(EVENT_SCHEMAS).map(([type, schema]) => [
+      type,
+      new Set(Object.keys(schema.entries).filter((key) => key !== 'type')),
+    ]),
+  );
 
 describe('the fixture is checked against the declarations, not trusted', () => {
   const fixture = new Map(full.map(([type, frame]) => [type, new Set(Object.keys(frame))]));
@@ -372,27 +320,13 @@ describe('the fixture is checked against the declarations, not trusted', () => {
 });
 
 /**
- * The gate and the union are one vocabulary, and this file was reading only one of them.
- *
- * `shared/events.ts` states the rule as **`EVENT_TYPES` is the gate**, and everything above takes
- * its subject from the *interface union* instead: `declaredMembers()` parses `ChemclawEvent` with
- * the compiler API and the fixture is checked against that. The two lists are not the same list.
- * Measured: `'fake_event'` added to `EVENT_TYPES` — admitted by `normalizeEvent` at runtime, with
- * no interface and no branch — produced **zero** failures in this file.
- *
- * The direction that costs events is held (dropping a name from `EVENT_TYPES` reds the
- * round-trips above with no backend checkout at all), so what this closes is the other one: dead
- * names accumulating in the gate, which is where the `handoff` mirror came from — a consumer chain
- * for an event nothing could send.
- *
- * The one name that is legitimately in the gate without an interface of its own is an **alias**: a
- * second wire spelling that normalises onto a declared member, which is what a two-repository
- * rename needs. So aliases are permitted and *pinned* — a new one is a deliberate edit here, not a
- * line in a set literal that nobody has to explain.
+ * The gate and the union are one vocabulary: `EVENT_TYPES` admits every member of the union and
+ * nothing else except a pinned alias, which is a second wire spelling that normalises onto a
+ * declared member (a two-repository rename in progress).
  */
 describe('the runtime gate and the interface union are one vocabulary', () => {
   /** What the gate admits, read off `EVENT_TYPES` — the same reader the contract check uses. */
-  const gate = (): string[] => clientEventTypes();
+  const gate = (): string[] => [...EVENT_TYPES];
 
   it('is the list the gate actually holds, not a re-derivation of it', () => {
     // Every assertion below loops over this, so a reader that returned nothing would pass them
@@ -428,12 +362,12 @@ describe('the runtime gate and the interface union are one vocabulary', () => {
         'is a name this client accepts and no surface can render',
     ).toEqual([]);
     // Pinned, not counted: a second alias is a second wire spelling of an existing event, which is
-    // a two-repository rename in progress and needs the argument that goes with one.
+    // a two-repository rename in progress and needs the argument that goes with one (ISSUES.md).
     expect(
       aliases,
-      'a wire name normalising onto another event — argue it in shared/events.ts and in ' +
-        "tests/backendContract.test.ts's RETAINED_FOR_ROLLOUT / AHEAD_OF_BACKEND, then pin it here",
-    ).toEqual(['note_recorded -> note_proposed']);
+      'a wire name normalising onto another event — argue it in shared/events.ts and ISSUES.md, ' +
+        'then pin it here',
+    ).toEqual(['note_proposed -> note_recorded']);
   });
 
   it('declares no member of the union that the gate would drop', () => {
@@ -446,128 +380,61 @@ describe('the runtime gate and the interface union are one vocabulary', () => {
 });
 
 /**
- * `ErrorCode` (the type) and `ERROR_CODES` (the runtime set) are two hand-maintained lists of the
- * same vocabulary, and nothing bound them to each other.
+ * Every error code the contract declares survives normalisation.
  *
- * **What the drift costs is specific, not cosmetic.** `normalizeEvent` gates on `ERROR_CODES` and
- * maps anything absent to `internal`. So a code added to the union and forgotten in the set does
- * not merely lose its copy — it arrives as `internal`, which is **not** in
- * `PARTIAL_ANSWER_CODES`, so `streamTurn` treats it as terminal and throws. That runs the
- * `finally`, whose `reader.cancel()` the BFF turns into a destroyed upstream request and FastAPI
- * into a client disconnect: the backend's turn is cancelled before it records the transcript, and
- * the partial answer is lost from the screen *and* from the stored conversation.
- *
- * That is exactly the failure `spend_cap_reached` was added to `PARTIAL_ANSWER_CODES` to prevent,
- * reachable again through a one-line omission in a different file. Both lists happened to be
- * updated together when that code arrived; nothing would have noticed if they had not been.
- *
- * Parsed with the compiler API rather than imported, because the *type* has no runtime existence —
- * importing `ERROR_CODES` proves only what the set holds, and the union is the half a reader edits
- * first.
+ * A code that did not would arrive as `internal`, which is not in `PARTIAL_ANSWER_CODES`, so
+ * `streamTurn` would treat a turn that only ran into a guard as terminal and cancel it before the
+ * service records the transcript — the partial answer lost from the screen and from the stored
+ * conversation.
  */
-describe('the error-code union and its runtime set are one vocabulary', () => {
-  /** The `ErrorCode` union's string members, read off the declaration. */
-  const unionMembers = (): Set<string> => {
-    const file = eventsSource();
-    for (const statement of file.statements) {
-      if (!ts.isTypeAliasDeclaration(statement) || statement.name.text !== 'ErrorCode') continue;
-      if (!ts.isUnionTypeNode(statement.type)) {
-        throw new Error('ErrorCode is no longer a union; this check needs updating');
-      }
-      const members = new Set<string>();
-      for (const node of statement.type.types) {
-        // **Loud on anything that is not a string literal, rather than skipping it.** A `continue`
-        // here reads as harmless and is the one thing that would quietly hollow this test out: an
-        // ordinary refactor — extracting three codes into `type TimeoutCode = 'a' | 'b' | 'c'` and
-        // writing `ErrorCode = 'internal' | TimeoutCode | …` — leaves the alias unresolved, so
-        // those three go unchecked while the test still passes. That is precisely the change a
-        // maintainer reaches for when adding a `PartialAnswerCode` alias, i.e. the moment this
-        // check matters most.
-        //
-        // Resolving type references would mean a type *checker* rather than a parse, and the
-        // cheaper honest answer is to refuse: whoever writes that alias sees this message and
-        // teaches the test about it deliberately.
-        if (!ts.isLiteralTypeNode(node) || !ts.isStringLiteral(node.literal)) {
-          throw new Error(
-            `ErrorCode member \`${node.getText(file)}\` is not a string literal, so this check ` +
-              'cannot see the codes behind it. Inline it, or teach unionMembers to resolve it — ' +
-              'silently skipping it would leave those codes unverified.',
-          );
-        }
-        members.add(node.literal.text);
-      }
-      return members;
-    }
-    throw new Error('no ErrorCode declaration found in shared/events.ts');
-  };
+describe('every error code the contract declares is one the normaliser accepts', () => {
+  it.each([...EVENT_ENUMS['ErrorEvent.code']])('keeps %s', (code) => {
+    const event = normalizeEvent({
+      type: 'error',
+      message: 'x',
+      code,
+      retryable: false,
+      correlation_id: 'c1',
+    });
+    expect(event, `normalizeEvent dropped the ${code} event entirely`).not.toBeNull();
+    expect((event as { code: string }).code, `'${code}' normalised to something else`).toBe(code);
+  });
 
-  it('every code the type declares is one the normaliser will actually accept', () => {
-    const declared = unionMembers();
-    expect(declared.size).toBeGreaterThan(5);
-
-    // Round-tripped through `normalizeEvent` rather than compared against an imported constant:
-    // what matters is not that two lists match but that a declared code *survives normalisation*,
-    // which is the property the failure above turns on.
-    for (const code of declared) {
-      const event = normalizeEvent({
-        type: 'error',
-        message: 'x',
-        code,
-        retryable: false,
-        correlation_id: 'c1',
-      });
-      expect(event, `normalizeEvent dropped the ${code} event entirely`).not.toBeNull();
-      expect(
-        (event as { code: string }).code,
-        `'${code}' is declared in the ErrorCode union but missing from ERROR_CODES, so it ` +
-          `normalises to 'internal' — and 'internal' is not in PARTIAL_ANSWER_CODES, so a turn ` +
-          `carrying it would be cancelled and its partial answer lost`,
-      ).toBe(code);
-    }
+  it('reads a code it has not heard of as internal', () => {
+    const event = normalizeEvent({ type: 'error', message: 'x', code: 'a_future_code' });
+    expect((event as { code: string }).code).toBe('internal');
   });
 });
 
 /**
- * The note event under both of its names — the reader half of a two-repository rename.
+ * The note event under both of its wire names — the reader half of a two-repository rename.
  *
- * The service emits `note_proposed` for an event that is not a proposal, and says so in its own
- * model docstring: nothing reviews a note any more, so the accurate name is `note_recorded`. An
- * SSE discriminator is a contract two repositories switch on, and there is exactly one ordering
- * with no broken state — the reader accepts both names first, the emitter changes afterwards.
- * Done the other way round, every browser that has not been redeployed drops the event silently,
- * which is the failure this file exists to end.
- *
- * Both directions are driven here because "accepts both" is two claims, and the old one is the
- * one a careless rename would take away: every browser in the field speaks it today.
+ * The service now sends `note_recorded` (the contract's name); `note_proposed` is the old spelling,
+ * still admitted until every deployment has rolled forward, and normalised onto the new one so no
+ * surface has to learn both.
  */
 describe('the note event is read under both of its wire names', () => {
   const body = { note_id: 'note-suzuki-42', reference: 'agent/notes/suzuki-42' };
 
-  it('reads the name the service sends today', () => {
-    const event = normalizeEvent({ type: 'note_proposed', ...body });
-    expect(event, 'the name in production was dropped').not.toBeNull();
-    expect(event).toEqual({ type: 'note_proposed', ...body });
-  });
-
-  it('reads the name the service is moving to, as the same event', () => {
+  it('reads the name the contract declares', () => {
     const event = normalizeEvent({ type: 'note_recorded', ...body });
-    expect(event, 'a `note_recorded` frame is dropped, so the rename would lose it').not.toBeNull();
-    // Normalised onto the internal name, so no surface has to learn the second spelling and none
-    // can miss it: the trace row, the entity rail and the turn summary all key on `note_proposed`.
-    expect(event).toEqual({ type: 'note_proposed', ...body });
+    expect(event, 'a `note_recorded` frame is dropped').not.toBeNull();
+    expect(event).toEqual({ type: 'note_recorded', ...body });
   });
 
-  it('reads the new name off the SSE event line when the payload carries no type', () => {
-    // The service sets both the `event:` name and the JSON `type`; this is the half that survives
-    // a frame whose body was written by something older, and it is the path `src/lib/sse.ts` uses
-    // as its fallback. A tolerance that only covered the JSON field would be half a tolerance.
-    const event = normalizeEvent(body, 'note_recorded');
-    expect(event).toEqual({ type: 'note_proposed', ...body });
+  it('reads the old name, as the same event', () => {
+    const event = normalizeEvent({ type: 'note_proposed', ...body });
+    expect(event, 'the old name was dropped while deployments may still send it').not.toBeNull();
+    expect(event).toEqual({ type: 'note_recorded', ...body });
+  });
+
+  it('reads the name off the SSE event line when the payload carries no type', () => {
+    expect(normalizeEvent(body, 'note_recorded')).toEqual({ type: 'note_recorded', ...body });
+    expect(normalizeEvent(body, 'note_proposed')).toEqual({ type: 'note_recorded', ...body });
   });
 
   it('still refuses a name neither side has ever sent', () => {
-    // The point of the two names is tolerance of one specific, argued rename — not of anything
-    // that looks like it. Without this, "accepts both" and "accepts everything" are the same test.
+    // The tolerance is for one argued rename, not for anything that looks like it.
     expect(normalizeEvent({ type: 'note_recorded_v2', ...body })).toBeNull();
     expect(normalizeEvent({ type: 'note_written', ...body })).toBeNull();
   });

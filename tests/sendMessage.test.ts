@@ -32,7 +32,7 @@ const devAuth: AuthProvider = {
  */
 function reauthingAuth(recovers: boolean): AuthProvider & { asked: number } {
   return {
-    mode: 'msal',
+    mode: 'bff',
     account: null,
     asked: 0,
     refreshed: false,
@@ -614,7 +614,7 @@ describe('sendMessage', () => {
   });
 
   /**
-   * A hard token-acquisition failure — `msalAuth.getAccessToken` rethrowing something other than
+   * A hard token-acquisition failure — a provider's `getAccessToken` rethrowing something other than
    * `InteractionRequiredAuthError` — is not a dropped connection, even though both used to reach
    * `sendMessage`'s outer catch as a bare rejection wrapped into `kind: 'stream'`. That misreading
    * sent a turn that was never opened into the ten-minute "the server may still be running it"
@@ -624,7 +624,7 @@ describe('sendMessage', () => {
    */
   describe('the token provider failing before any request is opened', () => {
     const failingAuth: AuthProvider = {
-      mode: 'msal',
+      mode: 'bff',
       account: null,
       getAccessToken: () => Promise.reject(new Error('acquireTokenSilent: network is down')),
       login: async () => undefined,
@@ -751,8 +751,7 @@ describe('sendMessage', () => {
  * Wait for a condition, with a deadline and a name.
  *
  * The two stop tests below used `while (!ready()) await sleep(5)` with no ceiling, and each runs
- * in 6 ms on its own. Measured under the full suite the day `tests/backendContract.test.ts` was
- * added — 126 files rather than 125 — both timed out at vitest's default 5,000 ms and the run
+ * in 6 ms on its own. Under the full suite both timed out at vitest's default 5,000 ms and the run
  * reported them as failures of the *stop* path, which is not what had happened: the token they
  * were spinning for lands through `updateAssistant`, whose store writes are batched per animation
  * frame, and a starved worker simply does not get one. An unbounded spin loop inside a 5,000 ms

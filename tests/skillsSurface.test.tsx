@@ -27,7 +27,7 @@ import { SkillsPanel } from '../src/components/SkillsPanel.tsx';
 import { stubFetch } from './helpers.ts';
 import { resetQueryCache } from '../src/api/queryClient.ts';
 
-const mode = { current: 'dev' as 'dev' | 'msal', roles: [] as string[], ready: true };
+const mode = { current: 'dev' as 'dev' | 'bff', roles: [] as string[], ready: true };
 
 vi.mock('../src/auth/AuthContext.tsx', async () => {
   const { config } = await import('../src/env.ts');
@@ -418,7 +418,7 @@ describe('what is acting on a chemist', () => {
   });
 
   it('does not offer the write half to somebody without the role', async () => {
-    mode.current = 'msal';
+    mode.current = 'bff';
     mode.roles = [];
     serve({
       '/skills/mine': () => json({ skills: [] }),

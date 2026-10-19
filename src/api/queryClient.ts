@@ -1,47 +1,17 @@
 /**
- * The one query client, its defaults, and the keys.
+ * The one query client, its defaults, and the keys. Separate from `queries.ts` because `client.ts`
+ * invalidates keys and cannot import a module that imports `api` (see `docs/dependencies.md`).
  *
- * Split from `queries.ts` — which holds what each read *is* — because `client.ts` invalidates the
- * plan-inbox key from inside `decidePlan` and cannot import a module that imports `api`.
+ * There is no `QueryClientProvider`: `useQuery(options, queryClient)` takes the client explicitly
+ * and the app has one root; `resetQueryCache()` is the test seam.
  *
- * ## The policy this reverses
+ * Defaults that differ from upstream:
  *
- * This repository declined a data-fetching library, and every read was `useEffect` plus
- * `let cancelled = false` plus a `useState<view | null>` plus a `useState(failed)` — the same four
- * lines, ten times, each a place to get the cancellation wrong. Two of them had already been got
- * wrong in ways that cost a rendered answer, and both are recorded in the files they happened in:
- * `ResultBlock` needed a `requested` ref because putting `state.status` in the dependency list made
- * the effect cancel the fetch its own previous run had started, and a *second* ref re-armed on
- * every mount because React 19's StrictMode double-invoke left a plain `mounted` flag `false` for
- * the life of the component — a 200 that rendered nothing, in development, for ever.
- *
- * Those are not mistakes somebody made. They are what the shape costs, and the owner approved
- * taking the dependency that removes it. See `docs/dependencies.md`.
- *
- * ## The client is a singleton, and there is no `QueryClientProvider`
- *
- * `useQuery(options, queryClient)` takes the client explicitly — supported API, not a workaround —
- * and this app has exactly one React root. A provider would be a second way to say the same thing,
- * and it would have to be threaded through every one of the 26 test files that render one of these
- * components directly. The cache is module-scoped exactly as `inFlight` and `pendingPlansCache`
- * were before it, and `resetQueryCache()` is the same test seam `resetPendingPlansCache()` was,
- * for the same reason: one test would otherwise answer the next one's question.
- *
- * ## Three defaults this app does not take from upstream
- *
- *  - **`retry: false`.** react-query retries three times with backoff. Nothing here retried before
- *    except the 401-recover-once inside `request`, which stays where it is because it is
- *    app-specific — it knows what a refresh is and that a second attempt after a failed one is a
- *    redirect loop. Leaving the default on would triple the load on the most expensive route in
- *    the app and change every failure's timing.
- *  - **`refetchOnWindowFocus: false`.** Nothing refetched on focus before, so this is the honest
- *    default rather than a special case — and it is *load-bearing* for `/plans/pending`, whose own
- *    route docstring is quoted in `client.ts`: the service scans up to 25 sessions, and each read
- *    "is a statement on a checkpointer that serializes them against every concurrent turn on the
- *    pod". A chemist alt-tabbing back to a `/review` tab must not re-run that.
- *    `tests/requestEconomy.test.ts` drives it. The one read that *wants* focus refetching — the
- *    health probe — asks for it by name, which is how it should have to be spelled.
- *  - **`gcTime`.** Stated rather than inherited — see `QUERY_GC_MS`.
+ * - `retry: false` — the only retry is `request`'s 401-recover-once; retries would multiply load on
+ *   expensive routes.
+ * - `refetchOnWindowFocus: false` — in particular `/plans/pending` scans many sessions; reads that
+ *   want focus refetching ask for it (`tests/requestEconomy.test.ts`).
+ * - `gcTime` is stated (`QUERY_GC_MS`).
  */
 
 import {
@@ -56,35 +26,13 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query';
 
-/**
- * How long an answer nobody is observing stays in the cache before it is dropped.
- *
- * Stated rather than inherited, because an unbounded cache of tool-result payloads in a long-lived
- * tab is the failure mode a content-addressed `staleTime: Infinity` invites. It is also a *timer*,
- * armed when the last observer unmounts — exported so `tests/rateLimit.test.ts` can advance past it
- * rather than transcribe it, since that case asserts a component leaves no timer behind.
- */
+/** How long an unobserved answer stays cached. Exported so tests can advance past the timer. */
 export const QUERY_GC_MS = 5 * 60_000;
 
 /**
- * Deliver a query's result on a microtask, not on a `setTimeout(0)`.
- *
- * react-query's `notifyManager` batches notifications with `setTimeout(callback, 0)` by default.
- * That is a deliberate upstream choice and it is the wrong one *here*, because of what this app is
- * migrating from: every one of these reads used to be `promise.then(setState)`, which lands in the
- * promise's own microtask. Leaving the default on would add a macrotask hop to every read in the
- * app — one more frame of "Reading…" on a cache hit, on a result block, on a note panel — as a
- * side effect of a refactor that is supposed to change nothing a chemist can see.
- *
- * It is also what makes the change *checkable*. Three existing tests drive a read to completion by
- * flushing microtasks with no time passing (`tests/staleSheetResponse.test.tsx` says so in its own
- * helper: "a timer-based wait would let the deferred responses this test is holding resolve out
- * from under it"). Under the default scheduler those tests cannot observe a result at all, and the
- * only way to keep them would be to teach each one to advance a clock — which would mean the suite
- * agreeing with the implementation rather than asserting on it.
- *
- * `setScheduler` is upstream's own documented seam for this, and `queueMicrotask` is the value its
- * documentation names.
+ * Deliver query results on a microtask (upstream's documented `setScheduler` seam) rather than
+ * `setTimeout(0)`, so a cached read renders without an extra frame and tests can flush with
+ * microtasks.
  */
 notifyManager.setScheduler(queueMicrotask);
 
@@ -99,31 +47,13 @@ export const queryClient = new QueryClient({
   },
 });
 /**
- * Subscribe the client to the browser's focus and online events.
- *
- * `QueryClientProvider` does this on mount, and there is none here — so without this line
- * `refetchOnWindowFocus` and `refetchOnReconnect` are **inert everywhere**, whatever any query
- * asks for. That is not a theoretical gap: `TopBar`'s health probe replaced two hand-written
- * listeners (`visibilitychange` and `online`) with those two options, and every probe taken during
- * an outage fails — so the dot would have read "unreachable" for up to 30 s after the Wi-Fi came
- * back, which is the moment a chemist is most likely to be looking at it.
- *
- * It was found by driving the *other* direction: a case asserting that the plan inbox is not
- * rescanned on focus passed with `refetchOnWindowFocus` deliberately turned **on**, because
- * nothing was listening for focus at all. A control that cannot fail is the one thing worse than
- * no control, and this is the line that makes both of them mean something.
- *
- * Never unmounted: this client lives as long as the page does, which is the same claim the
- * singleton itself makes.
+ * Subscribe the client to focus and online events — normally done by `QueryClientProvider`, which
+ * this app does not use. Without it `refetchOnWindowFocus`/`refetchOnReconnect` are inert (the
+ * health probe relies on them). Never unmounted.
  */
 queryClient.mount();
 
-/**
- * Test seam: the cache is module-wide, so one test would otherwise answer the next one's question.
- *
- * The same shape, and the same reason, as `resetClientEventBudget` in `server/clientEvents.ts` —
- * and the direct replacement for `resetPendingPlansCache`, which did this for one entry.
- */
+/** Test seam: clear the module-wide cache between tests. */
 export function resetQueryCache(): void {
   queryClient.clear();
 }
@@ -149,16 +79,9 @@ export function useApiInfiniteQuery<TQueryFnData, TError = Error, TPageParam = u
 }
 
 /**
- * Every query key this app uses, in one place.
- *
- * A key is a read's *identity*, and identity is what the thing this replaces got wrong: two
- * components citing one `result_ref` were two round trips to the blob store, because each
- * component's own `requested` ref could only see inside that component. A shared key is what makes
- * them one read, so the keys belong together where a reader can see that two of them are not
- * accidentally the same and that none of them is accidentally different.
- *
- * They live here rather than beside the option factories because `client.ts` reaches for
- * `keys.pendingPlans` and may not import `queries.ts`.
+ * Every query key, in one place: a key is a read's identity, so a shared key makes two components
+ * one request. Here rather than beside the option factories because `client.ts` needs
+ * `keys.pendingPlans`.
  */
 export const keys = {
   /** Content-addressed: the URL changes whenever the bytes do, so the key is the whole identity. */
@@ -166,19 +89,14 @@ export const keys = {
   note: (noteId: string) => ['note', noteId] as const,
   pendingPlans: ['plans', 'pending'] as const,
   /**
-   * The held-open questions, and the two things that re-ask for them.
-   *
-   * `nonce` and `pushes` are *in the key* rather than in a dependency array — a frame off the
-   * push-back stream moves `awaitingRevision`, which is the whole reason an inbox left open on
-   * screen notices a new question without polling. It lived inline at its one call site while this
-   * docstring said every key in the app is here, which is the one claim a key list exists to make.
+   * Held-open questions; `nonce` and `pushes` are in the key so a push-back frame triggers a
+   * refetch.
    */
   pendingRequests: (nonce: number, pushes: number) => ['pending-requests', nonce, pushes] as const,
   sessions: ['sessions'] as const,
   /**
-   * The sessions somebody else owns that this person was let into (Chemclaw3 #483). Not nested
-   * under `sessions`: that key is an infinite query of *owned* pages, and a prefix invalidation of
-   * it should not have to know this one exists.
+   * Sessions others own that this person was let into; separate from `sessions` (an infinite query
+   * of owned pages).
    */
   sharedSessions: ['shared-sessions'] as const,
   /** Who is in one session: its owner and the members that owner admitted. */
@@ -197,24 +115,18 @@ export const keys = {
   orgSkills: ['skills', 'org'] as const,
   orgSkillVersions: (name: string) => ['skills', 'org', name, 'versions'] as const,
   /**
-   * One skill's body, nested under its tier's list key on purpose: a write to a tier invalidates
-   * that tier's prefix, which then reaches the list, every open body and every open history at
-   * once. An ad-hoc key outside that prefix is how an open body went on showing text a revert had
-   * already replaced.
+   * One skill's body, nested under its tier's key so a write to the tier invalidates list, bodies
+   * and histories together.
    */
   skillBody: (tier: 'mine' | 'org', name: string) => ['skills', tier, name, 'body'] as const,
   health: ['health'] as const,
   /**
-   * One session's artefacts — the list the pane, the cards and the shell's "is there a pane at
-   * all" read. An `exhibit` frame invalidates exactly this key, and a revision write invalidates
-   * its prefix, which reaches every body and history under it.
+   * One session's artefacts; an `exhibit` frame invalidates this key, a revision write its prefix.
    */
   exhibits: (sessionId: string) => ['exhibits', sessionId] as const,
   /**
-   * One artefact at one revision, nested under the list's prefix on purpose — the `skillBody`
-   * argument: a write that invalidates `['exhibits', sessionId]` reaches the head body, every
-   * pinned revision and the history at once. `0` is the head, which *moves*, so it is a separate
-   * entry from the number it currently resolves to rather than an alias of it.
+   * One artefact at one revision, under the list prefix. `0` is the head, a separate entry from the
+   * number it resolves to.
    */
   exhibit: (sessionId: string, exhibitId: string, revision: number) =>
     ['exhibits', sessionId, exhibitId, revision] as const,
@@ -224,38 +136,15 @@ export const keys = {
     ['exhibits', sessionId, exhibitId, 'diff', from, to] as const,
   /** Every artefact of the caller's, across sessions — "My artefacts". */
   myExhibits: ['my-exhibits'] as const,
-  /**
-   * A calculation by-product's text, by its `<calc_key>#<name>` ref. Outside the `exhibits` prefix
-   * on purpose: the calc store is shared across sessions, and an artefact's revision write says
-   * nothing about the bytes a calculation produced.
-   */
+  /** A calc by-product's text, outside the `exhibits` prefix (the calc store is shared). */
   calcArtifact: (ref: string) => ['calc-artifact', ref] as const,
 } as const;
 
-/**
- * What a content-addressed read is worth caching for: for ever.
- *
- * Not a tuning choice — it is what content-addressing *means*. `client.ts` already recorded the gap
- * this closes: "a remount (a route change, a conversation switch and back, a block scrolling out of
- * the window and in again) refetched the whole payload every time", because `send` sets `no-store`
- * by default and the in-flight join held nothing once the answer arrived. A key whose bytes cannot
- * change under it is the one case where `Infinity` is correct by construction rather than by
- * judgement.
- */
+/** Content-addressed reads never go stale. */
 export const IMMUTABLE = { staleTime: Infinity } as const;
 
 /**
- * The shortest interval between two scans of the plan inbox.
- *
- * `GET /plans/pending` is the most expensive thing one navigation in this app can trigger: the
- * service scans up to `service_max_plan_scans` (25) sessions, and its own route docstring says each
- * read "is a statement on a checkpointer that serializes them against every concurrent turn on the
- * pod". `ReviewQueue` mounts it on every visit to `/review`, so a chemist bouncing between the
- * inbox and a conversation paid for the whole scan each time.
- *
- * Ten seconds, which is short enough that nobody navigates through it deliberately and long enough
- * to collapse a bounce. It is a `staleTime` rather than a cache with an expiry policy for the same
- * reason it was a minimum interval before: the one action that can invalidate this answer is a plan
- * decision, and that decision invalidates the key rather than waiting the interval out.
+ * Minimum interval between plan-inbox scans: `GET /plans/pending` scans up to 25 sessions on the
+ * backend. A plan decision invalidates the key directly.
  */
 export const PENDING_PLANS_STALE_MS = 10_000;

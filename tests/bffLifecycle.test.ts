@@ -51,15 +51,24 @@ async function freePort(): Promise<number> {
 interface Bff {
   /** stdin is `ignore`, so this is the shape `spawn` actually returns here. */
   child: ChildProcessByStdio<null, Readable, Readable>;
+  /** `METRICS_PORT`: a free one unless the test chose it, so no run depends on 8082 being free. */
+  metricsPort: number;
   /** Every JSON record the process wrote, in order. */
   records: Record<string, unknown>[];
   exit: Promise<number | null>;
 }
 
 /** Start `server/index.ts` as this repository ships it, collecting its log records. */
-function startBff(env: Record<string, string>): Bff {
+async function startBff(env: Record<string, string>): Promise<Bff> {
+  const metricsPort = Number(env.METRICS_PORT ?? (await freePort()));
   const child = spawn(process.execPath, [ENTRY], {
-    env: { ...process.env, CLIENT_DIR: '/nonexistent-client-dir', LOG_LEVEL: 'info', ...env },
+    env: {
+      ...process.env,
+      CLIENT_DIR: '/nonexistent-client-dir',
+      LOG_LEVEL: 'info',
+      METRICS_PORT: String(metricsPort),
+      ...env,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const records: Record<string, unknown>[] = [];
@@ -77,7 +86,7 @@ function startBff(env: Record<string, string>): Bff {
   child.stdout.on('data', collect);
   child.stderr.on('data', collect);
   const exit = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
-  return { child, records, exit };
+  return { child, metricsPort, records, exit };
 }
 
 /** Wait for a record matching `predicate`, or fail loudly with what did arrive. */
@@ -126,7 +135,7 @@ describe('SIGTERM', () => {
   it('fails readiness for a whole drain period before it stops listening', async () => {
     const DRAIN_MS = 1_500;
     const port = await freePort();
-    const bff = startBff({
+    const bff = await startBff({
       PORT: String(port),
       BIND_HOST: '127.0.0.1',
       CHEMCLAW_API_URL: upstreamUrl,
@@ -181,7 +190,7 @@ describe('SIGTERM', () => {
 
   it('names the drain in the readiness body, so a probe log says why', async () => {
     const port = await freePort();
-    const bff = startBff({
+    const bff = await startBff({
       PORT: String(port),
       BIND_HOST: '127.0.0.1',
       CHEMCLAW_API_URL: upstreamUrl,
@@ -207,12 +216,56 @@ describe('SIGTERM', () => {
   }, 20_000);
 });
 
+describe('the metrics listener', () => {
+  it('serves /metrics on METRICS_PORT and the app port refuses it', async () => {
+    const port = await freePort();
+    const bff = await startBff({
+      PORT: String(port),
+      BIND_HOST: '127.0.0.1',
+      CHEMCLAW_API_URL: upstreamUrl,
+    });
+    try {
+      const announced = await waitForRecord(bff, (r) => r.message === 'metrics on');
+      expect(announced.fields).toEqual({ address: `http://127.0.0.1:${bff.metricsPort}/metrics` });
+      await waitForRecord(bff, (r) => r.message === 'listening');
+
+      const scrape = await fetch(`http://127.0.0.1:${bff.metricsPort}/metrics`);
+      expect(scrape.status).toBe(200);
+      expect(await scrape.text()).toMatch(/^chemclaw_ui_sessions 0$/m);
+      expect(await probe(port, '/metrics')).toBe('404');
+      expect(await probe(bff.metricsPort, '/healthz')).toBe('404');
+    } finally {
+      bff.child.kill('SIGKILL');
+    }
+  }, 20_000);
+
+  it('reports a METRICS_PORT it cannot bind as a record, and exits 1', async () => {
+    const holder = net.createServer();
+    await new Promise<void>((resolve) => holder.listen(0, '127.0.0.1', resolve));
+    const held = (holder.address() as AddressInfo).port;
+    const bff = await startBff({
+      PORT: String(await freePort()),
+      BIND_HOST: '127.0.0.1',
+      CHEMCLAW_API_URL: upstreamUrl,
+      METRICS_PORT: String(held),
+    });
+    try {
+      const record = await waitForRecord(bff, (r) => r.message === 'metrics server error');
+      expect(record.fields).toMatchObject({ code: 'EADDRINUSE', address: `127.0.0.1:${held}` });
+      expect(await bff.exit).toBe(1);
+    } finally {
+      bff.child.kill('SIGKILL');
+      await new Promise<void>((resolve) => holder.close(() => resolve()));
+    }
+  }, 20_000);
+});
+
 describe('a server that cannot listen', () => {
   it('reports EADDRINUSE as a record rather than a stack, and exits 1', async () => {
     const holder = net.createServer();
     await new Promise<void>((resolve) => holder.listen(0, '127.0.0.1', resolve));
     const port = (holder.address() as AddressInfo).port;
-    const bff = startBff({
+    const bff = await startBff({
       PORT: String(port),
       BIND_HOST: '127.0.0.1',
       CHEMCLAW_API_URL: upstreamUrl,
@@ -265,6 +318,7 @@ describe('a failure nobody caught', () => {
             CLIENT_DIR: '/nonexistent-client-dir',
             CHEMCLAW_API_URL: upstreamUrl,
             LOG_LEVEL: 'info',
+            METRICS_PORT: String(await freePort()),
           },
           stdio: ['ignore', 'pipe', 'pipe'],
         },

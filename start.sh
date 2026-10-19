@@ -4,7 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# The BFF proxies /api/* to the Chemclaw3 FastAPI service
+# The BFF proxies /api/* to the Chemclaw3 FastAPI service. This script defaults to :8000 (the
+# port Chemclaw3's live lane serves on); the BFF's own default, without this script, is :8080.
 export CHEMCLAW_API_URL="${CHEMCLAW_API_URL:-http://127.0.0.1:8000}"
 export AUTH_MODE="${AUTH_MODE:-dev}"
 export BIND_HOST="${BIND_HOST:-0.0.0.0}"
@@ -22,7 +23,7 @@ export LOG_LEVEL="${LOG_LEVEL:-info}"
 export APP_VERSION="${APP_VERSION:-dev}"
 export SSE_HEARTBEAT_MS="${SSE_HEARTBEAT_MS:-15000}"
 export UPSTREAM_CONNECT_TIMEOUT_MS="${UPSTREAM_CONNECT_TIMEOUT_MS:-10000}"
-# PORT is assigned by Replit or falls back to 8100
+# PORT is assigned by the host platform or falls back to 8099
 export PORT="${PORT:-8099}"
 
 # The HTML sandbox is ON by default in every other launcher (compose, `npm run dev`, the browser

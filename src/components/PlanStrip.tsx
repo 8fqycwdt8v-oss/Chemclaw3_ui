@@ -1,26 +1,11 @@
 /**
- * The plan, as one line you can open.
+ * The plan as one collapsible line: where the plan has got to, with the steps one click in. While
+ * the turn runs it also carries the activity line, since "step 3 of 4" and "calling predict_pka"
+ * describe one moment.
  *
- * The card this replaces printed every step above every answer, always expanded, for the whole
- * life of the conversation — 90-odd pixels of checklist over a two-line answer, and on a phone the
- * first half of the screen. The steps are worth having; they are not worth having *first*, every
- * time, at the cost of the thing the chemist asked for.
- *
- * So the strip states the one fact a reader wants at a glance — where the plan has got to — and
- * holds the rest one click in. While the turn runs it is also the live row: the activity line is
- * folded into the same strip rather than sitting beside it, because "step 3 of 4" and "calling
- * predict_pka" are one sentence about one moment and two rows saying it is one row too many.
- *
- * ## It opens itself exactly once
- *
- * A pending approval opens it, and nothing else does. `POST /sessions/{id}/plan/decision` binds a
- * decision to the hash of the plan that was shown, so a reader being asked to approve a plan must
- * be able to see the plan without hunting for it. Every other turn starts collapsed.
- *
- * The status prefixes are presentation, not identity: the service encodes completion as `[x] `/
- * `[ ] ` on the line, and the hash it signs is computed over the bare step text. `PlanItems` is
- * where that parsing lives, and it stays the single rendering of a step so the strip and the trace
- * cannot drift.
+ * It opens itself only for a pending approval: the decision is bound to the hash of the plan shown,
+ * so the reader must see it. `[x] `/`[ ] ` prefixes are presentation (the hash covers bare step
+ * text); `PlanItems` parses them and is the single rendering shared with the trace.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -85,11 +70,8 @@ export function PlanStrip({
   const jobs = useMemo(() => planStepJobs(trace, jobFeed), [trace, jobFeed]);
   const awaitingApproval = trace.some((e) => e.kind === 'approval_request');
   const [open, setOpen] = useState(awaitingApproval);
-  // Opened when the approval ARRIVES, not only when the strip happens to mount after one.
-  // `useState(awaitingApproval)` reads the trace once, so a turn that asks for approval mid-stream
-  // — which is every live one; the rehydrated case is the exception — left the plan folded away
-  // behind a reader being asked to approve it. Tracked so it fires on the transition rather than
-  // on every render, which would fight a reader who closed it again.
+  // Open when the approval arrives (mid-stream), not only on mount. Tracked so it fires on the
+  // transition and does not fight a reader who closes it again.
   const wasAwaiting = useRef(awaitingApproval);
   useEffect(() => {
     if (awaitingApproval && !wasAwaiting.current) setOpen(true);
@@ -122,10 +104,7 @@ export function PlanStrip({
         ) : (
           <span className="flex min-w-0 flex-1 items-baseline gap-2 text-sm">
             <span className="truncate text-ink-muted">
-              {/* Past tense on a settled turn, and it counts what the service reported rather
-                  than assuming a finished turn finished its plan: a turn can end with steps
-                  still open, and saying "4 of 4" over three ticked boxes would be a lie the
-                  checklist below immediately contradicts. */}
+              {/* On a settled turn, count what the service reported: a turn can end with steps still open. */}
               {position
                 ? `${done} of ${items.length} steps done`
                 : `${items.length} step${items.length === 1 ? '' : 's'}`}

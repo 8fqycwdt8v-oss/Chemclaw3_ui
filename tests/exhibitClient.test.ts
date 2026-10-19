@@ -1,7 +1,7 @@
 /**
  * The artefact contract from this client's side: the decoders, the event, and the requests.
  *
- * Three things are held here that the cross-repository check (`backendContract.test.ts`) cannot
+ * Three things are held here that the pinned-contract check (`pinnedContract.test.ts`) cannot
  * hold, because it compares *names* and these are *behaviours*:
  *
  *  - a body the service sent is decoded into exactly the frozen shape, a malformed spec becomes the

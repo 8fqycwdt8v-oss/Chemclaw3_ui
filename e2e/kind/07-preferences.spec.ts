@@ -4,7 +4,14 @@
  * There is no preferences screen: a preference is stated in conversation and stored by the agent's
  * `remember_preference` tool, then injected into every later turn's system prompt by core's
  * `agent/preferences.py` middleware ("standing preferences"). So the whole workflow is a model
- * decision twice over — to store it, and to honour it — and the scripted mock makes neither.
+ * decision twice over — to store it, and to honour it.
+ *
+ * On the mock, `[[e2e:remember]]` stores `forbidden_solvent_dcm`, and `[[e2e:conditions]]` answers
+ * by opening with the standing-preferences entries its system message carried ("Standing
+ * preferences received: …", or "No standing preferences reached me.") and recommending the first
+ * solvent none of them excludes — DCM when nothing arrived. So a green mock run proves the store,
+ * the section and its delivery to the model; whether a model would choose to honour it is the live
+ * lane's question.
  */
 
 import {
@@ -13,8 +20,9 @@ import {
   lastAnswer,
   newConversation,
   openTrace,
-  requireRealModel,
+  realModel,
   runTag,
+  say,
   test,
   toolsCalled,
 } from './lane.ts';
@@ -22,18 +30,17 @@ import {
 test('a forbidden solvent, stated once, is kept out of a later answer in a new conversation', async ({
   alice,
 }) => {
-  requireRealModel(
-    'storing and honouring a preference (no scripted behaviour calls remember_preference, there ' +
-      'is no preferences UI, and the mock records no prompts to inspect)',
-  );
   const { page } = alice;
   const tag = runTag();
 
   await newConversation(page);
   await ask(
     page,
-    `${tag}: Please remember this as a standing preference for all my future work: I never use ` +
-      'dichloromethane (DCM) as a solvent — it is forbidden in my lab.',
+    say(
+      `[[e2e:remember]] ${tag} never use DCM`,
+      `${tag}: Please remember this as a standing preference for all my future work: I never use ` +
+        'dichloromethane (DCM) as a solvent — it is forbidden in my lab.',
+    ),
   );
   const stored = await toolsCalled(page);
   expect(stored, `tools: ${stored.join(', ')}`).toContain('remember_preference');
@@ -47,9 +54,25 @@ test('a forbidden solvent, stated once, is kept out of a later answer in a new c
   await newConversation(page);
   const answer = await ask(
     page,
-    'Suggest a solvent and conditions for an EDC/HOBt amide coupling of benzoic acid with ' +
-      'benzylamine. Name exactly one solvent to use.',
+    say(
+      `[[e2e:conditions]] ${tag} EDC/HOBt amide coupling`,
+      `${tag}: Suggest a solvent and conditions for an EDC/HOBt amide coupling of benzoic acid ` +
+        'with benzylamine. Name exactly one solvent to use.',
+    ),
   );
+  if (!realModel()) {
+    // The plumbing: the section reached the model, carrying the entry just stored …
+    await expect(answer).toContainText('Standing preferences received:');
+    await expect(answer, 'the stored DCM preference is not among those received').toContainText(
+      /dichloromethane|DCM/,
+    );
+    // … and the respect: the solvent it recommends is not the one the preference excludes.
+    const recommended = /Conditions:[^\n]*? in (.+?) at room temperature/.exec(
+      await answer.innerText(),
+    )?.[1];
+    expect(recommended, 'the scripted answer names no solvent').toBeTruthy();
+    expect(recommended).not.toMatch(/dichloromethane|DCM/i);
+  }
   const text = (await answer.innerText()).toLowerCase();
   // Mentioning DCM to say it is avoided is fine; recommending it is not.
   const recommendsDcm =

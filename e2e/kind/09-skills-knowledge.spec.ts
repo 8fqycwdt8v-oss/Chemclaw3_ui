@@ -7,10 +7,10 @@ import {
   ask,
   expect,
   lastAnswer,
+  NOTE_CHIP,
   newConversation,
   openTrace,
   realModel,
-  requireRealModel,
   runTag,
   say,
   test,
@@ -103,16 +103,19 @@ test('a knowledge note the agent read is visible to the chemist in full', async 
 });
 
 test('a cited knowledge note opens in the note panel', async ({ alice }) => {
-  requireRealModel('citing a note in the answer');
+  // On the mock, `[[e2e:cite]]` runs `find_notes` and cites the first knowledge note it returned.
   const { page } = alice;
+  const tag = runTag();
   await newConversation(page);
   await ask(
     page,
-    'What does our knowledge base say about amide couplings in DCM? Cite the note ids you use.',
+    say(
+      `[[e2e:cite]] ${tag} amide couplings in DCM`,
+      `${tag}: What does our knowledge base say about amide couplings in DCM? Cite the note ids ` +
+        'you use.',
+    ),
   );
-  const chip = lastAnswer(page)
-    .getByRole('button', { name: /^(failure|playbook|rxn|campaign)-/ })
-    .first();
+  const chip = lastAnswer(page).getByRole('button', { name: NOTE_CHIP }).first();
   await expect(chip).toBeVisible();
   const id = ((await chip.textContent()) ?? '').trim();
   await chip.click();

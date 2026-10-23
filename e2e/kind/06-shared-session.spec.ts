@@ -15,8 +15,6 @@ import {
   expect,
   lastAnswer,
   newConversation,
-  realModel,
-  requireRealModel,
   requireTwoPeople,
   runTag,
   say,
@@ -29,27 +27,32 @@ import {
 /**
  * The prompts, per lane.
  *
- * **Against the mock, one marker per conversation, and it is the opener's.** The mock picks its
- * behaviour by scanning the *whole* request for `[[name]]` in catalogue order, and chat completions
- * resends the whole thread — so once a conversation holds `[[a-cheap]]`, every later turn in it is
- * `a-cheap`, whatever marker the new message carries (measured: an `[[f-slow]]` asked after an
- * `[[a-cheap]]` answered in 0.4 s as `a-cheap`). So the opener carries `[[f-slow]]` — 8 s of
- * thinking before the first frame, long enough to queue behind — and every later message is
- * unmarked and inherits it.
+ * **Against the mock, each message names its own behaviour.** The mock follows the newest marked
+ * user message in the thread (core `MockLlm.select`), so a marker on a later message replaces the
+ * opener's and an unmarked one inherits it. The opener is cheap; the turn bob queues behind (or
+ * watches) is `[[e2e:slow]]`, which streams for 20 s — long enough to queue, withdraw and follow —
+ * and bob's own message is cheap again, so his answer is his own turn's and not the slow one's.
  */
 const OPENER = (tag: string): string =>
   say(
-    `[[f-slow]] ${tag} shared start`,
+    `[[a-cheap]] ${tag} shared start`,
     `${tag} shared start: in one sentence, what is a Suzuki coupling?`,
   );
 const SLOW = (tag: string, what: string): string =>
   say(
-    `${tag} ${what}`,
+    `[[e2e:slow]] ${tag} ${what}`,
     `${tag} ${what}: search our notes thoroughly for Buchwald–Hartwig amination failure modes and ` +
       'summarise every one you find, citing each.',
   );
 const QUICK = (tag: string, what: string): string =>
-  say(`${tag} ${what}`, `${tag} ${what}: in one sentence, what is a Suzuki coupling?`);
+  say(`[[a-cheap]] ${tag} ${what}`, `${tag} ${what}: in one sentence, what is a Suzuki coupling?`);
+/** Bob's ask for a plan, in alice's conversation under the plan-only profile. */
+const PLAN = (tag: string): string =>
+  say(
+    `[[e2e:plan]] ${tag} compute the ammonia reaction energy`,
+    `${tag}: Compute the GFN2-xTB reaction energy of N2 + 3 H2 -> 2 NH3. Propose the plan and ` +
+      'wait for approval.',
+  );
 
 const withdrawButton = (page: Page) => page.getByRole('button', { name: 'Withdraw' });
 
@@ -196,7 +199,6 @@ test.describe('a shared session', () => {
     alice,
     bob,
   }) => {
-    requireRealModel('proposing a plan');
     const tag = runTag();
     const { page } = alice;
     await newConversation(page);
@@ -209,11 +211,7 @@ test.describe('a shared session', () => {
     await page.keyboard.press('Escape');
     await bobOpens(bob, tag);
 
-    await ask(
-      bob.page,
-      'Compute the GFN2-xTB reaction energy of N2 + 3 H2 -> 2 NH3. Propose the plan and wait ' +
-        'for approval.',
-    );
+    await ask(bob.page, PLAN(tag));
     await expect(lastAnswer(bob.page).getByRole('button', { name: 'Approve plan' })).toBeEnabled();
 
     await bob.page
@@ -223,6 +221,5 @@ test.describe('a shared session', () => {
     const row = bob.page.getByRole('listitem').filter({ hasText: tag });
     await expect(row).toBeVisible();
     await expect(row.getByText(/^Shared by /)).toBeVisible();
-    expect(realModel()).toBe(true);
   });
 });

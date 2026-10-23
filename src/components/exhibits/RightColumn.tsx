@@ -100,7 +100,7 @@ export function ExhibitPaneTrigger({
         size="sm"
         aria-pressed={open}
         aria-label={
-          open ? `Hide artefacts (${exhibits.length})` : `Show artefacts (${exhibits.length})`
+          open ? `Hide artefacts: ${exhibits.length}` : `Show artefacts: ${exhibits.length}`
         }
         onClick={() => (open ? useExhibitPane.getState().close() : reveal())}
       >

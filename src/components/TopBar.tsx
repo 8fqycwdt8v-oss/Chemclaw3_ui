@@ -170,10 +170,11 @@ export function TopBar({
 
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
+              {/* The name starts with the visible text (WCAG 2.5.3), so a speech user can say what they see. */}
               <Button
                 variant="ghost"
                 size="xs"
-                aria-label="Account and build details"
+                aria-label={`${account?.name ?? config.appVersion} — Account and build details`}
                 className="max-w-32 truncate"
               >
                 {account?.name ?? config.appVersion}

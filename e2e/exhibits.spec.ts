@@ -154,7 +154,7 @@ test('a 3D structure turns under the keyboard, reads as a table, and downloads a
   if (isMobile) {
     await page.getByRole('button', { name: 'Artefacts (2)' }).click();
   } else {
-    await page.getByRole('button', { name: 'Show artefacts (2)' }).click();
+    await page.getByRole('button', { name: 'Show artefacts: 2' }).click();
   }
   const pane = isMobile
     ? page.getByRole('dialog', { name: 'Artefacts' })

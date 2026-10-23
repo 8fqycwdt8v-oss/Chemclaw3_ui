@@ -287,7 +287,7 @@ for (const theme of ['light', 'dark'] as const) {
       await seedArtefactConversation(page, 'e2e-a11y-geometry', '2'.repeat(32));
       await page.goto('/c/e2e-a11y-geometry');
       await page
-        .getByRole('button', { name: isMobile ? 'Artefacts (2)' : 'Show artefacts (2)' })
+        .getByRole('button', { name: isMobile ? 'Artefacts (2)' : 'Show artefacts: 2' })
         .click();
       const pane = isMobile
         ? page.getByRole('dialog', { name: 'Artefacts' })
@@ -310,7 +310,7 @@ for (const theme of ['light', 'dark'] as const) {
       await seedArtefactConversation(page, 'e2e-a11y-wave3', '1'.repeat(32));
       await page.goto('/c/e2e-a11y-wave3');
       await page
-        .getByRole('button', { name: isMobile ? 'Artefacts (3)' : 'Show artefacts (3)' })
+        .getByRole('button', { name: isMobile ? 'Artefacts (3)' : 'Show artefacts: 3' })
         .click();
       const pane = isMobile
         ? page.getByRole('dialog', { name: 'Artefacts' })

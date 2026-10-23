@@ -5,43 +5,14 @@ the history. File new ones at https://github.com/8fqycwdt8v-oss/Chemclaw3_ui/iss
 
 ## Open
 
-### Issue 12: a job ending read off a stream and not yet relayed dies with the tab that read it
-
-The service's mailbox claim is destructive, so a `job_completed` frame read by a tab that dies
-before `tab.publish` is lost. `src/state/jobReconcile.ts` recovers the _fact_ on the next takeover
-from `GET /jobs/{id}` (seven-day window, ten newest), but not the push-back payload. The remaining
-fix is upstream: acknowledge before the claim, or store the push-back payload on the run record.
-
-### Issue 13: the old spelling of the note event is still admitted
-
-The service emits `note_recorded` (the pinned contract's name). This client also admits the old
-`note_proposed` and normalises it onto `note_recorded` (`WIRE_ALIASES` in `shared/events.ts`, pinned
-by `tests/eventContract.test.ts`). Remove the alias once the rename has rolled out to every
-deployment.
-
-### The design lifecycle is a transcription
-
-`LEGAL_STATUS_MOVES` and `STATUSES_NEEDING_A_PROTOCOL` (`shared/protocols.ts`) copy rules core
-enforces in `require_movable`, which the API contract does not carry.
-`tests/protocolStatusTransitions.test.ts` parses core's `protocols/store.py` at the pinned commit
-and compares the literals (a failure under `CHEMCLAW3_REQUIRED=1`, a skip without it); it cannot
-see a rule enforced in a shape it does not parse. Needs core to publish the transitions in the
-document (an `x-` extension on `StatusIn`, or a route); then generate the table and drop the parser.
-
 ### The contract is looser than the service in places the UI works around
 
-Found by typing the UI from the pinned document; each is a request to core, not a UI fix.
-
-- Fields with a default are not `required` and carry no `default` when it is `None` or a factory
-  (`Setpoints.ph`, `DesignListOut.designs`, `NoteRef.tags`, ...), so the generated types say
-  "may be absent" while the service always sends them. `Served` in `shared/wire.ts` reads responses
-  as complete; core marking them required (or emitting the default) would let that go.
-- `ExhibitView.spec` / `raw_spec` are `unknown`, so the per-kind specs the document does declare
-  (`TableSpec`, `ChartSpec`, ...) are not reachable from the view; the UI validates in
-  `shared/exhibits.ts`.
-- `DesignOut.kind` and `RevisionSummary.kind` are bare strings; the UI reads `request` or `protocol`.
-- `GET /healthz` and `POST /sessions/{id}/turn/stop` answer an unconstrained `object`
-  (`shared/wireUntyped.ts`).
+- Fields with a default are not `required` in the document and carry no `default` when it is
+  `None` or a factory, so the generated types say "may be absent" while the service always sends
+  them; `Served` in `shared/wire.ts` reads responses as complete. Marking them required in core is
+  not a flag: fifteen models (`ExperimentDesign` and the models inside it, `Setpoints` among them)
+  are both request and response bodies, so required response fields need core to publish separate
+  input and output schemas, which renames those components.
 - Sent and not read by any surface: `NoteRef.artifact_refs` / `calc_refs`, `NeighborRef.relations_in`
   / `relations_out`, `ArmRow`'s `atmosphere`, `concentration_molar`, `ph`, `pressure_bar`,
   `PendingRequestOut.reminders`, and `DesignListOut.total` / `.truncated` (the protocols panel has no
@@ -70,11 +41,9 @@ migration is its own PR, not a lockfile bump.
 
 ### Issue 22: shared sessions — what still needs the service
 
-Queued turns, withdraw, `stream_lagged` reattach and live following of another member's turn are
-built (`src/state/sharedSync.ts`). Upstream asks: a `turn_started` frame (or `running_sender` on
-`GET /queue`) carrying the sender and question, so a watched turn can say whose it is from the first
-token; a push hint instead of the 5 s queue poll; and an explicit "queued turn started" event
-(Chemclaw3 #503 item 9) so Withdraw does not race the hand-over.
+Queued turns, withdraw, the `turn_started` hand-over, `stream_lagged` reattach and live following
+of another member's turn, named by the line's `running_turn`, are built (`src/state/sharedSync.ts`).
+Upstream ask: a push hint instead of the 5 s queue poll.
 
 ### Issue 23: the OIDC browser lanes' limits
 
@@ -85,11 +54,6 @@ for core's token validator, not core; the mock lane signs in as a public client
 registration; both lanes run on one site (`127.0.0.1`), so a browser's cross-site cookie rule for
 the redirect back from the provider is checked by hand (`docs/operations.md`, "What a human
 verifies").
-
-### An HTTP surface for subscriptions
-
-`watch_for` / `list_watches` / `stop_watching` are agent tools only, so a chemist cannot see or
-cancel a standing query. Needs routes in Chemclaw3 before this UI can show them.
 
 ### Known gaps
 

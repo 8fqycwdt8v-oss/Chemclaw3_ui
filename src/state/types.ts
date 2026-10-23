@@ -264,6 +264,11 @@ export interface AssistantMessage {
    * and never persisted; replaced by the stored exchange after the turn ends (`mergeTranscript`).
    */
   watched?: boolean;
+  /**
+   * Whose watched turn this is and what it asked, from the line's `running_turn` when it named
+   * one; `question` is `null` until the service has recorded it.
+   */
+  watchedTurn?: { sender: string; question: string | null };
   error: { kind: ApiErrorKind; message: string } | null;
 }
 

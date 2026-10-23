@@ -18,7 +18,7 @@
  * **What is relayed.** The leader `publish`es notes and stream health; store handlers are
  * idempotent. A row nobody has claimed survives a takeover, but the service's claim is destructive,
  * so a frame read by a tab that dies before relaying it is lost; `src/state/jobReconcile.ts`
- * recovers the fact from the run registry on takeover (`ISSUES.md` Issue 12).
+ * recovers it from the run registry on takeover.
  */
 
 import type { AwaitingAnswerEvent, JobTerminalEvent } from '../../shared/events.ts';

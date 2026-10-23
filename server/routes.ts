@@ -56,6 +56,9 @@ const TICKET = '([0-9]{1,19})';
  */
 const ACTOR = "([A-Za-z0-9._:~!*'()%-]{1,512})";
 
+/** A standing query's id: a `bigint` identity, digits only. */
+const WATCH = '([0-9]{1,19})';
+
 /** An artefact id: `xb-` plus sixteen lowercase hex (`EXHIBIT_ID_RE` in `shared/exhibits.ts`). */
 const XID = '(xb-[0-9a-f]{16})';
 
@@ -331,6 +334,15 @@ export const ROUTES: readonly Route[] = [
     method: 'DELETE',
     pattern: new RegExp(`^/api/jobs/${JOB}$`),
     target: (m) => `/jobs/${m[1]}`,
+    sse: false,
+  },
+
+  // The caller's own standing queries: read and stop. Saving one is the agent's `watch_for`.
+  { method: 'GET', pattern: /^\/api\/watches$/, target: () => '/watches', sse: false },
+  {
+    method: 'DELETE',
+    pattern: new RegExp(`^/api/watches/${WATCH}$`),
+    target: (m) => `/watches/${m[1]}`,
     sse: false,
   },
 

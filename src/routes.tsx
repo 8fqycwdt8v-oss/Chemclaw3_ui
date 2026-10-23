@@ -36,6 +36,8 @@ const loadProtocolsPanel = () =>
   import('./components/ProtocolsPanel.tsx').then((m) => ({ default: m.ProtocolsPanel }));
 const loadProtocolDocument = () =>
   import('./components/ProtocolDocument.tsx').then((m) => ({ default: m.ProtocolDocument }));
+const loadWatchesPanel = () =>
+  import('./components/WatchesPanel.tsx').then((m) => ({ default: m.WatchesPanel }));
 const loadMyExhibits = () =>
   import('./components/exhibits/MyExhibits.tsx').then((m) => ({ default: m.MyExhibits }));
 
@@ -45,6 +47,7 @@ const JobsPanel = lazy(loadJobsPanel);
 const ProtocolsPanel = lazy(loadProtocolsPanel);
 const ProtocolDocument = lazy(loadProtocolDocument);
 const MyExhibits = lazy(loadMyExhibits);
+const WatchesPanel = lazy(loadWatchesPanel);
 
 let prefetched = false;
 
@@ -314,6 +317,17 @@ export function AppRoutes(): React.JSX.Element {
           <AppShell>
             <Panel what="Opening the skills screen…">
               <SkillsPanel />
+            </Panel>
+          </AppShell>
+        }
+      />
+      {/* A chemist's standing queries, so a watch can be seen and stopped without a turn. */}
+      <Route
+        path="/watches"
+        element={
+          <AppShell>
+            <Panel what="Opening your watches…">
+              <WatchesPanel />
             </Panel>
           </AppShell>
         }

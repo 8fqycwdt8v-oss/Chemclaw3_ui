@@ -28,6 +28,7 @@ import type {
   DurableJobStatus,
   ExhibitIn,
   ExhibitRevisionIn,
+  HealthzOut,
   JobRecordSummary,
   LocalSkillIn,
   LocalSkillOut,
@@ -63,8 +64,9 @@ import type {
   TranscriptMessage,
   TranscriptToolCall,
   TranscriptTurnStatus,
+  TurnStopOut,
+  WatchesOut,
 } from '../../shared/wire.ts';
-import type { HealthzOut, TurnStopOut } from '../../shared/wireUntyped.ts';
 import {
   ApiError,
   CORRELATION_HEADER,
@@ -420,6 +422,18 @@ export const api = {
     return request<LocalSkillsOut>(`/skills/mine/${encodeURIComponent(name)}`, getToken, {
       method: 'DELETE',
     }).then((page) => page.skills ?? []);
+  },
+
+  /** This chemist's standing queries, and whether the deployment evaluates any of them. */
+  listWatches(getToken: TokenGetter): Promise<WatchesOut> {
+    return request<WatchesOut>('/watches', getToken);
+  },
+
+  /** Stop one of this chemist's standing queries. A 404 (already gone) throws. */
+  async stopWatch(getToken: TokenGetter, watchId: number): Promise<void> {
+    await request<void>(`/watches/${encodeURIComponent(String(watchId))}`, getToken, {
+      method: 'DELETE',
+    });
   },
 
   /** The names of the skills acting on every turn in this deployment. Open to any caller. */

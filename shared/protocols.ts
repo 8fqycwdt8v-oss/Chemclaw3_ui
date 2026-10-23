@@ -4,8 +4,7 @@
  * diff).
  *
  * The document models are generated from the pinned core contract (`shared/generated/api.ts`) and
- * aliased here under the names the UI uses; what is written by hand is the lifecycle logic below
- * and the one narrowing noted at `RevisionKind`.
+ * aliased here under the names the UI uses; what is written by hand is the lifecycle filter below.
  *
  * - `FieldBasis`: a request field is `stated` (with the chemist's `quote`), `inferred` or `absent`;
  *   never render an inference as an instruction.
@@ -16,7 +15,14 @@
  * fixture service; dependency-free.
  */
 
+import {
+  LEGAL_STATUS_MOVES,
+  STATUSES_NEEDING_A_PROTOCOL,
+  STATUSES_REFUSING_A_PROTOCOL,
+} from './generated/lifecycle.ts';
 import type { Loosen, Schemas, Served } from './wire.ts';
+
+export { LEGAL_STATUS_MOVES, STATUSES_NEEDING_A_PROTOCOL, STATUSES_REFUSING_A_PROTOCOL };
 
 /** Single experiment, a screen of arms, or a multi-round campaign. */
 export type DesignMode = Schemas['DesignSummary']['mode'];
@@ -26,10 +32,9 @@ export type DesignStatus = Schemas['StatusIn']['status'];
 
 /**
  * What a revision holds: the ask alone, or a procedure. Derived by the service from `has_protocol`;
- * decides which sign-offs can succeed (`legalStatusMoves`). The contract types it as a bare string;
- * these are the two values it carries.
+ * decides which sign-offs can succeed (`legalStatusMoves`).
  */
-export type RevisionKind = 'request' | 'protocol';
+export type RevisionKind = Schemas['DesignOut']['kind'];
 
 /** `blocker` stops execution; `warning` and `note` qualify it. */
 export type CheckSeverity = Schemas['ProtocolCheck']['severity'];
@@ -96,9 +101,7 @@ export type ProtocolCheck = Served<Schemas['ProtocolCheck']>;
 export type ExperimentDesign = Served<Schemas['ExperimentDesign']>;
 
 /** A revision as the history lists it — everything but the document itself. */
-export type RevisionSummary = Omit<Served<Schemas['RevisionSummary']>, 'kind'> & {
-  kind: RevisionKind;
-};
+export type RevisionSummary = Served<Schemas['RevisionSummary']>;
 
 /**
  * One recorded lifecycle move: which revision was signed off, and why. The header `status` follows
@@ -112,10 +115,7 @@ export type DesignSummary = Served<Schemas['DesignSummary']>;
  * What `GET /protocols/{id}` returns: one revision, flat, with the design's header and history
  * beside it — the service's exact shape. `DesignRevision` is derived from it.
  */
-export type DesignOut = Omit<Served<Schemas['DesignOut']>, 'kind' | 'history'> & {
-  kind: RevisionKind;
-  history: RevisionSummary[];
-};
+export type DesignOut = Served<Schemas['DesignOut']>;
 
 /** The per-revision half of `DesignOut`, derived so it cannot drift. */
 export type DesignRevision = Omit<DesignOut, 'summary' | 'history' | 'status_history'>;
@@ -204,39 +204,25 @@ export const DESIGN_STATUSES: readonly DesignStatus[] = [
 ];
 
 /**
- * Which move each status permits — a transcription of the service's `_LEGAL_MOVES`
- * (`src/chemclaw/protocols/store.py`), so only moves that can succeed are offered.
- * The pinned contract does not carry it (`ISSUES.md`). `draft -> executed` is absent;
- * `abandoned -> draft` is present.
- */
-export const LEGAL_STATUS_MOVES: Record<DesignStatus, readonly DesignStatus[]> = {
-  requested: ['draft', 'abandoned'],
-  draft: ['approved', 'abandoned'],
-  approved: ['executed', 'draft', 'abandoned'],
-  executed: ['abandoned'],
-  abandoned: ['draft'],
-};
-
-/**
- * Statuses that assert something about a procedure (the service's `_NEEDS_A_PROTOCOL`); refused for
- * a design holding only the ask.
- */
-export const STATUSES_NEEDING_A_PROTOCOL: readonly DesignStatus[] = ['approved', 'executed'];
-
-/**
- * The moves this design can be given — the service's `require_movable` as a filter: the transition
- * table, `_NEEDS_A_PROTOCOL`, and `requested` meaning the ask alone. `headKind` is the head
+ * The moves this design can be given — the service's `require_movable` as a filter, from the
+ * rules core publishes on `StatusIn` (`shared/generated/lifecycle.ts`): the transition table, the
+ * statuses only a `protocol` head may hold, and those it may not. `headKind` is the head
  * revision's. Self-transitions are omitted deliberately; a stale page gets a `status_conflict` and
- * re-reads.
+ * re-reads. Returned in lifecycle order (`DESIGN_STATUSES`).
  */
 export function legalStatusMoves(
   current: DesignStatus,
   headKind: RevisionKind,
 ): readonly DesignStatus[] {
   // `?? []`: a status this build does not know yields no buttons rather than a crash.
-  return (LEGAL_STATUS_MOVES[current] ?? []).filter((target) => {
-    if (STATUSES_NEEDING_A_PROTOCOL.includes(target)) return headKind === 'protocol';
-    if (target === 'requested') return headKind !== 'protocol';
+  const moves: readonly DesignStatus[] =
+    (LEGAL_STATUS_MOVES as Partial<Record<DesignStatus, readonly DesignStatus[]>>)[current] ?? [];
+  return DESIGN_STATUSES.filter((target) => {
+    if (!moves.includes(target)) return false;
+    if ((STATUSES_NEEDING_A_PROTOCOL as readonly DesignStatus[]).includes(target))
+      return headKind === 'protocol';
+    if ((STATUSES_REFUSING_A_PROTOCOL as readonly DesignStatus[]).includes(target))
+      return headKind !== 'protocol';
     return true;
   });
 }

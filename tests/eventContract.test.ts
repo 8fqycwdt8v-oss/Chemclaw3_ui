@@ -15,6 +15,7 @@ import { EVENT_ENUMS, EVENT_SCHEMAS } from '../shared/generated/events.ts';
 describe('the event contract admits every member of its own union', () => {
   const frames: Record<ChemclawEvent['type'], Record<string, unknown>> = {
     queued: {},
+    turn_started: { ticket: 7 },
     plan: { todos: ['a'] },
     tool_call: { tool: 'find_notes', arguments: '{}' },
     token: { text: 'hi' },
@@ -121,6 +122,7 @@ const full: Array<[string, Record<string, unknown>]> = [
   // and this entry was kept present with an empty frame for exactly that day: the declaration
   // check below is what failed when `ticket` and `position` arrived.
   ['queued', { ticket: 12, position: 3 }],
+  ['turn_started', { ticket: 12 }],
   ['plan', { todos: ['step one'], plan_hash: 'abc123', scope: ['record_knowledge_note'] }],
   ['tool_call', { tool: 'find_notes', arguments: '{"q":1}', agent: 'safety' }],
   // `agent` is load-bearing on this one: the backend stamps every token with it and says a
@@ -361,13 +363,9 @@ describe('the runtime gate and the interface union are one vocabulary', () => {
       'in the runtime gate and nowhere in the union — the gate is the thing that admits, so this ' +
         'is a name this client accepts and no surface can render',
     ).toEqual([]);
-    // Pinned, not counted: a second alias is a second wire spelling of an existing event, which is
-    // a two-repository rename in progress and needs the argument that goes with one (ISSUES.md).
-    expect(
-      aliases,
-      'a wire name normalising onto another event — argue it in shared/events.ts and ISSUES.md, ' +
-        'then pin it here',
-    ).toEqual(['note_proposed -> note_recorded']);
+    // An alias is a second wire spelling of an existing event: a two-repository rename in progress,
+    // which needs its argument in shared/events.ts and ISSUES.md before it is admitted here.
+    expect(aliases, 'a wire name normalising onto another event').toEqual([]);
   });
 
   it('declares no member of the union that the gate would drop', () => {
@@ -406,36 +404,21 @@ describe('every error code the contract declares is one the normaliser accepts',
   });
 });
 
-/**
- * The note event under both of its wire names — the reader half of a two-repository rename.
- *
- * The service now sends `note_recorded` (the contract's name); `note_proposed` is the old spelling,
- * still admitted until every deployment has rolled forward, and normalised onto the new one so no
- * surface has to learn both.
- */
-describe('the note event is read under both of its wire names', () => {
+/** The note event is read under the one name the contract declares; the pre-rename spelling is gone. */
+describe('the note event is read under its contract name', () => {
   const body = { note_id: 'note-suzuki-42', reference: 'agent/notes/suzuki-42' };
 
-  it('reads the name the contract declares', () => {
-    const event = normalizeEvent({ type: 'note_recorded', ...body });
-    expect(event, 'a `note_recorded` frame is dropped').not.toBeNull();
-    expect(event).toEqual({ type: 'note_recorded', ...body });
-  });
-
-  it('reads the old name, as the same event', () => {
-    const event = normalizeEvent({ type: 'note_proposed', ...body });
-    expect(event, 'the old name was dropped while deployments may still send it').not.toBeNull();
-    expect(event).toEqual({ type: 'note_recorded', ...body });
-  });
-
-  it('reads the name off the SSE event line when the payload carries no type', () => {
+  it('reads the name the contract declares, from the payload or the SSE event line', () => {
+    expect(normalizeEvent({ type: 'note_recorded', ...body })).toEqual({
+      type: 'note_recorded',
+      ...body,
+    });
     expect(normalizeEvent(body, 'note_recorded')).toEqual({ type: 'note_recorded', ...body });
-    expect(normalizeEvent(body, 'note_proposed')).toEqual({ type: 'note_recorded', ...body });
   });
 
-  it('still refuses a name neither side has ever sent', () => {
-    // The tolerance is for one argued rename, not for anything that looks like it.
-    expect(normalizeEvent({ type: 'note_recorded_v2', ...body })).toBeNull();
-    expect(normalizeEvent({ type: 'note_written', ...body })).toBeNull();
+  it('refuses any other spelling, the pre-rename one included', () => {
+    for (const name of ['note_proposed', 'note_recorded_v2', 'note_written']) {
+      expect(normalizeEvent({ type: name, ...body })).toBeNull();
+    }
   });
 });

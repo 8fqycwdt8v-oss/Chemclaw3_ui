@@ -191,6 +191,8 @@ const DISPOSITION = {
   handoff: 'row',
   exhibit: 'row',
   exhibit_draft: 'other-consumer',
+  // Ends a place in line (cleared by the reducer for any event) and is announced by `sendMessage`.
+  turn_started: 'other-consumer',
   error: 'message',
 } as const satisfies Record<TurnEventKind, Disposition>;
 
@@ -213,10 +215,8 @@ describe('every event kind the pinned document declares', () => {
     expect(Object.keys(EVENT_MODELS).sort()).toEqual(documentKinds().sort());
   });
 
-  it('is admitted by the gate, and the only extra name is the pinned alias', () => {
-    expect([...EVENT_TYPES].filter((name) => !documentKinds().includes(name))).toEqual([
-      'note_proposed',
-    ]);
+  it('is admitted by the gate, which admits nothing else', () => {
+    expect([...EVENT_TYPES].filter((name) => !documentKinds().includes(name))).toEqual([]);
   });
 
   it.each(documentKinds())(

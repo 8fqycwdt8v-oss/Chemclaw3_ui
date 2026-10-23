@@ -110,7 +110,8 @@ to one set of streams.
 - **Enforced.** A relayed throttle is a notice, not a budget change
   (`tests/streamThrottleNotice.test.tsx`, `tests/jobStreamRateLimit.test.ts`).
 - **Accepted.** A job ending read by a tab that dies before relaying it is recovered late from
-  `GET /jobs/{id}` on the next takeover (`tests/jobReconcile.test.ts`). `ISSUES.md` Issue 12.
+  `GET /jobs/{id}` on the next takeover, whose run record carries every field the job card reads
+  (`tests/jobReconcile.test.ts`).
 
 ## 7. Chemistry on the client
 

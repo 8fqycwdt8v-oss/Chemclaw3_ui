@@ -397,6 +397,39 @@ describe('followSharedConversation', () => {
     expect(stub.calls.filter((c) => c.url.endsWith('/turn/stream'))).toHaveLength(1);
   });
 
+  it('names a followed turn’s sender and question from the first frame, when the line does', async () => {
+    const cid = alicesConversation();
+    const turn = holdingStream([]);
+    const stub = stubFetch((url) => {
+      if (url.endsWith(`/sessions/${SID}/messages`)) return json(ALICE_TURN);
+      if (url.endsWith(`/sessions/${SID}/queue`)) {
+        return json({
+          running: true,
+          running_turn: {
+            sender: BOB,
+            question: 'Which base?',
+            started_at: '2026-10-23T09:00:00Z',
+          },
+          waiting: [],
+        });
+      }
+      if (url.endsWith(`/sessions/${SID}/turn/stream`)) return turn.response;
+      return jsonError(404, 'unexpected');
+    });
+    restore = stub.restore;
+
+    stop = followSharedConversation(cid, auth);
+    await until(
+      () => messagesOf(cid).some((m) => m.role === 'assistant' && m.watched),
+      'the watched turn to open',
+    );
+    const watched = messagesOf(cid).find((m) => m.role === 'assistant' && m.watched);
+    expect(watched?.role === 'assistant' && watched.watchedTurn).toEqual({
+      sender: BOB,
+      question: 'Which base?',
+    });
+  });
+
   it('does not watch while this browser’s own turn is running there', async () => {
     const cid = alicesConversation();
     useChatStore.getState().setStreaming({

@@ -5,9 +5,11 @@
  *   node scripts/generate-api.mjs           # write shared/generated/*     (npm run generate:api)
  *   node scripts/generate-api.mjs --check   # fail if they are stale       (npm run generate:check)
  *
- * Two outputs:
+ * Three outputs:
  *
  *  - `shared/generated/api.ts` — every route and model, by `openapi-typescript`.
+ *  - `shared/generated/lifecycle.ts` — the design lifecycle core publishes on `StatusIn`
+ *    (`x-legal-moves` and the statuses a head's kind must or must not be `protocol` for).
  *  - `shared/generated/events.ts` — one tolerant valibot schema per member of the `TurnEvent` union,
  *    written in the vocabulary of `shared/eventCoercion.ts`. A field's helper follows from its
  *    schema (a string is `text`, an integer `count`, an enum `oneOf`, ...) and its fallback from the
@@ -205,6 +207,42 @@ function generateEvents(document, lock) {
   return header + blocks.join('\n') + table;
 }
 
+/* ── design lifecycle ────────────────────────────────────────────────────── */
+
+const LIFECYCLE_KEYS = [
+  'x-legal-moves',
+  'x-statuses-needing-a-protocol',
+  'x-statuses-refusing-a-protocol',
+];
+
+function generateLifecycle(document, lock) {
+  const statusIn = document.components.schemas.StatusIn;
+  const statuses = statusIn?.properties?.status?.enum;
+  if (!Array.isArray(statuses)) throw new Error('StatusIn.status is not an enum');
+  for (const key of LIFECYCLE_KEYS) {
+    if (!(key in (statusIn ?? {}))) throw new Error(`StatusIn does not carry \`${key}\``);
+  }
+  const moves = statusIn['x-legal-moves'];
+  const list = (key) => literal(statusIn[key]);
+  const rows = Object.keys(moves)
+    .sort()
+    .map((status) => `  ${status}: ${literal(moves[status])},`)
+    .join('\n');
+  const missing = statuses.filter((status) => !(status in moves));
+  if (missing.length > 0) throw new Error(`x-legal-moves has no row for ${missing.join(', ')}`);
+  return (
+    banner(lock, 'The design lifecycle core enforces, as published on `StatusIn`.') +
+    `import type { components } from './api.ts';\n\n` +
+    `type DesignStatus = components['schemas']['StatusIn']['status'];\n\n` +
+    `/** The moves each status permits besides staying put (\`x-legal-moves\`). */\n` +
+    `export const LEGAL_STATUS_MOVES = {\n${rows}\n} as const satisfies Record<DesignStatus, readonly DesignStatus[]>;\n\n` +
+    `/** Statuses a design can hold only when its head revision is a \`protocol\`. */\n` +
+    `export const STATUSES_NEEDING_A_PROTOCOL = ${list('x-statuses-needing-a-protocol')} as const satisfies readonly DesignStatus[];\n\n` +
+    `/** Statuses a design whose head revision is a \`protocol\` cannot hold. */\n` +
+    `export const STATUSES_REFUSING_A_PROTOCOL = ${list('x-statuses-refusing-a-protocol')} as const satisfies readonly DesignStatus[];\n`
+  );
+}
+
 /* ── driver ──────────────────────────────────────────────────────────────── */
 
 /** The pinned contract: its lock, bytes and parsed document, refused if the copy was edited. */
@@ -229,6 +267,7 @@ export async function generate({ lock, document } = loadPinned()) {
     'shared/generated/api.ts':
       banner(lock, 'Every route and model of the API contract, by openapi-typescript.') + types,
     'shared/generated/events.ts': generateEvents(document, lock),
+    'shared/generated/lifecycle.ts': generateLifecycle(document, lock),
   };
 }
 

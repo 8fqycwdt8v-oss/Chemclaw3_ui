@@ -18,6 +18,7 @@ import {
   Plus,
   Search,
   Server,
+  Eye,
   Shapes,
   Trash2,
   TriangleAlert,
@@ -652,6 +653,9 @@ export function SidebarBody({ onNavigate }: { onNavigate?: () => void }): React.
           </SidebarLink>
           <SidebarLink to="/jobs" icon={<Server />} onNavigate={onNavigate}>
             Durable runs
+          </SidebarLink>
+          <SidebarLink to="/watches" icon={<Eye />} onNavigate={onNavigate}>
+            Watches
           </SidebarLink>
           {/* Stored skills must be findable so the people they act on can see and remove them. */}
           <SidebarLink to="/skills" icon={<BookOpen />} onNavigate={onNavigate}>

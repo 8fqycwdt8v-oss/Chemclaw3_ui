@@ -113,6 +113,8 @@ export const keys = {
   /** The skills acting on this chemist's own turns, and on everybody's. Two keys, two tiers. */
   mySkills: ['skills', 'mine'] as const,
   orgSkills: ['skills', 'org'] as const,
+  /** The chemist's own standing queries (`watch_for`). */
+  watches: ['watches'] as const,
   orgSkillVersions: (name: string) => ['skills', 'org', name, 'versions'] as const,
   /**
    * One skill's body, nested under its tier's key so a write to the tier invalidates list, bodies

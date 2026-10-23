@@ -18,6 +18,7 @@ import { api } from '../api/client.ts';
 import { ApiError } from '../api/errors.ts';
 import { streamTurn } from '../api/streamTurn.ts';
 import type { AuthProvider } from '../auth/types.ts';
+import type { RunningTurnOut } from '../../shared/wire.ts';
 import { config } from '../env.ts';
 import { logger } from '../lib/logger.ts';
 import { announceStatus } from './announce.ts';
@@ -139,7 +140,7 @@ export function followSharedConversation(conversationId: string, auth: AuthProvi
     store().dropWatchedTurns(conversationId);
   };
 
-  const watch = async (sid: string): Promise<void> => {
+  const watch = async (sid: string, running: RunningTurnOut | null): Promise<void> => {
     const abort = new AbortController();
     watcher = abort;
     // Held in an object rather than two `let`s: both are assigned inside a callback, and narrowing
@@ -163,7 +164,7 @@ export function followSharedConversation(conversationId: string, auth: AuthProvi
               // Opened only once the service has said there is a turn to show: a 404 or a 429
               // must not flash an empty answer into the transcript.
               if (view.id || abort.signal.aborted) return;
-              view.id = store().startWatchedTurn(conversationId);
+              view.id = store().startWatchedTurn(conversationId, running);
               view.batcher = createTokenBatcher(conversationId, view.id);
               announceStatus(
                 'Another person’s turn is running in this conversation; following it.',
@@ -244,7 +245,7 @@ export function followSharedConversation(conversationId: string, auth: AuthProvi
       }
       if (line) {
         if (line.running && !watcher && !ownTurnHere() && Date.now() >= quietUntil) {
-          void watch(sid);
+          void watch(sid, line.running_turn);
         }
         // A turn we did not follow has stopped: the transcript has it now.
         if (wasRunning && !line.running && !watcher) void sync();

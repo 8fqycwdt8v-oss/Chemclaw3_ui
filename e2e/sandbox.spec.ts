@@ -80,7 +80,7 @@ async function openProbe(page: Page, isMobile: boolean, app = '') {
   await seed(page);
   await page.goto(`${app}/c/${CONVERSATION}`);
   await page
-    .getByRole('button', { name: isMobile ? 'Artefacts (3)' : 'Show artefacts (3)' })
+    .getByRole('button', { name: isMobile ? 'Artefacts (3)' : 'Show artefacts: 3' })
     .click();
   const pane = isMobile
     ? page.getByRole('dialog', { name: 'Artefacts' })

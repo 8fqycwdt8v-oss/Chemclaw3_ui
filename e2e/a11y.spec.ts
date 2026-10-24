@@ -45,6 +45,7 @@ async function expectTheme(page: Page, theme: 'light' | 'dark'): Promise<void> {
  * dialog around the canvas still gets scanned, and the text alternative it offers is checked.
  */
 async function scan(page: Page, exclude?: string): Promise<void> {
+  await settled(page);
   let builder = new AxeBuilder({ page }).withTags(RULES);
   if (exclude) builder = builder.exclude(exclude);
   const { violations } = await builder.analyze();
@@ -58,6 +59,26 @@ async function scan(page: Page, exclude?: string): Promise<void> {
     violations.map((v) => v.id),
     detail,
   ).toEqual([]);
+}
+
+/**
+ * Wait for every finite transition and animation to finish before axe reads the page.
+ *
+ * axe computes colour contrast from what is painted. Scanned a frame after a disclosure opens, the
+ * rows are still fading in, so it measures a blend of text and surface and reports "color-contrast"
+ * on nearly every small node at once, on a different run each time: `trace expanded` failed 5 of 8
+ * repeats on one machine and passed in CI. An infinite animation (a spinner) never finishes, so it
+ * is not waited for.
+ */
+async function settled(page: Page): Promise<void> {
+  await page.evaluate(() =>
+    Promise.all(
+      document
+        .getAnimations()
+        .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+        .map((animation) => animation.finished.catch(() => undefined)),
+    ),
+  );
 }
 
 /** Seed one conversation bound to a fixture session, as a returning reader's browser holds it. */

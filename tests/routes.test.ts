@@ -39,6 +39,8 @@ describe('proxy route whitelist', () => {
       ['GET', '/api/jobs', '/jobs'],
       ['GET', '/api/jobs/qm-7', '/jobs/qm-7'],
       ['DELETE', '/api/jobs/qm-7', '/jobs/qm-7'],
+      ['GET', '/api/watches', '/watches'],
+      ['DELETE', '/api/watches/42', '/watches/42'],
       ['GET', '/api/protocols', '/protocols'],
       ['GET', `/api/protocols/${DESIGN}`, `/protocols/${DESIGN}`],
       ['POST', `/api/protocols/${DESIGN}/revisions`, `/protocols/${DESIGN}/revisions`],
@@ -205,6 +207,9 @@ describe('proxy route whitelist', () => {
     // The check-in mailbox is claimed by reading it, and the service serves a GET only. A POST
     // here would be a path this proxy invented for a route that does not exist.
     expect(resolveRoute('POST', '/api/check-ins')).toBeNull();
+    // A watch is saved by a turn, never by this route, and its id is digits only.
+    expect(resolveRoute('POST', '/api/watches')).toBeNull();
+    expect(resolveRoute('DELETE', '/api/watches/..%2Fjobs')).toBeNull();
   });
 
   describe('tool-result refs', () => {

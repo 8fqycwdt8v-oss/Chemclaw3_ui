@@ -782,6 +782,10 @@
             "type": "array"
           },
           "kind": {
+            "enum": [
+              "request",
+              "protocol"
+            ],
             "title": "Kind",
             "type": "string"
           },
@@ -2260,6 +2264,19 @@
         "title": "HandoffEvent",
         "type": "object"
       },
+      "HealthzOut": {
+        "description": "`GET /healthz` — liveness only: the process is up. Readiness is `GET /readyz`.",
+        "properties": {
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "HealthzOut",
+        "type": "object"
+      },
       "HtmlSpec": {
         "additionalProperties": false,
         "description": "A page the model wrote, rendered only inside the UI's sandbox origin, never by this server.\n\nThe backend stores and exports it as text and never serves it as `text/html`\n(`D-2026-10-03-model-written-html-runs-in-an-opaque-origin-the-backend-never-serves`); the\npage runs in an opaque-origin iframe on a separate origin with `connect-src 'none'`. `height` is\nthe frame's initial height in CSS pixels, which the frame may report back.",
@@ -2656,7 +2673,7 @@
         "type": "object"
       },
       "NoteRecordedEvent": {
-        "description": "A note was written into the knowledge graph (gap RCH-4).\n\nA note write returns its reference into the *model's* context, so without this the chemist\nnever learns their contribution landed. This carries the reference back to the surface that\nproduced it.\n\n**The wire name was `note_proposed` and the event was never a proposal**\n(`D-2026-09-14-the-reader-lands-first-and-the-name-follows`). Nothing reviews a note any more\n(`D-2026-09-05-the-gate-follows-behaviour-not-knowledge`), so the accurate name is\n`note_recorded`, and what a chemist reads has said \"recorded\" the whole time. The literal is an\nSSE discriminator two repositories switch on, so the rename is a three-step deploy and **the\nonly ordering with no broken state is reader first**: `Chemclaw3_ui` shipped a reader that\naccepts both names (its `shared/events.ts` carries the argument), this is the second step, and\nthe third — dropping the old name from that reader — is theirs and happens after this ships.\nThe reverse order silently drops the event in every browser not yet redeployed.\n\n`evals/live.py` is this repository's own reader and accepts both for the same window.",
+        "description": "A note was written into the knowledge graph (gap RCH-4).\n\nA note write returns its reference into the *model's* context, so without this the chemist\nnever learns their contribution landed. This carries the reference back to the surface that\nproduced it.\n\nRecorded, not proposed: nothing reviews a note\n(`D-2026-09-14-the-reader-lands-first-and-the-name-follows`). The literal is an SSE\ndiscriminator `Chemclaw3_ui` switches on, so renaming it is a reader-first deploy.",
         "properties": {
           "note_id": {
             "title": "Note Id",
@@ -4046,6 +4063,10 @@
             "type": "string"
           },
           "kind": {
+            "enum": [
+              "request",
+              "protocol"
+            ],
             "title": "Kind",
             "type": "string"
           },
@@ -4093,6 +4114,38 @@
           "columns"
         ],
         "title": "RowsFrom",
+        "type": "object"
+      },
+      "RunningTurnOut": {
+        "description": "The turn a session's line waits on — `SessionQueueOut.running_turn`.\n\n`sender` is whose turn it is, `started_at` when it took the session (for a resumed turn, when\nit was resumed), and `question` what it asked — `None` while not yet recorded: a durable\ndeployment reads it from the transcript, which the turn writes once admitted, so a turn still\nwaiting for capacity has none yet. Any participant may read it, as they may the transcript.",
+        "properties": {
+          "question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question"
+          },
+          "sender": {
+            "title": "Sender",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sender",
+          "question",
+          "started_at"
+        ],
+        "title": "RunningTurnOut",
         "type": "object"
       },
       "ScheduleHealth": {
@@ -4306,11 +4359,21 @@
         "type": "object"
       },
       "SessionQueueOut": {
-        "description": "A session's line, first in line first, and whether a turn is running ahead of it here.\n\n`running` is this replica's view: the turn's pump lives in one process, so another replica\nanswers `false` for a turn it cannot see — the same scope `POST /sessions/{id}/turn/stop` has.",
+        "description": "A session's line, first in line first, and the turn running ahead of it.\n\n`running` says whether a turn holds the session and `running_turn` whose it is (`None` exactly\nwhen `running` is false). Both are the deployment's answer, the same on every replica: where\nsessions are durable they are read from the shared turn claim, not from the memory of the\nprocess that runs the turn. A hold that excludes a turn (a fork or a delete in progress) is not\na running turn.",
         "properties": {
           "running": {
             "title": "Running",
             "type": "boolean"
+          },
+          "running_turn": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunningTurnOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "waiting": {
             "items": {
@@ -4543,7 +4606,7 @@
       },
       "StatusIn": {
         "additionalProperties": false,
-        "description": "A lifecycle move.",
+        "description": "A lifecycle move.\n\nThe schema carries the rules the move is judged by (`lifecycle_rules`): `x-legal-moves` from\neach status, and the statuses a head's `kind` must be `protocol` for, or must not be.",
         "properties": {
           "expected_revision": {
             "minimum": 1.0,
@@ -4585,7 +4648,35 @@
           "expected_status"
         ],
         "title": "StatusIn",
-        "type": "object"
+        "type": "object",
+        "x-legal-moves": {
+          "abandoned": [
+            "draft"
+          ],
+          "approved": [
+            "abandoned",
+            "draft",
+            "executed"
+          ],
+          "draft": [
+            "abandoned",
+            "approved"
+          ],
+          "executed": [
+            "abandoned"
+          ],
+          "requested": [
+            "abandoned",
+            "draft"
+          ]
+        },
+        "x-statuses-needing-a-protocol": [
+          "approved",
+          "executed"
+        ],
+        "x-statuses-refusing-a-protocol": [
+          "requested"
+        ]
       },
       "StoredToolResult": {
         "description": "One stored tool result, as the fetch route returns it.\n\n`text` is exactly what the tool returned — the same string the answer verifier scores against,\nnot the preview. It is deliberately typed as text rather than parsed JSON: a tool result is\nwhatever the framework handed back, and a store that promised JSON would have to fail or lie\nabout the ones that are not.\n\n`correlation_id` rides along so a fetched result joins the audit trail and the logs of the turn\nthat produced it, which is the join a reviewer asks for and the one a ref alone cannot make.\n\n**Both `tool` and `correlation_id` are empty when the store cannot name one call**, and a\nreader must treat an empty one as \"unknown\" rather than as a value. A ref names *bytes*: two\ncalls in one session that returned identical text share one blob and one link row by design\n(D-011 applied to bytes), and there is then no single tool or turn the row belongs to. The\nwrite collapses a disagreeing column to `''` rather than overwriting it with the newest call's\n(see `_UPSERT_LINK`), because a label that is right most of the time is the failure mode this\nwhole surface is built to avoid — and \"Error: Function failed.\" makes it a certainty, not an\nedge case. What is never ambiguous is `text`: those are the bytes the ref addresses, and every\ncall that produced them produced exactly these.",
@@ -5120,13 +5211,17 @@
             "tool_call": "#/components/schemas/ToolCallEvent",
             "tool_failed": "#/components/schemas/ToolFailedEvent",
             "tool_queued": "#/components/schemas/ToolQueuedEvent",
-            "tool_result": "#/components/schemas/ToolResultEvent"
+            "tool_result": "#/components/schemas/ToolResultEvent",
+            "turn_started": "#/components/schemas/TurnStartedEvent"
           },
           "propertyName": "type"
         },
         "oneOf": [
           {
             "$ref": "#/components/schemas/QueuedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TurnStartedEvent"
           },
           {
             "$ref": "#/components/schemas/PlanEvent"
@@ -5190,6 +5285,45 @@
           }
         ]
       },
+      "TurnStartedEvent": {
+        "description": "A message that waited in the session's line has taken the turn and is about to run.\n\n(`D-2026-10-17-a-hand-over-is-one-decision-and-the-line-names-its-turn`.) Sent once, as the\nturn's first frame, the moment the message's place became the running turn; it is for the\nmessage's own stream, and a participant already watching sees it too. From here the message is\nno longer in the line: `DELETE /sessions/{id}/queue/{ticket}` answers 404 and `POST\n/sessions/{id}/turn/stop` is what ends it. A withdrawal that removed the ticket first wins\ninstead, and the stream ends on `queue_cancelled`; a stream carries one of the two, never both.\nA turn that never waited does not send it. `ticket` is the place the message held.",
+        "properties": {
+          "ticket": {
+            "title": "Ticket",
+            "type": "integer"
+          },
+          "type": {
+            "const": "turn_started",
+            "default": "turn_started",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticket"
+        ],
+        "title": "TurnStartedEvent",
+        "type": "object"
+      },
+      "TurnStopOut": {
+        "description": "What `POST /sessions/{id}/turn/stop` answers.\n\n`stopped` is whether the turn has ended. `deferred` is true only for `?reason=unload`, when the\nstop waits out the reattach grace and may yet be cancelled by a reattach; it is omitted, not\nfalse, everywhere else, so the body of a plain stop is `{\"stopped\": true}`.",
+        "properties": {
+          "deferred": {
+            "default": false,
+            "title": "Deferred",
+            "type": "boolean"
+          },
+          "stopped": {
+            "title": "Stopped",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "stopped"
+        ],
+        "title": "TurnStopOut",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -5228,6 +5362,72 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "WatchOut": {
+        "description": "One standing query and its watermark: only news after `last_seen_at` is reported.",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "last_seen_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen At"
+          },
+          "note_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note Type"
+          },
+          "query": {
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "query",
+          "note_type",
+          "last_seen_at"
+        ],
+        "title": "WatchOut",
+        "type": "object"
+      },
+      "WatchesOut": {
+        "description": "The caller's watches, oldest first, and whether this deployment evaluates any of them.\n\n`digests_enabled` false means nothing runs a watch (`CHEMCLAW_DIGEST_ENABLED`): the rows are\nkept and will report once an operator turns digests on, so a surface must not promise news.",
+        "properties": {
+          "digests_enabled": {
+            "title": "Digests Enabled",
+            "type": "boolean"
+          },
+          "watches": {
+            "items": {
+              "$ref": "#/components/schemas/WatchOut"
+            },
+            "title": "Watches",
+            "type": "array"
+          }
+        },
+        "required": [
+          "watches",
+          "digests_enabled"
+        ],
+        "title": "WatchesOut",
         "type": "object"
       },
       "Well": {
@@ -5453,7 +5653,7 @@
   },
   "info": {
     "title": "Chemclaw",
-    "version": "1.0.0"
+    "version": "2.0.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -5595,11 +5795,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "string"
-                  },
-                  "title": "Response Healthz Healthz Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/HealthzOut"
                 }
               }
             },
@@ -5967,7 +6163,7 @@
     },
     "/profiles": {
       "get": {
-        "description": "The specialized agents a session may be started as.\n\nRead from the in-memory profile registry, not `load_profiles()`: that returns only newly\nregistered profiles (empty after startup) and does blocking file I/O. The registry is already\nsorted and includes `default`, which no file declares.",
+        "description": "The specialized agents a session may be started as.\n\nRead from the in-memory profile registry, not `load_profiles()`: that returns only newly\nregistered profiles (empty after startup) and does blocking file I/O. The registry is already\nsorted and includes `default`, which no file declares. Under an access policy only the profiles\nthe caller's roles open are listed.",
         "operationId": "profiles_profiles_get",
         "responses": {
           "200": {
@@ -6406,7 +6602,7 @@
     },
     "/readyz": {
       "get": {
-        "description": "Readiness: the agent can be built, Postgres answers, and how many connectors are down.\n\nThe database gates (under `session_store=\"postgres\"` a pod cannot serve a turn without it); the\nconnectors are reported, not gating — `connectors_required` fails startup instead. Reported as a\ncount, not names: this body is public, and names stay on `/metrics` and in logs. The database\nverdict is reachability plus `_schema_carries_this_image` (directional, so rollbacks stay\nready).\n\n503 rather than an exception, so `curl` shows the reason. `/healthz` stays untouched: an outage\nshould drain pods, not restart them. Both probes are cached for\n`service_readiness_cache_seconds` (0 probes every time).",
+        "description": "Readiness: the agent can be built, Postgres answers, and how many connectors are down.\n\nThe database gates (under `session_store=\"postgres\"` a pod cannot serve a turn without it); the\nconnectors are reported, not gating — `connectors_required` fails startup instead. A process\nrunning a model-text overlay adds its digest, as `model_text_overlay`. Reported as a\ncount, not names: this body is public, and names stay on `/metrics` and in logs. The database\nverdict is reachability plus `_schema_carries_this_image` (directional, so rollbacks stay\nready).\n\n503 rather than an exception, so `curl` shows the reason. `/healthz` stays untouched: an outage\nshould drain pods, not restart them. Both probes are cached for\n`service_readiness_cache_seconds` (0 probes every time).",
         "operationId": "readyz_readyz_get",
         "responses": {
           "200": {
@@ -7434,7 +7630,7 @@
     },
     "/sessions/{session_id}/queue": {
       "get": {
-        "description": "The session's line — who is waiting for the running turn to end, first in line first.\n\nAny participant may read it: it names senders and places, not what they said.",
+        "description": "The session's line — who is waiting for the running turn to end, first in line first.\n\nAny participant may read it: it names the waiting senders and their places, not what they\nsaid, and the running turn's sender and question, which the transcript already shows them. The\nrunning turn is the deployment's answer, the same on every replica (`_running_turn`).",
         "operationId": "session_queue_sessions__session_id__queue_get",
         "parameters": [
           {
@@ -7474,7 +7670,7 @@
     },
     "/sessions/{session_id}/queue/{ticket}": {
       "delete": {
-        "description": "Withdraw a waiting message before it runs — its sender's, or the owner's for any.\n\n404 for a ticket this session's line does not hold, including another session's, so tickets\ncannot be guessed across sessions. The waiting request notices on its next look (within\n`service_turn_queue_poll_seconds` on another replica) and ends with `queue_cancelled`.",
+        "description": "Withdraw a waiting message before it runs — its sender's, or the owner's for any.\n\n404 for a ticket this session's line does not hold, including another session's, so tickets\ncannot be guessed across sessions, and for one whose message has just taken the turn (its\nstream says `turn_started`; Stop ends it now). A 204 means the message never runs: the waiting\nrequest notices on its next look (within `service_turn_queue_poll_seconds` on another replica),\nor at its hand-over, and ends with `queue_cancelled`.",
         "operationId": "withdraw_queued_sessions__session_id__queue__ticket__delete",
         "parameters": [
           {
@@ -7565,7 +7761,7 @@
     },
     "/sessions/{session_id}/turn/stop": {
       "post": {
-        "description": "Stop the session's running turn — the one way to cancel work in flight.\n\nA member stops only their own turn, the owner any. 404 when nothing is running. A turn held by\nanother replica is authorized here and relayed to its holder (`_stop_elsewhere`), 503 if it does\nnot answer in `service_turn_relay_lease_seconds`. `?reason=unload` defers: the turn stops only\nif neither its sender nor the requester reattaches within `service_turn_unload_grace_seconds`\n(answers `{\"stopped\": false, \"deferred\": true}`).",
+        "description": "Stop the session's running turn — the one way to cancel work in flight.\n\nA member stops only their own turn, the owner any. 404 when nothing is running, except that a\nStop from the sender or the owner on a turn whose process died and that is waiting to be resumed\nends it for good (200 `{\"stopped\": true}`, the question settles `interrupted`). A turn held by\nanother replica is authorized here and relayed to its holder (`_stop_elsewhere`), 503 if it does\nnot answer in `service_turn_relay_lease_seconds`. `?reason=unload` defers: the turn stops only\nif neither its sender nor the requester reattaches within `service_turn_unload_grace_seconds`\n(answers `{\"stopped\": false, \"deferred\": true}`).",
         "operationId": "stop_turn_sessions__session_id__turn_stop_post",
         "parameters": [
           {
@@ -7600,11 +7796,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": {
-                    "type": "boolean"
-                  },
-                  "title": "Response Stop Turn Sessions  Session Id  Turn Stop Post",
-                  "type": "object"
+                  "$ref": "#/components/schemas/TurnStopOut"
                 }
               }
             },
@@ -7626,7 +7818,7 @@
     },
     "/sessions/{session_id}/turn/stream": {
       "get": {
-        "description": "Follow the session's running turn live — any participant, from this moment on.\n\nEach watcher has its own buffer and is cut off (`stream_lagged`) if it stops reading; a turn on\nanother replica is relayed by its holder (`_watch_elsewhere`). 404 when nothing is running; 410\n`turn_interrupted` when the latest turn died with its process; 429 at\n`service_turn_max_watchers` or the caller's stream cap, held until the socket closes.\n`TURN_CORRELATION_HEADER` names the turn; the sender reattaching cancels a pending unload stop;\nmembership is re-read while watching.",
+        "description": "Follow the session's running turn live — any participant, from this moment on.\n\nEach watcher has its own buffer and is cut off (`stream_lagged`) if it stops reading; a turn on\nanother replica is relayed by its holder (`_watch_elsewhere`). A turn whose process died between\ntwo steps, whose calls were all repeatable reads, is resumed from its checkpoint when its sender\nattaches (`_resume_dead_turn`); the stream is then the resumed turn: it runs under the same\nlimits as a new turn (429 at the caller's turn cap or budget; it may open with a `queued` frame\nand end on `at_capacity` or `budget_exhausted`, after which the same attach can try again) and\ncarries what happens from the moment of attaching, not the events the dead attempt had already\nsent. 404 when nothing is running; 410 `turn_interrupted` when the latest turn died with its\nprocess and cannot be resumed; 429 at `service_turn_max_watchers` or the caller's stream cap,\nheld until the socket closes. `TURN_CORRELATION_HEADER` names the turn; the sender reattaching\ncancels a pending unload stop; membership is re-read while watching.",
         "operationId": "watch_turn_sessions__session_id__turn_stream_get",
         "parameters": [
           {
@@ -8023,6 +8215,58 @@
           }
         },
         "summary": "Read Versions"
+      }
+    },
+    "/watches": {
+      "get": {
+        "description": "The caller's own standing queries.",
+        "operationId": "list_watches_watches_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WatchesOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Watches"
+      }
+    },
+    "/watches/{watch_id}": {
+      "delete": {
+        "description": "Stop one of the caller's watches. 404 for an id the caller does not hold.",
+        "operationId": "stop_watch_watches__watch_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "watch_id",
+            "required": true,
+            "schema": {
+              "title": "Watch Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop Watch"
       }
     },
     "/workflows": {

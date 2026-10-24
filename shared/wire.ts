@@ -60,7 +60,11 @@ export type TranscriptMessage = Loosen<
 export type SessionMemberOut = Served<Schemas['SessionMemberOut']>;
 export type SessionMembersOut = Served<Schemas['SessionMembersOut']>;
 export type QueuedMessageOut = Served<Schemas['QueuedMessageOut']>;
+export type RunningTurnOut = Served<Schemas['RunningTurnOut']>;
 export type SessionQueueOut = Served<Schemas['SessionQueueOut']>;
+/** `deferred` stays optional: the service omits it when false. */
+export type TurnStopOut = Schemas['TurnStopOut'];
+export type HealthzOut = Served<Schemas['HealthzOut']>;
 export type SharedSessionSummary = Loosen<
   Served<Schemas['SharedSessionSummary']>,
   'owner' | 'title'
@@ -78,6 +82,11 @@ export type PendingRequest = Loosen<Served<Schemas['PendingRequestOut']>, 'remin
 export type PendingRequestsOut = Omit<Served<Schemas['PendingRequestsOut']>, 'requests'> & {
   requests: PendingRequest[];
 };
+
+/* ── standing queries ────────────────────────────────────────────────────── */
+
+export type WatchOut = Served<Schemas['WatchOut']>;
+export type WatchesOut = Served<Schemas['WatchesOut']>;
 
 /* ── notes ───────────────────────────────────────────────────────────────── */
 

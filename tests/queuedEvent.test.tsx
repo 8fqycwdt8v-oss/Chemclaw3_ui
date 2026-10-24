@@ -177,6 +177,19 @@ describe('a place in a shared conversation’s line', () => {
     expect(assistantOf(second.cid, second.mid).queuePlace).toBeNull();
   });
 
+  it('forgets the ticket on the hand-over frame, before any token', () => {
+    // `turn_started` is the service saying the place became the running turn, so Stop goes
+    // straight to stopping it instead of a withdrawal that would race the hand-over.
+    const { cid, mid } = startTurn();
+    const store = useChatStore.getState();
+    store.applyEvent(cid, mid, inLine(7, 0));
+    store.applyEvent(cid, mid, normalizeEvent({ type: 'turn_started', ticket: 7 })!);
+    const assistant = assistantOf(cid, mid);
+    expect(assistant.queuePlace).toBeNull();
+    expect(assistant.queued).toBe(false);
+    expect(assistant.trace).toHaveLength(0);
+  });
+
   it('settles a withdrawn message without an error, saying why', () => {
     const { cid, mid } = startTurn();
     const store = useChatStore.getState();
@@ -192,5 +205,24 @@ describe('a place in a shared conversation’s line', () => {
     expect(screen.getByText('The owner withdrew your message before it ran.')).toBeTruthy();
     // Not the copy for an answer cut short: there never was one.
     expect(screen.queryByText(/Stopped before the answer was complete/)).toBeNull();
+  });
+});
+
+describe('a followed turn', () => {
+  it('says whose it is and what it asked when the line named it', () => {
+    const cid = useChatStore.getState().createConversation();
+    useChatStore
+      .getState()
+      .startWatchedTurn(cid, { sender: 'bob@example.com', question: 'Which base?' });
+    render(<MessageList conversationId={cid} />);
+    expect(screen.getByText('bob@example.com’s turn, followed live.')).toBeTruthy();
+    expect(screen.getByText('Which base?')).toBeTruthy();
+  });
+
+  it('falls back to “another person” when the line did not', () => {
+    const cid = useChatStore.getState().createConversation();
+    useChatStore.getState().startWatchedTurn(cid);
+    render(<MessageList conversationId={cid} />);
+    expect(screen.getByText(/Another person’s turn, followed live/)).toBeTruthy();
   });
 });

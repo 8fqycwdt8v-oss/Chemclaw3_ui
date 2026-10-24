@@ -205,7 +205,7 @@ export function useJobStreams(): void {
         }
         publishHealth(joined);
         // Ask the run registry how awaited runs ended: a leader that died before relaying an ending
-        // took the only copy (`ISSUES.md` Issue 12). Also runs on the first election at page load.
+        // took the only copy. Also runs on the first election at page load.
         void reconcileAfterTakeover(joined, useChatStore.getState(), auth);
       }
       held = joined.isLeader();

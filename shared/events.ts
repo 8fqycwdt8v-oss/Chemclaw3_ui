@@ -9,7 +9,6 @@
  * What is written here, and why it is not generated:
  *  - `refine` states a reading the document leaves open (the fallback for a closed set, a field
  *    read as open text where the document narrows it). `STATED_READINGS` lists them.
- *  - `WIRE_ALIASES` maps an older spelling of a wire name onto the current one.
  *  - `normalizeEvent` drops a discriminator this build does not know: the union is designed to
  *    grow, so an older frontend ignores newer events instead of failing on them.
  *
@@ -127,6 +126,7 @@ const placeOrNull = () =>
     null,
   );
 
+const turnStartedEvent = G.turnStartedEvent;
 const queuedEvent = refine('queued', G.queuedEvent, {
   ticket: placeOrNull(),
   position: placeOrNull(),
@@ -177,6 +177,7 @@ const errorEvent = refine('error', G.errorEvent, { message: text('The turn faile
 /* ── the types ───────────────────────────────────────────────────────────── */
 
 export type QueuedEvent = v.InferOutput<typeof queuedEvent>;
+export type TurnStartedEvent = v.InferOutput<typeof turnStartedEvent>;
 export type PlanEvent = v.InferOutput<typeof planEvent>;
 export type ToolCallEvent = Loosen<v.InferOutput<typeof toolCallEvent>, 'agent'>;
 export type TokenEvent = Loosen<v.InferOutput<typeof tokenEvent>, 'agent'>;
@@ -222,6 +223,7 @@ export type TurnEventKind = G.TurnEventKind;
 
 export type ChemclawEvent =
   | QueuedEvent
+  | TurnStartedEvent
   | PlanEvent
   | ToolCallEvent
   | TokenEvent
@@ -251,6 +253,7 @@ export type ChemclawEventType = ChemclawEvent['type'];
  */
 const EVENT_MEMBERS = {
   queued: queuedEvent,
+  turn_started: turnStartedEvent,
   plan: planEvent,
   tool_call: toolCallEvent,
   token: tokenEvent,
@@ -273,13 +276,6 @@ const EVENT_MEMBERS = {
   error: errorEvent,
 } as const satisfies Record<TurnEventKind, v.GenericSchema>;
 
-/**
- * Older wire spellings of members already declared, resolved before dispatch. The service renamed
- * `note_proposed` to `note_recorded`; the old name stays admitted until every deployment has rolled
- * forward (`ISSUES.md` Issue 13).
- */
-const WIRE_ALIASES: Readonly<Record<string, TurnEventKind>> = { note_proposed: 'note_recorded' };
-
 /** The decoder. One `v.variant` over the members, dispatching on the discriminator. */
 const eventSchema = v.variant(
   'type',
@@ -290,26 +286,20 @@ const eventSchema = v.variant(
 );
 
 /** Every wire name this client admits, derived from the schemas. Exported for tests. */
-export const EVENT_TYPES: ReadonlySet<string> = new Set<string>([
-  ...Object.keys(EVENT_MEMBERS),
-  ...Object.keys(WIRE_ALIASES),
-]);
+export const EVENT_TYPES: ReadonlySet<string> = new Set<string>(Object.keys(EVENT_MEMBERS));
 
 /**
  * Coerce one decoded SSE frame into a `ChemclawEvent`, or `null` for an unknown discriminator (the
  * union is designed to grow, so an older frontend ignores newer events). Every field has a
  * fallback, so a malformed field never drops the event. The payload's `type` wins over the SSE
- * name; `WIRE_ALIASES` is applied before dispatch.
+ * name.
  */
 export function normalizeEvent(raw: unknown, sseEventName?: string): ChemclawEvent | null {
   if (typeof raw !== 'object' || raw === null) return null;
   const frame = raw as Record<string, unknown>;
   const wireName = typeof frame.type === 'string' ? frame.type : sseEventName;
   if (typeof wireName !== 'string') return null;
-  const parsed = v.safeParse(eventSchema, {
-    ...frame,
-    type: WIRE_ALIASES[wireName] ?? wireName,
-  });
+  const parsed = v.safeParse(eventSchema, { ...frame, type: wireName });
   return parsed.success ? (parsed.output as ChemclawEvent) : null;
 }
 

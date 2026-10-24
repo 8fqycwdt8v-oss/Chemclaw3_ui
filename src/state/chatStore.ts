@@ -535,6 +535,7 @@ function traceEntryFor(event: ChemclawEvent): TraceEntry | null {
     case 'answer':
     case 'tool_queued':
     case 'queued':
+    case 'turn_started':
     case 'capability_degraded':
     case 'error':
     case 'tool_result':
@@ -635,7 +636,10 @@ export interface ChatState {
   mergeRemoteTranscript: (conversationId: string, remote: ChatMessage[]) => boolean;
   /** Open a placeholder for somebody else's running turn, followed live. See
    *  `AssistantMessage.watched`. Returns its id. */
-  startWatchedTurn: (conversationId: string) => string;
+  startWatchedTurn: (
+    conversationId: string,
+    running?: { sender: string; question: string | null } | null,
+  ) => string;
   /**
    * Remove watched placeholders when the view closes before the re-read replaces them. Returns
    * whether there was one.
@@ -1301,8 +1305,14 @@ export const useChatStore = create<ChatState>()(
         return changed;
       },
 
-      startWatchedTurn(conversationId) {
-        const message: AssistantMessage = { ...newAssistantMessage(), watched: true };
+      startWatchedTurn(conversationId, running) {
+        const message: AssistantMessage = {
+          ...newAssistantMessage(),
+          watched: true,
+          ...(running
+            ? { watchedTurn: { sender: running.sender, question: running.question } }
+            : {}),
+        };
         set((s) => {
           const conversation = s.conversations[conversationId];
           if (!conversation) return {};

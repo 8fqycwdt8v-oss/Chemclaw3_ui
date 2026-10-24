@@ -14,12 +14,13 @@ committed copy plus a lock naming the core commit it was taken at.
 **Chosen: (3).** A contract bump is then a reviewable diff of the document itself, builds are
 offline and repeatable, and a core that has moved on cannot red this repository.
 
-| File                          | Holds                                                                                       |
-| ----------------------------- | ------------------------------------------------------------------------------------------- |
-| `contracts/core-openapi.json` | core's `schema/api/openapi.json`, byte for byte                                             |
-| `contracts/core.lock`         | `commit` (full sha in core), `contract_version`, `sha256` of the copy, `repository`, `path` |
-| `shared/generated/api.ts`     | every route and model, by `openapi-typescript`                                              |
-| `shared/generated/events.ts`  | one tolerant valibot schema per member of the `TurnEvent` union, from the document          |
+| File                            | Holds                                                                                       |
+| ------------------------------- | ------------------------------------------------------------------------------------------- |
+| `contracts/core-openapi.json`   | core's `schema/api/openapi.json`, byte for byte                                             |
+| `contracts/core.lock`           | `commit` (full sha in core), `contract_version`, `sha256` of the copy, `repository`, `path` |
+| `shared/generated/api.ts`       | every route and model, by `openapi-typescript`                                              |
+| `shared/generated/events.ts`    | one tolerant valibot schema per member of the `TurnEvent` union, from the document          |
+| `shared/generated/lifecycle.ts` | the design lifecycle core publishes as `x-` extensions on `StatusIn`                        |
 
 ## What holds it
 
@@ -36,24 +37,20 @@ offline and repeatable, and a core that has moved on cannot red this repository.
   and the lists this UI keeps (`EXHIBIT_KINDS`, `DESIGN_STATUSES`) against the document's enums.
 - `npm run check:live-contract <service url>` (part of operator-run `check:live`) diffs the contract a
   deployment serves at `/openapi.json` with the pin; it needs the service directly, not the BFF.
-- The design-lifecycle table is compared with core's `protocols/store.py` at the pinned commit
-  (`tests/protocolStatusTransitions.test.ts`), by the same reader and the same required/skip rule.
 - Request bodies are `satisfies` their generated request model at the call site, so `tsc` holds the
   keys and the required fields.
 
 ## What is not generated, and why
 
 - `shared/events.ts` — the readings that are a UI decision: the fallback for a closed set the
-  document does not give one for, a field read as open text where the document narrows it, the
-  `note_proposed` → `note_recorded` alias, and `normalizeEvent`'s drop of an unknown kind (the union
-  is designed to grow). Each is a `refine` call, listed in `STATED_READINGS`.
+  document does not give one for, a field read as open text where the document narrows it, and
+  `normalizeEvent`'s drop of an unknown kind (the union is designed to grow). Each is a `refine` call, listed in `STATED_READINGS`.
 - `shared/wire.ts` — aliases under the names the UI uses. `Served` reads a response as complete (the
   document marks fields with a default optional; the service serialises them all); `Loosen` keeps a
   field optional where this UI tolerates an older service.
-- `shared/wireUntyped.ts` — bodies the document types as a bare `object` (`/healthz`, turn stop).
-- `shared/exhibits.ts` — the artefact decoders. The document types `spec` as `unknown`, and the UI
-  validates it per kind; the decoders' fields are held against the document in `pinnedContract`.
-- `shared/protocols.ts` keeps the lifecycle table (`LEGAL_STATUS_MOVES`), which is not on the wire.
+- `shared/exhibits.ts` — the artefact decoders: the UI validates each kind's `spec` tolerantly
+  rather than trusting the document's union; the decoders' fields are held against the document in
+  `pinnedContract`.
 - The BFF's own routes (`/api/client-events`, `/config.js`).
 
 ## How to bump the contract

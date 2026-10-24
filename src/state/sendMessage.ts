@@ -515,6 +515,8 @@ export async function sendMessage(opts: SendOptions): Promise<void> {
               : `${linePlace(event.position ?? 0)}.`,
           );
         }
+        // The line handed this message the turn: from here Stop ends it rather than withdraws it.
+        if (event.type === 'turn_started') announceStatus('Your message has started.');
         useChatStore.getState().applyEvent(conversationId, messageId, event);
         // Refetch the session's artefacts and, for one the agent just created, open the pane on it
         // — unless the reader closed the pane during this turn (`useExhibitPane.autoOpen`).

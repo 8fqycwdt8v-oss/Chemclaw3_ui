@@ -181,6 +181,32 @@ function CopyAnswer({ text }: { text: string }): React.JSX.Element {
   );
 }
 
+/** The line over a followed turn: whose it is and its question, or a placeholder for either. */
+export function WatchedTurnLabel({
+  message,
+  streaming,
+}: {
+  message: AssistantMessage;
+  streaming: boolean;
+}): React.JSX.Element {
+  const turn = message.watchedTurn;
+  if (!turn) {
+    return (
+      <p className="mb-1.5 text-2xs text-ink-muted">
+        {streaming
+          ? 'Another person’s turn, followed live. Their question appears here once it is answered.'
+          : 'Another person’s turn. Loading their question…'}
+      </p>
+    );
+  }
+  return (
+    <div className="mb-1.5 text-2xs text-ink-muted">
+      <p>{streaming ? `${turn.sender}’s turn, followed live.` : `${turn.sender}’s turn.`}</p>
+      {turn.question && <p className="mt-0.5 whitespace-pre-wrap italic">{turn.question}</p>}
+    </div>
+  );
+}
+
 const AssistantBubble = memo(function AssistantBubble({
   message,
   sessionId,
@@ -208,14 +234,9 @@ const AssistantBubble = memo(function AssistantBubble({
     <div className="flex flex-col" aria-busy={streaming || undefined}>
       {/* Qualifiers above the text, ranked: a bar for what stops the reader acting, a chip for what they consult. */}
       <div className="max-w-prose">
-        {/* Somebody else's turn, followed live: say so, since a watcher never sees the question. */}
-        {message.watched && (
-          <p className="mb-1.5 text-2xs text-ink-muted">
-            {streaming
-              ? 'Another person’s turn, followed live. Their question appears here once it is answered.'
-              : 'Another person’s turn. Loading their question…'}
-          </p>
-        )}
+        {/* Somebody else's turn, followed live: whose and what it asked when the line named it,
+            since the watch stream itself carries neither. */}
+        {message.watched && <WatchedTurnLabel message={message} streaming={streaming} />}
         <StatusStrip message={message} />
         <PlanStrip message={message} trace={message.trace} />
         {/* Only when there is no plan to fold it into: the strip above carries the same live row,

@@ -44,7 +44,7 @@ The wire types are **generated** from core's API contract, pinned at a commit:
 `contracts/core-openapi.json` (verbatim copy) + `contracts/core.lock` (commit, version, sha256),
 generated into `shared/generated/` (never edit). `shared/wire.ts` aliases the models under the
 UI's names; `shared/events.ts` holds the tolerant readings. Don't hand-write a wire type: if the
-document lacks one, say why in `shared/wireUntyped.ts`. To bump the contract: `docs/api-contract.md`
+document lacks one, ask core to type it and declare the minimal shape beside its caller, saying why. To bump the contract: `docs/api-contract.md`
 (copy, lock, `npm run generate:api`, `npm run ci`).
 
 ## Commands

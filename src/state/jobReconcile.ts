@@ -1,5 +1,5 @@
 /**
- * On taking the streams, ask the run registry how every awaited run ended (`ISSUES.md` Issue 12).
+ * On taking the streams, ask the run registry how every awaited run ended.
  * The service's claim on a job ending is destructive, so a leader that dies between reading a frame
  * and relaying it loses it; this turns "never told" into "told late".
  *

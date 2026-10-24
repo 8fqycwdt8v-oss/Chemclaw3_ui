@@ -203,7 +203,7 @@ type Frame = readonly [event: ChemclawEvent, gapMs: number];
  *
  * `capability_degraded`, `tool_failed`, `evidence_source`, `job_started` and `job_completed` are
  * here because a crash in any of those renderers shipped green through the whole browser tier. The
- * five that remain absent (`queued`, `question`, `note_proposed`, `approval_request`, `error`) are
+ * five that remain absent (`queued`, `question`, `note_recorded`, `approval_request`, `error`) are
  * each a *different turn* rather than a different frame — they change what the turn is, so they
  * belong in scenarios of their own rather than bolted onto the one every other spec asserts on.
  */
@@ -1878,6 +1878,21 @@ createServer(async (req, res) => {
   //
   // A row, like `/check-ins` above, now that a spec asserts on the card it draws (`DIGESTS`).
   if (path === '/digests' && req.method === 'GET') return json(res, 200, DIGESTS);
+
+  // The caller's standing queries. Stateless, like the skills tiers below.
+  if (path === '/watches' && req.method === 'GET') {
+    return json(res, 200, {
+      watches: [
+        { id: 1, query: 'Suzuki couplings in 2-MeTHF', note_type: null, last_seen_at: null },
+      ],
+      digests_enabled: true,
+    });
+  }
+  if (/^\/watches\/[0-9]+$/.test(path) && req.method === 'DELETE') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
 
   // The two stored skills tiers and the behaviour-proposal queue — the surfaces the stored tiers
   // hold their exemption from review under, so a page that renders blank is a control that stops
